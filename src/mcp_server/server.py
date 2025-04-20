@@ -47,7 +47,7 @@ async def query_weave_traces_tool(
     return_full_data: bool = False,
     metadata_only: bool = False,
 ) -> str:
-    f"""
+    """
     Query Weave traces, trace metadata, and trace costs with filtering and sorting options.
 
     <wandb_vs_weave_product_distinction>

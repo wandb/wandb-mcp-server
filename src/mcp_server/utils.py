@@ -1,7 +1,9 @@
+import netrc
 import os
 from dataclasses import field
 import logging
 from typing import Dict, List, Optional, Any
+from urllib.parse import urlparse
 
 import simple_parsing
 from dataclasses import dataclass
@@ -38,6 +40,31 @@ class ServerMCPArgs:
     )
 
 
+def _wandb_base_url() -> str:
+    # TODO: make configurable
+    return "https://api.wandb.ai"
+
+
+def _wandb_api_key_via_netrc_file(filepath: str) -> str | None:
+    netrc_path = os.path.expanduser(filepath)
+    if not os.path.exists(netrc_path):
+        return None
+    nrc = netrc.netrc(netrc_path)
+    res = nrc.authenticators(urlparse(_wandb_base_url()).netloc)
+    api_key = None
+    if res:
+        _, _, api_key = res
+    return api_key
+
+def _wandb_api_key_via_netrc() -> str | None:
+    for filepath in ("~/.netrc", "~/_netrc"):
+        api_key = _wandb_api_key_via_netrc_file(filepath)
+        if api_key:
+            return api_key
+    return None
+
+
+
 # Initialize server args global variable
 _server_args = None
 
@@ -54,6 +81,9 @@ def get_server_args():
         # Get API key from environment if not provided via CLI
         if not _server_args.wandb_api_key:
             _server_args.wandb_api_key = os.getenv("WANDB_API_KEY", "")
+
+        if not _server_args.wandb_api_key:
+            _server_args.wandb_api_key = _wandb_api_key_via_netrc()
 
     return _server_args
 
@@ -127,3 +157,4 @@ def merge_metadata(metadata_list: List[Dict]) -> Dict:
         )
 
     return merged
+

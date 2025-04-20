@@ -6,6 +6,38 @@ A Model Context Protocol (MCP) server for querying [Weights & Biases Weave](http
 - query W&B Weave traces, evaluations and datasets
 - write text and charts to W&B Reports
 
+## Installation
+We provide a helper utility for easily installing the Weights and Biases MCP Server into applications that use a JSON server spec. Please first [install `uv`](https://docs.astral.sh/uv/getting-started/installation/), typically by running `curl -LsSf https://astral.sh/uv/install.sh | sh` on your machine.
+
+From there, you can use the `add_to_client` helper to add the server to your MCP client - inspired by the OpenMCP Server Registry [`add-to-client` pattern](https://www.open-mcp.org/servers)
+
+### Cursor project (run from the project dir):
+`uvx --from git+https://github.com/wandb/mcp-server add_to_client .cursor/mcp.json && uvx wandb login`
+
+### Cursor global (applies to all projects):
+`uvx --from git+https://github.com/wandb/mcp-server add_to_client ~/.cursor/mcp.json && uvx wandb login`
+
+### Claude desktop:
+`uvx --from git+https://github.com/wandb/mcp-server add_to_client ~/Library/Application\ Support/Claude/claude_desktop_config.json && uvx wandb login`
+
+### Manually
+If you don't want to use the helper above, add the following to your MCP client config manually:
+
+```
+{
+  "mcpServers": {
+    "wandb": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/wandb/mcp-server",
+        "mcp_server"
+      ]
+    }
+  }
+}
+```
+
 ## Available tools
 
 
@@ -37,7 +69,7 @@ Example query for Claude Desktop:
 how many openai.chat traces in the wandb-applied-ai-team/mcp-tests weave project? plot the most recent 5 traces over time and save to a report
 ```
 
-## Installation
+## Running from Source
 
 ```bash
 git clone https://github.com/wandb/mcp-server.git
@@ -45,14 +77,14 @@ cd mcp-server && uv venv && source .venv/bin/activate
 uv pip install -e .
 ```
 
-## Configuration
+### Configuration
 
 1. Create a `.env` file in the root directory with your Weights & Biases API key:
 ```
 WANDB_API_KEY=your_api_key_here
 ```
 
-## Running the Server
+### Running the Server
 
 Run the server using:
 
@@ -60,9 +92,9 @@ Run the server using:
 uv run src/mcp_server/server.py
 ```
 
-## Client Setup
+### Client Setup
 
-### Claude Desktop
+#### Claude Desktop
 
 ```json
     "mcpServers": {
