@@ -1,35 +1,16 @@
-import logging
 import os
 
 import pytest
-from rich.logging import RichHandler
+from wandb_mcp_server.utils import get_rich_logger
 
-from wandb_mcp_server.tools.count_traces import (
+from tests.anthropic_test_utils import call_anthropic, extract_anthropic_tool_use
+from wandb_mcp_server.mcp_tools.count_traces import (
     COUNT_WEAVE_TRACES_TOOL_DESCRIPTION,
     count_traces,
 )
-from wandb_mcp_server.tools.tools_utils import generate_anthropic_tool_schema
-from tests.anthropic_test_utils import (
-    call_anthropic,
-    extract_anthropic_tool_use
-)
+from wandb_mcp_server.mcp_tools.tools_utils import generate_anthropic_tool_schema
 
-logger = logging.getLogger(__name__)
-
-rich_handler = RichHandler(
-    level=logging.DEBUG,
-    show_time=True,
-    show_level=True,
-    show_path=False,
-    markup=True, 
-)
-
-# Remove existing handlers if any and add RichHandler
-if logger.hasHandlers():
-    logger.handlers.clear()
-logger.addHandler(rich_handler)
-logger.setLevel(logging.DEBUG)
-logger.propagate = False  # Prevent duplicate logs if root logger is configured
+logger = get_rich_logger(__name__)
 
 os.environ["WANDB_SILENT"] = "true"
 
@@ -103,9 +84,6 @@ test_queries = [
         "expected_output": 15,
     },
 ]
-
-# Force claude to use a tool: tool_choice = {"type": "tool", "name": "get_weather"}
-
 
 # -----------------------
 # Pytest integration

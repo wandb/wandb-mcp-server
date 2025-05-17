@@ -1,7 +1,12 @@
+"""Module for querying the W&B GraphQL API."""
+
 import copy
 import logging
+import os
+import re
 import traceback
 from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin
 
 import wandb
 from graphql import parse
@@ -11,8 +16,9 @@ from graphql.language import parse
 from graphql.language import printer as gql_printer
 from graphql.language import visitor as gql_visitor
 from wandb_gql import gql  # This must be imported after wandb
+from wandb_mcp_server.utils import get_rich_logger
 
-logger = logging.getLogger(__name__)
+logger = get_rich_logger(__name__)
 
 
 QUERY_WANDB_GQL_TOOL_DESCRIPTION = """Execute an arbitrary GraphQL query against the Weights & Biases (W&B) Models API.

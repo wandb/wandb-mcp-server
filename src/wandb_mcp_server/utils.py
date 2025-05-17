@@ -1,25 +1,24 @@
+from __future__ import annotations
+
+import logging
 import netrc
 import os
-from dataclasses import field
-import logging
+import subprocess
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 import simple_parsing
-from dataclasses import dataclass
-import weave
+from rich.logging import RichHandler
 
 os.environ["WANDB_SILENT"] = "True"
-weave_logger = logging.getLogger("weave")
-# Let the specific application configure the level if needed
-# weave_logger.setLevel(logging.ERROR) # Removed default level setting
-
-logger = logging.getLogger(__name__)
+os.environ["WEAVE_SILENT"] = "True"
 
 
 # Define a handler to redirect logs
 class RedirectLoggerHandler(logging.Handler):
     """A handler that redirects log records to another logger."""
+
     def __init__(self, target_logger, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.target_logger = target_logger
@@ -30,11 +29,13 @@ class RedirectLoggerHandler(logging.Handler):
         # if formatters are used elsewhere.
         try:
             msg = self.format(record)
-            new_record = logging.makeLogRecord({
-                **record.__dict__,
-                'msg': msg,
-                'args': [], # Args are already incorporated into msg by format()
-            })
+            new_record = logging.makeLogRecord(
+                {
+                    **record.__dict__,
+                    "msg": msg,
+                    "args": [],  # Args are already incorporated into msg by format()
+                }
+            )
             self.target_logger.handle(new_record)
         except Exception:
             self.handleError(record)
@@ -101,12 +102,15 @@ def get_server_args():
         if os.environ.get("PARSE_ARGS_AT_IMPORT", "0") == "1":
             _server_args = simple_parsing.parse(ServerMCPArgs)
 
-        # Get API key from environment if not provided via CLI
+        # Check netrc file first, and if found, set it in the environment
+        netrc_api_key = _wandb_api_key_via_netrc()
+        if netrc_api_key:
+            os.environ["WANDB_API_KEY"] = netrc_api_key
+            _server_args.wandb_api_key = netrc_api_key
+
+        # If not set via netrc, try environment variable
         if not _server_args.wandb_api_key:
             _server_args.wandb_api_key = os.getenv("WANDB_API_KEY", "")
-
-        if not _server_args.wandb_api_key:
-            _server_args.wandb_api_key = _wandb_api_key_via_netrc()
 
     return _server_args
 
@@ -171,3 +175,29 @@ def merge_metadata(metadata_list: List[Dict]) -> Dict:
         )
 
     return merged
+
+
+def get_rich_logger(name: str, propagate: bool = False) -> logging.Logger:
+    """Configure and return a logger with RichHandler."""
+    logger = logging.getLogger(name)
+    _rich_handler = RichHandler(
+        show_time=True, show_level=True, show_path=False, markup=True
+    )
+    if logger.hasHandlers():
+        logger.handlers.clear()
+    logger.addHandler(_rich_handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = propagate
+    return logger
+
+
+def get_git_commit():
+    logger = get_rich_logger(__name__)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True
+        )
+        return str(result.stdout.strip())[:8]
+    except Exception as e:
+        logger.warning(f"Failed to get git commit: {e}")
+        return "unknown"

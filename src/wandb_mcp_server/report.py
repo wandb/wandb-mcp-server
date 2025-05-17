@@ -3,7 +3,6 @@
 Weave MCP Server - Report creation and editing functionality for W&B reports.
 """
 
-import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 import re
@@ -13,13 +12,12 @@ from dotenv import load_dotenv
 from wandb_workspaces.reports.v2 import H1, H2, H3, P, TableOfContents
 
 import wandb
-
+from wandb_mcp_server.utils import get_rich_logger
 # Load environment variables
 load_dotenv(dotenv_path=Path(__file__).parent.parent.parent / ".env")
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("weave-mcp-server")
+logger = get_rich_logger(__name__)
 
 def create_report(
     entity_name: str,

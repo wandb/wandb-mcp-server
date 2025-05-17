@@ -1,12 +1,11 @@
 import base64
 import json
-import logging
 import os
 from typing import Any, Dict
 
 import requests
 
-from wandb_mcp_server.tools.query_weave import _build_query_expression
+from wandb_mcp_server.weave_api.query_builder import QueryBuilder
 from wandb_mcp_server.mcp_tools.tools_utils import get_retry_session
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -118,7 +117,7 @@ Examples
 def count_traces(
     entity_name: str,
     project_name: str,
-    filters: Dict[str, Any] = None,
+    filters: dict = None,
     request_timeout: int = 30,
 ) -> int:
     """Count the number of traces matching the given filters.
@@ -183,22 +182,28 @@ def count_traces(
         raise ValueError("WANDB_API_KEY is required to query Weave traces count.")
 
     request_body: Dict[str, Any] = {"project_id": project_id}
-    filter_payload: Dict[str, Any] = {} # For fields that go into the top-level 'filter' object
-    complex_filters_for_query_expr: Dict[str, Any] = {} # For fields that go into query.$expr
+    filter_payload: Dict[
+        str, Any
+    ] = {}  # For fields that go into the top-level 'filter' object
+    complex_filters_for_query_expr: Dict[
+        str, Any
+    ] = {}  # For fields that go into query.$expr
 
     if filters:
         # Keys that belong inside the 'filter' object in the request body
         # as per https://weave-docs.wandb.ai/reference/service-api/calls-query-stats-calls-query_stats-post
         direct_filter_keys = {
-            "op_names", "op_name", # op_name will be converted to op_names list
-            "input_refs", 
-            "output_refs", 
-            "parent_ids", 
-            "trace_ids", "trace_id", # trace_id will be converted to trace_ids list
-            "call_ids", 
-            "trace_roots_only", 
-            "wb_user_ids", 
-            "wb_run_ids"
+            "op_names",
+            "op_name",  # op_name will be converted to op_names list
+            "input_refs",
+            "output_refs",
+            "parent_ids",
+            "trace_ids",
+            "trace_id",  # trace_id will be converted to trace_ids list
+            "call_ids",
+            "trace_roots_only",
+            "wb_user_ids",
+            "wb_run_ids",
         }
 
         temp_op_names = []
@@ -206,8 +211,10 @@ def count_traces(
             temp_op_names.append(filters["op_name"])
         if "op_names" in filters:
             val = filters["op_names"]
-            if isinstance(val, list): temp_op_names.extend(val)
-            else: temp_op_names.append(val)
+            if isinstance(val, list):
+                temp_op_names.extend(val)
+            else:
+                temp_op_names.append(val)
         if temp_op_names:
             filter_payload["op_names"] = list(set(temp_op_names))
 
@@ -216,17 +223,26 @@ def count_traces(
             temp_trace_ids.append(filters["trace_id"])
         if "trace_ids" in filters:
             val = filters["trace_ids"]
-            if isinstance(val, list): temp_trace_ids.extend(val)
-            else: temp_trace_ids.append(val)
+            if isinstance(val, list):
+                temp_trace_ids.extend(val)
+            else:
+                temp_trace_ids.append(val)
         if temp_trace_ids:
             filter_payload["trace_ids"] = list(set(temp_trace_ids))
 
         # Handle other direct filter keys
-        for key in ["input_refs", "output_refs", "parent_ids", "call_ids", "wb_user_ids", "wb_run_ids"]:
+        for key in [
+            "input_refs",
+            "output_refs",
+            "parent_ids",
+            "call_ids",
+            "wb_user_ids",
+            "wb_run_ids",
+        ]:
             if key in filters:
                 value = filters[key]
                 filter_payload[key] = [value] if not isinstance(value, list) else value
-        
+
         if "trace_roots_only" in filters:
             filter_payload["trace_roots_only"] = filters["trace_roots_only"]
         # Per docs, trace_roots_only is a boolean, not a list.
@@ -239,15 +255,15 @@ def count_traces(
                 complex_filters_for_query_expr[key] = value
 
     # Add the constructed filter_payload to the main request_body if it's not empty
-    if filter_payload: 
+    if filter_payload:
         request_body["filter"] = filter_payload
 
     # Build the query expression from remaining complex filters
     if complex_filters_for_query_expr:
-        query_expr_obj = _build_query_expression(complex_filters_for_query_expr)
-        if query_expr_obj: 
+        query_expr_obj = QueryBuilder.build_query_expression(complex_filters_for_query_expr)
+        if query_expr_obj:
             dumped_query = query_expr_obj.model_dump(by_alias=True, exclude_none=True)
-            if dumped_query and dumped_query.get("$expr"): 
+            if dumped_query and dumped_query.get("$expr"):
                 request_body["query"] = dumped_query
 
     # Execute the HTTP query
@@ -288,13 +304,17 @@ def count_traces(
     except requests.exceptions.RequestException as e:
         logger.error(f"HTTP Request failed for project {project_id}: {e}")
         if isinstance(e, requests.exceptions.RetryError):
-            if e.__cause__ and hasattr(e.__cause__, 'reason') and e.__cause__.reason:
-                logger.error(f"Specific reason for retry exhaustion: {e.__cause__.reason}")
+            if e.__cause__ and hasattr(e.__cause__, "reason") and e.__cause__.reason:
+                logger.error(
+                    f"Specific reason for retry exhaustion: {e.__cause__.reason}"
+                )
         logger.debug(
             f"Failed request body during exception for {project_id}: {json.dumps(request_body)}"
         )
         # traceback.print_exc() # Uncomment for detailed traceback during development
-        raise Exception(f"Failed to query Weave trace count for {project_id} due to network error: {e}")
+        raise Exception(
+            f"Failed to query Weave trace count for {project_id} due to network error: {e}"
+        )
     except json.JSONDecodeError as e:
         logger.error(
             f"Failed to decode JSON response for {project_id}: {e}. Response text: {response.text if 'response' in locals() else 'N/A'}"
