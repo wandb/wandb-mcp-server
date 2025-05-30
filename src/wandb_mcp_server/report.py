@@ -9,7 +9,6 @@ import re
 
 import wandb_workspaces.reports.v2 as wr
 from dotenv import load_dotenv
-from wandb_workspaces.reports.v2 import H1, H2, H3, P, TableOfContents
 
 import wandb
 from wandb_mcp_server.utils import get_rich_logger

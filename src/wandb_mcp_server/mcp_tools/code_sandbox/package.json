@@ -1,0 +1,16 @@
+{
+  "name": "wandb-mcp-pyodide-runner",
+  "version": "1.0.0",
+  "description": "Pyodide runner for W&B MCP Server sandbox execution",
+  "main": "pyodide_runner.js",
+  "type": "module",
+  "scripts": {
+    "test": "node pyodide_runner.js \"cHJpbnQoJ0hlbGxvIGZyb20gUHlvZGlkZSEnKQ==\""
+  },
+  "dependencies": {
+    "pyodide": "^0.24.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

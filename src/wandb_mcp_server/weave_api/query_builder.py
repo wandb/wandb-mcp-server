@@ -25,11 +25,9 @@ from weave.trace_server.interface.query import (
 )
 
 from wandb_mcp_server.weave_api.models import (
-    AttributeFilter,
     FilterOperator,
     QueryFilter,
     QueryParams,
-    TimeRange,
 )
 from wandb_mcp_server.utils import get_rich_logger
 

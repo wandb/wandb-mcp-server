@@ -14,6 +14,7 @@ dependencies = [
     "wandb-workspaces>=0.1.12",
     "networkx>=3.4.2",
     "requests>=2.31.0",
+    "e2b-code-interpreter>=1.5.0",
 ]
 
 [build-system]
@@ -29,6 +30,14 @@ test = [
     "litellm>=1.67.2",
     "anthropic>=0.50.0",
     "pytest-xdist>=3.6.1",
+    "pytest-asyncio>=0.26.0",
+]
+sandbox = [
+    "e2b>=0.17.0",
+]
+http = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -52,4 +61,9 @@ filterwarnings = [
     # Ignore Pydantic __fields__ / __fields_set__ deprecations from weave
     'ignore:The \`__fields__\` attribute is deprecated:pydantic.warnings.PydanticDeprecatedSince20:weave\.trace\.object_record',
     'ignore:The \`__fields_set__\` attribute is deprecated:pydantic.warnings.PydanticDeprecatedSince20:weave\.trace\.object_record',
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.11.12",
 ]

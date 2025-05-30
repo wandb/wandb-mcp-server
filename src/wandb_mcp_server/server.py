@@ -37,7 +37,15 @@ from wandb_mcp_server.mcp_tools.query_weave import (
     QUERY_WEAVE_TRACES_TOOL_DESCRIPTION,
     query_paginated_weave_traces,
 )
-from wandb_mcp_server.trace_utils import DateTimeEncoder
+from wandb_mcp_server.mcp_tools.code_sandbox.execute_sandbox_code import (
+    EXECUTE_SANDBOX_CODE_TOOL_DESCRIPTION,
+    execute_sandbox_code,
+)
+from wandb_mcp_server.mcp_tools.code_sandbox.sandbox_models import (
+    SandboxExecutionRequest,
+    SandboxExecutionResult,
+    SandboxType,
+)
 from wandb_mcp_server.utils import get_rich_logger, get_server_args
 from wandb_mcp_server.weave_api.models import QueryResult
 
@@ -181,6 +189,46 @@ def query_wandb_support_bot(question: str) -> str:
     return query_wandbot_api(question)
 
 
+@mcp.tool(description=EXECUTE_SANDBOX_CODE_TOOL_DESCRIPTION)
+async def execute_sandbox_code_tool(
+    code: str,
+    timeout: int = 30,
+    sandbox_type: Optional[str] = None,
+    install_packages: Optional[List[str]] = None,
+) -> str:
+    """Execute Python code in a secure sandbox environment."""
+    try:
+        # Validate input using Pydantic model
+        request = SandboxExecutionRequest(
+            code=code,
+            timeout=timeout,
+            sandbox_type=SandboxType(sandbox_type) if sandbox_type else None,
+            install_packages=install_packages,
+        )
+        
+        result_dict = await execute_sandbox_code(
+            code=request.code,
+            timeout=request.timeout,
+            sandbox_type=request.sandbox_type.value if request.sandbox_type else None,
+            install_packages=request.install_packages,
+        )
+        
+        # Validate output using Pydantic model
+        result = SandboxExecutionResult(**result_dict)
+        return result.model_dump_json()
+        
+    except Exception as e:
+        logger.error(f"Error in execute_sandbox_code_tool: {e}", exc_info=True)
+        error_result = SandboxExecutionResult(
+            success=False,
+            error=f"Tool execution failed: {str(e)}",
+            output="",
+            logs=[],
+            sandbox_used="none"
+        )
+        return error_result.model_dump_json()
+
+
 def cli():
     """Command-line interface for starting the Weave MCP Server."""
     # Ensure WANDB_SILENT is set, and attempt to configure wandb for silent operation globally
@@ -223,7 +271,7 @@ def cli():
             "WANDB_API_KEY must be set either as an environment variable, in .env file, or as a command-line argument"
         )
 
-    logger.info(f"Starting Weights & Biases MCP Server.")
+    logger.info("Starting Weights & Biases MCP Server.")
     logger.info(
         f"API Key configured: {'Yes' if get_server_args().wandb_api_key else 'No'}"
     )

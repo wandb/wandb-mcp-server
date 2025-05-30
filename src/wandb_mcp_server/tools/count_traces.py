@@ -1,12 +1,11 @@
 import base64
 import json
-import logging
 import os
 from typing import Any, Dict
 
 import requests
 
-from wandb_mcp_server.tools.query_weave import _build_query_expression
+from wandb_mcp_server.mcp_tools.query_weave import _build_query_expression
 from wandb_mcp_server.mcp_tools.tools_utils import get_retry_session
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -206,8 +205,10 @@ def count_traces(
             temp_op_names.append(filters["op_name"])
         if "op_names" in filters:
             val = filters["op_names"]
-            if isinstance(val, list): temp_op_names.extend(val)
-            else: temp_op_names.append(val)
+            if isinstance(val, list):
+                temp_op_names.extend(val)
+            else:
+                temp_op_names.append(val)
         if temp_op_names:
             filter_payload["op_names"] = list(set(temp_op_names))
 
@@ -216,8 +217,10 @@ def count_traces(
             temp_trace_ids.append(filters["trace_id"])
         if "trace_ids" in filters:
             val = filters["trace_ids"]
-            if isinstance(val, list): temp_trace_ids.extend(val)
-            else: temp_trace_ids.append(val)
+            if isinstance(val, list):
+                temp_trace_ids.extend(val)
+            else:
+                temp_trace_ids.append(val)
         if temp_trace_ids:
             filter_payload["trace_ids"] = list(set(temp_trace_ids))
 

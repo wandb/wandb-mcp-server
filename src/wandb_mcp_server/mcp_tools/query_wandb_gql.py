@@ -2,17 +2,12 @@
 
 import copy
 import logging
-import os
-import re
 import traceback
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin
 
 import wandb
 from graphql import parse
-from graphql.error import GraphQLError
 from graphql.language import ast as gql_ast
-from graphql.language import parse
 from graphql.language import printer as gql_printer
 from graphql.language import visitor as gql_visitor
 from wandb_gql import gql  # This must be imported after wandb
@@ -867,7 +862,7 @@ def query_paginated_wandb_gql(
                 # Safety checks
                 if current_has_next and not current_cursor:
                     logging.warning(
-                        f"hasNextPage is true but no endCursor received. Stopping loop."
+                        "hasNextPage is true but no endCursor received. Stopping loop."
                     )
                     current_has_next = False
                 if not edges_this_page:

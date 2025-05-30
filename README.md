@@ -101,6 +101,24 @@ wandb login && uv run src/wandb_mcp_server/server.py
 ### General W&B helpers
 - **`query_wandb_entity_projects`** List the available W&B entities and projects that can be accessed to give the LLM more context on how to write the correct queries for the above tools.
 
+### Code Execution & Sandbox
+- **`execute_sandbox_code_tool`** Execute Python code in secure, isolated sandbox environments:
+  - **E2B Cloud Sandbox** - Most secure option with full VM isolation (requires `E2B_API_KEY`)
+  - **Pyodide Local Sandbox** - WebAssembly-based execution (requires Node.js)
+
+
+## Sandbox Requirements
+
+### E2B Cloud Sandbox (Recommended)
+For the most secure sandbox experience, set up an E2B API key:
+1. Sign up at [e2b.dev](https://e2b.dev)
+2. Get your API key from the dashboard
+3. Set the environment variable: `export E2B_API_KEY=your_api_key_here`
+
+### Local Pyodide Sandbox
+For local code execution using WebAssembly:
+1. Install Node.js (version 18 or higher): [nodejs.org](https://nodejs.org/)
+2. The Pyodide runtime will be automatically loaded when needed
 
 ## Usage tips
 

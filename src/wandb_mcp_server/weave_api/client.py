@@ -13,8 +13,7 @@ from typing import Any, Dict, Iterator, Optional
 import requests
 from requests.exceptions import RetryError
 
-from wandb_mcp_server.tools.tools_utils import get_retry_session
-from wandb_mcp_server.utils import get_rich_logger, _wandb_api_key_via_netrc
+from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
 
