@@ -1,9 +1,9 @@
 # noqa: D100
-"""Integration tests that verify Anthropic selects `query_wandb_gql_tool`.
+"""Integration tests that verify Anthropic selects `query_wandb_tool`.
 
 These tests send natural-language questions about the W&B *Models* data for the
 `wandb-applied-ai-team/mcp-tests` project.  The Anthropic model should respond
-with a `tool_use` invoking `query_wandb_gql_tool`, which we then execute and
+with a `tool_use` invoking `query_wandb_tool`, which we then execute and
 validate.
 """
 

@@ -544,7 +544,7 @@ class TestTraceService(unittest.TestCase):
 
     def setUp(self):
         """Set up test environment."""
-        self.service = TraceService(api_key="fake_api_key")
+        self.service = TraceService()
 
     @patch("wandb_mcp_server.weave_api.client.WeaveApiClient.query_traces")
     def test_query_traces(self, mock_query_traces):
@@ -813,7 +813,7 @@ class TestIntegration:
         mock_query_traces.return_value = mock_traces
 
         # Create service and query
-        service = TraceService(api_key="fake_api_key")
+        service = TraceService()
         result = service.query_traces(
             entity_name="test_entity",
             project_name="test_project",

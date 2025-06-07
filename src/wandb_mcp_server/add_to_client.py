@@ -2,6 +2,10 @@ import json
 import logging
 import os
 import sys
+from dataclasses import dataclass, field
+from typing import Optional, Dict, List
+
+import simple_parsing
 
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -9,35 +13,90 @@ from wandb_mcp_server.utils import get_rich_logger
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = get_rich_logger(__name__)
 
-new_config = {
-    "mcpServers": {
-        "wandb": {
-            "command": "uvx",
-            "args": [
-                "--from",
-                "git+https://github.com/wandb/wandb-mcp-server",
-                "wandb_mcp_server",
-            ],
+
+@dataclass
+class AddToClientArgs:
+    """Add Weights & Biases MCP server to your client config."""
+    
+    config_path: str
+    """Path to the MCP client config file"""
+    
+    wandb_api_key: Optional[str] = None
+    """W&B API key for authentication"""
+    
+    e2b_api_key: Optional[str] = None
+    """E2B API key for cloud sandbox execution"""
+    
+    disable_code_sandbox: Optional[str] = None
+    """Set to any value to disable code sandbox (e.g., '1' or 'true')"""
+    
+    write_env_vars: List[str] = field(default_factory=list)
+    """Write additional environment variables to client config file (format: KEY=VALUE)"""
+    
+    def get_env_vars(self) -> Dict[str, str]:
+        """Get all environment variables to include in the config."""
+        env_vars = {}
+        
+        # Parse additional env vars from list
+        for env_str in self.write_env_vars:
+            if '=' in env_str:
+                key, value = env_str.split('=', 1)
+                env_vars[key] = value
+        
+        # Add specific environment variables if provided
+        if self.wandb_api_key:
+            env_vars["WANDB_API_KEY"] = self.wandb_api_key
+            
+        if self.e2b_api_key:
+            env_vars["E2B_API_KEY"] = self.e2b_api_key
+        
+        if self.disable_code_sandbox:
+            env_vars["DISABLE_CODE_SANDBOX"] = self.disable_code_sandbox
+            
+        return env_vars
+
+
+def get_new_config(env_vars: Optional[Dict[str, str]] = None) -> dict:
+    """
+    Get the new configuration to add to the client config.
+    
+    Args:
+        env_vars: Optional environment variables to include in the config
+        
+    Returns:
+        Dictionary with the MCP server configuration
+    """
+    config = {
+        "mcpServers": {
+            "wandb": {
+                "command": "uvx",
+                "args": [
+                    "--from",
+                    "git+https://github.com/wandb/wandb-mcp-server",
+                    "wandb_mcp_server",
+                ],
+            }
         }
     }
-}
+    
+    # Add environment variables if provided
+    if env_vars:
+        config["mcpServers"]["wandb"]["env"] = env_vars
+    
+    return config
 
 
-def add_to_client(pathname: str | None = None) -> None:
+def add_to_client(args: AddToClientArgs) -> None:
     """
     Add MCP server configuration to a client config file.
 
     Args:
-        pathname: Path to the MCP client config file
+        args: Command line arguments
 
     Raises:
-        ValueError: If pathname is not provided
         Exception: If there are errors reading/writing the config file
     """
-    if not pathname:
-        raise ValueError("Please provide the path to your MCP client config")
-
-    config_path = os.path.abspath(pathname)
+    config_path = os.path.abspath(args.config_path)
 
     # Read existing config file or initialize a default structure
     config = {"mcpServers": {}}  # Start with a default, ensures mcpServers key exists
@@ -75,17 +134,19 @@ def add_to_client(pathname: str | None = None) -> None:
         )
         sys.exit(f"Fatal error reading config file: {e}")  # Exit if we can't read
 
-    # Ensure the 'mcpServers' key exists and is a dictionary.
-    # This is a safeguard if the loaded_config was a dict but missed mcpServers or had it as a wrong type.
     if not isinstance(config.get("mcpServers"), dict):
         if os.path.exists(
             config_path
-        ):  # Only print warning if file existed and was loaded
+        ):
             logger.warning(
                 f"Warning: 'mcpServers' key in the loaded config from {config_path} was missing or not a dictionary. Initializing it."
             )
         config["mcpServers"] = {}  # Ensure it's a dictionary
 
+    # Get the new configuration with environment variables
+    env_vars = args.get_env_vars()
+    new_config = get_new_config(env_vars)
+    
     # Check for key overlaps
     existing_keys = set(config["mcpServers"].keys())
     new_keys = set(new_config["mcpServers"].keys())
@@ -119,13 +180,8 @@ def add_to_client(pathname: str | None = None) -> None:
 
 
 def add_to_client_cli():
-    if len(sys.argv) > 1:
-        add_to_client(sys.argv[1])
-    else:
-        logger.error(
-            "Please provide the path to your MCP client config as a command line argument"
-        )
-        sys.exit(1)
+    args = simple_parsing.parse(AddToClientArgs)
+    add_to_client(args)
 
 
 if __name__ == "__main__":

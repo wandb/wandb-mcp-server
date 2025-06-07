@@ -1,6 +1,6 @@
 import inspect
 import re
-from typing import Any, Callable, Dict, Type, Union, Tuple
+from typing import Any, Callable, Dict, Type, Union, Tuple, Optional
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -301,3 +301,51 @@ def get_retry_session(
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
+
+
+async def save_result_to_sandbox_if_requested(
+    result: Union[str, Dict[str, Any]],
+    save_filename: Optional[str] = None,
+    logger = None
+) -> None:
+    """
+    Save result data to sandbox if a filename is provided and sandbox is available.
+    
+    This is a shared utility function that handles the common pattern of saving
+    query results to the sandbox environment.
+    
+    Args:
+        result: The data to save (either JSON string or dict)
+        save_filename: Optional filename to save to. If None or empty, no save is performed.
+        logger: Optional logger instance for debugging
+    """
+    if not save_filename:
+        return
+    
+    try:
+        # Check if sandbox is available
+        from wandb_mcp_server.mcp_tools.code_sandbox.execute_sandbox_code import check_sandbox_availability
+        available, _, _ = check_sandbox_availability()
+        
+        if not available:
+            if logger:
+                logger.debug("No sandbox available for saving results")
+            return
+        
+        # Import the write function
+        from wandb_mcp_server.mcp_tools.code_sandbox.sandbox_file_utils import write_json_to_sandbox
+        
+        # Schedule the write operation
+        import asyncio
+        await write_json_to_sandbox(
+            json_data=result,
+            filename=save_filename
+        )
+        
+        if logger:
+            logger.info(f"Scheduled write of results to {save_filename} in sandbox")
+            
+    except Exception as e:
+        if logger:
+            logger.error(f"Error saving results to sandbox: {e}", exc_info=True)
+        # Don't raise - this is a best-effort operation

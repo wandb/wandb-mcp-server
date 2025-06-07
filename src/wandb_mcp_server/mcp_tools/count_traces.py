@@ -26,7 +26,7 @@ not actual logged traces data, metrics or run data.
 W&B offers two distinct products with different purposes:
 
 1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model 
-    lifecycle management. Use `query_wandb_gql_tool` for questions about:
+    lifecycle management. Use `query_wandb_tool` for questions about:
     - Experiment runs, metrics, and performance comparisons
     - Artifact management and model registry
     - Hyperparameter optimization and sweeps
@@ -42,7 +42,7 @@ W&B offers two distinct products with different purposes:
 
 <use_case_selector>
 **USE CASE SELECTOR - READ FIRST:**
-- For runs, metrics, experiments, artifacts, sweeps etc → use query_wandb_gql_tool
+- For runs, metrics, experiments, artifacts, sweeps etc → use query_wandb_tool
 - For traces, LLM calls, chain-of-thought, LLM evaluations, AI agent traces, AI apps etc → use query_weave_traces_tool
 
 =====================================================================
@@ -52,12 +52,12 @@ This tool is ONLY for WEAVE TRACES (LLM operations), NOT for run metrics or expe
 
 **KEYWORD GUIDE:**
 If user question contains:
-- "runs", "experiments", "metrics" → Use query_wandb_gql_tool
+- "runs", "experiments", "metrics" → Use query_wandb_tool
 - "traces", "LLM calls" etc → Use this tool
 
 **COMMON MISUSE CASES:**
-❌ "Looking at metrics of my latest runs" - Do NOT use this tool, use query_wandb_gql_tool instead
-❌ "Compare performance across experiments" - Do NOT use this tool, use query_wandb_gql_tool instead
+❌ "Looking at metrics of my latest runs" - Do NOT use this tool, use query_wandb_tool instead
+❌ "Compare performance across experiments" - Do NOT use this tool, use query_wandb_tool instead
 </use_case_selector>
 </tool_choice_guidance>
 

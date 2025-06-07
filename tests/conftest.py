@@ -50,7 +50,6 @@ Relevant libraries and versions during debugging of this issue:
 import json
 import logging
 import os
-import time
 import uuid
 from collections import defaultdict
 from datetime import datetime

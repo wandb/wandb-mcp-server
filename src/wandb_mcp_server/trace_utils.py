@@ -6,7 +6,6 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 import tiktoken
-import logging
 from wandb_mcp_server.utils import get_rich_logger
 
 

@@ -94,9 +94,6 @@ class TraceService:
         requested_synthetic_columns: list[str] = []
         invalid_columns_reported: set[str] = set()
         
-        # Define synthetic fields that should be kept if requested by the user,
-        # but their data is derived or needs special handling.
-        synthetic_fields_to_reconstruct: set[str] = {"status", "latency_ms", "costs"}
 
         processed_columns = set() # To avoid duplicate processing if a column is listed multiple times
 

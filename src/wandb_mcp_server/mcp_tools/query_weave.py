@@ -22,7 +22,7 @@ Query Weave traces, trace metadata, and trace costs with filtering and sorting o
 W&B offers two distinct products with different purposes:
 
 1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model 
-    lifecycle management. Use `query_wandb_gql_tool` for questions about:
+    lifecycle management. Use `query_wandb_tool` for questions about:
     - Experiment runs, metrics, and performance comparisons
     - Artifact management and model registry
     - Hyperparameter optimization and sweeps
@@ -38,7 +38,7 @@ W&B offers two distinct products with different purposes:
 
 <use_case_selector>
 **USE CASE SELECTOR - READ FIRST:**
-- For runs, metrics, experiments, artifacts, sweeps etc → use query_wandb_gql_tool
+- For runs, metrics, experiments, artifacts, sweeps etc → use query_wandb_tool
 - For traces, LLM calls, chain-of-thought, LLM evaluations, AI agent traces, AI apps etc → use query_weave_traces_tool
 
 =====================================================================
@@ -48,16 +48,16 @@ This tool is ONLY for WEAVE TRACES (LLM operations), NOT for run metrics or expe
 
 **KEYWORD GUIDE:**
 If user question contains:
-- "runs", "experiments", "metrics" → Use query_wandb_gql_tool
+- "runs", "experiments", "metrics" → Use query_wandb_tool
 - "traces", "LLM calls" etc → Use this tool
 
 **COMMON MISUSE CASES:**
-❌ "Looking at metrics of my latest runs" - Do NOT use this tool, use query_wandb_gql_tool instead
-❌ "Compare performance across experiments" - Do NOT use this tool, use query_wandb_gql_tool instead
+❌ "Looking at metrics of my latest runs" - Do NOT use this tool, use query_wandb_tool instead
+❌ "Compare performance across experiments" - Do NOT use this tool, use query_wandb_tool instead
 </use_case_selector>
 
 If the users asks for data about "runs" or "experiments" or anything about "experiment tracking"
-then use the `query_wandb_gql_tool` instead.
+then use the `query_wandb_tool` instead.
 </use_case_selector>
 
 <usage_tips>
@@ -143,76 +143,106 @@ there is a risk of returning traces that do not belong to the evaluation that wa
 - Weave nomenclature: Note that users might refer to weave ops as "traces" or "calls" or "traces" as "ops".
 
 </usage_guidance>
-</usage_tips>
 
-Args:
-    entity_name: The Weights & Biases entity name (team or username)
-    project_name: The Weights & Biases project name
-    filters: Dict of filter conditions, supporting:
-        - display_name: Filter by display name seen in the Weave UI (string or regex pattern)
-        - op_name: Filter by weave op name, a long URI starting with 'weave:///' (string or regex pattern)
-        - op_name_contains: Filter for op_name containing this substring (easier than regex)
-        - trace_roots_only: Boolean to filter for only top-level/parent traces. Useful when you don't need
-            to return the data from all child traces.
-        - trace_id: Filter by a specific `trace_id` (e.g., "01958ab9-3c67-7c72-92bf-d023fa5a0d4d").
-            A `trace_id` groups multiple calls/spans. Use if the user explicitly say they provided a "trace_id" for a group of operations.
-            Always first try to filter by `call_ids` if a user provides an ID, before trying to filter by `trace_id`.
-        - call_ids: Filter by specific `call_id`s (also known as Span IDs) (string or list of strings, e.g., ["01958ab9-3c68-7c23-8ccd-c135c7037769"]).
-            **GUIDANCE**: `call_id` (Span ID) identifies a *single* operation/span and is typically found in Weave UI URLs.
-            If a user provides an ID for a specific item they're viewing, **prefer `call_ids`**.
-            Format as a list: `{"call_ids": ["user_provided_id"]}`.
-        - parent_ids: Return traces that are children of the given parent trace ids (string or list of strings). Ensure you use this \
+Parameters
+----------
+entity_name : str
+    The Weights & Biases entity name (team or username)
+project_name : str
+    The Weights & Biases project name
+filters : dict
+    Dict of filter conditions, supporting:
+    
+    - display_name : str or regex pattern
+        Filter by display name seen in the Weave UI
+    - op_name : str or regex pattern
+        Filter by weave op name, a long URI starting with 'weave:///'
+    - op_name_contains : str
+        Filter for op_name containing this substring (easier than regex)
+    - trace_roots_only : bool
+        Boolean to filter for only top-level/parent traces. Useful when you don't need
+        to return the data from all child traces.
+    - trace_id : str
+        Filter by a specific `trace_id` (e.g., "01958ab9-3c67-7c72-92bf-d023fa5a0d4d").
+        A `trace_id` groups multiple calls/spans. Use if the user explicitly say they provided a "trace_id" for a group of operations.
+        Always first try to filter by `call_ids` if a user provides an ID, before trying to filter by `trace_id`.
+    - call_ids : str or list of str
+        Filter by specific `call_id`s (also known as Span IDs) (string or list of strings, e.g., ["01958ab9-3c68-7c23-8ccd-c135c7037769"]).
+        **GUIDANCE**: `call_id` (Span ID) identifies a *single* operation/span and is typically found in Weave UI URLs.
+        If a user provides an ID for a specific item they're viewing, **prefer `call_ids`**.
+        Format as a list: `{"call_ids": ["user_provided_id"]}`.
+    - parent_ids : str or list of str
+        Return traces that are children of the given parent trace ids (string or list of strings). Ensure you use this \
 if given an evaluation trace id or name.
-        - status: Filter by trace status, defined as whether or not the trace had an exception or not. Can be
-            `success` or `error`.
-            NOTE: When users ask for "failed", "wrong", or "incorrect" traces, use `status:'error'` or 
-            `has_exception:True` as the filter.
-        - time_range: Dict with "start" and "end" datetime strings. Datetime strings should be in ISO format
-            (e.g. `2024-01-01T00:00:00Z`)
-        - attributes: Dict of the weave attributes of the trace.
-            Supports nested paths (e.g., "metadata.model_name") via dot notation.
-            Value can be:
-            *   A literal for exact equality (e.g., `"status": "success"`)
-            *   A dictionary with a comparison operator: `$gt`, `$lt`, `$eq`, `$gte`, `$lte` (e.g., `{"token_count": {"$gt": 100}}`)
-            *   A dictionary with the `$contains` operator for substring matching on string attributes (e.g., `{"model_name": {"$contains": "gpt-3"}}`)
-            **Warning:** The `$contains` operator performs simple substring matching only, full regular expression matching (e.g., via `$regex`) is **not supported** for attributes. Do not attempt to use `$regex`.
-        - has_exception: Optional[bool] to filter traces by exception status:
-            - None (or key not present): Show all traces regardless of exception status
-            - True: Show only traces that have exceptions (exception field is not null)
-            - False: Show only traces without exceptions (exception field is null)
-    sort_by: Field to sort by (started_at, ended_at, op_name, etc.). Defaults to 'started_at'
-    sort_direction: Sort direction ('asc' or 'desc'). Defaults to 'desc'
-    limit: Maximum number of results to return. Defaults to None
-    include_costs: Include tracked api cost information in the results. Defaults to True
-    include_feedback: Include weave annotations (human labels/feedback). Defaults to True
-    columns: List of specific columns to include in the results. Its almost always a good idea to specficy the
+    - status : str
+        Filter by trace status, defined as whether or not the trace had an exception or not. Can be
+        `success` or `error`.
+        NOTE: When users ask for "failed", "wrong", or "incorrect" traces, use `status:'error'` or 
+        `has_exception:True` as the filter.
+    - time_range : dict
+        Dict with "start" and "end" datetime strings. Datetime strings should be in ISO format
+        (e.g. `2024-01-01T00:00:00Z`)
+    - attributes : dict
+        Dict of the weave attributes of the trace.
+        Supports nested paths (e.g., "metadata.model_name") via dot notation.
+        Value can be:
+        *   A literal for exact equality (e.g., `"status": "success"`)
+        *   A dictionary with a comparison operator: `$gt`, `$lt`, `$eq`, `$gte`, `$lte` (e.g., `{"token_count": {"$gt": 100}}`)
+        *   A dictionary with the `$contains` operator for substring matching on string attributes (e.g., `{"model_name": {"$contains": "gpt-3"}}`)
+        **Warning:** The `$contains` operator performs simple substring matching only, full regular expression matching (e.g., via `$regex`) is **not supported** for attributes. Do not attempt to use `$regex`.
+    - has_exception : bool, optional
+        Optional[bool] to filter traces by exception status:
+        - None (or key not present): Show all traces regardless of exception status
+        - True: Show only traces that have exceptions (exception field is not null)
+        - False: Show only traces without exceptions (exception field is null)
+sort_by : str, optional
+    Field to sort by (started_at, ended_at, op_name, etc.). Defaults to 'started_at'
+sort_direction : str, optional
+    Sort direction ('asc' or 'desc'). Defaults to 'desc'
+limit : int, optional
+    Maximum number of results to return. Defaults to None
+include_costs : bool, optional
+    Include tracked api cost information in the results. Defaults to True
+include_feedback : bool, optional
+    Include weave annotations (human labels/feedback). Defaults to True
+columns : list of str, optional
+    List of specific columns to include in the results. Its almost always a good idea to specficy the
     columns needed. Defaults to None (all columns).
-        Available columns are:
-            id: <class 'str'>
-            project_id: <class 'str'>
-            op_name: <class 'str'>
-            display_name: typing.Optional[str]
-            trace_id: <class 'str'>
-            parent_id: typing.Optional[str]
-            started_at: <class 'datetime.datetime'>
-            attributes: dict[str, typing.Any]
-            inputs: dict[str, typing.Any]
-            ended_at: typing.Optional[datetime.datetime]
-            exception: typing.Optional[str]
-            output: typing.Optional[typing.Any]
-            summary: typing.Optional[SummaryMap] # Contains nested data like 'summary.weave.status' and 'summary.weave.latency_ms'
-            status: typing.Optional[str] # Synthesized from summary.weave.status if requested
-            latency_ms: typing.Optional[int] # Synthesized from summary.weave.latency_ms if requested
-            wb_user_id: typing.Optional[str]
-            wb_run_id: typing.Optional[str]
-            deleted_at: typing.Optional[datetime.datetime]
-    expand_columns: List of columns to expand in the results. Defaults to None
-    truncate_length: Maximum length for string values in weave traces. Defaults to 200
-    return_full_data: Whether to include full untruncated trace data. If True, the `truncate_length` parameter is ignored. If  \
+    Available columns are:
+        id: <class 'str'>
+        project_id: <class 'str'>
+        op_name: <class 'str'>
+        display_name: typing.Optional[str]
+        trace_id: <class 'str'>
+        parent_id: typing.Optional[str]
+        started_at: <class 'datetime.datetime'>
+        attributes: dict[str, typing.Any]
+        inputs: dict[str, typing.Any]
+        ended_at: typing.Optional[datetime.datetime]
+        exception: typing.Optional[str]
+        output: typing.Optional[typing.Any]
+        summary: typing.Optional[SummaryMap] # Contains nested data like 'summary.weave.status' and 'summary.weave.latency_ms'
+        status: typing.Optional[str] # Synthesized from summary.weave.status if requested
+        latency_ms: typing.Optional[int] # Synthesized from summary.weave.latency_ms if requested
+        wb_user_id: typing.Optional[str]
+        wb_run_id: typing.Optional[str]
+        deleted_at: typing.Optional[datetime.datetime]
+expand_columns : list of str, optional
+    List of columns to expand in the results. Defaults to None
+truncate_length : int, optional
+    Maximum length for string values in weave traces. Defaults to 200
+return_full_data : bool, optional
+    Whether to include full untruncated trace data. If True, the `truncate_length` parameter is ignored. If  \
 `False` returns truncation_length = 0, no values for the column keys are returned. Defaults to True.
-    metadata_only: Return only metadata without traces. Defaults to False
+metadata_only : bool, optional
+    Return only metadata without traces. Defaults to False
+save_filename : str, optional
+    If provided, the result will be saved to a code sandbox as a JSON file with the given filename for later \
+analysis if needed. Options, defaults to None.
 
-Returns:
+Returns
+-------
+str
     JSON string containing either full trace data or metadata only, depending on parameters
 
 <examples>

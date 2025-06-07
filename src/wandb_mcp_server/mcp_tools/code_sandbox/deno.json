@@ -1,0 +1,42 @@
+{
+  "name": "pyodide-sandbox",
+  "version": "1.0.0",
+  "description": "Pyodide-based Python code sandbox for W&B MCP Server",
+  "tasks": {
+    "run": "deno run --allow-net --allow-read --allow-write --allow-env pyodide_sandbox.ts",
+    "test": "deno test --allow-net --allow-read --allow-write",
+    "fmt": "deno fmt",
+    "lint": "deno lint"
+  },
+  "imports": {
+    "pyodide": "npm:pyodide@0.27.6"
+  },
+  "compilerOptions": {
+    "allowJs": true,
+    "strict": true,
+    "lib": ["deno.window", "esnext"]
+  },
+  "fmt": {
+    "files": {
+      "include": ["**/*.ts", "**/*.js"],
+      "exclude": ["node_modules/"]
+    },
+    "options": {
+      "useTabs": false,
+      "lineWidth": 100,
+      "indentWidth": 2,
+      "singleQuote": false,
+      "proseWrap": "preserve"
+    }
+  },
+  "lint": {
+    "files": {
+      "include": ["**/*.ts", "**/*.js"],
+      "exclude": ["node_modules/"]
+    },
+    "rules": {
+      "tags": ["recommended"],
+      "exclude": ["no-explicit-any"]
+    }
+  }
+}

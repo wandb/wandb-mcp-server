@@ -4,7 +4,7 @@
 # import ast
 # import json
 # import os
-# from src.wandb_mcp_server.server import query_wandb_gql_tool # Assuming src is importable
+# from src.wandb_mcp_server.server import query_wandb_tool # Assuming src is importable
 
 
 
@@ -94,9 +94,9 @@
 # def gql_examples():
 #     """Reads the target function's docstring and extracts GQL examples."""
 #     try:
-#         target_docstring = inspect.getdoc(query_wandb_gql_tool)
+#         target_docstring = inspect.getdoc(query_wandb_tool)
 #         if not target_docstring:
-#             raise ImportError(f"Could not get docstring for query_wandb_gql_tool.")
+#             raise ImportError(f"Could not get docstring for query_wandb_tool.")
         
 #         # --- DEBUGGING: Print the retrieved docstring ---
 #         print("\n--- Retrieved Docstring by inspect.getdoc() ---")
@@ -119,7 +119,7 @@
 #     # Attempt to pre-load examples just to get names for parameterization
 #     # Note: This duplicates loading but simplifies parametrize setup
 #     # The fixture ensures the main test execution uses the proper setup/cached result.
-#     _target_docstring = inspect.getdoc(query_wandb_gql_tool)
+#     _target_docstring = inspect.getdoc(query_wandb_tool)
 #     if not _target_docstring:
 #          raise ImportError("Docstring not found at collection time.")
 #     _extracted_examples = extract_gql_examples_from_docstring(_target_docstring)
@@ -219,7 +219,7 @@
 #     # --- Make the Live API Call ---
 #     try:
 #         # Use default max_items and items_per_page from the tool's signature
-#         result = query_wandb_gql_tool(query=query, variables=variables)
+#         result = query_wandb_tool(query=query, variables=variables)
 
 #         print(f"API Result for {name}: {result}")
 
@@ -236,7 +236,7 @@
 #         # e.g., if name == "GetProjectInfo": assert "project" in result.get("data", {})
 
 #     except Exception as e:
-#         pytest.fail(f"query_wandb_gql_tool raised an exception for example '{name}': {e}")
+#         pytest.fail(f"query_wandb_tool raised an exception for example '{name}': {e}")
 
 # # Note: This test makes live calls to the W&B API. Ensure:
 # # 1. You are logged into W&B (e.g., via `wandb login`).

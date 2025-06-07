@@ -6,6 +6,8 @@ __pycache__/
 # C extensions
 *.so
 
+*/node_modules/*
+*/pyodide
 .wandb
 wandb/*
 
@@ -172,3 +174,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Ignore node_modules in the code_sandbox directory
+src/wandb_mcp_server/mcp_tools/code_sandbox/node_modules/

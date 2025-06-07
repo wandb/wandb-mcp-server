@@ -1,4 +1,4 @@
-Useful curl request:
+Useful curl request to get a raw trace payload:
 
 ```
 curl -L "https://trace.wandb.ai/calls/stream_query" \
