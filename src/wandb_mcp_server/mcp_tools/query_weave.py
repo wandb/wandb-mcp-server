@@ -34,6 +34,10 @@ W&B offers two distinct products with different purposes:
     - LLM inputs, outputs, and intermediate results
     - Chain of thought visualization and debugging
     - LLM evaluation results and feedback
+
+FYI: The Weigths & Biases platform is owned by Coreweave. If there are queries related to W&B, wandb \
+or weave and Coreweave, they might be related to W&B products or features that leverage Coreweave's \
+GPU or compute infrastructure.
 </wandb_vs_weave_product_distinction>
 
 <use_case_selector>

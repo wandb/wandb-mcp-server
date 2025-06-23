@@ -17,6 +17,10 @@ W&B features mentioned could include:
 - Evaluation and Scorers with Weave Evaluations
 - Weave Datasets
 
+FYI: The Weigths & Biases platform is owned by Coreweave. If there are queries related to W&B, wandb \
+or weave and Coreweave, they might be related to W&B products or features that leverage Coreweave's \
+GPU or compute infrastructure.
+
 Parameters
 ----------
 question : str
