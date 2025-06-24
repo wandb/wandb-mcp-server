@@ -34,83 +34,23 @@ or
 brew install uv
 ```
 
-### 2. Code sandbox setup (optional)
+### 2. Popular MCP Clients:
 
-The wandb MCP server exposes a secure, isolated python code sandbox tool to the client to let it send code (e.g. pandas) for additional data analysis to be run on queried W&B data. 
-
-**Option 1: Local Pyodide sandbox - Install Deno**
-
-The local Pyodide sandbox uses Deno to run Python in a WebAssembly environment, providing secure isolation from the host system. This option is automatically used if Deno is installed and no E2B API key is found.
-
-```bash
-# One-line install for macOS/Linux:
-curl -fsSL https://deno.land/install.sh | sh -s -- -y
-
-# Add Deno to your PATH (if not done automatically):
-echo 'export PATH="$HOME/.deno/bin:$PATH"' >> ~/.bashrc  # for bash
-echo 'export PATH="$HOME/.deno/bin:$PATH"' >> ~/.zshrc   # for zsh
-source ~/.bashrc  # or ~/.zshrc
-
-# Or on Windows (PowerShell):
-irm https://deno.land/install.ps1 | iex
-```
-
-After installation, verify Deno is available:
-```bash
-# Restart your terminal or source your shell config
-source ~/.bashrc  # or ~/.zshrc
-
-# Verify installation
-deno --version
-```
-
-If `deno --version` doesn't work, you may need to manually add Deno to your PATH:
-```bash
-echo 'export PATH="$HOME/.deno/bin:$PATH"' >> ~/.bashrc  # for bash
-echo 'export PATH="$HOME/.deno/bin:$PATH"' >> ~/.zshrc   # for zsh
-source ~/.bashrc  # or ~/.zshrc
-```
-
-Note, first execution may take longer as Pyodide downloads required packages
-
-**Option 2: Hosted E2B sandbox - Set E2B api key**
-
-The sandbox tool will use E2B if an E2B API key is detected. E2B provides persistent cloud VMs with full Python environment:
-
-1. Sign up to E2B at [e2b.dev](https://e2b.dev)
-2. Get your API key from the E2B dashboard
-3. Set the `E2B_API_KEY` environment variable in the client settings.json
-
-- To explicitly disable the sandbox tool completely, set `DISABLE_CODE_SANDBOX=1` environment variable
-
-
-### 3. Installation helpers
-
-We provide a helper utility below to easily install the Weights & Biases MCP Server into applications that use a JSON server spec - inspired by the OpenMCP Server Registry [add-to-client pattern](https://www.open-mcp.org/servers).
-
-
-### Example helper
-
-```bash
-uvx --from git+https://github.com/wandb/wandb-mcp-server -- add_to_client --config_path <path to the MCP config json file> --add_deno_path && uvx wandb login
-```
-
-### Cursor installation
-#### Cursor project
+### Cursor, project-only
 Enable the server for a specific project. Run the following in the root of your project dir:
 
 ```bash
 uvx --from git+https://github.com/wandb/wandb-mcp-server -- add_to_client --config_path .cursor/mcp.json --add_deno_path && uvx wandb login
 ```
 
-#### Cursor global
+### Cursor global
 Enable the server for all Cursor projects, doesn't matter where this is run:
 
 ```bash
 uvx --from git+https://github.com/wandb/wandb-mcp-server -- add_to_client --config_path ~/.cursor/mcp.json --add_deno_path && uvx wandb login
 ```
 
-### Windsurf installation
+### Windsurf 
 
 ```bash
 uvx --from git+https://github.com/wandb/wandb-mcp-server -- add_to_client --config_path ~/.codeium/windsurf/mcp_config.json --add_deno_path && uvx wandb login
@@ -128,36 +68,14 @@ Passing an environment variable to Claude Code, e.g. api key:
 claude mcp add wandb -e WANDB_API_KEY=your-api-key -- uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
 ```
 
-### Claude Desktop installation
-First ensure `uv` is installed, you might have to use brew to install depite `uv` being available in your terminal.
-
-Then run the below:
+### Claude Desktop
+First ensure `uv` is installed, you might have to use `homebrew` to install depite `uv` being available in your terminal. Then run the below:
 
 ```bash
 uvx --from git+https://github.com/wandb/wandb-mcp-server -- add_to_client --config_path "~/Library/Application Support/Claude/claude_desktop_config.json" --add_deno_path && uvx wandb login
 ```
 
-
-
-### Writing environment variables to the config file
-
-The `add_to_client` function accepts a number of flags to enable writing optional environment variables to the server's config file. Below is an example of using the built-in convenience flag, `--e2b_api_key`, as well as setting other env variables that don't have dedicated flags.
-
-```bash
-# Write the server config file with additional env vars
-uvx --from git+https://github.com/wandb/wandb-mcp-server -- add_to_client \
-  --config_path ~/.codeium/windsurf/mcp_config.json \
-  --e2b_api_key 12345abcde \
-  --add_deno_path \
-  --write_env_vars MCP_LOGS_WANDB_ENTITY=my_wandb_entity E2B_PACKAGE_ALLOWLIST=numpy,pandas
-
-# Then login to W&B
-uvx wandb login
-```
-
-Arguments passed to `--write_env_vars` must be space separated and the key and value of each env variable must be separated only by a `=`.
-
-## Manual Installation
+### Manual Installation
 1. Ensure you have `uv` installed, see above installation instructions for uv.
 2. Get your W&B api key [here](https://www.wandb.ai/authorize)
 3. Add the following to your MCP client config manually.
@@ -180,18 +98,7 @@ Arguments passed to `--write_env_vars` must be space separated and the key and v
 }
 ```
 
-### Running from Source
-
-Run the server from source by running the below in the root dir:
-
-```bash
-wandb login && uv run src/wandb_mcp_server/server.py
-```
-
-## Environment Variables
-
-The full list of environment variables used to control the server's settings can be found in the `.env.example` file.
-
+These help utilities above are inspired by the OpenMCP Server Registry [add-to-client pattern](https://www.open-mcp.org/servers).
 
 ## Available MCP tools
 
@@ -245,6 +152,88 @@ Questions such as "what is my best evaluation?" are probably overly broad and yo
 #### Ensure all data was retrieved
 
 When asking broad, general questions such as "what are my best performing runs/evaluations?" its always a good idea to ask the LLM to check that it retrieved all the available runs. The MCP tools are designed to fetch the correct amount of data, but sometimes there can be a tendency from the LLMs to only retrieve the latest runs or the last N runs.
+
+## Advanced
+
+### Code sandbox setup (optional)
+
+The wandb MCP server exposes a secure, isolated python code sandbox tool to the client to let it send code (e.g. pandas) for additional data analysis to be run on queried W&B data. 
+
+**Option 1: Local Pyodide sandbox - Install Deno**
+
+The local Pyodide sandbox uses Deno to run Python in a WebAssembly environment, providing secure isolation from the host system. This option is automatically used if Deno is installed and no E2B API key is found.
+
+```bash
+# One-line install for macOS/Linux:
+curl -fsSL https://deno.land/install.sh | sh -s -- -y
+
+# Add Deno to your PATH (if not done automatically):
+echo 'export PATH="$HOME/.deno/bin:$PATH"' >> ~/.bashrc  # for bash
+echo 'export PATH="$HOME/.deno/bin:$PATH"' >> ~/.zshrc   # for zsh
+source ~/.bashrc  # or ~/.zshrc
+
+# Or on Windows (PowerShell):
+irm https://deno.land/install.ps1 | iex
+```
+
+After installation, verify Deno is available:
+```bash
+# Restart your terminal or source your shell config
+source ~/.bashrc  # or ~/.zshrc
+
+# Verify installation
+deno --version
+```
+
+If `deno --version` doesn't work, you may need to manually add Deno to your PATH:
+```bash
+echo 'export PATH="$HOME/.deno/bin:$PATH"' >> ~/.bashrc  # for bash
+echo 'export PATH="$HOME/.deno/bin:$PATH"' >> ~/.zshrc   # for zsh
+source ~/.bashrc  # or ~/.zshrc
+```
+
+Note, first execution may take longer as Pyodide downloads required packages
+
+**Option 2: Hosted E2B sandbox - Set E2B api key**
+
+The sandbox tool will use E2B if an E2B API key is detected. E2B provides persistent cloud VMs with full Python environment:
+
+1. Sign up to E2B at [e2b.dev](https://e2b.dev)
+2. Get your API key from the E2B dashboard
+3. Set the `E2B_API_KEY` environment variable in the client settings.json
+
+- To explicitly disable the sandbox tool completely, set `DISABLE_CODE_SANDBOX=1` environment variable
+
+
+### Writing environment variables to the config file
+
+The `add_to_client` function accepts a number of flags to enable writing optional environment variables to the server's config file. Below is an example of using the built-in convenience flag, `--e2b_api_key`, as well as setting other env variables that don't have dedicated flags.
+
+```bash
+# Write the server config file with additional env vars
+uvx --from git+https://github.com/wandb/wandb-mcp-server -- add_to_client \
+  --config_path ~/.codeium/windsurf/mcp_config.json \
+  --e2b_api_key 12345abcde \
+  --add_deno_path \
+  --write_env_vars MCP_LOGS_WANDB_ENTITY=my_wandb_entity E2B_PACKAGE_ALLOWLIST=numpy,pandas
+
+# Then login to W&B
+uvx wandb login
+```
+
+Arguments passed to `--write_env_vars` must be space separated and the key and value of each env variable must be separated only by a `=`.
+
+### Running from Source
+
+Run the server from source by running the below in the root dir:
+
+```bash
+wandb login && uv run src/wandb_mcp_server/server.py
+```
+
+### Environment Variables
+
+The full list of environment variables used to control the server's settings can be found in the `.env.example` file.
 
 
 ## Sandbox Configuration (Optional)
