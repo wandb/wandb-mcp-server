@@ -21,7 +21,7 @@ A Model Context Protocol (MCP) server for querying [Weights & Biases](https://ww
 
 ### 1. Install `uv`
 
-Please first [install `uv`](https://docs.astral.sh/uv/getting-started/installation/) with either:
+Please first install [`uv`](https://docs.astral.sh/uv/getting-started/installation/) with either:
 
 
 ```bash
