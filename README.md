@@ -34,7 +34,7 @@ or
 brew install uv
 ```
 
-### 2. Popular MCP Clients:
+### 2. Install on your MCP client of choice:
 
 ### Cursor, project-only
 Enable the server for a specific project. Run the following in the root of your project dir:
