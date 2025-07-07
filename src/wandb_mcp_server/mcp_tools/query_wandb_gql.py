@@ -402,11 +402,7 @@ use the tool again with additional filters or pagination to get a more complete 
             id
             name
             # Use sampledHistory with specs to get actual values for specific keys
-            sampledHistory(specs: $specs) { 
-                step # The step number
-                timestamp # Timestamp of the log
-                item # JSON string containing {key: value} for requested keys at this step
-            } 
+            sampledHistory(specs: $specs)
         }
         }
     }
