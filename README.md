@@ -6,6 +6,16 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://cursor.com/install-mcp?name=wandb&config=JTdCJTIyY29tbWFuZCUyMiUzQSUyMnV2eCUyMC0tZnJvbSUyMGdpdCUyQmh0dHBzJTNBJTJGJTJGZ2l0aHViLmNvbSUyRndhbmRiJTJGd2FuZGItbWNwLXNlcnZlciUyMHdhbmRiX21jcF9zZXJ2ZXIlMjIlN0Q%3D">
+    <picture>
+      <source media="(prefers-color-scheme: light)" srcset="https://cursor.com/deeplink/mcp-install-dark.svg">
+      <source media="(prefers-color-scheme: dark)" srcset="https://cursor.com/deeplink/mcp-install-light.svg">
+      <img src="https://cursor.com/deeplink/mcp-install-light.svg" alt="Install MCP Server">
+    </picture>
+  </a>
+</p>
+
 # Weights & Biases MCP Server
 
 A Model Context Protocol (MCP) server for querying [Weights & Biases](https://www.wandb.ai/) data. This server allows a MCP Client to:
@@ -106,7 +116,7 @@ These help utilities above are inspired by the OpenMCP Server Registry [add-to-c
 -  **`query_wandb_tool`** Execute queries against wandb experiment tracking data including Runs & Sweeps.
   
 ### 2. weave
-- **`query_weave_traces_tool`** Queries Weave traces with powerful filtering, sorting, and pagination options.
+- **`query_weave_traces_tool`** Queries Weave evaluations and traces with powerful filtering, sorting, and pagination options.
   Returns either complete trace data or just metadata to avoid overwhelming the LLM context window.
 
 - **`count_weave_traces_tool`** Efficiently counts Weave traces matching given filters without returning the trace data.
