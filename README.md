@@ -6,15 +6,6 @@
   </picture>
 </p>
 
-<p align="center">
-  <a href="https://cursor.com/install-mcp?name=wandb&config=JTdCJTIyY29tbWFuZCUyMiUzQSUyMnV2eCUyMC0tZnJvbSUyMGdpdCUyQmh0dHBzJTNBJTJGJTJGZ2l0aHViLmNvbSUyRndhbmRiJTJGd2FuZGItbWNwLXNlcnZlciUyMHdhbmRiX21jcF9zZXJ2ZXIlMjIlN0Q%3D">
-    <picture>
-      <source media="(prefers-color-scheme: light)" srcset="https://cursor.com/deeplink/mcp-install-dark.svg">
-      <source media="(prefers-color-scheme: dark)" srcset="https://cursor.com/deeplink/mcp-install-light.svg">
-      <img src="https://cursor.com/deeplink/mcp-install-light.svg" alt="Install MCP Server">
-    </picture>
-  </a>
-</p>
 
 # Weights & Biases MCP Server
 
