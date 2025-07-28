@@ -240,9 +240,6 @@ return_full_data : bool, optional
 `False` returns truncation_length = 0, no values for the column keys are returned. Defaults to True.
 metadata_only : bool, optional
     Return only metadata without traces. Defaults to False
-save_filename : str, optional
-    If provided, the result will be saved to a code sandbox as a JSON file with the given filename for later \
-analysis if needed. Options, defaults to None.
 
 Returns
 -------

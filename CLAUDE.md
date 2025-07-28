@@ -25,9 +25,6 @@ This is a **Weights & Biases MCP Server** that provides LLM clients with access 
 ### Discovery & Navigation
 - `query_wandb_entity_projects` - List available entities and projects
 
-### Code Execution & Sandbox
-- `execute_sandbox_code_tool` - Execute Python code in secure, isolated sandbox environments
-
 ## Architecture Patterns
 
 ### Tool Registration Pattern
@@ -135,42 +132,6 @@ uv run pytest
 - `uv run pytest tests/test_specific.py` - Run specific test file
 - `uv run pytest -xvs` - Run with verbose output and stop on first failure
 
-## Sandbox Functionality
-
-The MCP server now includes secure Python code execution capabilities through multiple sandbox options:
-
-### Sandbox Types (Auto-selected)
-1. **E2B Cloud Sandbox** - Fully isolated cloud VMs (~150ms startup)
-   - Requires: `E2B_API_KEY` environment variable
-   - Most secure option with complete isolation
-   - Supports package installation
-
-2. **Pyodide Local Sandbox** - WebAssembly-based Python execution
-   - Requires: Node.js installed locally
-   - Secure local execution with no filesystem access
-   - Supports common scientific packages (numpy, pandas, matplotlib)
-
-3. **RestrictedPython Fallback** - Restricted Python execution
-   - Always available (included in dependencies)
-   - Limited package support but safe execution
-   - Last resort when other options fail
-
-### Usage Examples
-```python
-# Simple calculation
-execute_sandbox_code_tool(code="print(2 + 2)")
-
-# Data analysis
-execute_sandbox_code_tool(code="""
-import pandas as pd
-data = {'x': [1, 2, 3], 'y': [4, 5, 6]}
-df = pd.DataFrame(data)
-print(df.describe())
-""")
-
-# Force specific sandbox
-execute_sandbox_code_tool(code="print('test')", sandbox_type="e2b")
-```
 
 ## Environment Configuration
 
@@ -179,7 +140,6 @@ Required environment variables:
 - `WEAVE_PROJECT_ID` - Weave project identifier
 
 Optional environment variables:
-- `E2B_API_KEY` - For E2B cloud sandbox functionality
 - `MCP_SERVER_LOG_LEVEL` - Logging level (DEBUG, INFO, WARNING, ERROR)
 
 The codebase demonstrates excellent separation of concerns, comprehensive error handling, and scalable patterns for adding new W&B integrations.
