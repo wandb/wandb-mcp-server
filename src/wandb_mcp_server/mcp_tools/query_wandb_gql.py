@@ -109,9 +109,6 @@ max_items : int, optional
     Maximum number of items to fetch across all pages. Default is 100.
 items_per_page : int, optional
     Number of items to request per page. Default is 50.
-save_filename: str, optional
-    If provided, the result will be saved to a code sandbox as a JSON file with the given filename for later \
-    analysis if needed. Options, defaults to None.
 
 Returns
 -------
