@@ -36,7 +36,7 @@ def main():
         sys.argv[0],  # Keep the script name
         "--transport", "http",
         "--host", "0.0.0.0",  # Listen on all interfaces for HuggingFace Spaces
-        "--port", str(os.environ.get("PORT", "8080"))  # Use PORT env var or default to 8080
+        "--port", str(os.environ.get("PORT", "7860"))  # Use PORT env var or default to 8080
     ]
     
     # Check for required environment variables
