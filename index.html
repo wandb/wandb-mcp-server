@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weights & Biases MCP Server</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            padding: 40px;
+            margin: 20px 0;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        
+        .logo {
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(45deg, #ff6b35, #f7931e);
+            border-radius: 12px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 30px;
+            margin-bottom: 20px;
+        }
+        
+        h1 {
+            color: #2d3748;
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 700;
+        }
+        
+        .subtitle {
+            color: #718096;
+            font-size: 1.2em;
+            margin-top: 10px;
+        }
+        
+        .status {
+            background: #48bb78;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 600;
+            display: inline-block;
+            margin-top: 20px;
+        }
+        
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 40px 0;
+        }
+        
+        .feature {
+            background: #f7fafc;
+            padding: 25px;
+            border-radius: 8px;
+            border-left: 4px solid #4299e1;
+        }
+        
+        .feature h3 {
+            color: #2d3748;
+            margin: 0 0 10px 0;
+            font-size: 1.2em;
+        }
+        
+        .feature p {
+            color: #4a5568;
+            margin: 0;
+            font-size: 0.95em;
+        }
+        
+        .endpoint {
+            background: #1a202c;
+            color: #e2e8f0;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 1.1em;
+            text-align: center;
+            margin: 30px 0;
+            position: relative;
+        }
+        
+        .endpoint::before {
+            content: "🔗 MCP Endpoint";
+            position: absolute;
+            top: -10px;
+            left: 20px;
+            background: #1a202c;
+            padding: 0 10px;
+            font-size: 0.8em;
+            color: #a0aec0;
+        }
+        
+        .examples {
+            background: #edf2f7;
+            padding: 25px;
+            border-radius: 8px;
+            margin: 30px 0;
+        }
+        
+        .examples h3 {
+            color: #2d3748;
+            margin: 0 0 15px 0;
+        }
+        
+        .example {
+            background: white;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 10px 0;
+            border-left: 3px solid #38b2ac;
+            font-style: italic;
+            color: #2d3748;
+        }
+        
+        .setup-steps {
+            background: #fff5f5;
+            border: 1px solid #feb2b2;
+            border-radius: 8px;
+            padding: 25px;
+            margin: 30px 0;
+        }
+        
+        .setup-steps h3 {
+            color: #c53030;
+            margin: 0 0 15px 0;
+        }
+        
+        .setup-steps ol {
+            color: #2d3748;
+            padding-left: 20px;
+        }
+        
+        .setup-steps li {
+            margin: 10px 0;
+        }
+        
+        .footer {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #e2e8f0;
+            color: #718096;
+        }
+        
+        .footer a {
+            color: #4299e1;
+            text-decoration: none;
+        }
+        
+        .footer a:hover {
+            text-decoration: underline;
+        }
+        
+        @media (max-width: 768px) {
+            body {
+                padding: 10px;
+            }
+            
+            .container {
+                padding: 20px;
+            }
+            
+            h1 {
+                font-size: 2em;
+            }
+            
+            .features {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">🐝</div>
+            <h1>Weights & Biases MCP Server</h1>
+            <p class="subtitle">Model Context Protocol server for querying W&B data</p>
+            <div class="status">✅ Server Running</div>
+        </div>
+
+        <div class="endpoint">
+            https://huggingface.co/spaces/[your-username]/[space-name]/mcp
+        </div>
+
+        <div class="features">
+            <div class="feature">
+                <h3>📊 W&B Models</h3>
+                <p>Query experiment tracking data, runs, sweeps, and performance metrics using GraphQL.</p>
+            </div>
+            
+            <div class="feature">
+                <h3>🔍 W&B Weave</h3>
+                <p>Access LLM traces, evaluations, and datasets with powerful filtering and pagination.</p>
+            </div>
+            
+            <div class="feature">
+                <h3>🤖 Support Agent</h3>
+                <p>Get help from wandbot, the W&B RAG-powered support agent for product questions.</p>
+            </div>
+            
+            <div class="feature">
+                <h3>📝 Reports</h3>
+                <p>Create and save W&B Reports with markdown text and HTML visualizations.</p>
+            </div>
+        </div>
+
+        <div class="setup-steps">
+            <h3>⚠️ Setup Required</h3>
+            <ol>
+                <li>Get your W&B API key from <a href="https://wandb.ai/authorize" target="_blank">wandb.ai/authorize</a></li>
+                <li>Set <code>WANDB_API_KEY</code> as a secret in this Space's environment variables</li>
+                <li>Connect your MCP client to the endpoint above</li>
+            </ol>
+        </div>
+
+        <div class="examples">
+            <h3>💬 Example Queries</h3>
+            <div class="example">
+                "How many openai.chat traces are in my wandb-team/my-project weave project?"
+            </div>
+            <div class="example">
+                "Show me the latest 10 runs from my experiment and create a report with the results."
+            </div>
+            <div class="example">
+                "What's the best performing model in my latest sweep? Plot the results."
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>
+                Built with ❤️ for the <a href="https://modelcontextprotocol.io/" target="_blank">Model Context Protocol</a> community
+                <br>
+                <a href="https://github.com/wandb/wandb-mcp-server" target="_blank">Source Code</a> • 
+                <a href="https://docs.wandb.ai/" target="_blank">W&B Docs</a> • 
+                <a href="https://weave-docs.wandb.ai/" target="_blank">Weave Docs</a>
+            </p>
+        </div>
+    </div>
+</body>
+</html>
