@@ -35,8 +35,8 @@ def main():
     sys.argv = [
         sys.argv[0],  # Keep the script name
         "--transport", "http",
-        "--host", "0.0.0.0",  # Listen on all interfaces for HuggingFace Spaces
-        "--port", str(os.environ.get("PORT", "7860"))  # Use PORT env var or default to 8080
+        "--host", os.environ.get("HOST", "0.0.0.0"),  # Listen on all interfaces for HuggingFace Spaces
+        "--port", str(os.environ.get("PORT", "7860"))  # Use PORT env var or default to 7860
     ]
     
     # Check for required environment variables
@@ -48,7 +48,7 @@ def main():
         sys.exit(1)
     
     logger.info(f"WANDB_API_KEY configured: {'Yes' if wandb_api_key else 'No'}")
-    logger.info(f"Starting HTTP server on port {os.environ.get('PORT', '8080')}")
+    logger.info(f"Starting HTTP server on port {os.environ.get('PORT', '7860')}")
     logger.info("MCP endpoint will be available at: /mcp")
     
     try:

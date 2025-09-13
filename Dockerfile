@@ -29,9 +29,11 @@ COPY app.py .
 ENV PYTHONPATH=/app/src
 ENV WANDB_SILENT=True
 ENV WEAVE_SILENT=True
+ENV MCP_TRANSPORT=http
+ENV HOST=0.0.0.0
 
 # Expose port for HTTP transport
-EXPOSE 8080
+EXPOSE 7860
 
 # Run the application
 CMD ["python", "app.py"]

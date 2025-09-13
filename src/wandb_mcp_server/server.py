@@ -258,7 +258,7 @@ def cli():
         logger.info(f"Starting HTTP server on {args.host}:{port}")
         
         # Create new FastMCP instance with HTTP configuration
-        http_mcp = FastMCP("weave-mcp-server", port=port, stateless_http=True)
+        http_mcp = FastMCP("weave-mcp-server", host=args.host, port=port, stateless_http=True)
         
         # Copy all tools from the original mcp instance
         # We need to re-register the tools on the new instance
