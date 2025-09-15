@@ -16,6 +16,7 @@ A Model Context Protocol (MCP) server for querying [Weights & Biases](https://ww
 - query [wandbot](https://github.com/wandb/wandbot), the W&B support agent, for general W&B feature questions
 - write text and charts to W&B Reports
 
+Check out a hosted public [version on HF spaces](https://huggingface.co/spaces/NiWaRe/wandb-mcp-server) - currently without Oauth but with a configurable WANDB_API_KEY (the referenced space will work on all public wandb/weave repos out of the box). We're working on OAuth support.
 
 ## Installation
 
