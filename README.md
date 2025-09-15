@@ -100,6 +100,100 @@ uvx --from git+https://github.com/wandb/wandb-mcp-server -- add_to_client --conf
 
 These help utilities above are inspired by the OpenMCP Server Registry [add-to-client pattern](https://www.open-mcp.org/servers).
 
+## Configuration
+
+### API Key Setup
+
+The W&B MCP Server requires a Weights & Biases API key for authentication. You can configure it in several ways (in priority order):
+
+1. **Command-line argument** (highest priority):
+   ```bash
+   wandb_mcp_server --wandb-api-key YOUR_API_KEY
+   ```
+
+2. **Environment variable**:
+   ```bash
+   export WANDB_API_KEY=YOUR_API_KEY
+   wandb_mcp_server
+   ```
+
+3. **`.env` file** in the project root:
+   ```
+   WANDB_API_KEY=YOUR_API_KEY
+   ```
+
+4. **`.netrc` file** (lowest priority):
+   ```
+   machine api.wandb.ai
+   login user
+   password YOUR_API_KEY
+   ```
+
+Get your API key at: [https://wandb.ai/authorize](https://wandb.ai/authorize)
+
+### Logging Configuration
+
+Control logging behavior with these environment variables:
+
+- **`MCP_SERVER_LOG_LEVEL`**: Server log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
+  ```bash
+  export MCP_SERVER_LOG_LEVEL=INFO
+  ```
+
+- **`WANDB_SILENT`**: Suppress W&B output (default: `True`)
+  ```bash
+  export WANDB_SILENT=False  # Enable W&B output for debugging
+  ```
+
+- **`WEAVE_SILENT`**: Suppress Weave output (default: `True`)
+  ```bash
+  export WEAVE_SILENT=False  # Enable Weave output for debugging
+  ```
+
+- **`WEAVE_DISABLED`**: Disable Weave tracing (default: `true`)
+  ```bash
+  export WEAVE_DISABLED=false  # Enable Weave tracing for MCP operations
+  ```
+
+- **`MCP_TRACE_LIST_OPERATIONS`**: Trace MCP list operations (default: `false`)
+  ```bash
+  export MCP_TRACE_LIST_OPERATIONS=true  # Trace list_tools, list_resources, list_prompts
+  ```
+
+- **`WANDB_DEBUG`**: Enable detailed W&B debug logging
+  ```bash
+  export WANDB_DEBUG=true  # Enables verbose W&B logging
+  ```
+
+### Transport Configuration
+
+#### Stdio Transport (Default)
+```bash
+wandb_mcp_server --transport stdio
+```
+Used by most MCP clients like Claude Desktop.
+
+#### HTTP Transport
+```bash
+wandb_mcp_server --transport http --host localhost --port 8080
+```
+
+Options:
+- `--host`: Host address (default: `localhost`, HF spaces: `0.0.0.0`)
+- `--port`: Port number (default: `8080`, HF spaces: `7860`)
+
+### Complete Command-Line Options
+
+```bash
+wandb_mcp_server [OPTIONS]
+
+Options:
+  --transport {stdio,http}     Transport type (default: stdio)
+  --host HOST                  Host for HTTP transport (default: localhost)  
+  --port PORT                  Port for HTTP transport (default: 8080)
+  --wandb-api-key KEY         W&B API key (can also use env var)
+```
+
 ## Available MCP tools
 
 ### 1. wandb
@@ -230,17 +324,6 @@ To use the HTTP server with external chat applications like Mistral's le Chat, y
    - **Mistral le Chat**: Add the ngrok URL + `/mcp` as the MCP server endpoint
    - **Other chat apps**: Use the ngrok URL + `/mcp` for MCP connections
    - **Example**: `https://abc123.ngrok.io/mcp`
-
-**Example ngrok output:**
-```
-Session Status                online
-Account                       your-account (Plan: Free)
-Version                       3.0.0
-Region                        United States (us)
-Forwarding                    https://abc123.ngrok.io -> http://localhost:8080
-```
-
-Use `https://abc123.ngrok.io/mcp` as your MCP server endpoint in chat applications.
 
 ### Environment Variables
 

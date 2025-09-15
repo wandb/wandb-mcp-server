@@ -1,6 +1,14 @@
 #!/usr/bin/env python
 """
 Weights & Biases MCP Server - A Model Context Protocol server for querying Weights & Biases data.
+
+This server provides tools for:
+- Querying Weave traces and evaluations
+- Counting traces efficiently  
+- Executing GraphQL queries against W&B experiment data
+- Creating shareable reports with visualizations
+- Getting help via wandbot support agent
+- Discovering available entities and projects
 """
 
 import io
@@ -10,13 +18,18 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-import asyncio
-import signal
-import atexit
 
 import wandb
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+# Import Weave for tracing MCP tool calls
+try:
+    import weave
+    WEAVE_AVAILABLE = True
+except ImportError:
+    weave = None
+    WEAVE_AVAILABLE = False
 
 from wandb_mcp_server.mcp_tools.list_wandb_entities_projects import (
     LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION,
@@ -45,289 +58,397 @@ from wandb_mcp_server.mcp_tools.query_weave import (
 from wandb_mcp_server.utils import get_rich_logger, get_server_args, ServerMCPArgs
 from wandb_mcp_server.weave_api.models import QueryResult
 
-print('Running server.py...', file=sys.stderr)
-
-# Silence logging to avoid interfering with MCP server
-os.environ["WANDB_SILENT"] = "True"
-os.environ["WEAVE_SILENT"] = "True"
-weave_logger = get_rich_logger("weave")
-weave_logger.setLevel(logging.ERROR)
-gql_transport_logger = get_rich_logger("gql.transport.requests")
-gql_transport_logger.setLevel(logging.ERROR)
+print('Starting W&B MCP Server...', file=sys.stderr)
 
 # Load environment variables
 load_dotenv(dotenv_path=Path(__file__).parent.parent.parent / ".env")
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)  # Sets root logger level and default handler
+logging.basicConfig(level=logging.INFO)
 logger = get_rich_logger(
     "weave-mcp-server", default_level_str="WARNING", env_var_name="MCP_SERVER_LOG_LEVEL"
 )
 
-# Create an MCP server using FastMCP
-mcp = FastMCP("weave-mcp-server")
 
-# --------------- MCP TOOLS ---------------
+# ===============================================================================
+# SECTION 1: W&B AUTHENTICATION & API KEY SETUP
+# ===============================================================================
 
-
-@mcp.tool(description=QUERY_WEAVE_TRACES_TOOL_DESCRIPTION)
-async def query_weave_traces_tool(
-    entity_name: str,
-    project_name: str,
-    filters: Dict = {},
-    sort_by: str = "started_at",
-    sort_direction: str = "desc",
-    limit: int = 10000000,
-    include_costs: bool = True,
-    include_feedback: bool = True,
-    columns: list = [],
-    expand_columns: list = [],
-    truncate_length: int = 200,
-    return_full_data: bool = False,
-    metadata_only: bool = False,
-) -> str:
-    try:
-        # Use paginated query with chunks of 20
-        result_model: QueryResult = await query_paginated_weave_traces(
-            entity_name=entity_name,
-            project_name=project_name,
-            chunk_size=50,
-            filters=filters,
-            sort_by=sort_by,
-            sort_direction=sort_direction,
-            target_limit=limit,
-            include_costs=include_costs,
-            include_feedback=include_feedback,
-            columns=columns,
-            expand_columns=expand_columns,
-            truncate_length=truncate_length,
-            return_full_data=return_full_data,
-            metadata_only=metadata_only,
-        )
-        json_output_string = result_model.model_dump_json()
-
-        return json_output_string
-
-    except Exception as e:
-        logger.error(f"Error in query_weave_traces_tool: {e}", exc_info=True)
-        raise e
-
-
-@mcp.tool(description=COUNT_WEAVE_TRACES_TOOL_DESCRIPTION)
-async def count_weave_traces_tool(
-    entity_name: str, project_name: str, filters: Optional[Dict[str, Any]] = None
-) -> str:
-    try:
-        # Call the synchronous count_traces function
-        total_count = count_traces(
-            entity_name=entity_name, project_name=project_name, filters=filters or {}
-        )
-
-        # Create a copy of filters and ensure trace_roots_only is True
-        root_filters = filters.copy() if filters else {}
-        root_filters["trace_roots_only"] = True
-        root_traces_count = count_traces(
-            entity_name=entity_name,
-            project_name=project_name,
-            filters=root_filters,
-        )
-
-        return json.dumps(
-            {"total_count": total_count, "root_traces_count": root_traces_count}
-        )
-
-    except Exception as e:
-        logger.error(f"Error calling tool: {e}")
-        return f"Error counting traces: {str(e)}"
-
-
-@mcp.tool(description=QUERY_WANDB_GQL_TOOL_DESCRIPTION)
-async def query_wandb_tool(
-    query: str,
-    variables: Optional[Dict[str, Any]] = None,
-    max_items: int = 100,
-    items_per_page: int = 20,
-) -> Dict[str, Any]:
-    gql_result = query_paginated_wandb_gql(query, variables, max_items, items_per_page)
-
-    return gql_result
-
-
-@mcp.tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
-async def create_wandb_report_tool(
-    entity_name: str,
-    project_name: str,
-    title: str,
-    description: Optional[str] = None,
-    markdown_report_text: str = "",
-    plots_html: Optional[Union[Dict[str, str], str]] = None,
-) -> str:
-    try:
-        result = create_report(
-            entity_name=entity_name,
-            project_name=project_name,
-            title=title,
-            description=description,
-            markdown_report_text=markdown_report_text,
-            plots_html=plots_html,
-        )
+def setup_wandb_login(api_key: str) -> None:
+    """
+    Setup W&B login with suppressed output to avoid interfering with MCP protocol.
+    
+    Args:
+        api_key: The W&B API key to use for authentication
         
-        # Build return message with processing details
-        result_message = f"The report was saved here: {result['url']}"
-        if result['processing_details']:
-            result_message += "\n\nReport processing details:\n" + "\n".join(f"- {detail}" for detail in result['processing_details'])
-        
-        return result_message
-        
+    Raises:
+        Exception: If login fails
+    """
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = captured_stdout = io.StringIO()
+    sys.stderr = captured_stderr = io.StringIO()
+    
+    try:
+        logger.info("Attempting explicit W&B login...")
+        wandb.login(key=api_key)
+        login_msg_stdout = captured_stdout.getvalue().strip()
+        login_msg_stderr = captured_stderr.getvalue().strip()
+        if login_msg_stdout:
+            logger.info(f"Suppressed stdout during W&B login: {login_msg_stdout}")
+        if login_msg_stderr:
+            logger.info(f"Suppressed stderr during W&B login: {login_msg_stderr}")
+        logger.info("W&B login successful.")
     except Exception as e:
-        # The create_report function now includes processing details in errors
-        raise e
+        logger.error(f"Error during W&B login: {e}")
+        raise
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
 
 
-@mcp.tool(description=LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION)
-def query_wandb_entity_projects(entity: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
-    return list_entity_projects(entity)
+def validate_and_get_api_key(args: ServerMCPArgs) -> str:
+    """
+    Validate and retrieve the W&B API key from various sources.
+    
+    Priority order:
+    1. Command-line argument (--wandb-api-key)
+    2. Environment variable (WANDB_API_KEY)
+    3. .netrc file
+    4. .env file
+    
+    Args:
+        args: Parsed command-line arguments
+        
+    Returns:
+        The W&B API key
+        
+    Raises:
+        ValueError: If no API key is found
+    """
+    api_key = args.wandb_api_key or get_server_args().wandb_api_key
+    
+    if not api_key:
+        raise ValueError(
+            "WANDB_API_KEY must be set. Options:\n"
+            "1. Command-line: --wandb-api-key YOUR_KEY\n"
+            "2. Environment: export WANDB_API_KEY=YOUR_KEY\n"
+            "3. .env file: WANDB_API_KEY=YOUR_KEY\n"
+            "4. .netrc file: machine api.wandb.ai login user password YOUR_KEY\n"
+            "\nGet your API key at: https://wandb.ai/authorize"
+        )
+    
+    return api_key
 
 
-@mcp.tool(description=WANDBOT_TOOL_DESCRIPTION)
-def query_wandb_support_bot(question: str) -> Dict[str, Any]:
-    return query_wandbot_api(question)
+# ===============================================================================
+# SECTION 2: W&B LOGGING CONFIGURATION
+# ===============================================================================
 
+def configure_wandb_logging() -> None:
+    """
+    Configure W&B and Weave logging behavior to avoid interference with MCP protocol.
+    (because Weave outputs created or fetched traces)
+    
+    Environment variables that control logging:
+    - WANDB_SILENT: Set to "True" to suppress all W&B output (default: True)
+    - WEAVE_SILENT: Set to "True" to suppress all Weave output (default: True) 
+    - MCP_SERVER_LOG_LEVEL: Set server log level (DEBUG, INFO, WARNING, ERROR)
+    - WANDB_CONSOLE: Set to "off" to disable console output (default: off)
+    """
+    # Ensure W&B operates silently by default to not interfere with MCP protocol
+    os.environ.setdefault("WANDB_SILENT", "True")
+    os.environ.setdefault("WEAVE_SILENT", "True")
+    
+    # Configure W&B to suppress console output
+    try:
+        wandb.setup(settings=wandb.Settings(silent=True, console="off"))
+        logger.debug("W&B configured for silent operation")
+    except Exception as e:
+        logger.warning(f"Could not apply wandb.setup settings: {e}")
+    
+    # Silence specific loggers that might interfere with MCP
+    weave_logger = get_rich_logger("weave")
+    weave_logger.setLevel(logging.ERROR)
+    
+    gql_transport_logger = get_rich_logger("gql.transport.requests")
+    gql_transport_logger.setLevel(logging.ERROR)
+    
+    # Allow users to enable more verbose W&B logging if needed for debugging
+    if os.environ.get("WANDB_DEBUG", "").lower() == "true":
+        logger.info("W&B debug logging enabled via WANDB_DEBUG=true")
+        os.environ["WANDB_SILENT"] = "False"
+        wandb_logger = get_rich_logger("wandb")
+        wandb_logger.setLevel(logging.DEBUG)
+
+
+def initialize_weave_tracing() -> bool:
+    """
+    Initialize Weave tracing for MCP operations using the official FastMCP integration.
+    
+    According to https://weave-docs.wandb.ai/guides/integrations/mcp, Weave automatically
+    traces FastMCP operations (tools, resources, prompts) when weave.init() is called.
+    
+    Returns:
+        True if Weave was successfully initialized, False otherwise
+    """
+    if not WEAVE_AVAILABLE:
+        logger.debug("Weave not available - MCP operations will not be traced")
+        return False
+    
+    # Check if Weave tracing is disabled
+    if os.environ.get("WEAVE_DISABLED", "true").lower() == "true":
+        logger.debug("Weave tracing disabled via WEAVE_DISABLED=true")
+        return False
+    
+    # Get Weave project configuration
+    entity = os.environ.get("MCP_LOGS_WANDB_ENTITY") or os.environ.get("WANDB_ENTITY")
+    project = os.environ.get("MCP_LOGS_WANDB_PROJECT", "wandb-mcp-logs")
+    
+    if not entity:
+        logger.debug("No WANDB_ENTITY or MCP_LOGS_WANDB_ENTITY set - MCP operations will not be traced to Weave")
+        return False
+    
+    try:
+        weave_project = f"{entity}/{project}"
+        logger.info(f"Initializing Weave tracing for MCP operations: {weave_project}")
+        
+        # Set optional MCP configuration for list operations tracing
+        if os.environ.get("MCP_TRACE_LIST_OPERATIONS", "").lower() == "true":
+            os.environ["MCP_TRACE_LIST_OPERATIONS"] = "true"
+            logger.info("MCP list operations tracing enabled")
+        
+        # Initialize Weave - this automatically enables tracing for FastMCP operations
+        weave.init(weave_project)
+        
+        logger.info("Weave tracing initialized - FastMCP operations will be automatically traced")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize Weave tracing: {e}")
+        return False
+
+
+# ===============================================================================
+# SECTION 3: MCP TOOL REGISTRATION
+# ===============================================================================
+
+def register_tools(mcp_instance: FastMCP) -> None:
+    """
+    Register all W&B MCP tools on the given FastMCP instance.
+    
+    Available tools:
+    - query_weave_traces_tool: Query LLM traces with filtering and pagination
+    - count_weave_traces_tool: Efficiently count traces without returning data
+    - query_wandb_tool: Execute GraphQL queries against W&B experiment data
+    - create_wandb_report_tool: Create shareable reports with visualizations
+    - query_wandb_entity_projects: List available entities and projects
+    - query_wandb_support_bot: Get help via wandbot RAG-powered support
+    
+    Args:
+        mcp_instance: The FastMCP instance to register tools on
+    """
+    
+    @mcp_instance.tool(description=QUERY_WEAVE_TRACES_TOOL_DESCRIPTION)
+    async def query_weave_traces_tool(
+        entity_name: str,
+        project_name: str,
+        filters: Dict = {},
+        sort_by: str = "started_at",
+        sort_direction: str = "desc",
+        limit: int = 10000000,
+        include_costs: bool = True,
+        include_feedback: bool = True,
+        columns: list = [],
+        expand_columns: list = [],
+        truncate_length: int = 200,
+        return_full_data: bool = False,
+        metadata_only: bool = False,
+    ) -> str:
+        try:
+            result_model: QueryResult = await query_paginated_weave_traces(
+                entity_name=entity_name,
+                project_name=project_name,
+                chunk_size=50,
+                filters=filters,
+                sort_by=sort_by,
+                sort_direction=sort_direction,
+                target_limit=limit,
+                include_costs=include_costs,
+                include_feedback=include_feedback,
+                columns=columns,
+                expand_columns=expand_columns,
+                truncate_length=truncate_length,
+                return_full_data=return_full_data,
+                metadata_only=metadata_only,
+            )
+            return result_model.model_dump_json()
+        except Exception as e:
+            logger.error(f"Error in query_weave_traces_tool: {e}", exc_info=True)
+            raise e
+
+    @mcp_instance.tool(description=COUNT_WEAVE_TRACES_TOOL_DESCRIPTION)
+    async def count_weave_traces_tool(
+        entity_name: str, project_name: str, filters: Optional[Dict[str, Any]] = None
+    ) -> str:
+        try:
+            total_count = count_traces(
+                entity_name=entity_name, project_name=project_name, filters=filters or {}
+            )
+
+            # Also count root traces for better understanding of project scope
+            root_filters = filters.copy() if filters else {}
+            root_filters["trace_roots_only"] = True
+            root_traces_count = count_traces(
+                entity_name=entity_name,
+                project_name=project_name,
+                filters=root_filters,
+            )
+
+            return json.dumps(
+                {"total_count": total_count, "root_traces_count": root_traces_count}
+            )
+        except Exception as e:
+            logger.error(f"Error in count_weave_traces_tool: {e}")
+            return f"Error counting traces: {str(e)}"
+
+    @mcp_instance.tool(description=QUERY_WANDB_GQL_TOOL_DESCRIPTION)
+    async def query_wandb_tool(
+        query: str,
+        variables: Optional[Dict[str, Any]] = None,
+        max_items: int = 100,
+        items_per_page: int = 20,
+    ) -> Dict[str, Any]:
+        return query_paginated_wandb_gql(query, variables, max_items, items_per_page)
+
+    @mcp_instance.tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
+    async def create_wandb_report_tool(
+        entity_name: str,
+        project_name: str,
+        title: str,
+        description: Optional[str] = None,
+        markdown_report_text: str = "",
+        plots_html: Optional[Union[Dict[str, str], str]] = None,
+    ) -> str:
+        try:
+            result = create_report(
+                entity_name=entity_name,
+                project_name=project_name,
+                title=title,
+                description=description,
+                markdown_report_text=markdown_report_text,
+                plots_html=plots_html,
+            )
+            
+            # Build return message with processing details
+            result_message = f"The report was saved here: {result['url']}"
+            if result['processing_details']:
+                result_message += "\n\nReport processing details:\n" + "\n".join(f"- {detail}" for detail in result['processing_details'])
+            
+            return result_message
+        except Exception as e:
+            raise e
+
+    @mcp_instance.tool(description=LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION)
+    def query_wandb_entity_projects(entity: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
+        return list_entity_projects(entity)
+
+    @mcp_instance.tool(description=WANDBOT_TOOL_DESCRIPTION)
+    def query_wandb_support_bot(question: str) -> Dict[str, Any]:
+        return query_wandbot_api(question)
+
+
+# ===============================================================================
+# SECTION 4: MCP SERVER SETUP (STDIO & HTTP)
+# ===============================================================================
+
+def create_mcp_server(transport: str, host: str = "localhost", port: Optional[int] = None) -> FastMCP:
+    """
+    Create and configure a FastMCP server for the specified transport.
+    
+    Args:
+        transport: Transport type ("stdio" or "http")
+        host: Host for HTTP transport (default: "localhost")
+        port: Port for HTTP transport (default: 8080)
+        
+    Returns:
+        Configured FastMCP instance with all tools registered
+        
+    Raises:
+        ValueError: If transport type is invalid
+    """
+    if transport == "http":
+        port = port if port is not None else 8080
+        logger.info(f"Configuring HTTP server on {host}:{port}")
+        mcp = FastMCP("weave-mcp-server", host=host, port=port, stateless_http=True)
+    elif transport == "stdio":
+        logger.info("Configuring stdio server")
+        mcp = FastMCP("weave-mcp-server")
+    else:
+        raise ValueError(f"Invalid transport type: {transport}. Must be 'stdio' or 'http'")
+    
+    # Register all tools
+    register_tools(mcp)
+    
+    return mcp
+
+
+# ===============================================================================
+# SECTION 5: MAIN CLI ENTRY POINT
+# ===============================================================================
 
 def cli():
-    """Command-line interface for starting the Weave MCP Server."""
-    # Parse command line arguments first
+    """
+    Main command-line interface for starting the Weights & Biases MCP Server.
+    
+    Usage:
+        wandb_mcp_server [OPTIONS]
+        
+    Options:
+        --transport {stdio,http}     Transport type (default: stdio)
+        --host HOST                  Host for HTTP transport (default: localhost)  
+        --port PORT                  Port for HTTP transport (default: 8080)
+        --wandb-api-key KEY         W&B API key (can also use env var)
+        
+    Environment Variables:
+        WANDB_API_KEY               W&B API key for authentication
+        MCP_SERVER_LOG_LEVEL        Server log level (DEBUG, INFO, WARNING, ERROR)
+        WANDB_SILENT                Set to "False" to enable W&B output (default: True)
+        WEAVE_SILENT                Set to "False" to enable Weave output (default: True)
+        WANDB_DEBUG                 Set to "true" to enable W&B debug logging
+    """
+    # Parse command line arguments
     import simple_parsing
     args = simple_parsing.parse(ServerMCPArgs)
     
-    # Ensure WANDB_SILENT is set, and attempt to configure wandb for silent operation globally
-    os.environ["WANDB_SILENT"] = "True"
-    try:
-        wandb.setup(settings=wandb.Settings(silent=True, console="off"))
-    except Exception as e:
-        logger.warning(f"Could not apply wandb.setup settings: {e}")
-
-    # Attempt to explicitly login to W&B and suppress its stdout messages
-    # This is to ensure login happens before mcp.run() and to capture login confirmations.
-    api_key = args.wandb_api_key or get_server_args().wandb_api_key
-    if api_key:
-        original_stdout = sys.stdout
-        original_stderr = sys.stderr
-        sys.stdout = captured_stdout = io.StringIO()
-        sys.stderr = captured_stderr = io.StringIO()
-        try:
-            logger.info("Attempting explicit W&B login in cli()...")
-            wandb.login(key=api_key)
-            login_msg_stdout = captured_stdout.getvalue().strip()
-            login_msg_stderr = captured_stderr.getvalue().strip()
-            if login_msg_stdout:
-                logger.info(f"Suppressed stdout during W&B login: {login_msg_stdout}")
-            if login_msg_stderr:
-                logger.info(f"Suppressed stderr during W&B login: {login_msg_stderr}")
-            logger.info("Explicit W&B login attempt finished.")
-        except Exception as e:
-            logger.error(f"Error during explicit W&B login: {e}")
-            # Potentially re-raise or handle as a fatal error if login is critical
-        finally:
-            sys.stdout = original_stdout  # Always restore stdout
-            sys.stderr = original_stderr  # Always restore stderr
-    else:
-        logger.warning(
-            "WANDB_API_KEY not found via get_server_args(). Skipping explicit login."
-        )
-
-    # Validate that we have the required API key (may be redundant if explicit login was attempted)
-    if not api_key:
-        raise ValueError(
-            "WANDB_API_KEY must be set either as an environment variable, in .env file, or as a command-line argument"
-        )
-
-    logger.info("Starting Weights & Biases MCP Server.")
-    logger.info(
-        f"API Key configured: {'Yes' if api_key else 'No'}"
-    )
-
+    # Configure W&B logging behavior
+    configure_wandb_logging()
+    
+    # Validate and get API key
+    api_key = validate_and_get_api_key(args)
+    
+    # Perform W&B login
+    setup_wandb_login(api_key)
+    
+    # Initialize Weave tracing for MCP tool calls
+    weave_initialized = initialize_weave_tracing()
+    
+    logger.info("Starting Weights & Biases MCP Server")
+    logger.info(f"Transport: {args.transport}")
+    logger.info(f"API Key configured: Yes")
+    
     # Validate transport type
     if args.transport not in ["stdio", "http"]:
         raise ValueError(f"Invalid transport type: {args.transport}. Must be 'stdio' or 'http'")
-
-    # Determine transport configuration
+    
+    # Create and run the MCP server
+    server = create_mcp_server(args.transport, args.host, args.port)
+    
     if args.transport == "http":
-        # Set default port if not specified
-        port = args.port if args.port is not None else 8080
-        logger.info(f"Starting HTTP server on {args.host}:{port}")
-        
-        # Create new FastMCP instance with HTTP configuration
-        http_mcp = FastMCP("weave-mcp-server", port=port, stateless_http=True)
-        
-        # Copy all tools from the original mcp instance
-        # We need to re-register the tools on the new instance
-        logger.info("Registering tools for HTTP transport...")
-        
-        # Re-register all tools
-        @http_mcp.tool(description=QUERY_WEAVE_TRACES_TOOL_DESCRIPTION)
-        async def query_weave_traces_tool_http(
-            entity_name: str,
-            project_name: str,
-            filters: Dict = {},
-            sort_by: str = "started_at",
-            sort_direction: str = "desc",
-            limit: int = 10000000,
-            include_costs: bool = True,
-            include_feedback: bool = True,
-            columns: list = [],
-            expand_columns: list = [],
-            truncate_length: int = 200,
-            return_full_data: bool = False,
-            metadata_only: bool = False,
-        ) -> str:
-            return await query_weave_traces_tool(
-                entity_name, project_name, filters, sort_by, sort_direction,
-                limit, include_costs, include_feedback, columns, expand_columns,
-                truncate_length, return_full_data, metadata_only
-            )
-        
-        @http_mcp.tool(description=COUNT_WEAVE_TRACES_TOOL_DESCRIPTION)
-        async def count_weave_traces_tool_http(
-            entity_name: str, project_name: str, filters: Optional[Dict[str, Any]] = None
-        ) -> str:
-            return await count_weave_traces_tool(entity_name, project_name, filters)
-        
-        @http_mcp.tool(description=QUERY_WANDB_GQL_TOOL_DESCRIPTION)
-        async def query_wandb_tool_http(
-            query: str,
-            variables: Optional[Dict[str, Any]] = None,
-            max_items: int = 100,
-            items_per_page: int = 20,
-        ) -> Dict[str, Any]:
-            return await query_wandb_tool(query, variables, max_items, items_per_page)
-        
-        @http_mcp.tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
-        async def create_wandb_report_tool_http(
-            entity_name: str,
-            project_name: str,
-            title: str,
-            description: Optional[str] = None,
-            markdown_report_text: str = "",
-            plots_html: Optional[Union[Dict[str, str], str]] = None,
-        ) -> str:
-            return await create_wandb_report_tool(
-                entity_name, project_name, title, description, markdown_report_text, plots_html
-            )
-        
-        @http_mcp.tool(description=LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION)
-        def query_wandb_entity_projects_http(entity: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
-            return query_wandb_entity_projects(entity)
-        
-        @http_mcp.tool(description=WANDBOT_TOOL_DESCRIPTION)
-        def query_wandb_support_bot_http(question: str) -> Dict[str, Any]:
-            return query_wandb_support_bot(question)
-        
-        # Run with streamable HTTP transport
-        http_mcp.run(transport="streamable-http")
+        logger.info(f"Starting HTTP server on {args.host}:{args.port or 8080}")
+        server.run(transport="streamable-http")
     else:
-        logger.info("Starting server with stdio transport")
-        mcp.run(transport="stdio")
+        logger.info("Starting stdio server")
+        server.run(transport="stdio")
 
 
 if __name__ == "__main__":
