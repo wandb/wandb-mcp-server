@@ -8,15 +8,16 @@ The application runs as a FastAPI server on port 7860 (HF Spaces default) with:
 - **Main landing page**: `/` - Serves the index.html with setup instructions
 - **Health check**: `/health` - Returns server status and W&B configuration
 - **MCP endpoint**: `/mcp` - Streamable HTTP transport endpoint for MCP
-  - POST `/mcp` - Handles JSON-RPC requests (initialize, tools/list, tools/call)
-  - GET `/mcp` - SSE endpoint for server-initiated messages and long-lived connections
+  - Uses Server-Sent Events (SSE) for responses
+  - Requires `Accept: application/json, text/event-stream` header
+  - Supports initialize, tools/list, tools/call methods
 
 ## Key Changes for HF Spaces
 
 ### 1. app.py
 - Creates a FastAPI application that serves the landing page
-- Implements MCP streamable HTTP protocol directly (no FastMCP mounting issues)
-- Handles both POST requests (JSON-RPC) and GET requests (SSE) at `/mcp`
+- Mounts FastMCP server using `mcp.streamable_http_app()` pattern (following HuggingFace example)
+- Uses lifespan context manager for session management
 - Configured to run on `0.0.0.0:7860` (HF Spaces requirement)
 - Sets W&B cache directories to `/tmp` to avoid permission issues
 
@@ -28,6 +29,11 @@ The application runs as a FastAPI server on port 7860 (HF Spaces default) with:
 ### 3. Dependencies
 - FastAPI and uvicorn moved to main dependencies (not optional)
 - All dependencies listed in requirements.txt for HF Spaces
+
+### 4. Lazy Loading Fix
+- Fixed `TraceService` initialization in `query_weave.py` to use lazy loading
+- This allows the server to start even without a W&B API key
+- The service is only initialized when first needed
 
 ## Environment Variables
 
@@ -98,7 +104,41 @@ The server will start on http://localhost:7860
 
 ## MCP Client Configuration
 
-Example configuration for Claude Desktop or other MCP clients:
+### Important Notes
+
+The MCP server uses the Streamable HTTP transport which:
+- Returns responses in Server-Sent Events (SSE) format
+- Requires the client to send `Accept: application/json, text/event-stream` header
+- Uses session management for stateful operations
+
+### Testing with curl
+
+```bash
+# Initialize the server
+curl -X POST https://[your-username]-[space-name].hf.space/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "initialize",
+    "params": {
+      "protocolVersion": "0.1.0",
+      "capabilities": {},
+      "clientInfo": {"name": "test-client", "version": "1.0"}
+    },
+    "id": 1
+  }'
+
+# List available tools
+curl -X POST https://[your-username]-[space-name].hf.space/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":2}'
+```
+
+### MCP Client Configuration
+
+For MCP clients that support streamable HTTP:
 
 ```json
 {
