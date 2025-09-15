@@ -166,6 +166,82 @@ Run the server from source by running the below in the root dir:
 wandb login && uv run src/wandb_mcp_server/server.py
 ```
 
+### Transport Options
+
+The server supports two transport modes. You can specify these options when running from source:
+
+#### Local MCP Client Communication (default)
+For standard MCP client integration (Cursor, Claude Desktop, etc.), use the default stdio transport:
+
+```bash
+# Default - uses stdio transport (same as Running from Source section)
+uv run src/wandb_mcp_server/server.py
+
+# Explicit stdio transport
+uv run src/wandb_mcp_server/server.py --transport stdio
+```
+
+#### HTTP Server Transport (SSE)
+For remote access or web-based applications that need HTTP connectivity via Server-Sent Events:
+
+```bash
+# HTTP server on default port 8080
+uv run src/wandb_mcp_server/server.py --transport http
+
+# HTTP server on custom port
+uv run src/wandb_mcp_server/server.py --transport http --port 9090
+
+# HTTP server accessible from any IP
+uv run src/wandb_mcp_server/server.py --transport http --host 0.0.0.0 --port 8080
+```
+
+**Available Options:**
+- `--transport`: Choose `stdio` (default) for local MCP clients or `http` for HTTP server with SSE
+- `--port`: Port number for HTTP server (defaults to 8080 when using HTTP transport)  
+- `--host`: Host to bind HTTP server to (defaults to `localhost`)
+
+**Note:** The HTTP transport uses the streamable HTTP protocol for bidirectional communication. No additional dependencies are required.
+
+#### Using with Chat Applications via ngrok
+
+To use the HTTP server with external chat applications like Mistral's le Chat, you can expose it publicly using ngrok:
+
+1. **Install ngrok** (if not already installed):
+   ```bash
+   # macOS
+   brew install ngrok
+   
+   # Or download from https://ngrok.com/download
+   ```
+
+2. **Start the MCP server** on HTTP transport:
+   ```bash
+   uv run src/wandb_mcp_server/server.py --transport http --port 8080 --wandb_api_key your_wandb_key
+   ```
+
+3. **In a new terminal, expose the server** with ngrok:
+   ```bash
+   ngrok http 8080
+   ```
+
+4. **Copy the public URL** from ngrok output (e.g., `https://abc123.ngrok.io`)
+
+5. **Configure your chat application** to use the MCP server:
+   - **Mistral le Chat**: Add the ngrok URL + `/mcp` as the MCP server endpoint
+   - **Other chat apps**: Use the ngrok URL + `/mcp` for MCP connections
+   - **Example**: `https://abc123.ngrok.io/mcp`
+
+**Example ngrok output:**
+```
+Session Status                online
+Account                       your-account (Plan: Free)
+Version                       3.0.0
+Region                        United States (us)
+Forwarding                    https://abc123.ngrok.io -> http://localhost:8080
+```
+
+Use `https://abc123.ngrok.io/mcp` as your MCP server endpoint in chat applications.
+
 ### Environment Variables
 
 The full list of environment variables used to control the server's settings can be found in the `.env.example` file.

@@ -145,6 +145,22 @@ class ServerMCPArgs:
             help="The Weights & Biases project to log traced MCP server calls to"
         ),
     )
+    transport: str = field(
+        default="stdio",
+        metadata=dict(
+            help="Transport type: 'stdio' for local MCP client communication or 'http' for HTTP server"
+        ),
+    )
+    port: Optional[int] = field(
+        default=None,
+        metadata=dict(
+            help="Port to run the HTTP server on. Defaults to 8080 when using HTTP transport."
+        ),
+    )
+    host: str = field(
+        default="localhost",
+        metadata=dict(help="Host to bind HTTP server to"),
+    )
 
 
 # Initialize server args global variable

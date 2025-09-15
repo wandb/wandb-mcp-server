@@ -42,7 +42,7 @@ from wandb_mcp_server.mcp_tools.query_weave import (
     QUERY_WEAVE_TRACES_TOOL_DESCRIPTION,
     query_paginated_weave_traces,
 )
-from wandb_mcp_server.utils import get_rich_logger, get_server_args
+from wandb_mcp_server.utils import get_rich_logger, get_server_args, ServerMCPArgs
 from wandb_mcp_server.weave_api.models import QueryResult
 
 print('Running server.py...', file=sys.stderr)
@@ -196,6 +196,10 @@ def query_wandb_support_bot(question: str) -> Dict[str, Any]:
 
 def cli():
     """Command-line interface for starting the Weave MCP Server."""
+    # Parse command line arguments first
+    import simple_parsing
+    args = simple_parsing.parse(ServerMCPArgs)
+    
     # Ensure WANDB_SILENT is set, and attempt to configure wandb for silent operation globally
     os.environ["WANDB_SILENT"] = "True"
     try:
@@ -205,7 +209,7 @@ def cli():
 
     # Attempt to explicitly login to W&B and suppress its stdout messages
     # This is to ensure login happens before mcp.run() and to capture login confirmations.
-    api_key = get_server_args().wandb_api_key
+    api_key = args.wandb_api_key or get_server_args().wandb_api_key
     if api_key:
         original_stdout = sys.stdout
         original_stderr = sys.stderr
@@ -233,20 +237,97 @@ def cli():
         )
 
     # Validate that we have the required API key (may be redundant if explicit login was attempted)
-    if (
-        not get_server_args().wandb_api_key
-    ):  # Re-check, as get_server_args might have complex logic or state
+    if not api_key:
         raise ValueError(
             "WANDB_API_KEY must be set either as an environment variable, in .env file, or as a command-line argument"
         )
 
     logger.info("Starting Weights & Biases MCP Server.")
     logger.info(
-        f"API Key configured: {'Yes' if get_server_args().wandb_api_key else 'No'}"
+        f"API Key configured: {'Yes' if api_key else 'No'}"
     )
 
-    # Run the server with stdio transport
-    mcp.run(transport="stdio")
+    # Validate transport type
+    if args.transport not in ["stdio", "http"]:
+        raise ValueError(f"Invalid transport type: {args.transport}. Must be 'stdio' or 'http'")
+
+    # Determine transport configuration
+    if args.transport == "http":
+        # Set default port if not specified
+        port = args.port if args.port is not None else 8080
+        logger.info(f"Starting HTTP server on {args.host}:{port}")
+        
+        # Create new FastMCP instance with HTTP configuration
+        http_mcp = FastMCP("weave-mcp-server", port=port, stateless_http=True)
+        
+        # Copy all tools from the original mcp instance
+        # We need to re-register the tools on the new instance
+        logger.info("Registering tools for HTTP transport...")
+        
+        # Re-register all tools
+        @http_mcp.tool(description=QUERY_WEAVE_TRACES_TOOL_DESCRIPTION)
+        async def query_weave_traces_tool_http(
+            entity_name: str,
+            project_name: str,
+            filters: Dict = {},
+            sort_by: str = "started_at",
+            sort_direction: str = "desc",
+            limit: int = 10000000,
+            include_costs: bool = True,
+            include_feedback: bool = True,
+            columns: list = [],
+            expand_columns: list = [],
+            truncate_length: int = 200,
+            return_full_data: bool = False,
+            metadata_only: bool = False,
+        ) -> str:
+            return await query_weave_traces_tool(
+                entity_name, project_name, filters, sort_by, sort_direction,
+                limit, include_costs, include_feedback, columns, expand_columns,
+                truncate_length, return_full_data, metadata_only
+            )
+        
+        @http_mcp.tool(description=COUNT_WEAVE_TRACES_TOOL_DESCRIPTION)
+        async def count_weave_traces_tool_http(
+            entity_name: str, project_name: str, filters: Optional[Dict[str, Any]] = None
+        ) -> str:
+            return await count_weave_traces_tool(entity_name, project_name, filters)
+        
+        @http_mcp.tool(description=QUERY_WANDB_GQL_TOOL_DESCRIPTION)
+        async def query_wandb_tool_http(
+            query: str,
+            variables: Optional[Dict[str, Any]] = None,
+            max_items: int = 100,
+            items_per_page: int = 20,
+        ) -> Dict[str, Any]:
+            return await query_wandb_tool(query, variables, max_items, items_per_page)
+        
+        @http_mcp.tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
+        async def create_wandb_report_tool_http(
+            entity_name: str,
+            project_name: str,
+            title: str,
+            description: Optional[str] = None,
+            markdown_report_text: str = "",
+            plots_html: Optional[Union[Dict[str, str], str]] = None,
+        ) -> str:
+            return await create_wandb_report_tool(
+                entity_name, project_name, title, description, markdown_report_text, plots_html
+            )
+        
+        @http_mcp.tool(description=LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION)
+        def query_wandb_entity_projects_http(entity: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
+            return query_wandb_entity_projects(entity)
+        
+        @http_mcp.tool(description=WANDBOT_TOOL_DESCRIPTION)
+        def query_wandb_support_bot_http(question: str) -> Dict[str, Any]:
+            return query_wandb_support_bot(question)
+        
+        # Run with streamable HTTP transport
+        http_mcp.run(transport="streamable-http")
+    else:
+        logger.info("Starting server with stdio transport")
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
