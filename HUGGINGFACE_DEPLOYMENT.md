@@ -1,166 +1,126 @@
-# HuggingFace Spaces Deployment Instructions
+# Hugging Face Spaces Deployment Guide
 
-This guide will help you deploy the Weights & Biases MCP Server to HuggingFace Spaces.
+This repository is configured for deployment on Hugging Face Spaces as a Model Context Protocol (MCP) server for Weights & Biases.
 
-## 📋 Prerequisites
+## Architecture
 
-1. **HuggingFace Account**: Create an account at [huggingface.co](https://huggingface.co)
-2. **W&B API Key**: Get your API key from [wandb.ai/authorize](https://wandb.ai/authorize)
+The application runs as a FastAPI server on port 7860 (HF Spaces default) with:
+- **Main landing page**: `/` - Serves the index.html with setup instructions
+- **Health check**: `/health` - Returns server status and W&B configuration
+- **MCP endpoint**: `/mcp` - Streamable HTTP transport endpoint for MCP (supports both regular HTTP and SSE upgrade)
 
-## 🚀 Step-by-Step Deployment
+## Key Changes for HF Spaces
 
-### 1. Create a New Space
+### 1. app.py
+- Creates a FastAPI application that serves the landing page
+- Mounts the MCP server as a sub-application at `/mcp`
+- Configured to run on `0.0.0.0:7860` (HF Spaces requirement)
+- No need for static/templates directories - index.html is served directly
 
-1. Go to [HuggingFace Spaces](https://huggingface.co/spaces)
-2. Click "Create new Space"
-3. Fill in the details:
-   - **Space name**: `wandb-mcp-server` (or your preferred name)
-   - **License**: `apache-2.0`
-   - **Select the SDK**: `Docker`
-   - **Hardware**: `CPU basic` (free tier is sufficient)
-   - **Visibility**: `Public` or `Private` (your choice)
+### 2. server.py
+- Exports necessary functions for HF Spaces initialization
+- Support for being imported as a module
+- Maintains backward compatibility with CLI usage
 
-### 2. Upload Files
+### 3. Dependencies
+- FastAPI and uvicorn moved to main dependencies (not optional)
+- All dependencies listed in requirements.txt for HF Spaces
 
-Upload the following files to your Space repository:
+## Environment Variables
 
-#### Required Files:
-- `Dockerfile` - Container configuration
-- `app.py` - Entry point for the Space
-- `requirements.txt` - Python dependencies
-- `README_HUGGINGFACE.md` - Rename this to `README.md` in the Space
-- `src/` - Copy the entire source directory
-- `pyproject.toml` - Project configuration
-
-#### File Structure in Your Space:
+Required in HF Spaces settings:
 ```
-your-space/
-├── Dockerfile
-├── app.py
-├── requirements.txt
-├── README.md (renamed from README_HUGGINGFACE.md)
-├── pyproject.toml
+WANDB_API_KEY=your_api_key_here
+```
+
+Optional:
+```
+WANDB_ENTITY=your_wandb_entity
+MCP_LOGS_WANDB_PROJECT=wandb-mcp-logs
+WEAVE_DISABLED=false  # Set to enable Weave tracing
+```
+
+## Deployment Steps
+
+1. **Create a new Space on Hugging Face**
+   - Choose "Docker" as the SDK
+   - Set visibility as needed
+
+2. **Configure Secrets**
+   - Go to Settings → Variables and secrets
+   - Add `WANDB_API_KEY` as a secret
+
+3. **Push the Code**
+   ```bash
+   git add .
+   git commit -m "Configure for HF Spaces deployment"
+   git push
+   ```
+
+4. **Connect to the MCP Server**
+   - Use the endpoint: `https://[your-username]-[space-name].hf.space/mcp`
+   - Configure your MCP client with this URL and "streamable-http" transport
+
+## File Structure
+
+```
+.
+├── app.py              # HF Spaces entry point
+├── index.html          # Landing page
+├── Dockerfile          # Container configuration
+├── requirements.txt    # Python dependencies
+├── pyproject.toml      # Package configuration
 └── src/
     └── wandb_mcp_server/
-        ├── __init__.py
-        ├── server.py
-        ├── utils.py
-        ├── trace_utils.py
-        ├── mcp_tools/
-        └── weave_api/
+        ├── server.py   # MCP server implementation
+        └── ...         # Tool implementations
 ```
 
-### 3. Configure Environment Variables
+## Testing Locally
 
-1. In your Space settings, go to the "Variables and secrets" section
-2. Add the following environment variable:
-   - **Name**: `WANDB_API_KEY`
-   - **Value**: Your Weights & Biases API key from step 1
-   - **Type**: Secret (recommended for security)
+To test the HF Spaces configuration locally:
 
-### 4. Deploy and Test
+```bash
+# Install dependencies
+pip install -r requirements.txt
 
-1. Commit your changes to trigger the build
-2. Wait for the Space to build and start (this may take a few minutes)
-3. Once running, your MCP server will be available at:
-   ```
-   https://your-username-wandb-mcp-server.hf.space/mcp
-   ```
+# Set environment variables
+export WANDB_API_KEY=your_key_here
 
-### 5. Verify Deployment
-
-1. Check the Space logs to ensure it started successfully
-2. Look for messages like:
-   ```
-   Starting Weights & Biases MCP Server on HuggingFace Spaces
-   WANDB_API_KEY configured: Yes
-   Starting HTTP server on port 8080
-   MCP endpoint will be available at: /mcp
-   ```
-
-## 🔧 Using Your Deployed Server
-
-### With Mistral le Chat
-1. Open [chat.mistral.ai](https://chat.mistral.ai)
-2. Go to MCP settings
-3. Add your server URL: `https://your-username-wandb-mcp-server.hf.space/mcp`
-
-### With Other MCP Clients
-Use the endpoint URL in any MCP client that supports HTTP transport.
-
-### Example Usage
-Once connected, you can ask questions like:
-```
-How many traces are in my wandb-team/my-project weave project?
+# Run the server
+python app.py
 ```
 
+The server will start on http://localhost:7860
+
+## MCP Client Configuration
+
+Example configuration for Claude Desktop or other MCP clients:
+
+```json
+{
+  "mcpServers": {
+    "wandb": {
+      "url": "https://[your-username]-[space-name].hf.space/mcp",
+      "transport": "streamable-http"
+    }
+  }
+}
 ```
-Show me the latest runs from my experiment and create a report.
-```
 
-## 🛠️ Customization Options
+## Differences from Standard Deployment
 
-### Hardware Upgrades
-- For better performance with large datasets, consider upgrading to `CPU upgrade` or `GPU` hardware
-- This can be changed in Space settings under "Hardware"
+| Feature | Standard | HF Spaces |
+|---------|----------|-----------|
+| Transport | stdio/http | streamable-http only |
+| Port | Configurable | Fixed at 7860 |
+| Host | Configurable | Fixed at 0.0.0.0 |
+| Entry Point | CLI (server.py) | FastAPI (app.py) |
+| Static Files | Optional directories | Embedded in app |
 
-### Environment Variables
-You can add additional environment variables in Space settings:
-- `MCP_SERVER_LOG_LEVEL`: Set to `DEBUG` for verbose logging
-- `WANDB_SILENT`: Set to `False` if you want W&B logging
-- `WEAVE_SILENT`: Set to `False` if you want Weave logging
+## Troubleshooting
 
-### Custom Configuration
-Modify `app.py` to customize:
-- Port configuration (though HuggingFace handles this automatically)
-- Logging levels
-- Additional startup logic
-
-## 🔍 Troubleshooting
-
-### Build Failures
-- Check the build logs for specific error messages
-- Ensure all required files are uploaded
-- Verify `requirements.txt` has all necessary dependencies
-
-### Runtime Issues
-- Check the Space logs for error messages
-- Verify `WANDB_API_KEY` is set correctly
-- Ensure your W&B API key is valid
-
-### Connection Problems
-- Verify the Space is running (not crashed)
-- Check that you're using the correct endpoint URL
-- Ensure your MCP client supports HTTP transport
-
-### Performance Issues
-- Consider upgrading to better hardware
-- Monitor Space resource usage
-- Optimize query parameters to reduce data transfer
-
-## 🔄 Updates and Maintenance
-
-### Updating the Server
-1. Update files in your Space repository
-2. Commit changes to trigger a rebuild
-3. Monitor the build process and test functionality
-
-### Monitoring
-- Check Space logs regularly for errors
-- Monitor resource usage in Space settings
-- Set up notifications for Space status changes
-
-## 💡 Tips for Success
-
-1. **Start Small**: Test with simple queries first
-2. **Monitor Resources**: Keep an eye on CPU/memory usage
-3. **Secure Secrets**: Always use "Secret" type for API keys
-4. **Documentation**: Keep your Space README updated with usage examples
-5. **Version Control**: Consider using Git integration for easier updates
-
-## 📚 Additional Resources
-
-- [HuggingFace Spaces Documentation](https://huggingface.co/docs/hub/spaces)
-- [Docker on HuggingFace Spaces](https://huggingface.co/docs/hub/spaces-sdks-docker)
-- [Model Context Protocol Specification](https://modelcontextprotocol.io/)
-- [W&B MCP Server Repository](https://github.com/wandb/wandb-mcp-server)
+1. **Server not starting**: Check WANDB_API_KEY is set in Space secrets
+2. **MCP connection fails**: Ensure using `/mcp` endpoint with correct transport ("streamable-http")
+3. **Tools not working**: Verify W&B API key has necessary permissions
+4. **Landing page not loading**: Check index.html is included in deployment

@@ -22,8 +22,9 @@ COPY pyproject.toml .
 # Install the package in development mode
 RUN pip install -e .
 
-# Copy the app entry point
+# Copy the app entry point and landing page
 COPY app.py .
+COPY index.html .
 
 # Set environment variables
 ENV PYTHONPATH=/app/src
