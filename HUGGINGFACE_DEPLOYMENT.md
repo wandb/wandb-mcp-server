@@ -7,15 +7,18 @@ This repository is configured for deployment on Hugging Face Spaces as a Model C
 The application runs as a FastAPI server on port 7860 (HF Spaces default) with:
 - **Main landing page**: `/` - Serves the index.html with setup instructions
 - **Health check**: `/health` - Returns server status and W&B configuration
-- **MCP endpoint**: `/mcp` - Streamable HTTP transport endpoint for MCP (supports both regular HTTP and SSE upgrade)
+- **MCP endpoint**: `/mcp` - Streamable HTTP transport endpoint for MCP
+  - POST `/mcp` - Handles JSON-RPC requests (initialize, tools/list, tools/call)
+  - GET `/mcp` - SSE endpoint for server-initiated messages and long-lived connections
 
 ## Key Changes for HF Spaces
 
 ### 1. app.py
 - Creates a FastAPI application that serves the landing page
-- Mounts the MCP server as a sub-application at `/mcp`
+- Implements MCP streamable HTTP protocol directly (no FastMCP mounting issues)
+- Handles both POST requests (JSON-RPC) and GET requests (SSE) at `/mcp`
 - Configured to run on `0.0.0.0:7860` (HF Spaces requirement)
-- No need for static/templates directories - index.html is served directly
+- Sets W&B cache directories to `/tmp` to avoid permission issues
 
 ### 2. server.py
 - Exports necessary functions for HF Spaces initialization
