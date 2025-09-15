@@ -33,6 +33,12 @@ ENV WEAVE_SILENT=True
 ENV MCP_TRANSPORT=http
 ENV HOST=0.0.0.0
 
+# Set W&B cache directories to writable locations
+ENV WANDB_CACHE_DIR=/tmp/.wandb_cache
+ENV WANDB_CONFIG_DIR=/tmp/.wandb_config
+ENV WANDB_DATA_DIR=/tmp/.wandb_data
+ENV HOME=/tmp
+
 # Expose port for HTTP transport
 EXPOSE 7860
 
