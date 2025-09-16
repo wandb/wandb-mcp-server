@@ -41,11 +41,11 @@ Returns:
     List[Dict[str, Any]]: List of project dictionaries containing:
         - name: Project name
         - entity: Entity name
-        - description: Project description
-        - visibility: Project visibility (public/private)
+        - description: Project description (if available)
+        - visibility: Project visibility (if available)
         - created_at: Creation timestamp
-        - updated_at: Last update timestamp
-        - tags: List of project tags
+        - url: Project URL
+        - id: Project ID
 """
 
 
@@ -63,11 +63,11 @@ def list_entity_projects(entity: str | None = None) -> dict[str, list[dict[str, 
             Each project dictionary contains:
             - name: Project name
             - entity: Entity name
-            - description: Project description
-            - visibility: Project visibility (public/private)
+            - description: Project description (if available)
+            - visibility: Project visibility (if available)
             - created_at: Creation timestamp
-            - updated_at: Last update timestamp
-            - tags: List of project tags
+            - url: Project URL
+            - id: Project ID
     """
     # Initialize wandb API
     api = wandb.Api()
@@ -93,9 +93,9 @@ def list_entity_projects(entity: str | None = None) -> dict[str, list[dict[str, 
                 "entity": project.entity,
                 "description": getattr(project, "description", None),
                 "visibility": getattr(project, "visibility", None),
-                "created_at": project.created_at,
-                "updated_at": project.updated_at,
-                "tags": project.tags,
+                "created_at": getattr(project, "created_at", getattr(project, "createdAt", None)),
+                "url": getattr(project, "url", None),
+                "id": getattr(project, "id", None),
             }
             projects_data.append(project_dict)
 
