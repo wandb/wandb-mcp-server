@@ -14,7 +14,7 @@ A Model Context Protocol (MCP) server that provides seamless access to [Weights 
 
 ### 1. 🔍 Analyze ML Experiments
 ```
-"Show me the top 5 runs with the highest accuracy from my image-classification project and create a report comparing their hyperparameters"
+"Show me the top 5 runs with the highest accuracy from my wandb-smle/hiring-agent-demo-public project and create a report comparing their hyperparameters"
 ```
 The MCP server queries W&B runs, compares metrics, and generates a shareable report with visualizations.
 
@@ -29,6 +29,12 @@ The server retrieves Weave traces, filters by status, and provides detailed erro
 "Compare the F1 scores across all evaluations in my RAG pipeline and identify which prompts performed best"
 ```
 The server queries Weave evaluations, aggregates scores, and highlights top-performing configurations.
+
+### 4. 🤖 Get Expert Help with W&B/Weave
+```
+"How do I implement custom metrics in Weave evaluations? Show me an example with async scorers"
+```
+The integrated [wandbot](https://github.com/wandb/wandbot) support agent provides detailed answers, code examples, and debugging assistance for any W&B or Weave-related questions.
 
 ## Installation
 
@@ -59,27 +65,32 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 You'll need a Weights & Biases API key. Get yours at: [https://wandb.ai/authorize](https://wandb.ai/authorize)
 
-Configure your API key using one of these methods (ordered by the server's priority - the last one is the easiest one):
+Configure your API key using one of these methods (first one recommended to have the other default parameters too):
 
-1. **Environment variable** (recommended):
+1. **`.env` file** in your project (copy from `env.example`):
+   ```bash
+   cp env.example .env
+   # Edit .env and add your API key
+   ```
+
+2. **`.netrc` file**:
+   ```bash
+   uvx wandb login
+   ```
+
+3. **Environment variable** (recommended):
    ```bash
    export WANDB_API_KEY=your-api-key
    ```
 
-2. **`.env` file** in your project:
-   ```
-   WANDB_API_KEY=your-api-key
-   ```
-
-3. **Command-line argument**:
+4. **Command-line argument**:
    ```bash
    wandb_mcp_server --wandb-api-key your-api-key
    ```
 
-4. **`.netrc` file**:
-   ```bash
-   uvx wandb login
-   ```
+#### 3. Environment Configuration (Optional)
+
+The server includes [wandbot](https://github.com/wandb/wandbot) support for answering W&B/Weave questions. See `env.example` for all available configuration options including custom endpoints.
 
 ### MCP Client Setup
 
@@ -261,7 +272,7 @@ The server provides the following MCP tools:
 - **`count_weave_traces_tool`** - Efficiently count traces without returning data
 
 ### Support & Reporting
-- **`query_wandb_support_bot`** - Get help from wandbot, our RAG-powered support agent
+- **`query_wandb_support_bot`** - Get help from [wandbot](https://github.com/wandb/wandbot), our RAG-powered technical support agent that can answer any W&B/Weave questions, help debug issues, and provide code examples
 - **`create_wandb_report_tool`** - Create W&B Reports with markdown and visualizations
 - **`query_wandb_entity_projects`** - List available entities and projects
 
