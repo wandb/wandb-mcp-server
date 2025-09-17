@@ -33,8 +33,8 @@ Authorization: Bearer YOUR_WANDB_API_KEY
 
 In Mistral LeChat, add a Custom MCP Connector:
 
-1. **Server URL**: `https://your-space.hf.space/mcp`
-2. **Authentication**: Choose "HTTP Bearer Token"
+1. **Server URL**: `https://niware-wandb-mcp-server.hf.space/mcp`
+2. **Authentication**: Choose "API Key Authentication"
 3. **Token**: Enter your W&B API key
 
 ### Claude Desktop / Cursor
@@ -46,7 +46,7 @@ Configure in your MCP settings:
   "mcpServers": {
     "wandb": {
       "transport": "http",
-      "url": "http://localhost:8080/mcp",
+      "url": "https://niware-wandb-mcp-server.hf.space/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_WANDB_API_KEY",
         "Accept": "application/json, text/event-stream"
@@ -67,7 +67,7 @@ import requests
 
 # Initialize MCP session
 response = requests.post(
-    "http://localhost:8080/mcp",
+    "https://niware-wandb-mcp-server.hf.space/mcp",
     headers={
         "Authorization": "Bearer YOUR_WANDB_API_KEY",
         "Accept": "application/json, text/event-stream",
@@ -82,41 +82,28 @@ response = requests.post(
 )
 ```
 
-## Security Considerations
+## OAuth: WIP
 
-### Non-Expiring API Keys
+### Current Solution
 
-W&B API keys don't expire by default, similar to GitHub Personal Access Tokens or OpenAI API keys. This is a design choice by W&B for developer convenience.
+We currently use W&B API keys directly as Bearer tokens. This approach:
+- ✅ Works with all W&B functionality
+- ✅ Compatible with MCP specification
+- ✅ Simple and reliable
+- ✅ Follows industry patterns (GitHub, OpenAI)
+- ❌ Requires manual key management
+- ❌ No automatic token refresh
 
-**Best Practices:**
-- Rotate keys regularly (quarterly recommended)
-- Use separate keys for different services
-- Monitor usage at [wandb.ai/settings](https://wandb.ai/settings)
-- Revoke compromised keys immediately
-- Never commit keys to version control
-
-### Multi-User Deployment
-
-For HuggingFace Spaces or shared deployments:
-- Server requires no API key configuration
-- Each user provides their own key
-- Keys are used transiently per request
-- No keys are stored or logged
-
-## OAuth: Why We Can't Support Full OAuth 2.0
-
-### What We Tried
-
-We attempted to implement OAuth 2.0 support to provide a seamless authentication experience, especially for clients like Mistral LeChat that expect OAuth for custom connectors. This included:
+### Tests
+We attempted to implement a OAuth-assisted authentication flow (clients like ChatGPT would forward to login in the beginning):
 
 1. **OAuth Discovery Endpoints**: `/.well-known/oauth-authorization-server`
 2. **Authorization Flow**: Redirect to W&B's Auth0 login
 3. **Token Exchange**: Accept W&B API keys as "access tokens"
 4. **Device Flow**: Guide users to get their API key
 
-### Why It Doesn't Work
-
-**Fundamental Limitations:**
+### Still WIP
+We're running into some issues with the OAuth-assisted approach we tried out (forward clients to wandb.ai/protect and return OAuth style metdata) - with some issus:
 
 1. **W&B Doesn't Provide OAuth for Third Parties**
    - W&B uses Auth0 internally but doesn't allow third-party OAuth client registration
@@ -132,8 +119,6 @@ We attempted to implement OAuth 2.0 support to provide a seamless authentication
    - OAuth requires the authorization server and resource server to cooperate
    - W&B's Auth0 instance (`wandb.auth0.com`) doesn't know about our server
    - Can't validate tokens or handle callbacks
-
-### What Would Be Needed for Full OAuth
 
 For proper OAuth 2.0 support, W&B would need to:
 
@@ -151,16 +136,6 @@ For proper OAuth 2.0 support, W&B would need to:
    - Introspection endpoint for validating tokens
    - Revocation endpoint for invalidating tokens
    - JWKS endpoint for JWT validation
-
-### Current Solution
-
-Given these limitations, we use W&B API keys directly as Bearer tokens. This approach:
-- ✅ Works with all W&B functionality
-- ✅ Compatible with MCP specification
-- ✅ Simple and reliable
-- ✅ Follows industry patterns (GitHub, OpenAI)
-- ❌ Requires manual key management
-- ❌ No automatic token refresh
 
 ## Troubleshooting
 
