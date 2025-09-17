@@ -8,15 +8,17 @@ The application runs as a FastAPI server on port 7860 (HF Spaces default) with:
 - **Main landing page**: `/` - Serves the index.html with setup instructions
 - **Health check**: `/health` - Returns server status and W&B configuration
 - **MCP endpoint**: `/mcp` - Streamable HTTP transport endpoint for MCP
-  - Uses Server-Sent Events (SSE) for responses
+  - Server can intelligently decide to return plan plan JSON or a SSE stream (the client always requests in the same way, see below)
   - Requires `Accept: application/json, text/event-stream` header
   - Supports initialize, tools/list, tools/call methods
+
+More information on the details of [streamable http](https://modelcontextprotocol.io/specification/draft/basic/transports#streamable-http) are in the official docs and [this PR](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/206).
 
 ## Key Changes for HF Spaces
 
 ### 1. app.py
 - Creates a FastAPI application that serves the landing page
-- Mounts FastMCP server using `mcp.streamable_http_app()` pattern (following HuggingFace example)
+- Mounts FastMCP server using `mcp.streamable_http_app()` pattern (following [example from Mistral here](https://huggingface.co/spaces/Jofthomas/Multiple_mcp_fastapi_template))
 - Uses lifespan context manager for session management
 - Configured to run on `0.0.0.0:7860` (HF Spaces requirement)
 - Sets W&B cache directories to `/tmp` to avoid permission issues
@@ -27,19 +29,19 @@ The application runs as a FastAPI server on port 7860 (HF Spaces default) with:
 - Maintains backward compatibility with CLI usage
 
 ### 3. Dependencies
-- FastAPI and uvicorn moved to main dependencies (not optional)
+- FastAPI and uvicorn as main dependencies
 - All dependencies listed in requirements.txt for HF Spaces
 
 ### 4. Lazy Loading Fix
-- Fixed `TraceService` initialization in `query_weave.py` to use lazy loading
-- This allows the server to start even without a W&B API key
+- `TraceService` initialization in `query_weave.py` to use lazy loading
+- This allows the server to start even without a W&B API key (when first adding in LeChat for example without connecting)
 - The service is only initialized when first needed
 
 ## Environment Variables
 
 No environment variables are required! The server works without any configuration.
 
-**Note**: Users provide their own W&B API keys as Bearer tokens. No server configuration needed.
+**Note**: Users provide their own W&B API keys as Bearer tokens. No server configuration needed (see AUTH_README.md).
 
 ## Deployment Steps
 
@@ -49,7 +51,7 @@ No environment variables are required! The server works without any configuratio
 
 2. **Configure Secrets**
    - Go to Settings → Variables and secrets
-   - Add `WANDB_API_KEY` as a secret
+   - Add `MCP_SERVER_URL` as a variable for the URL to be correctly
 
 3. **Push the Code**
    ```bash
@@ -93,55 +95,6 @@ python app.py
 ```
 
 The server will start on http://localhost:7860
-
-## MCP Client Configuration
-
-### Important Notes
-
-The MCP server uses the Streamable HTTP transport which:
-- Returns responses in Server-Sent Events (SSE) format
-- Requires the client to send `Accept: application/json, text/event-stream` header
-- Uses session management for stateful operations
-
-### Testing with curl
-
-```bash
-# Initialize the server
-curl -X POST https://[your-username]-[space-name].hf.space/mcp \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "initialize",
-    "params": {
-      "protocolVersion": "0.1.0",
-      "capabilities": {},
-      "clientInfo": {"name": "test-client", "version": "1.0"}
-    },
-    "id": 1
-  }'
-
-# List available tools
-curl -X POST https://[your-username]-[space-name].hf.space/mcp \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":2}'
-```
-
-### MCP Client Configuration
-
-For MCP clients that support streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "wandb": {
-      "url": "https://[your-username]-[space-name].hf.space/mcp",
-      "transport": "streamable-http"
-    }
-  }
-}
-```
 
 ## MCP Architecture & Key Learnings
 
@@ -250,59 +203,3 @@ os.environ["HOME"] = "/tmp"
 | Import-time API key errors | Server fails to start | Use lazy loading pattern |
 | Permission errors in HF Spaces | `mkdir /.cache: permission denied` | Set cache dirs to `/tmp` |
 | Can't access MCP methods | Methods not exposed | Use FastMCP's built-in decorators and methods |
-
-### Testing Strategy
-
-1. **Local Testing**: Always test with correct headers
-2. **Check Routes**: Verify mounting creates `/mcp` endpoint
-3. **Test Initialize First**: This method doesn't require session state
-4. **SSE Response Parsing**: Remember responses are SSE formatted, not plain JSON
-
-### Evolution of Our Implementation
-
-Our journey to the correct implementation went through several iterations:
-
-#### Attempt 1: Direct Protocol Implementation
-- **Approach**: Implement MCP protocol directly in FastAPI
-- **Issue**: Reinventing the wheel, not using FastMCP's built-in capabilities
-- **Learning**: FastMCP already handles the protocol complexity
-
-#### Attempt 2: Trying to Extract FastMCP's Internal App
-- **Approach**: Access FastMCP's internal FastAPI app via attributes
-- **Issue**: FastMCP doesn't expose its app in an accessible way
-- **Learning**: Need to use FastMCP's intended methods
-
-#### Attempt 3: Using http_app() Method
-- **Approach**: Try various methods like `http_app()`, `asgi_app()`, etc.
-- **Issue**: These methods either don't exist or don't work as expected
-- **Learning**: Documentation and examples are crucial
-
-#### Attempt 4: The Correct Pattern
-- **Approach**: Use `streamable_http_app()` following HuggingFace example
-- **Success**: Works perfectly when mounted at root
-- **Key Insight**: The example pattern exists for a reason - follow it!
-
-### Key Takeaways
-
-1. **Follow Existing Examples**: The HuggingFace example was the key to success
-2. **Understand the Protocol**: MCP uses SSE for good reasons (streaming, stateless option)
-3. **Lazy Loading is Critical**: Avoid initialization-time dependencies
-4. **Environment Matters**: HF Spaces has specific constraints (ports, permissions)
-5. **Test Incrementally**: Start with basic endpoints before complex operations
-
-## Differences from Standard Deployment
-
-| Feature | Standard | HF Spaces |
-|---------|----------|-----------|
-| Transport | stdio/http | streamable-http only |
-| Port | Configurable | Fixed at 7860 |
-| Host | Configurable | Fixed at 0.0.0.0 |
-| Entry Point | CLI (server.py) | FastAPI (app.py) |
-| Static Files | Optional directories | Embedded in app |
-
-## Troubleshooting
-
-1. **Server not starting**: Check WANDB_API_KEY is set in Space secrets
-2. **MCP connection fails**: Ensure using `/mcp` endpoint with correct transport ("streamable-http")
-3. **Tools not working**: Verify W&B API key has necessary permissions
-4. **Landing page not loading**: Check index.html is included in deployment
