@@ -23,7 +23,7 @@ os.environ["WANDB_SILENT"] = "True"
 os.environ["WEAVE_SILENT"] = "True"
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import FastMCP
 
@@ -35,6 +35,13 @@ from wandb_mcp_server.server import (
     initialize_weave_tracing,
     register_tools,
     ServerMCPArgs
+)
+
+# Import authentication
+from wandb_mcp_server.auth import (
+    mcp_auth_middleware,
+    create_resource_metadata_response,
+    MCPAuthConfig
 )
 
 # Configure logging
@@ -61,15 +68,17 @@ args = ServerMCPArgs(
 )
 
 wandb_configured = False
-try:
-    api_key = validate_and_get_api_key(args)
-    setup_wandb_login(api_key)
-    initialize_weave_tracing()
-    wandb_configured = True
-    logger.info("W&B API configured successfully")
-except ValueError as e:
-    logger.warning(f"W&B API key not configured: {e}")
-    logger.warning("Server will start but W&B operations will fail")
+api_key = validate_and_get_api_key(args)
+if api_key:
+    try:
+        setup_wandb_login(api_key)
+        initialize_weave_tracing()
+        wandb_configured = True
+        logger.info("Server W&B API key configured successfully")
+    except Exception as e:
+        logger.warning(f"Failed to configure server W&B API key: {e}")
+else:
+    logger.info("No server W&B API key configured - clients will provide their own")
 
 # Create the MCP server
 logger.info("Creating W&B MCP server...")
@@ -103,11 +112,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add authentication middleware for MCP endpoints
+@app.middleware("http")
+async def auth_middleware(request, call_next):
+    """Add OAuth 2.1 Bearer token authentication for MCP endpoints."""
+    return await mcp_auth_middleware(request, call_next)
+
 # Add custom routes
 @app.get("/", response_class=HTMLResponse)
 async def index():
     """Serve the landing page."""
     return INDEX_HTML_CONTENT
+
+@app.get("/.well-known/oauth-protected-resource")
+async def resource_metadata():
+    """OAuth 2.0 Protected Resource Metadata endpoint (RFC 9728)."""
+    config = MCPAuthConfig()
+    return JSONResponse(create_resource_metadata_response(config))
 
 @app.get("/health")
 async def health():
@@ -119,11 +140,14 @@ async def health():
     except:
         tool_count = 0
     
+    auth_status = "disabled" if os.environ.get("MCP_AUTH_DISABLED", "false").lower() == "true" else "enabled"
+    
     return {
         "status": "healthy",
         "service": "wandb-mcp-server",
         "wandb_configured": wandb_configured,
-        "tools_registered": tool_count
+        "tools_registered": tool_count,
+        "authentication": auth_status
     }
 
 # Mount the MCP streamable HTTP app

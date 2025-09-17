@@ -6,7 +6,14 @@ from wandb_mcp_server.weave_api.models import QueryResult
 
 logger = get_rich_logger(__name__)
 
-_trace_service = TraceService()
+# Lazy load the trace service to avoid requiring API key at import time
+_trace_service = None
+
+def get_trace_service():
+    global _trace_service
+    if _trace_service is None:
+        _trace_service = TraceService()
+    return _trace_service
 
 QUERY_WEAVE_TRACES_TOOL_DESCRIPTION = """
 Query Weave traces, trace metadata, and trace costs with filtering and sorting options.
@@ -301,7 +308,7 @@ def query_traces(
     but delegates to our new implementation.
     """
     # If api_key was provided, create a new service with that key
-    service = _trace_service
+    service = get_trace_service()
     if api_key:
         service = TraceService(
             api_key=api_key,
@@ -410,7 +417,7 @@ async def query_paginated_weave_traces(
         QueryResult: A Pydantic model containing the query results
     """
     # If api_key was provided, create a new service with that key
-    service = _trace_service
+    service = get_trace_service()
     if api_key:
         service = TraceService(
             api_key=api_key,
