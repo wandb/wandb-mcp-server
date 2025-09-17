@@ -56,6 +56,18 @@ from wandb_mcp_server.mcp_tools.query_weave import (
     query_paginated_weave_traces,
 )
 from wandb_mcp_server.utils import get_rich_logger, get_server_args, ServerMCPArgs
+
+# Export key functions for HF Spaces app
+__all__ = [
+    'validate_and_get_api_key',
+    'setup_wandb_login',
+    'configure_wandb_logging',
+    'initialize_weave_tracing',
+    'create_mcp_server',
+    'register_tools',
+    'ServerMCPArgs',
+    'cli'
+]
 from wandb_mcp_server.weave_api.models import QueryResult
 
 print('Starting W&B MCP Server...', file=sys.stderr)
@@ -107,9 +119,12 @@ def setup_wandb_login(api_key: str) -> None:
         sys.stderr = original_stderr
 
 
-def validate_and_get_api_key(args: ServerMCPArgs) -> str:
+def validate_and_get_api_key(args: ServerMCPArgs) -> Optional[str]:
     """
     Validate and retrieve the W&B API key from various sources.
+    
+    For HTTP transport: API key is optional (clients provide their own)
+    For STDIO transport: API key is required from environment
     
     Priority order:
     1. Command-line argument (--wandb-api-key)
@@ -121,16 +136,25 @@ def validate_and_get_api_key(args: ServerMCPArgs) -> str:
         args: Parsed command-line arguments
         
     Returns:
-        The W&B API key
+        The W&B API key if found, None otherwise
         
     Raises:
-        ValueError: If no API key is found
+        ValueError: If no API key is found for STDIO transport
     """
     api_key = args.wandb_api_key or get_server_args().wandb_api_key
     
+    # For HTTP transport, API key is optional (clients provide their own)
+    if args.transport == "http":
+        if api_key:
+            logger.info("Server W&B API key configured (for server operations)")
+        else:
+            logger.info("No server W&B API key configured (clients will provide their own)")
+        return api_key
+    
+    # For STDIO transport, API key is required
     if not api_key:
         raise ValueError(
-            "WANDB_API_KEY must be set. Options:\n"
+            "WANDB_API_KEY must be set for STDIO transport. Options:\n"
             "1. Command-line: --wandb-api-key YOUR_KEY\n"
             "2. Environment: export WANDB_API_KEY=YOUR_KEY\n"
             "3. .env file: WANDB_API_KEY=YOUR_KEY\n"
@@ -375,14 +399,27 @@ def create_mcp_server(transport: str, host: str = "localhost", port: Optional[in
         
     Raises:
         ValueError: If transport type is invalid
+    
+    Authentication:
+        - STDIO transport: Uses environment variables (WANDB_API_KEY required)
+        - HTTP transport: Clients provide W&B API key as Bearer token
+          Set MCP_AUTH_DISABLED=true to disable auth (development only)
     """
     if transport == "http":
         port = port if port is not None else 8080
         logger.info(f"Configuring HTTP server on {host}:{port}")
         mcp = FastMCP("weave-mcp-server", host=host, port=port, stateless_http=True)
+        
+        # Log authentication status for HTTP
+        if os.environ.get("MCP_AUTH_DISABLED", "false").lower() == "true":
+            logger.warning("⚠️  MCP authentication is DISABLED - server is publicly accessible")
+        else:
+            logger.info("🔒 MCP authentication enabled - clients must provide W&B API key as Bearer token")
+            
     elif transport == "stdio":
         logger.info("Configuring stdio server")
         mcp = FastMCP("weave-mcp-server")
+        logger.info("STDIO transport uses environment variable authentication")
     else:
         raise ValueError(f"Invalid transport type: {transport}. Must be 'stdio' or 'http'")
     
@@ -410,11 +447,12 @@ def cli():
         --wandb-api-key KEY         W&B API key (can also use env var)
         
     Environment Variables:
-        WANDB_API_KEY               W&B API key for authentication
+        WANDB_API_KEY               W&B API key (required for STDIO, optional for HTTP)
         MCP_SERVER_LOG_LEVEL        Server log level (DEBUG, INFO, WARNING, ERROR)
         WANDB_SILENT                Set to "False" to enable W&B output (default: True)
         WEAVE_SILENT                Set to "False" to enable Weave output (default: True)
         WANDB_DEBUG                 Set to "true" to enable W&B debug logging
+        MCP_AUTH_DISABLED           Set to "true" to disable HTTP auth (dev only)
     """
     # Parse command line arguments
     import simple_parsing
@@ -426,8 +464,9 @@ def cli():
     # Validate and get API key
     api_key = validate_and_get_api_key(args)
     
-    # Perform W&B login
-    setup_wandb_login(api_key)
+    # Perform W&B login only if we have an API key
+    if api_key:
+        setup_wandb_login(api_key)
     
     # Initialize Weave tracing for MCP tool calls
     weave_initialized = initialize_weave_tracing()

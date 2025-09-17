@@ -130,6 +130,7 @@ def create_report(
         processed_plots_html = None
 
     try:
+        # W&B will use WANDB_API_KEY from environment
         wandb.init(
             entity=entity_name, project=project_name, job_type="mcp_report_creation"
         )
