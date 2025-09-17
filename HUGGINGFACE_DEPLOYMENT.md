@@ -39,15 +39,7 @@ The application runs as a FastAPI server on port 7860 (HF Spaces default) with:
 
 No environment variables are required! The server works without any configuration.
 
-Optional (for server-side logging only):
-```
-WANDB_API_KEY=your_api_key_here  # Only if you want server-side Weave tracing
-WANDB_ENTITY=your_wandb_entity  # For server-side Weave tracing
-MCP_LOGS_WANDB_PROJECT=wandb-mcp-logs  # Project for server logs
-WEAVE_DISABLED=false  # Set to enable Weave tracing
-```
-
-**Note**: For normal operation, users provide their own W&B API keys as Bearer tokens. No server configuration needed.
+**Note**: Users provide their own W&B API keys as Bearer tokens. No server configuration needed.
 
 ## Deployment Steps
 

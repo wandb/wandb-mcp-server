@@ -62,6 +62,7 @@ class TraceService:
 
     def __init__(
         self,
+        api_key: Optional[str] = None,
         server_url: Optional[str] = None,
         retries: int = 3,
         timeout: int = 10,
@@ -69,18 +70,26 @@ class TraceService:
         """Initialize the TraceService.
 
         Args:
+            api_key: W&B API key. If not provided, uses WANDB_API_KEY env var.
             server_url: Weave API server URL. Defaults to 'https://trace.wandb.ai'.
             retries: Number of retries for failed requests.
             timeout: Request timeout in seconds.
         """
-        # Call get_server_args() to ensure API key is loaded from .netrc or env var
-        # and a warning is logged by get_server_args if no key is found.
-        server_config = get_server_args()
+        # If no API key provided, try to get from environment
+        if api_key is None:
+            import os
+            # Try to get from environment (set by auth middleware for HTTP or user for STDIO)
+            api_key = os.environ.get("WANDB_API_KEY")
+            
+            # If still no key, try get_server_args as fallback
+            if not api_key:
+                server_config = get_server_args()
+                api_key = server_config.wandb_api_key
 
         # Pass the resolved API key to WeaveApiClient.
-        # If server_config.wandb_api_key is None or "", WeaveApiClient will raise its ValueError.
+        # If api_key is None or "", WeaveApiClient will raise its ValueError.
         self.client = WeaveApiClient(
-            api_key=server_config.wandb_api_key,
+            api_key=api_key,
             server_url=server_url,
             retries=retries,
             timeout=timeout,

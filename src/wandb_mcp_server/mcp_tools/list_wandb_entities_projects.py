@@ -70,6 +70,7 @@ def list_entity_projects(entity: str | None = None) -> dict[str, list[dict[str, 
             - tags: List of project tags
     """
     # Initialize wandb API
+    # Will use WANDB_API_KEY from environment (set by auth middleware or user)
     api = wandb.Api()
 
     # Merge entity and teams into a single list

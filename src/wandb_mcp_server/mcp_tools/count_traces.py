@@ -176,6 +176,7 @@ def count_traces(
     """
     project_id = f"{entity_name}/{project_name}"
 
+    # Get API key from environment (set by auth middleware for HTTP, or by user for STDIO)
     api_key = os.environ.get("WANDB_API_KEY")
     if not api_key:
         logger.error("WANDB_API_KEY not found in environment variables.")

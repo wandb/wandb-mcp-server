@@ -135,32 +135,21 @@ async def mcp_auth_middleware(request: Request, call_next):
         wandb_api_key = wandb_api_key.strip()
         
         # Store the API key in request state for W&B operations
-        # The MCP tools should access this from the request context
         request.state.wandb_api_key = wandb_api_key
         
-        # For now, we'll set it in environment (in production, use contextvars)
-        # Save the original value to restore later
-        original_api_key = os.environ.get("WANDB_API_KEY")
-        
-        # Set the clean API key
+        # Set the API key for this request
+        # Note: We don't restore the original value because with streaming responses,
+        # the tool execution happens after call_next returns. Each request sets its own key.
         os.environ["WANDB_API_KEY"] = wandb_api_key
         
-        # Debug logging (remove in production)
-        logger.info(f"Auth middleware: Set WANDB_API_KEY with length={len(wandb_api_key)}, "
-                   f"first_6={wandb_api_key[:6] if len(wandb_api_key) >= 6 else 'N/A'}..., "
-                   f"last_4={wandb_api_key[-4:] if len(wandb_api_key) >= 4 else 'N/A'}, "
-                   f"is_40_chars={len(wandb_api_key) == 40}")
+        # Debug logging
+        logger.debug(f"Auth middleware: Set WANDB_API_KEY with length={len(wandb_api_key)}, "
+                    f"is_40_chars={len(wandb_api_key) == 40}")
         
-        try:
-            # Continue processing
-            response = await call_next(request)
-        finally:
-            # Restore original environment
-            if original_api_key:
-                os.environ["WANDB_API_KEY"] = original_api_key
-            elif "WANDB_API_KEY" in os.environ:
-                del os.environ["WANDB_API_KEY"]
-            
+        # Continue processing without restoring the env var
+        # Each request will set its own API key
+        response = await call_next(request)
+        
         return response
         
     except HTTPException as e:
