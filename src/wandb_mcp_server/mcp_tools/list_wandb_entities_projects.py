@@ -94,9 +94,9 @@ def list_entity_projects(entity: str | None = None) -> dict[str, list[dict[str, 
                 "entity": project.entity,
                 "description": getattr(project, "description", None),
                 "visibility": getattr(project, "visibility", None),
-                "created_at": project.created_at,
-                "updated_at": project.updated_at,
-                "tags": project.tags,
+                "created_at": getattr(project, "created_at", None),
+                "updated_at": getattr(project, "updated_at", None),
+                "tags": getattr(project, "tags", []),
             }
             projects_data.append(project_dict)
 
