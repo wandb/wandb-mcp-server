@@ -204,7 +204,7 @@
         </div>
 
         <div class="endpoint">
-            https://[your-username]-[space-name].hf.space/mcp
+            https://niware-wandb-mcp-server.hf.space/mcp
         </div>
 
         <div class="features">
@@ -229,13 +229,14 @@
             </div>
         </div>
 
-        <div class="setup-steps">
-            <h3>⚠️ Setup Required</h3>
+        <div class="setup-steps" style="background: #f0fdf4; border-color: #86efac;">
+            <h3 style="color: #166534;">✅ Ready to Use!</h3>
             <ol>
                 <li>Get your W&B API key from <a href="https://wandb.ai/authorize" target="_blank">wandb.ai/authorize</a></li>
-                <li>Set <code>WANDB_API_KEY</code> as a secret in this Space's environment variables</li>
-                <li>Connect your MCP client to the endpoint above</li>
+                <li>Configure your MCP client with the endpoint above</li>
+                <li>Provide your API key as Bearer token or API Key authentication</li>
             </ol>
+            <p style="margin-top: 15px; color: #166534;"><strong>No server configuration needed!</strong> Each user provides their own API key for secure access to their W&B data.</p>
         </div>
 
         <div class="examples">
@@ -251,6 +252,18 @@
             </div>
         </div>
 
+        <div style="background: #e0e7ff; padding: 20px; border-radius: 8px; margin: 30px 0; text-align: center;">
+            <h3 style="color: #312e81; margin: 0 0 10px 0;">🚀 Want to Run Your Own Instance?</h3>
+            <p style="color: #4c4999; margin: 10px 0;">
+                Install locally or deploy your own server from the open-source repository:
+            </p>
+            <a href="https://github.com/wandb/wandb-mcp-server" target="_blank" 
+               style="display: inline-block; background: #4c1d95; color: white; padding: 10px 20px; 
+                      border-radius: 6px; text-decoration: none; margin-top: 10px;">
+                View on GitHub →
+            </a>
+        </div>
+        
         <div class="footer">
             <p>
                 Built with ❤️ for the <a href="https://modelcontextprotocol.io/" target="_blank">Model Context Protocol</a> community

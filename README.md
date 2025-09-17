@@ -18,40 +18,48 @@ This server allows MCP clients to:
 - 🤖 Query [wandbot](https://github.com/wandb/wandbot), the W&B support agent
 - 📝 Write text and charts to W&B Reports
 
-## 🚀 Quick Start - Use This Space
+## 🚀 Quick Start - Use This Server Directly!
 
-### Option 1: Duplicate This Space (Recommended)
+### No Setup Required! 🎉
 
-1. **Duplicate this Space** by clicking the three dots menu (⋮) in the top right → "Duplicate this Space"
-2. **Set your W&B API Key** in your duplicated Space:
-   - Go to Settings → "Variables and secrets"
-   - Add a new secret: `WANDB_API_KEY` with your key from [wandb.ai/authorize](https://wandb.ai/authorize)
-3. **Use your personal MCP server endpoint**:
-   ```
-   https://huggingface.co/spaces/[your-username]/[your-space-name]/mcp
-   ```
+You can use this server immediately with your own W&B API key:
 
-By duplicating the Space, you get your own private instance that can access your W&B projects securely!
+1. **Get your W&B API key** from [wandb.ai/authorize](https://wandb.ai/authorize)
+2. **Configure your MCP client** with:
+   - **Server URL**: `https://niware-wandb-mcp-server.hf.space/mcp`
+   - **Authentication**: Your W&B API key as Bearer token
+3. **Start querying** your W&B data!
 
-### Option 2: Use the Public Space
-
-If the Space owner has configured a public API key, you can use the public endpoint directly:
-```
-https://huggingface.co/spaces/[original-space]/mcp
-```
-
-⚠️ **Note**: The public Space will only have access to projects accessible by the configured API key.
+That's it! No server configuration, no duplication needed. Each user provides their own API key, ensuring secure access to their own W&B projects.
 
 ## 🖥️ Using with MCP Clients
 
-### Mistral le Chat
-1. Go to your chat interface
-2. Click on MCP settings
-3. Add server with your Space URL: `https://huggingface.co/spaces/[your-username]/[your-space-name]/mcp`
-4. Start querying your W&B data!
+### Mistral LeChat
+1. Go to Settings → Custom MCP Connectors
+2. Add a new connector:
+   - **Server URL**: `https://niware-wandb-mcp-server.hf.space/mcp`
+   - **Authentication**: Choose "API Key Authentication"
+   - **API Key**: Your W&B API key from [wandb.ai/authorize](https://wandb.ai/authorize)
 
-### Other MCP Clients
-Use the endpoint with any MCP-compatible client that supports HTTP transport with Server-Sent Events (SSE).
+### Cursor
+Add to `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
+```json
+{
+  "mcpServers": {
+    "wandb": {
+      "transport": "http",
+      "url": "https://niware-wandb-mcp-server.hf.space/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_WANDB_API_KEY",
+        "Accept": "application/json, text/event-stream"
+      }
+    }
+  }
+}
+```
+
+### Claude Desktop / Claude Code
+Configure in your MCP settings with the server URL and Bearer token authentication.
 
 ## 🔧 Available MCP Tools
 
@@ -81,37 +89,45 @@ Show me the latest 10 runs from my experiment tracking project and create a repo
 What's the best performing model in my latest sweep? Plot the results.
 ```
 
-## ⚙️ Configuration
+## 💻 Run Locally (Optional)
 
-### Required Environment Variables
-- `WANDB_API_KEY`: Your Weights & Biases API key (set as Secret in Space settings)
+Want to run your own instance or develop locally? Check out the main repository:
 
-### Optional Environment Variables
-- `MCP_SERVER_LOG_LEVEL`: Set to `DEBUG` for verbose logging (default: `WARNING`)
-- `PORT`: Server port (automatically set by HuggingFace Spaces)
+```bash
+# Install and run from source
+git clone https://github.com/wandb/wandb-mcp-server
+cd wandb-mcp-server
+uv run src/wandb_mcp_server/server.py --transport http
+```
+
+See the [GitHub repository](https://github.com/wandb/wandb-mcp-server) for installation instructions for various MCP clients.
 
 ## 🔍 Troubleshooting
 
-### Space Not Working?
-1. **Check your API key**: Ensure `WANDB_API_KEY` is set correctly in Space settings → "Variables and secrets"
-2. **Verify the endpoint**: Make sure you're using `/mcp` suffix: `https://huggingface.co/spaces/[username]/[space]/mcp`
-3. **Check Space status**: Ensure the Space is running (not crashed or building)
+### Connection Issues?
+1. **Verify your API key**: Ensure it's correctly copied from [wandb.ai/authorize](https://wandb.ai/authorize)
+2. **Check the endpoint**: Must include `/mcp` suffix: `https://niware-wandb-mcp-server.hf.space/mcp`
+3. **Headers required**: Include both `Authorization` and `Accept` headers as shown above
 
 ### Query Tips
 - Always specify your W&B entity and project name in queries
 - Be specific rather than overly broad in your questions
 - Verify you have access to the projects you're querying
 
-## 🏗️ Development & Advanced Usage
+## 🔐 Security
 
-This HuggingFace Space is built from the open-source [wandb-mcp-server](https://github.com/wandb/wandb-mcp-server) repository.
+- **Your API key is never stored** - It's only used transiently for your requests
+- **Each user is isolated** - Your key only accesses your W&B data
+- **No server configuration needed** - The server doesn't have its own W&B access
+- **Industry-standard Bearer tokens** - Same pattern as GitHub, OpenAI, etc.
 
 ## 📚 Resources
 
 - [Model Context Protocol Documentation](https://modelcontextprotocol.io/)
 - [Weights & Biases Documentation](https://docs.wandb.ai/)
 - [W&B Weave Documentation](https://weave-docs.wandb.ai/)
-- [Source Code & Desktop Installation](https://github.com/wandb/wandb-mcp-server)
+- [Source Code Repository](https://github.com/wandb/wandb-mcp-server)
+- [Get Your W&B API Key](https://wandb.ai/authorize)
 
 ## 📄 License
 
