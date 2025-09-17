@@ -22,7 +22,7 @@ os.environ["HOME"] = "/tmp"
 os.environ["WANDB_SILENT"] = "True"
 os.environ["WEAVE_SILENT"] = "True"
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import FastMCP
@@ -38,11 +38,7 @@ from wandb_mcp_server.server import (
 )
 
 # Import authentication
-from wandb_mcp_server.auth import (
-    mcp_auth_middleware,
-    create_resource_metadata_response,
-    MCPAuthConfig
-)
+from wandb_mcp_server.auth import mcp_auth_middleware
 
 # Configure logging
 logging.basicConfig(
@@ -124,11 +120,8 @@ async def index():
     """Serve the landing page."""
     return INDEX_HTML_CONTENT
 
-@app.get("/.well-known/oauth-protected-resource")
-async def resource_metadata():
-    """OAuth 2.0 Protected Resource Metadata endpoint (RFC 9728)."""
-    config = MCPAuthConfig()
-    return JSONResponse(create_resource_metadata_response(config))
+# Removed OAuth endpoints - only API key authentication is supported
+# See AUTH_README.md for details on why full OAuth isn't feasible
 
 @app.get("/health")
 async def health():

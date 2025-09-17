@@ -29,30 +29,29 @@ class MCPAuthConfig:
     For HTTP transport: Accepts any W&B API key as a Bearer token.
     The server uses the client's token for all W&B operations.
     """
-    
-    def __init__(self):
-        self.resource_metadata_url = os.environ.get(
-            "MCP_RESOURCE_METADATA_URL", 
-            "/.well-known/oauth-protected-resource"
-        )
-        # Point to W&B's Auth0 instance for reference
-        self.authorization_server = os.environ.get(
-            "MCP_AUTH_SERVER", 
-            "https://wandb.auth0.com"
-        )
+    pass  # Simple config, no OAuth metadata needed
 
 
 def is_valid_wandb_api_key(token: str) -> bool:
     """
     Check if a token looks like a valid W&B API key format.
-    W&B API keys are typically 40 characters of alphanumeric + some special chars.
+    W&B API keys are typically 40 characters but we'll be permissive.
     """
-    if not token or len(token) < 20 or len(token) > 100:
+    if not token:
         return False
+    
+    # Strip any whitespace that might have been included
+    token = token.strip()
+    
+    # Be permissive - accept keys between 20 and 100 characters
+    # The actual W&B API will validate the exact format
+    if len(token) < 20 or len(token) > 100:
+        return False
+    
     # Basic validation - W&B keys contain alphanumeric and some special characters
-    # This is a permissive check since W&B key format may vary
     if re.match(r'^[a-zA-Z0-9_\-\.]+$', token):
         return True
+    
     return False
 
 
@@ -77,26 +76,24 @@ async def validate_bearer_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authorization required - please provide your W&B API key as a Bearer token",
             headers={
-                "WWW-Authenticate": f'Bearer realm="W&B MCP", '
-                                   f'resource_metadata="{config.resource_metadata_url}"'
+                "WWW-Authenticate": 'Bearer realm="W&B MCP"'
             }
         )
     
-    token = credentials.credentials
+    token = credentials.credentials.strip()  # Strip any whitespace
     
     # Basic format validation
     if not is_valid_wandb_api_key(token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid W&B API key format. Get your key at: https://wandb.ai/authorize",
+            detail=f"Invalid W&B API key format. Got {len(token)} characters. "
+                   f"Get your key at: https://wandb.ai/authorize",
             headers={
-                "WWW-Authenticate": f'Bearer realm="W&B MCP", '
-                                   f'error="invalid_token", '
-                                   f'resource_metadata="{config.resource_metadata_url}"'
+                "WWW-Authenticate": 'Bearer realm="W&B MCP", error="invalid_token"'
             }
         )
     
-    logger.debug("Bearer token validated successfully")
+    logger.debug(f"Bearer token validated successfully (length: {len(token)})")
     return token
 
 
@@ -124,13 +121,18 @@ async def mcp_auth_middleware(request: Request, call_next):
         authorization = request.headers.get("Authorization", "")
         credentials = None
         if authorization.startswith("Bearer "):
+            # Remove "Bearer " prefix and strip any whitespace
+            token = authorization[7:].strip()
             credentials = HTTPAuthorizationCredentials(
                 scheme="Bearer",
-                credentials=authorization[7:]  # Remove "Bearer " prefix
+                credentials=token
             )
         
         # Validate and get the W&B API key
         wandb_api_key = await validate_bearer_token(credentials, config)
+        
+        # Make sure the key is clean (no extra whitespace or encoding issues)
+        wandb_api_key = wandb_api_key.strip()
         
         # Store the API key in request state for W&B operations
         # The MCP tools should access this from the request context
@@ -139,7 +141,15 @@ async def mcp_auth_middleware(request: Request, call_next):
         # For now, we'll set it in environment (in production, use contextvars)
         # Save the original value to restore later
         original_api_key = os.environ.get("WANDB_API_KEY")
+        
+        # Set the clean API key
         os.environ["WANDB_API_KEY"] = wandb_api_key
+        
+        # Debug logging (remove in production)
+        logger.info(f"Auth middleware: Set WANDB_API_KEY with length={len(wandb_api_key)}, "
+                   f"first_6={wandb_api_key[:6] if len(wandb_api_key) >= 6 else 'N/A'}..., "
+                   f"last_4={wandb_api_key[-4:] if len(wandb_api_key) >= 4 else 'N/A'}, "
+                   f"is_40_chars={len(wandb_api_key) == 40}")
         
         try:
             # Continue processing
@@ -166,23 +176,9 @@ async def mcp_auth_middleware(request: Request, call_next):
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"error": "Authentication failed"},
             headers={
-                "WWW-Authenticate": f'Bearer realm="W&B MCP", '
-                                   f'resource_metadata="{config.resource_metadata_url}"'
+                "WWW-Authenticate": 'Bearer realm="W&B MCP"'
             }
         )
 
 
-def create_resource_metadata_response(config: MCPAuthConfig) -> Dict[str, Any]:
-    """
-    Create OAuth 2.0 Protected Resource Metadata response (RFC 9728).
-    
-    This tells MCP clients that we use W&B API keys as Bearer tokens.
-    Points to W&B's Auth0 instance where users can get their API keys.
-    """
-    return {
-        "resource": os.environ.get("MCP_SERVER_URL", "https://wandb-mcp-server.hf.space"),
-        "authorization_servers": [config.authorization_server],
-        "bearer_methods_supported": ["header"],
-        "resource_documentation": "https://github.com/wandb/wandb-mcp-server",
-        "authentication_note": "Use your W&B API key as a Bearer token. Get your key at https://wandb.ai/authorize",
-    }
+# OAuth-related functions removed - see AUTH_README.md for details
