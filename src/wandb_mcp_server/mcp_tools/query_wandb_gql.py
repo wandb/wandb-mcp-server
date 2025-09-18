@@ -591,7 +591,8 @@ def query_paginated_wandb_gql(
     api = None
     limit_key = None
     try:
-        api = wandb.Api()
+        # Use API key from environment (set by auth middleware for HTTP, or by user for STDIO)
+        api = wandb.Api()  # Will use WANDB_API_KEY from environment
         logger.info(
             "--- Inside query_paginated_wandb_gql: Step 0: Execute Initial Query ---"
         )

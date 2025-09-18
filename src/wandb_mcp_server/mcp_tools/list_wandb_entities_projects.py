@@ -41,11 +41,11 @@ Returns:
     List[Dict[str, Any]]: List of project dictionaries containing:
         - name: Project name
         - entity: Entity name
-        - description: Project description (if available)
-        - visibility: Project visibility (if available)
+        - description: Project description
+        - visibility: Project visibility (public/private)
         - created_at: Creation timestamp
-        - url: Project URL
-        - id: Project ID
+        - updated_at: Last update timestamp
+        - tags: List of project tags
 """
 
 
@@ -63,13 +63,14 @@ def list_entity_projects(entity: str | None = None) -> dict[str, list[dict[str, 
             Each project dictionary contains:
             - name: Project name
             - entity: Entity name
-            - description: Project description (if available)
-            - visibility: Project visibility (if available)
+            - description: Project description
+            - visibility: Project visibility (public/private)
             - created_at: Creation timestamp
-            - url: Project URL
-            - id: Project ID
+            - updated_at: Last update timestamp
+            - tags: List of project tags
     """
     # Initialize wandb API
+    # Will use WANDB_API_KEY from environment (set by auth middleware or user)
     api = wandb.Api()
 
     # Merge entity and teams into a single list
@@ -93,9 +94,9 @@ def list_entity_projects(entity: str | None = None) -> dict[str, list[dict[str, 
                 "entity": project.entity,
                 "description": getattr(project, "description", None),
                 "visibility": getattr(project, "visibility", None),
-                "created_at": getattr(project, "created_at", getattr(project, "createdAt", None)),
-                "url": getattr(project, "url", None),
-                "id": getattr(project, "id", None),
+                "created_at": getattr(project, "created_at", None),
+                "updated_at": getattr(project, "updated_at", None),
+                "tags": getattr(project, "tags", []),
             }
             projects_data.append(project_dict)
 

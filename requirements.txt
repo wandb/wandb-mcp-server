@@ -1,0 +1,16 @@
+# Core dependencies from pyproject.toml
+weave>=0.51.56
+wandb>=0.19.8
+httpx>=0.28.1
+mcp[cli]>=1.0.0
+simple-parsing>=0.1.7
+pytest>=8.3.1
+python-dotenv>=1.0.0
+tiktoken>=0.9.0
+wandb-workspaces>=0.1.12
+networkx>=3.4.2
+requests>=2.31.0
+
+# HTTP transport dependencies
+fastapi>=0.104.0
+uvicorn>=0.24.0

@@ -36,9 +36,37 @@ The server queries Weave evaluations, aggregates scores, and highlights top-perf
 ```
 The integrated [wandbot](https://github.com/wandb/wandbot) support agent provides detailed answers, code examples, and debugging assistance for any W&B or Weave-related questions.
 
+## Deployment Options
+
+This MCP server can be deployed in three ways:
+
+### 🌐 Option 1: Use the Hosted Server (Recommended)
+
+Use our publicly hosted server on Hugging Face Spaces - no installation needed!
+
+**Server URL:** `https://niware-wandb-mcp-server.hf.space/mcp`
+
+Configure your MCP client to connect to the hosted server with your W&B API key as authentication. See the [Client Configuration](#mcp-client-configuration-for-hosted-server) section below for details.
+
+### 💻 Option 2: Local Development (STDIO)
+
+Run the server locally with direct stdio communication - best for development and testing.
+
+### 🔌 Option 3: Self-Hosted HTTP Server
+
+Deploy your own HTTP server with API key authentication - great for team deployments or custom infrastructure.
+
+---
+
 ## Installation
 
-These are instructions to run the local MCP server - we're working on a hosted version that is coming out soon too!
+### For Hosted Server Users
+
+No installation needed! Skip to [Client Configuration](#mcp-client-configuration-for-hosted-server).
+
+### For Local Installation
+
+These instructions are for running the MCP server locally (Options 2 & 3).
 
 ### Prerequisites
 
@@ -90,11 +118,51 @@ Configure your API key using one of these methods (first one recommended to have
 
 #### 3. Environment Configuration (Optional)
 
-The server includes [wandbot](https://github.com/wandb/wandbot) support for answering W&B/Weave questions. See `env.example` for all available configuration options including custom endpoints.
+The server includes [wandbot](https://github.com/wandb/wandbot) support for answering W&B/Weave questions. **wandbot works out-of-the-box without any configuration!** It uses the default public endpoint automatically.
 
-### MCP Client Setup
+See `env.example` for optional configuration like custom wandbot instances or other advanced settings.
 
-Choose your MCP client from the options below:
+### MCP Client Configuration for Hosted Server
+
+To use the hosted server, configure your MCP client with the following settings:
+
+<details>
+<summary><b>🖱️ Cursor IDE (Hosted Server)</b></summary>
+
+Add to `.cursor/mcp.json` or `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "wandb": {
+      "transport": "http",
+      "url": "https://niware-wandb-mcp-server.hf.space/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_WANDB_API_KEY",
+        "Accept": "application/json, text/event-stream"
+      }
+    }
+  }
+}
+```
+
+Replace `YOUR_WANDB_API_KEY` with your actual W&B API key from [wandb.ai/authorize](https://wandb.ai/authorize).
+</details>
+
+<details>
+<summary><b>🎨 Mistral LeChat (Hosted Server)</b></summary>
+
+1. Go to LeChat Settings → Custom MCP Connectors
+2. Click "Add MCP Connector"
+3. Configure with:
+   - **Server URL**: `https://niware-wandb-mcp-server.hf.space/mcp`
+   - **Authentication**: Choose "API Key Authentication"
+   - **Token**: Enter your W&B API key
+</details>
+
+### MCP Client Setup for Local Server
+
+Choose your MCP client from the options below for local server setup:
 
 <details>
 <summary><b>🖱️ Cursor IDE</b></summary>
@@ -272,7 +340,7 @@ The server provides the following MCP tools:
 - **`count_weave_traces_tool`** - Efficiently count traces without returning data
 
 ### Support & Reporting
-- **`query_wandb_support_bot`** - Get help from [wandbot](https://github.com/wandb/wandbot), our RAG-powered technical support agent that can answer any W&B/Weave questions, help debug issues, and provide code examples
+- **`query_wandb_support_bot`** - Get help from [wandbot](https://github.com/wandb/wandbot), our RAG-powered technical support agent that can answer any W&B/Weave questions, help debug issues, and provide code examples (works out-of-the-box, no configuration needed!)
 - **`create_wandb_report_tool`** - Create W&B Reports with markdown and visualizations
 - **`query_wandb_entity_projects`** - List available entities and projects
 
@@ -292,6 +360,69 @@ Be specific to get better results:
 
 ### Verify Complete Data Retrieval
 When analyzing performance across multiple runs, ask the LLM to confirm it retrieved all available data to ensure comprehensive analysis.
+
+## Self-Hosting Guide
+
+### Deploy to Hugging Face Spaces
+
+Deploy your own instance of the W&B MCP Server on Hugging Face Spaces:
+
+1. **Fork this repository** or clone it locally
+2. **Create a new Space on Hugging Face:**
+   - Go to [huggingface.co/spaces](https://huggingface.co/spaces)
+   - Click "Create new Space"
+   - Choose "Docker" as the SDK
+   - Set visibility as needed
+
+3. **Push the code to your Space:**
+   ```bash
+   git remote add hf-space https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE_NAME
+   git push hf-space main
+   ```
+
+4. **Your server will be available at:**
+   ```
+   https://YOUR_USERNAME-YOUR_SPACE_NAME.hf.space/mcp
+   ```
+
+See [HUGGINGFACE_DEPLOYMENT.md](HUGGINGFACE_DEPLOYMENT.md) for detailed deployment instructions.
+
+### Run Local HTTP Server
+
+Run the server locally with HTTP transport for development or testing:
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run with authentication (recommended)
+python app.py
+
+# Or run without authentication (development only)
+MCP_AUTH_DISABLED=true python app.py
+```
+
+The server will be available at `http://localhost:7860/mcp`
+
+**Authentication:** See [AUTH_README.md](AUTH_README.md) for details on Bearer token authentication.
+
+### File Structure for Deployment
+
+```
+wandb-mcp-server/
+├── app.py                    # HF Spaces/HTTP server entry point
+├── Dockerfile                # Container configuration for HF Spaces
+├── requirements.txt          # Python dependencies for HTTP deployment
+├── index.html               # Landing page for web interface
+├── AUTH_README.md           # Authentication documentation
+├── HUGGINGFACE_DEPLOYMENT.md # HF Spaces deployment guide
+├── src/
+│   └── wandb_mcp_server/
+│       ├── server.py        # Core MCP server (STDIO & HTTP)
+│       ├── auth.py          # Bearer token authentication
+│       └── mcp_tools/       # Tool implementations
+└── pyproject.toml           # Package configuration for local/pip install
+```
 
 ## Advanced Configuration
 
@@ -329,17 +460,30 @@ export WANDB_DEBUG=true    # Verbose W&B logging
 
 ### Transport Options
 
-#### Stdio Transport (Default)
-For local and server being on the same machine:
+#### STDIO Transport (Default for Local Development)
+For local development where the MCP client and server run on the same machine:
 ```bash
 wandb_mcp_server --transport stdio
+# Or with UV:
+uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
 ```
+- Requires W&B API key in environment
+- Direct communication via stdin/stdout
+- Best for local IDE integrations (Cursor, Windsurf, etc.)
 
-#### HTTP Transport with SSE
-For remote access or web applications:
+#### HTTP Transport (For Remote Access)
+For remote access, web applications, or hosted deployments:
 ```bash
+# Using the FastAPI app (recommended)
+python app.py  # Runs on port 7860 by default
+
+# Or using the CLI
 wandb_mcp_server --transport http --host 0.0.0.0 --port 8080
 ```
+- Clients provide W&B API key as Bearer token
+- Supports authentication middleware
+- Uses Server-Sent Events (SSE) for streaming
+- Ideal for hosted deployments and web clients
 
 ### Running from Source
 

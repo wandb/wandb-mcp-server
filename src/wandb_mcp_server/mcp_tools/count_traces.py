@@ -176,10 +176,16 @@ def count_traces(
     """
     project_id = f"{entity_name}/{project_name}"
 
+    # Get API key from environment (set by auth middleware for HTTP, or by user for STDIO)
     api_key = os.environ.get("WANDB_API_KEY")
     if not api_key:
         logger.error("WANDB_API_KEY not found in environment variables.")
         raise ValueError("WANDB_API_KEY is required to query Weave traces count.")
+    
+    # Debug logging to diagnose API key issues
+    logger.debug(f"Using W&B API key: length={len(api_key)}, "
+                f"first_6={api_key[:6] if len(api_key) >= 6 else 'N/A'}..., "
+                f"last_4={api_key[-4:] if len(api_key) >= 4 else 'N/A'}")
 
     request_body: Dict[str, Any] = {"project_id": project_id}
     filter_payload: Dict[
@@ -296,6 +302,11 @@ def count_traces(
         if response.status_code != 200:
             error_msg = f"Error querying Weave trace count: {response.status_code} - {response.text}"
             logger.error(error_msg)
+            # Log API key info for debugging
+            logger.error(f"API key info: length={len(api_key)}, is_40_chars={len(api_key) == 40}")
+            if "40 characters" in response.text:
+                logger.error(f"W&B requires exactly 40 character API keys. Current key has {len(api_key)} characters.")
+                logger.error(f"Key preview: {api_key[:8]}...{api_key[-4:] if len(api_key) >= 12 else ''}")
             # Log request body for easier debugging on error
             logger.debug(f"Failed request body: {json.dumps(request_body)}")
             raise Exception(error_msg)
