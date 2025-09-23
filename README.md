@@ -1,3 +1,13 @@
+---
+title: Weights & Biases MCP Server
+emoji: 🪄🐝
+colorFrom: yellow
+colorTo: gray
+sdk: docker
+app_file: app.py
+pinned: false
+---
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/wandb/wandb/main/assets/logo-dark.svg">
@@ -44,7 +54,7 @@ This MCP server can be deployed in three ways:
 
 Use our publicly hosted server on Hugging Face Spaces - no installation needed!
 
-**Server URL:** `https://niware-wandb-mcp-server.hf.space/mcp`
+**Server URL:** `https://mcp.withwandb.com/mcp`
 
 Configure your MCP client to connect to the hosted server with your W&B API key as authentication. See the [Client Configuration](#mcp-client-configuration-for-hosted-server) section below for details.
 
@@ -136,7 +146,7 @@ Add to `.cursor/mcp.json` or `~/.cursor/mcp.json`:
   "mcpServers": {
     "wandb": {
       "transport": "http",
-      "url": "https://niware-wandb-mcp-server.hf.space/mcp",
+      "url": "https://mcp.withwandb.com/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_WANDB_API_KEY",
         "Accept": "application/json, text/event-stream"
@@ -155,7 +165,7 @@ Replace `YOUR_WANDB_API_KEY` with your actual W&B API key from [wandb.ai/authori
 1. Go to LeChat Settings → Custom MCP Connectors
 2. Click "Add MCP Connector"
 3. Configure with:
-   - **Server URL**: `https://niware-wandb-mcp-server.hf.space/mcp`
+   - **Server URL**: `https://mcp.withwandb.com/mcp`
    - **Authentication**: Choose "API Key Authentication"
    - **Token**: Enter your W&B API key
 </details>
@@ -238,41 +248,43 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 <details>
 <summary><b>💬 Gemini</b></summary>
 **Quick Install:**
-Uses the `.gemini-extension.json` in this repo's root:
+
+1. Make sure to have your API key exported:
+
+```bash
+# Option 1: Export API key directly
+export WANDB_API_KEY=your-api-key
+
+# Option 2: Use wandb login (opens browser)
+uvx wandb login
+```
+
+2. Then add the extension using the following command (based on the `gemini-extension.json` file)
 
 ```bash
 gemini extensions install https://github.com/wandb/wandb-mcp-server
 ```
+
 <details>
 <summary>Manual Configuration</summary>
-Create `gemini-extension.json` in your project root (use `--path=path/to/gemini-extension.json` to add local folder):
+Create `gemini-extension.json` in your project root (use `--path=path/to/folder-with-gemini-extension.json` to add local folder):
 
 ```json
 {
-    "name": "Weights and Biases MCP Server",
+    "name": "wandb-mcp-server",
     "version": "0.1.0",
     "mcpServers": {
-        "wandb": {
-            "command": "uv",
-            "args": [
-                "run", 
-                "--directory",
-                "/path/to/wandb-mcp-server",
-                "wandb_mcp_server",
-                "--transport",
-                "stdio"
-            ],
-            "env": {
-                "WANDB_API_KEY": "$WANDB_API_KEY"
-            }
+      "wandb": {
+        "httpUrl": "https://mcp.withwandb.com/mcp",
+        "trust": true,
+        "headers": {
+            "Authorization": "Bearer $WANDB_API_KEY",
+            "Accept": "application/json, text/event-stream"
         }
+      }
     }
-}
+  }
 ```
-</details>
-
-Note: Replace `/path/to/wandb-mcp-server` with your installation path.
-</details>
 
 <details>
 <summary><b>🤖 Claude Desktop</b></summary>
@@ -323,7 +335,7 @@ claude mcp add wandb -e WANDB_API_KEY=your-api-key -- uvx --from git+https://git
 
 <details>
 <summary><b>🌐 ChatGPT, LeChat, Claude</b></summary>
-Try our hosted public version: [HF Spaces](https://huggingface.co/spaces/NiWaRe/wandb-mcp-server)
+Try our hosted public version: [HF Spaces](https://wandb-wandb-mcp-server.hf.space)
 
 This version allows you to configure your WANDB_API_KEY directly in the interface to access your own projects or to work with all publich projects otherwise. Follow the instructions in the space to add it to LeChat, ChatGPT, or Claude. We'll have an official hosted version soon.
 </details>

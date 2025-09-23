@@ -1,20 +1,14 @@
 {
-    "name": "wandb-weave",
+    "name": "wandb-mcp-server",
     "version": "0.1.0",
     "mcpServers": {
-        "wandb-weave": {
-            "command": "uv",
-            "args": [
-                "run", 
-                "--directory",
-                "/Users/niware_wb/Documents/code_projects/mcp_experiments/wandb-mcp-server",
-                "wandb_mcp_server",
-                "--transport",
-                "stdio"
-            ],
-            "env": {
-                "WANDB_API_KEY": "<your-api-key>"
-            }
+      "wandb": {
+        "httpUrl": "https://mcp.withwandb.com/mcp",
+        "trust": true,
+        "headers": {
+            "Authorization": "Bearer $WANDB_API_KEY",
+            "Accept": "application/json, text/event-stream"
         }
+      }
     }
-}
+  }

@@ -204,7 +204,7 @@
         </div>
 
         <div class="endpoint">
-            https://niware-wandb-mcp-server.hf.space/mcp
+            https://mcp.withwandb.com/mcp
         </div>
 
         <div class="features">
@@ -230,13 +230,69 @@
         </div>
 
         <div class="setup-steps" style="background: #f0fdf4; border-color: #86efac;">
-            <h3 style="color: #166534;">✅ Ready to Use!</h3>
-            <ol>
-                <li>Get your W&B API key from <a href="https://wandb.ai/authorize" target="_blank">wandb.ai/authorize</a></li>
-                <li>Configure your MCP client with the endpoint above</li>
-                <li>Provide your API key as Bearer token or API Key authentication</li>
-            </ol>
-            <p style="margin-top: 15px; color: #166534;"><strong>No server configuration needed!</strong> Each user provides their own API key for secure access to their W&B data.</p>
+            <h3 style="color: #166534;">🚀 Quick Setup</h3>
+            
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin: 20px 0;">
+                
+                <div style="background: white; padding: 20px; border-radius: 8px; border-left: 4px solid #4299e1;">
+                    <h4 style="margin: 0 0 10px 0; color: #2d3748;">📝 Cursor</h4>
+                    <ul style="margin: 0; padding-left: 20px; font-size: 0.9em;">
+                        <li>Add to <code>~/.cursor/mcp.json</code>:</li>
+                    </ul>
+                    <pre style="background: #1a202c; color: #e2e8f0; padding: 10px; border-radius: 4px; font-size: 0.8em; margin: 10px 0; overflow-x: auto;">"wandb": {
+  "transport": "http", 
+  "url": "https://mcp.withwandb.com/mcp",
+  "headers": {
+    "Authorization": "Bearer YOUR_WANDB_API_KEY",
+    "Accept": "application/json, text/event-stream"
+  }
+}</pre>
+                </div>
+
+                <div style="background: white; padding: 20px; border-radius: 8px; border-left: 4px solid #38b2ac;">
+                    <h4 style="margin: 0 0 10px 0; color: #2d3748;">🖥️ Claude Desktop</h4>
+                    <ul style="margin: 0; padding-left: 20px; font-size: 0.9em;">
+                        <li>Add to <code>claude_desktop_config.json</code>:</li>
+                    </ul>
+                    <pre style="background: #1a202c; color: #e2e8f0; padding: 10px; border-radius: 4px; font-size: 0.8em; margin: 10px 0; overflow-x: auto;">{
+  "mcpServers": {
+    "wandb-stdio": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/wandb/wandb-mcp-server.git", "wandb-mcp-server"],
+      "env": {
+        "WANDB_API_KEY": "YOUR_WANDB_API_KEY"
+      }
+    }
+  }
+}</pre>
+                </div>
+
+                <div style="background: white; padding: 20px; border-radius: 8px; border-left: 4px solid #f56565;">
+                    <h4 style="margin: 0 0 10px 0; color: #2d3748;">💬 LeChat</h4>
+                    <ul style="margin: 0; padding-left: 20px; font-size: 0.9em;">
+                        <li>MCP Server URL: <code>https://mcp.withwandb.com/mcp</code></li>
+                        <li>Auth: Bearer token</li>
+                        <li>Token: Your W&B API key</li>
+                    </ul>
+                </div>
+
+                <div style="background: white; padding: 20px; border-radius: 8px; border-left: 4px solid #9f7aea;">
+                    <h4 style="margin: 0 0 10px 0; color: #2d3748;">🤖 Gemini CLI</h4>
+                    <ul style="margin: 0; padding-left: 20px; font-size: 0.9em;">
+                        <li>Install extension:</li>
+                    </ul>
+                    <pre style="background: #1a202c; color: #e2e8f0; padding: 10px; border-radius: 4px; font-size: 0.8em; margin: 10px 0; overflow-x: auto;">gemini extensions install https://github.com/wandb/wandb-mcp-server</pre>
+                    <ul style="margin: 10px 0 0 0; padding-left: 20px; font-size: 0.9em;">
+                        <li>Then set API key (choose one):</li>
+                        <li style="margin-left: 15px;">• <code>export WANDB_API_KEY=your-key</code></li>
+                        <li style="margin-left: 15px;">• <code>uvx wandb login</code> (opens browser)</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <p style="margin-top: 15px; color: #166534; text-align: center;">
+                <strong>Get your API key:</strong> <a href="https://wandb.ai/authorize" target="_blank" style="color: #166534;">wandb.ai/authorize</a>
+            </p>
         </div>
 
         <div class="examples">
