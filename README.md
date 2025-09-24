@@ -20,7 +20,88 @@ pinned: false
 
 A Model Context Protocol (MCP) server that provides seamless access to [Weights & Biases](https://www.wandb.ai/) for ML experiments and agent applications.
 
+## Quick Install Buttons
+
+### IDEs & Editors
+[![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=wandb&config=eyJ0cmFuc3BvcnQiOiJodHRwIiwidXJsIjoiaHR0cHM6Ly9tY3Aud2l0aHdhbmRiLmNvbS9tY3AiLCJoZWFkZXJzIjp7IkF1dGhvcml6YXRpb24iOiJCZWFyZXIge3tXQU5EQl9BUElfS0VZfX0iLCJBY2NlcHQiOiJhcHBsaWNhdGlvbi9qc29uLCB0ZXh0L2V2ZW50LXN0cmVhbSJ9fQ%3D%3D)
+[![Install in VSCode](https://img.shields.io/badge/Install%20in-VSCode-blue?style=for-the-badge&logo=visualstudiocode)](#vscode-hosted-server)
+[![Install in Windsurf](https://img.shields.io/badge/Install%20in-Windsurf-green?style=for-the-badge&logo=windsurf)](#windsurf-ide-hosted-server)
+
+### AI Coding Agents
+[![Install in Claude Code](https://img.shields.io/badge/Install%20in-Claude%20Code-orange?style=for-the-badge&logo=anthropic)](#claude-code-hosted)
+[![Install in Gemini CLI](https://img.shields.io/badge/Install%20in-Gemini%20CLI-purple?style=for-the-badge&logo=google)](#gemini-hosted-server)
+[![Setup GitHub Copilot](https://img.shields.io/badge/Setup-GitHub%20Copilot-black?style=for-the-badge&logo=github)](#github-codex)
+
+### AI Chat Clients
+[![Install in ChatGPT](https://img.shields.io/badge/Install%20in-ChatGPT-teal?style=for-the-badge&logo=openai)](#chatgpt-hosted-server)
+[![Install in LeChat](https://img.shields.io/badge/Install%20in-LeChat-red?style=for-the-badge&logo=mistral)](#mistral-lechat-hosted-server)
+[![Install in Claude Desktop](https://img.shields.io/badge/Install%20in-Claude%20Desktop-orange?style=for-the-badge&logo=anthropic)](#claude-desktop-hosted-server)
+[![Other Web Clients](https://img.shields.io/badge/Other-Web%20Clients-gray?style=for-the-badge&logo=web)](#other-web-clients)
+
+> **Quick Setup:** Click the button for your client above. For Cursor, it auto-installs with one click. For others, you'll be taken to the setup instructions. Just replace `YOUR_WANDB_API_KEY` with your actual API key from [wandb.ai/authorize](https://wandb.ai/authorize).
+
+
 ## Example Use Cases
+
+<details>
+<summary><b>📋 Available MCP Tools & Descriptions</b></summary>
+
+### W&B Models Tools
+
+**`query_wandb_tool`** - Execute GraphQL queries against W&B experiment tracking data (runs, sweeps, artifacts)
+- Query experiment runs, metrics, and performance comparisons
+- Access artifact management and model registry data
+- Analyze hyperparameter optimization and sweeps
+- Retrieve project dashboards and reports data
+- Supports pagination with `max_items` and `items_per_page` parameters
+- Accepts custom GraphQL queries with variables
+
+### Weave Tools (LLM/GenAI)
+
+**`query_weave_traces_tool`** - Query LLM traces and evaluations with advanced filtering and pagination
+- Retrieve execution traces and paths of LLM operations
+- Access LLM inputs, outputs, and intermediate results
+- Filter by display name, operation name, trace ID, status, time range, latency
+- Sort by various fields (started_at, latency, cost, etc.)
+- Support for metadata-only queries to avoid context window overflow
+- Includes cost calculations and token usage analysis
+- Configurable data truncation and column selection
+
+**`count_weave_traces_tool`** - Efficiently count traces without returning full data
+- Get total trace counts and root trace counts
+- Apply same filtering options as query tool
+- Useful for understanding project scope before detailed queries
+- Returns storage size information in bytes
+- Much faster than full trace queries when you only need counts
+
+### Support & Knowledge
+
+**`query_wandb_support_bot`** - Get help from [wandbot](https://github.com/wandb/wandbot)
+- RAG-powered technical support agent for W&B/Weave questions
+- Provides code examples and debugging assistance
+- Covers experiment tracking, Weave tracing, model management
+- Explains W&B features, best practices, and troubleshooting
+- Works out-of-the-box with no configuration needed
+
+### Reporting & Documentation
+
+**`create_wandb_report_tool`** - Create shareable W&B Reports with markdown and visualizations
+- Generate reports with markdown text and HTML-rendered charts
+- Support for multiple chart sections with proper organization
+- Interactive visualizations with hover effects and SVG elements
+- Permanent, shareable documentation for analysis findings
+- Accepts both single HTML strings and dictionaries of multiple charts
+
+### Discovery & Navigation
+
+**`query_wandb_entity_projects`** - List available entities and projects
+- Discover accessible W&B entities (teams/usernames) and their projects
+- Get project metadata including descriptions, visibility, tags
+- Essential for understanding available data sources
+- Helps with proper entity/project specification in queries
+- Returns creation/update timestamps and project details
+
+</details>
 
 ### 1. 🔍 Analyze ML Experiments
 ```
@@ -46,17 +127,17 @@ The server queries Weave evaluations, aggregates scores, and highlights top-perf
 ```
 The integrated [wandbot](https://github.com/wandb/wandbot) support agent provides detailed answers, code examples, and debugging assistance for any W&B or Weave-related questions.
 
-## Deployment Options
+## Installation & Deployment
 
-This MCP server can be deployed in three ways:
+This MCP server can be deployed in three ways. **We recommend starting with the hosted server** for the easiest setup experience.
 
-### 🌐 Option 1: Use the Hosted Server (Recommended)
+### 🌐 Option 1: Hosted Server (Recommended - No Installation Required)
 
-Use our publicly hosted server on Hugging Face Spaces - no installation needed!
+Use our publicly hosted server on Hugging Face Spaces - **zero installation needed!**
 
 **Server URL:** `https://mcp.withwandb.com/mcp`
 
-Configure your MCP client to connect to the hosted server with your W&B API key as authentication. See the [Client Configuration](#mcp-client-configuration-for-hosted-server) section below for details.
+> **ℹ️ Quick Setup:** Click the button for your client above, then use the configuration examples in the sections below. Just replace `YOUR_WANDB_API_KEY` with your actual API key from [wandb.ai/authorize](https://wandb.ai/authorize).
 
 ### 💻 Option 2: Local Development (STDIO)
 
@@ -68,15 +149,342 @@ Deploy your own HTTP server with API key authentication - great for team deploym
 
 ---
 
-## Installation
+## Hosted Server Setup (Recommended)
 
-### For Hosted Server Users
+**No installation required!** Just configure your MCP client to connect to our hosted server.
 
-No installation needed! Skip to [Client Configuration](#mcp-client-configuration-for-hosted-server).
+### Get Your W&B API Key
 
-### For Local Installation
+Get your Weights & Biases API key at: [https://wandb.ai/authorize](https://wandb.ai/authorize)
 
-These instructions are for running the MCP server locally (Options 2 & 3).
+### Configuration by Client Type
+
+Choose your MCP client below for easy hosted server setup. All configurations use the same hosted server URL: `https://mcp.withwandb.com/mcp`
+
+#### IDEs & Code Editors
+
+<details>
+<summary><b>Cursor IDE (Hosted Server)</b></summary>
+
+**Quick Setup:**
+1. Open Cursor settings → MCP
+2. Add the configuration below
+3. Replace `YOUR_WANDB_API_KEY` with your key from [wandb.ai/authorize](https://wandb.ai/authorize)
+4. Restart Cursor
+
+**Configuration for `.cursor/mcp.json` or `~/.cursor/mcp.json`:**
+
+```json
+{
+  "mcpServers": {
+    "wandb": {
+      "transport": "http",
+      "url": "https://mcp.withwandb.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_WANDB_API_KEY",
+        "Accept": "application/json, text/event-stream"
+      }
+    }
+  }
+}
+```
+
+✅ **That's it!** No installation, no dependencies, just configuration.
+</details>
+
+<details>
+<summary><b id="windsurf-ide-hosted-server">Windsurf IDE (Hosted Server)</b></summary>
+
+**Quick Setup:**
+1. Open Windsurf settings → MCP
+2. Add the configuration below
+3. Replace `YOUR_WANDB_API_KEY` with your key from [wandb.ai/authorize](https://wandb.ai/authorize)
+4. Restart Windsurf
+
+**Configuration for `mcp_config.json`:**
+
+```json
+{
+  "mcpServers": {
+    "wandb": {
+      "transport": "http",
+      "url": "https://mcp.withwandb.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_WANDB_API_KEY",
+        "Accept": "application/json, text/event-stream"
+      }
+    }
+  }
+}
+```
+
+✅ **That's it!** No installation required.
+</details>
+
+<details>
+<summary><b id="vscode-hosted-server">VSCode (Hosted Server)</b></summary>
+
+**Quick Setup:**
+1. Create a `.vscode/mcp.json` file in your project root
+2. Add the configuration below
+3. Replace `YOUR_WANDB_API_KEY` with your key from [wandb.ai/authorize](https://wandb.ai/authorize)
+4. Restart VSCode or reload the window
+
+**Configuration for `.vscode/mcp.json`:**
+
+```json
+{
+  "servers": {
+    "wandb": {
+      "transport": "http",
+      "url": "https://mcp.withwandb.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_WANDB_API_KEY",
+        "Accept": "application/json, text/event-stream"
+      }
+    }
+  }
+}
+```
+
+✅ **That's it!** No installation required.
+</details>
+
+#### AI Coding Agents
+
+<details>
+<summary><b id="claude-code-hosted">Claude Code (Hosted Server)</b></summary>
+
+**Quick Setup:**
+1. Install Claude Code if you haven't already
+2. Configure the MCP server with HTTP transport:
+   ```bash
+   claude mcp add wandb \
+     --transport http \
+     --url https://mcp.withwandb.com/mcp \
+     --header "Authorization: Bearer YOUR_WANDB_API_KEY" \
+     --header "Accept: application/json, text/event-stream"
+   ```
+3. Replace `YOUR_WANDB_API_KEY` with your key from [wandb.ai/authorize](https://wandb.ai/authorize)
+
+**Alternative: Manual Configuration**
+
+Edit your Claude Code MCP config file:
+```json
+{
+  "mcpServers": {
+    "wandb": {
+      "transport": "http",
+      "url": "https://mcp.withwandb.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_WANDB_API_KEY",
+        "Accept": "application/json, text/event-stream"
+      }
+    }
+  }
+}
+```
+
+✅ **That's it!** No local installation required.
+</details>
+
+<details>
+<summary><b id="github-codex">GitHub Copilot/Codex (Hosted Server)</b></summary>
+
+**Quick Setup:**
+
+GitHub Copilot doesn't directly support MCP servers, but you can use the W&B API through code comments:
+
+1. Install the W&B Python SDK in your project:
+   ```bash
+   pip install wandb
+   ```
+
+2. Use Copilot to generate W&B code by adding comments like:
+   ```python
+   # Log metrics to wandb project my-project
+   # Query the last 10 runs from wandb
+   ```
+
+**Note:** For direct MCP integration, consider using Cursor or VSCode with MCP extensions.
+</details>
+
+<details>
+<summary><b id="gemini-hosted-server">Gemini CLI (Hosted Server)</b></summary>
+
+**Quick Setup:**
+1. Create a `gemini-extension.json` file in your project:
+
+```json
+{
+  "name": "wandb-mcp-server",
+  "version": "0.1.0",
+  "mcpServers": {
+    "wandb": {
+      "transport": "http",
+      "url": "https://mcp.withwandb.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_WANDB_API_KEY",
+        "Accept": "application/json, text/event-stream"
+      }
+    }
+  }
+}
+```
+
+2. Replace `YOUR_WANDB_API_KEY` with your key from [wandb.ai/authorize](https://wandb.ai/authorize)
+
+3. Install the extension:
+   ```bash
+   gemini extensions install --path .
+   ```
+
+✅ **That's it!** No installation required.
+</details>
+
+#### AI Chat Clients
+
+<details>
+<summary><b id="chatgpt-hosted-server">ChatGPT (Actions)</b></summary>
+
+**Quick Setup:**
+
+To use the W&B MCP Server with ChatGPT, create a Custom GPT with Actions:
+
+1. Go to [ChatGPT](https://chat.openai.com) → Explore GPTs → Create
+2. In the "Actions" section, click "Create new action"
+3. Configure Authentication:
+   - **Authentication Type**: API Key
+   - **Auth Type**: Bearer
+   - **API Key**: `YOUR_WANDB_API_KEY`
+
+3. Add the OpenAPI schema:
+
+```json
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "W&B MCP Server",
+    "version": "1.0.0",
+    "description": "Access W&B experiment tracking and Weave traces"
+  },
+  "servers": [
+    {
+      "url": "https://mcp.withwandb.com"
+    }
+  ],
+  "paths": {
+    "/mcp": {
+      "post": {
+        "operationId": "callTool",
+        "summary": "Execute W&B MCP tools",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["tool", "params"],
+                "properties": {
+                  "tool": {
+                    "type": "string",
+                    "description": "The MCP tool to call"
+                  },
+                  "params": {
+                    "type": "object",
+                    "description": "Parameters for the tool"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+4. Test the action and publish your Custom GPT
+
+✅ **That's it!** ChatGPT can now access W&B data through Actions.
+</details>
+
+<details>
+<summary><b id="mistral-lechat-hosted-server">Mistral LeChat (Hosted Server)</b></summary>
+
+**Quick Setup:**
+1. Go to LeChat Settings → Custom MCP Connectors
+2. Click "Add MCP Connector"
+3. Configure with:
+   - **Server URL**: `https://mcp.withwandb.com/mcp`
+   - **Authentication**: Choose "API Key Authentication"
+   - **Token**: Enter your W&B API key from [wandb.ai/authorize](https://wandb.ai/authorize)
+
+✅ **That's it!** No installation required.
+</details>
+
+<details>
+<summary><b id="claude-desktop-hosted-server">Claude Desktop (Hosted Server)</b></summary>
+
+**Quick Setup:**
+1. [Download Claude Desktop](https://claude.ai/download) if you haven't already
+2. Open Claude Desktop
+3. Go to Settings → Features → Model Context Protocol
+4. Add the configuration below
+5. Replace `YOUR_WANDB_API_KEY` with your key from [wandb.ai/authorize](https://wandb.ai/authorize)
+6. Restart Claude Desktop
+
+**Configuration for `claude_desktop_config.json`:**
+
+```json
+{
+  "mcpServers": {
+    "wandb": {
+      "transport": "http",
+      "url": "https://mcp.withwandb.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_WANDB_API_KEY",
+        "Accept": "application/json, text/event-stream"
+      }
+    }
+  }
+}
+```
+
+✅ **That's it!** No installation required.
+</details>
+
+<details>
+<summary><b id="other-web-clients">Other Web Clients</b></summary>
+
+**Quick Setup:**
+1. Use our hosted public version: [HF Spaces](https://wandb-wandb-mcp-server.hf.space)
+2. Configure your `WANDB_API_KEY` directly in the interface
+3. Follow the instructions in the space to add it to your preferred client
+
+This version allows you to access your own projects with your API key or work with all public projects otherwise.
+
+✅ **That's it!** No installation required.
+</details>
+
+---
+
+## 💻 Local Installation (Advanced Users)
+
+If you prefer to run the MCP server locally or need custom configurations, follow these instructions.
 
 ### Prerequisites
 
@@ -132,50 +540,12 @@ The server includes [wandbot](https://github.com/wandb/wandbot) support for answ
 
 See `env.example` for optional configuration like custom wandbot instances or other advanced settings.
 
-### MCP Client Configuration for Hosted Server
-
-To use the hosted server, configure your MCP client with the following settings:
-
-<details>
-<summary><b>🖱️ Cursor IDE (Hosted Server)</b></summary>
-
-Add to `.cursor/mcp.json` or `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "wandb": {
-      "transport": "http",
-      "url": "https://mcp.withwandb.com/mcp",
-      "headers": {
-        "Authorization": "Bearer YOUR_WANDB_API_KEY",
-        "Accept": "application/json, text/event-stream"
-      }
-    }
-  }
-}
-```
-
-Replace `YOUR_WANDB_API_KEY` with your actual W&B API key from [wandb.ai/authorize](https://wandb.ai/authorize).
-</details>
-
-<details>
-<summary><b>🎨 Mistral LeChat (Hosted Server)</b></summary>
-
-1. Go to LeChat Settings → Custom MCP Connectors
-2. Click "Add MCP Connector"
-3. Configure with:
-   - **Server URL**: `https://mcp.withwandb.com/mcp`
-   - **Authentication**: Choose "API Key Authentication"
-   - **Token**: Enter your W&B API key
-</details>
-
 ### MCP Client Setup for Local Server
 
 Choose your MCP client from the options below for local server setup:
 
 <details>
-<summary><b>🖱️ Cursor IDE</b></summary>
+<summary><b>Cursor IDE</b></summary>
 
 **Quick Install (Project-specific):**
 ```bash
@@ -213,7 +583,7 @@ Add to `.cursor/mcp.json` or `~/.cursor/mcp.json`:
 </details>
 
 <details>
-<summary><b>🌊 Windsurf IDE</b></summary>
+<summary><b>Windsurf IDE</b></summary>
 
 **Quick Install:**
 ```bash
@@ -246,7 +616,7 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 </details>
 
 <details>
-<summary><b>💬 Gemini</b></summary>
+<summary><b>Gemini</b></summary>
 **Quick Install:**
 
 1. Make sure to have your API key exported:
@@ -320,7 +690,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 </details>
 
 <details>
-<summary><b>💻 Claude Code</b></summary>
+<summary><b id="claude-code">💻 Claude Code</b></summary>
 
 **Quick Install:**
 ```bash
@@ -333,28 +703,7 @@ claude mcp add wandb -e WANDB_API_KEY=your-api-key -- uvx --from git+https://git
 ```
 </details>
 
-<details>
-<summary><b>🌐 ChatGPT, LeChat, Claude</b></summary>
-Try our hosted public version: [HF Spaces](https://wandb-wandb-mcp-server.hf.space)
 
-This version allows you to configure your WANDB_API_KEY directly in the interface to access your own projects or to work with all publich projects otherwise. Follow the instructions in the space to add it to LeChat, ChatGPT, or Claude. We'll have an official hosted version soon.
-</details>
-
-## Available Tools
-
-The server provides the following MCP tools:
-
-### W&B Models Tools
-- **`query_wandb_tool`** - Execute GraphQL queries against W&B experiment tracking data (runs, sweeps, artifacts)
-
-### Weave Tools  
-- **`query_weave_traces_tool`** - Query LLM traces and evaluations with filtering and pagination
-- **`count_weave_traces_tool`** - Efficiently count traces without returning data
-
-### Support & Reporting
-- **`query_wandb_support_bot`** - Get help from [wandbot](https://github.com/wandb/wandbot), our RAG-powered technical support agent that can answer any W&B/Weave questions, help debug issues, and provide code examples (works out-of-the-box, no configuration needed!)
-- **`create_wandb_report_tool`** - Create W&B Reports with markdown and visualizations
-- **`query_wandb_entity_projects`** - List available entities and projects
 
 ## Usage Tips
 
