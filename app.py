@@ -23,9 +23,10 @@ os.environ["WANDB_SILENT"] = "True"
 os.environ["WEAVE_SILENT"] = "True"
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import FastMCP
+import base64
 
 # Import W&B setup functions
 from wandb_mcp_server.server import (
@@ -51,6 +52,14 @@ logger = logging.getLogger("wandb-mcp-server")
 INDEX_HTML_PATH = Path(__file__).parent / "index.html"
 with open(INDEX_HTML_PATH, "r") as f:
     INDEX_HTML_CONTENT = f.read()
+
+# W&B Logo Favicon - Exact copy from wandb.ai/site
+# This is the official favicon PNG (32x32) used on https://wandb.ai
+# Downloaded from: https://cdn.wandb.ai/production/ff061fe17/favicon.png
+WANDB_FAVICON_BASE64 = """iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAUVBMVEUAAAD/zzD/zzD/zzD/zjH/yzD/zDP/zDP/zTL/zDP/zTL/yzL/yzL/zDL/zDL/zDP/zDP/zDP/zDP/yzL/yzP/zDL/zDL/zDL/zDL/zDP/zDNs+ITNAAAAGnRSTlMAECAwP0BQX2BvcICPkJ+gr7C/wM/Q3+Dv8ORN9PUAAAEOSURBVBgZfcEJkpswAADBEVphB0EwzmJg/v/QcKbKC3E3FI/xN5fa8VEAjRq5ENUGaNXIhai2QBrsOJTf3yWHziHxw6AvPpl04pOsmXehfvksOYTAoXz6qgONi8hJdNEwuMicZBcvXGVOsit6FxWboq4LNpWLntLZFNj0+s0mTM5KSLmpAjtn7ELV5MQPnXZ8VJacxFvgUrhFZnc1cCGod6BTE7t7Xd/YJbUDKjWw6Zw92AS1AsK9SWyiq4JNau6BN8lV4n+Sq8Sb8PXri93gbOBNGtUnm6Kbpq7gUDDrXFRc6B0TuMqcJbWFyUXmLKoNtC4SmzyOmUMztAUUf9TMbtKRk8g/gw58UvZ9yZu/MeoYEFwSwuAAAAAASUVORK5CYII=""".strip()
+
+# Use the official favicon directly
+FAVICON_BASE64 = WANDB_FAVICON_BASE64
 
 # Initialize W&B
 logger.info("Initializing W&B configuration...")
@@ -119,6 +128,18 @@ async def auth_middleware(request, call_next):
 async def index():
     """Serve the landing page."""
     return INDEX_HTML_CONTENT
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Serve the official W&B logo favicon (exact copy from wandb.ai)."""
+    return Response(
+        content=base64.b64decode(FAVICON_BASE64),
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=31536000",  # Cache for 1 year
+            "Content-Type": "image/x-icon"  # Standard favicon content type
+        }
+    )
 
 # Removed OAuth endpoints - only API key authentication is supported
 # See AUTH_README.md for details on why full OAuth isn't feasible
