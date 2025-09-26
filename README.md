@@ -36,49 +36,12 @@ Query and analyze your Weights & Biases data using natural language through the 
 <details open>
 <summary><strong>Example Use Cases</strong> (click command to copy)</summary>
 
-<table>
-<tr>
-<td width="25%">
+| **Analyze Experiments** | **Debug Traces** | **Create Reports** | **Get Help** |
+|:---|:---|:---|:---|
+| Show me the top 5 runs by eval/accuracy in wandb-smle/hiring-agent-demo-public? | How did the latency of my hiring agent predict traces evolve over the last months? | Generate a wandb report comparing the decisions made by the hiring agent last month | How do I create a leaderboard in Weave - ask SupportBot? |
 
-**Analyze Experiments**
-```text
-Show me the top 5 runs 
-by eval/accuracy in 
-wandb-smle/hiring-agent-demo-public?
-```
-
-</td>
-<td width="25%">
-
-**Debug Traces**
-```text
-How did the latency of 
-my hiring agent predict traces 
-evolve over the last months?
-```
-
-</td>
-<td width="25%">
-
-**Create Reports**
-```text
-Generate a wandb report 
-comparing the decisions made
-by the hiring agent last month
-```
-
-</td>
-<td width="25%">
-
-**Get Help**
-```text
-How do I create a leaderboard
-in Weave - ask SupportBot?
-```
-
-</td>
-</tr>
-</table>
+New tools for auto-clustering coming soon:<br>
+*"Go through the last 100 traces of my last training run in grpo-cuda/axolotl-grpo and tell me why rollout traces of my RL experiment were bad sometimes?"*
 </details>
 
 <details>
@@ -410,7 +373,13 @@ The W&B MCP Server uses **pure stateless architecture** for excellent performanc
 | **Success Rate** | 100% up to capacity |
 | **Scaling** | Horizontal (add workers) |
 
-> 📖 See [Architecture Guide](ARCHITECTURE.md) for technical details
+> 📖 See [Architecture Guide](docs/ARCHITECTURE.md) for technical details
+
+### Documentation & Testing
+
+- **📚 Documentation**: [docs/](docs/) - Architecture, authentication, debugging guides
+- **🧪 Testing Guide**: [tests/README.md](tests/README.md) - Comprehensive testing instructions
+- **🚀 Load Testing**: [tests/load_test.py](tests/load_test.py) - Performance and stress testing
 
 ### Key Resources
 

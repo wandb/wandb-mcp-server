@@ -23,7 +23,7 @@ if not ANTHROPIC_API_KEY:
     )
 
 TEST_WANDB_ENTITY = "wandb-applied-ai-team"  # "c-metrics"
-TEST_WANDB_PROJECT = "wandb-mcp-tests"
+TEST_WANDB_PROJECT = "mcp-tests"
 model_name = "claude-3-7-sonnet-20250219"
 
 available_tools = {
