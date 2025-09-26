@@ -8,6 +8,7 @@ import requests
 from wandb_mcp_server.weave_api.query_builder import QueryBuilder
 from wandb_mcp_server.mcp_tools.tools_utils import get_retry_session
 from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.api_client import WandBApiManager
 
 logger = get_rich_logger(__name__)
 
@@ -176,11 +177,11 @@ def count_traces(
     """
     project_id = f"{entity_name}/{project_name}"
 
-    # Get API key from environment (set by auth middleware for HTTP, or by user for STDIO)
-    api_key = os.environ.get("WANDB_API_KEY")
+    # Get API key from context (set by auth middleware) or environment
+    api_key = WandBApiManager.get_api_key()
     if not api_key:
-        logger.error("WANDB_API_KEY not found in environment variables.")
-        raise ValueError("WANDB_API_KEY is required to query Weave traces count.")
+        logger.error("W&B API key not found in context or environment variables.")
+        raise ValueError("W&B API key is required to query Weave traces count.")
     
     # Debug logging to diagnose API key issues
     logger.debug(f"Using W&B API key: length={len(api_key)}, "

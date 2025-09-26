@@ -3,17 +3,20 @@ from typing import Any, Dict, List, Optional
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.weave_api.service import TraceService
 from wandb_mcp_server.weave_api.models import QueryResult
+from wandb_mcp_server.api_client import WandBApiManager
 
 logger = get_rich_logger(__name__)
 
-# Lazy load the trace service to avoid requiring API key at import time
-_trace_service = None
-
 def get_trace_service():
-    global _trace_service
-    if _trace_service is None:
-        _trace_service = TraceService()
-    return _trace_service
+    """
+    Get a TraceService instance with the current request's API key.
+    
+    This creates a new TraceService for each request to ensure
+    the correct API key is used from the context.
+    """
+    # Get the API key from context (set by auth middleware) or environment
+    api_key = WandBApiManager.get_api_key()
+    return TraceService(api_key=api_key)
 
 QUERY_WEAVE_TRACES_TOOL_DESCRIPTION = """
 Query Weave traces, trace metadata, and trace costs with filtering and sorting options.

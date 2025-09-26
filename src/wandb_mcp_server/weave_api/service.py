@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from wandb_mcp_server.utils import get_rich_logger, get_server_args
 from wandb_mcp_server.weave_api.client import WeaveApiClient
+from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.weave_api.models import QueryResult
 from wandb_mcp_server.weave_api.processors import TraceProcessor
 from wandb_mcp_server.weave_api.query_builder import QueryBuilder
@@ -75,11 +76,10 @@ class TraceService:
             retries: Number of retries for failed requests.
             timeout: Request timeout in seconds.
         """
-        # If no API key provided, try to get from environment
+        # If no API key provided, try to get from context or environment
         if api_key is None:
-            import os
-            # Try to get from environment (set by auth middleware for HTTP or user for STDIO)
-            api_key = os.environ.get("WANDB_API_KEY")
+            # Try to get from context (set by auth middleware) or environment
+            api_key = WandBApiManager.get_api_key()
             
             # If still no key, try get_server_args as fallback
             if not api_key:

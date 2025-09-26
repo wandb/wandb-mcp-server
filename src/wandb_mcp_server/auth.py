@@ -137,18 +137,21 @@ async def mcp_auth_middleware(request: Request, call_next):
         # Store the API key in request state for W&B operations
         request.state.wandb_api_key = wandb_api_key
         
-        # Set the API key for this request
-        # Note: We don't restore the original value because with streaming responses,
-        # the tool execution happens after call_next returns. Each request sets its own key.
-        os.environ["WANDB_API_KEY"] = wandb_api_key
+        # Set the API key in context for this request
+        # Tools will use WandBApiManager.get_api_key() to retrieve it
+        from wandb_mcp_server.api_client import WandBApiManager
+        token = WandBApiManager.set_context_api_key(wandb_api_key)
         
         # Debug logging
-        logger.debug(f"Auth middleware: Set WANDB_API_KEY with length={len(wandb_api_key)}, "
+        logger.debug(f"Auth middleware: Set API key in context with length={len(wandb_api_key)}, "
                     f"is_40_chars={len(wandb_api_key) == 40}")
         
-        # Continue processing without restoring the env var
-        # Each request will set its own API key
-        response = await call_next(request)
+        try:
+            # Continue processing the request
+            response = await call_next(request)
+        finally:
+            # Reset the context after request processing
+            WandBApiManager.reset_context_api_key(token)
         
         return response
         

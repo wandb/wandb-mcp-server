@@ -71,7 +71,9 @@ def list_entity_projects(entity: str | None = None) -> dict[str, list[dict[str, 
     """
     # Initialize wandb API
     # Will use WANDB_API_KEY from environment (set by auth middleware or user)
-    api = wandb.Api()
+    # Get API instance with proper key handling
+    from wandb_mcp_server.api_client import get_wandb_api
+    api = get_wandb_api()
 
     # Merge entity and teams into a single list
     if entity is None:

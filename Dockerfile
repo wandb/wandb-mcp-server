@@ -42,5 +42,13 @@ ENV HOME=/tmp
 # Expose port for HTTP transport
 EXPOSE 7860
 
-# Run the application
-CMD ["python", "app.py"]
+# Run with single worker using Uvicorn's async event loop
+# MCP protocol requires stateful session management (in-memory sessions)
+# Single async worker handles high concurrency via event loop (1000+ concurrent connections)
+CMD ["uvicorn", "app:app", \
+     "--host", "0.0.0.0", \
+     "--port", "7860", \
+     "--workers", "1", \
+     "--log-level", "info", \
+     "--timeout-keep-alive", "120", \
+     "--limit-concurrency", "1000"]

@@ -129,8 +129,19 @@ def create_report(
         processing_warnings.append(f"Unexpected plots_html type: {type(plots_html)}, no charts will be included")
         processed_plots_html = None
 
+    # Get the current API key from context
+    from wandb_mcp_server.api_client import WandBApiManager
+    api_key = WandBApiManager.get_api_key()
+    
+    # Store original environment key
+    import os
+    old_key = os.environ.get("WANDB_API_KEY")
+    
     try:
-        # W&B will use WANDB_API_KEY from environment
+        # Set API key temporarily for wandb.init()
+        if api_key:
+            os.environ["WANDB_API_KEY"] = api_key
+        
         wandb.init(
             entity=entity_name, project=project_name, job_type="mcp_report_creation"
         )
@@ -194,6 +205,12 @@ def create_report(
         if processing_warnings:
             error_msg += f"\n\nProcessing details: {'; '.join(processing_warnings)}"
         raise Exception(error_msg)
+    finally:
+        # Restore original environment variable
+        if old_key:
+            os.environ["WANDB_API_KEY"] = old_key
+        elif "WANDB_API_KEY" in os.environ:
+            del os.environ["WANDB_API_KEY"]
 
 
 def edit_report(

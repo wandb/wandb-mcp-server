@@ -60,7 +60,7 @@ from wandb_mcp_server.utils import get_rich_logger, get_server_args, ServerMCPAr
 # Export key functions for HF Spaces app
 __all__ = [
     'validate_and_get_api_key',
-    'setup_wandb_login',
+    'validate_api_key',
     'configure_wandb_logging',
     'initialize_weave_tracing',
     'create_mcp_server',
@@ -86,37 +86,26 @@ logger = get_rich_logger(
 # SECTION 1: W&B AUTHENTICATION & API KEY SETUP
 # ===============================================================================
 
-def setup_wandb_login(api_key: str) -> None:
+def validate_api_key(api_key: str) -> bool:
     """
-    Setup W&B login with suppressed output to avoid interfering with MCP protocol.
+    Validate a W&B API key by attempting to use it.
     
     Args:
-        api_key: The W&B API key to use for authentication
+        api_key: The W&B API key to validate
         
-    Raises:
-        Exception: If login fails
+    Returns:
+        True if the API key is valid, False otherwise
     """
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-    sys.stdout = captured_stdout = io.StringIO()
-    sys.stderr = captured_stderr = io.StringIO()
-    
     try:
-        logger.info("Attempting explicit W&B login...")
-        wandb.login(key=api_key)
-        login_msg_stdout = captured_stdout.getvalue().strip()
-        login_msg_stderr = captured_stderr.getvalue().strip()
-        if login_msg_stdout:
-            logger.info(f"Suppressed stdout during W&B login: {login_msg_stdout}")
-        if login_msg_stderr:
-            logger.info(f"Suppressed stderr during W&B login: {login_msg_stderr}")
-        logger.info("W&B login successful.")
+        # Try to create an API instance and fetch the viewer
+        # This validates the key without setting any global state
+        api = wandb.Api(api_key=api_key)
+        _ = api.viewer  # This will fail if the key is invalid
+        logger.info("W&B API key validated successfully.")
+        return True
     except Exception as e:
-        logger.error(f"Error during W&B login: {e}")
-        raise
-    finally:
-        sys.stdout = original_stdout
-        sys.stderr = original_stderr
+        logger.error(f"Invalid W&B API key: {e}")
+        return False
 
 
 def validate_and_get_api_key(args: ServerMCPArgs) -> Optional[str]:
@@ -464,9 +453,9 @@ def cli():
     # Validate and get API key
     api_key = validate_and_get_api_key(args)
     
-    # Perform W&B login only if we have an API key
+    # Validate API key if we have one (but don't set global state)
     if api_key:
-        setup_wandb_login(api_key)
+        validate_api_key(api_key)
     
     # Initialize Weave tracing for MCP tool calls
     weave_initialized = initialize_weave_tracing()
