@@ -362,22 +362,9 @@ Server URL: `https://YOUR-SPACE.hf.space/mcp`
 
 ## More Information
 
-### Architecture & Performance
-
-The W&B MCP Server uses **pure stateless architecture** for excellent performance:
-
-| Metric | Performance |
-|--------|------------|
-| **Concurrent Connections** | 500+ (hosted) / 1000+ (local) |
-| **Throughput** | ~35 req/s (hosted) / ~50 req/s (local) |
-| **Success Rate** | 100% up to capacity |
-| **Scaling** | Horizontal (add workers) |
-
-> 📖 See [Architecture Guide](docs/ARCHITECTURE.md) for technical details
-
 ### Documentation & Testing
 
-- **📚 Documentation**: [docs/](docs/) - Architecture, authentication, debugging guides
+- **📚 Documentation**: [docs/](docs/) - Development and debugging guides
 - **🧪 Testing Guide**: [tests/README.md](tests/README.md) - Comprehensive testing instructions
 - **🚀 Load Testing**: [tests/load_test.py](tests/load_test.py) - Performance and stress testing
 

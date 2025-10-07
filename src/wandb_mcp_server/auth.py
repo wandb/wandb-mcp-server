@@ -143,8 +143,7 @@ async def mcp_auth_middleware(request: Request, call_next):
         token = WandBApiManager.set_context_api_key(wandb_api_key)
         
         # Debug logging
-        logger.debug(f"Auth middleware: Set API key in context with length={len(wandb_api_key)}, "
-                    f"is_40_chars={len(wandb_api_key) == 40}")
+        logger.debug(f"Auth middleware: Set API key in context with length={len(wandb_api_key)}")
         
         try:
             # Continue processing the request

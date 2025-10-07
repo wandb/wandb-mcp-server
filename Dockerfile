@@ -1,13 +1,18 @@
-FROM python:3.11-slim
+# Use Chainguard base image for enhanced security
+FROM us-central1-docker.pkg.dev/wandb-mcp-production/chainguard-pull-through/coreweave/chainguard-base:latest
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install Python and build dependencies
+RUN apk add --no-cache \
+    python3 \
+    py3-pip \
+    python3-dev \
+    build-base \
     git \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates
 
 # Copy requirements first for better caching
 COPY requirements.txt .
@@ -19,8 +24,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 COPY pyproject.toml .
 
-# Install the package in development mode
-RUN pip install -e .
+# Install the package in production mode (not editable)
+RUN pip install .
 
 # Copy the app entry point and landing page
 COPY app.py .
@@ -38,6 +43,13 @@ ENV WANDB_CACHE_DIR=/tmp/.wandb_cache
 ENV WANDB_CONFIG_DIR=/tmp/.wandb_config
 ENV WANDB_DATA_DIR=/tmp/.wandb_data
 ENV HOME=/tmp
+
+# Create non-root user and set ownership
+RUN adduser -D -u 1000 wandb && \
+    chown -R wandb:wandb /app /tmp
+
+# Switch to non-root user
+USER wandb
 
 # Expose port for HTTP transport
 EXPOSE 7860
