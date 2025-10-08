@@ -193,11 +193,20 @@ async def thread_safe_auth_middleware(request: Request, call_next):
                 # Reset context variable
                 WandBApiManager.reset_context_api_key(token)
         else:
-            # No API key available - in stateless mode, this is expected to fail
-            logger.warning(f"No Bearer token provided for {request.url.path}")
-            logger.debug(f"   Request method: {request.method}")
-            logger.debug("   Passing to MCP (will likely return 401)")
-            return await call_next(request)
+            # No API key provided - return 401 immediately to challenge the client
+            # This is required for proper OAuth 2.1 / HTTP authentication flow
+            logger.warning(f"No Bearer token provided for {request.url.path} - returning 401")
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": "Authorization required",
+                    "message": "Please provide your W&B API key as a Bearer token",
+                    "instructions": "Get your API key at: https://wandb.ai/authorize"
+                },
+                headers={
+                    "WWW-Authenticate": 'Bearer realm="W&B MCP", charset="UTF-8"'
+                }
+            )
         
     except Exception as e:
         logger.error(f"Authentication error: {e}")
