@@ -132,18 +132,22 @@ def create_report(
     # Get the current API key from context
     from wandb_mcp_server.api_client import WandBApiManager
     api_key = WandBApiManager.get_api_key()
-    
-    # Store original environment key
-    import os
-    old_key = os.environ.get("WANDB_API_KEY")
-    
+
     try:
-        # Set API key temporarily for wandb.init()
+        # For non-TTY environments (like Docker), we need to login first
         if api_key:
-            os.environ["WANDB_API_KEY"] = api_key
+            # Use wandb.login() to set the API key globally for this session
+            # This is more reliable in containerized environments than Settings(api_key=...)
+            wandb.login(key=api_key, relogin=True, force=True, verify=False)
+            logger.info("Successfully logged into W&B with provided API key")
+        else:
+            logger.warning("No API key available for W&B login")
         
+        # Now init without needing to pass the API key explicitly
         wandb.init(
-            entity=entity_name, project=project_name, job_type="mcp_report_creation"
+            entity=entity_name,
+            project=project_name,
+            job_type="mcp_report_creation",
         )
 
         # Initialize the report
@@ -205,12 +209,7 @@ def create_report(
         if processing_warnings:
             error_msg += f"\n\nProcessing details: {'; '.join(processing_warnings)}"
         raise Exception(error_msg)
-    finally:
-        # Restore original environment variable
-        if old_key:
-            os.environ["WANDB_API_KEY"] = old_key
-        elif "WANDB_API_KEY" in os.environ:
-            del os.environ["WANDB_API_KEY"]
+
 
 
 def edit_report(
