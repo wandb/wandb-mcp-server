@@ -305,60 +305,17 @@ ngrok http 8080
 </details>
 
 <details>
-<summary><strong>Option 3: Self-Hosted HTTP Server</strong></summary>
+<summary><strong>Option 3: Self-Hosted HTTP Server (Advanced)</strong></summary>
 
-Deploy your own W&B MCP server for team-wide access or custom infrastructure requirements. This option gives you complete control over deployment, security, and scaling while maintaining compatibility with all MCP clients. Perfect for organizations that need on-premises deployment or want to integrate with existing infrastructure.
+This public repository focuses on the STDIO transport. If you need a fully managed HTTP deployment (Docker, Cloud Run, Hugging Face, etc.), start from this codebase and add your own HTTP entrypoint in a separate repo. The production-grade hosted server maintained by W&B now lives in a private repository built on top of this one.
 
-### Using Docker
-
-```bash
-# Client-authenticated mode (recommended - no server API key needed)
-docker run -p 7860:7860 ghcr.io/wandb/wandb-mcp-server
-```
-
-**Note**: HTTP deployment uses **client-authenticated mode**. Clients must provide their W&B API key via Bearer token. See [CLIENT_AUTH_MODE.md](CLIENT_AUTH_MODE.md) for details.
-
-### From Source
+For lightweight experimentation you can still run the FastMCP HTTP transport directly:
 
 ```bash
-# Clone repository
-git clone https://github.com/wandb/wandb-mcp-server
-cd wandb-mcp-server
-
-# Install and run (no WANDB_API_KEY needed)
-uv pip install -r requirements.txt
-uv run app.py
+uvx wandb_mcp_server --transport http --host 0.0.0.0 --port 8080
 ```
 
-### Deploy to HuggingFace Spaces
-
-1. Fork [wandb-mcp-server](https://github.com/wandb/wandb-mcp-server)
-2. Create new Space on [Hugging Face](https://huggingface.co/spaces)
-3. Choose "Docker" SDK
-4. Connect your fork
-5. Deploy (no WANDB_API_KEY secret needed - clients provide their own)
-
-Server URL: `https://YOUR-SPACE.hf.space/mcp`
-
-**Authentication**: All clients must include `Authorization: Bearer <WANDB_API_KEY>` header in requests.
-
-### Deploy to Google Cloud Run
-
-For production deployments with enhanced security (HMAC-SHA256 session management):
-
-```bash
-# Use the automated deployment script
-./deploy.sh
-```
-
-The script handles:
-- ✅ Service account configuration
-- ✅ HMAC-SHA256 API key hashing
-- ✅ Multi-tenant session isolation
-- ✅ Automatic deployment logging
-- ✅ Health check verification
-
-See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed documentation.
+Clients must continue to provide their own W&B API key via Bearer token per the MCP spec.
 </details>
 
 ---
