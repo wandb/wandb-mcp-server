@@ -1,0 +1,14 @@
+{
+    "name": "wandb-mcp-server",
+    "version": "0.1.0",
+    "mcpServers": {
+      "wandb": {
+        "httpUrl": "https://mcp.withwandb.com/mcp",
+        "trust": true,
+        "headers": {
+            "Authorization": "Bearer $WANDB_API_KEY",
+            "Accept": "application/json, text/event-stream"
+        }
+      }
+    }
+  }
