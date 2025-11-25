@@ -325,15 +325,30 @@ def get_retry_session(
     return session
 
 
-def log_tool_call(tool_name: str, viewer: Any, params: Dict[str, Any]) -> None:
+def log_tool_call(tool_name: str, viewer: Any, params: Dict[str, Any], session_id: str = None) -> None:
     """
     Minimal helper to log tool calls consistently across mcp_tools.
 
-    No truncation/redaction.
+    No truncation/redaction for debug logs, but analytics tracking is sanitized.
     """
     logger = get_rich_logger("mcp_tools")
     try:
         logger.info(f"ToolCall name={tool_name} viewer={viewer} params={params}")
+
+        # Track tool call for analytics
+        try:
+            from wandb_mcp_server.analytics import get_analytics_tracker
+            tracker = get_analytics_tracker()
+            tracker.track_tool_call(
+                tool_name=tool_name,
+                session_id=session_id,
+                viewer_info=viewer,
+                params=params,
+                success=True
+            )
+        except Exception:
+            # Never fail tool execution due to analytics
+            pass
     except Exception:
         # Never fail tool execution due to logging
         pass
