@@ -58,9 +58,11 @@ When asking broad, general questions such as "what are my best performing runs/e
 
 ## Quick Start
 
-We recommend using our **hosted server** at `https://mcp.withwandb.com` - no installation required!
+We recommend using our **hosted server** at `https://mcp.withwandb.com` - no installation required! <br>
 
-> 🔑 Get your API key from [wandb.ai/authorize](https://wandb.ai/authorize)
+> 🔑 Get your API key from [wandb.ai/authorize](https://wandb.ai/authorize) <br>
+
+> 🌐 To connect to a **W&B Dedicated / On-Prem Instance** currently only the **local** MCP configuration can be used with an additional `WANDB_BASE_URL` env variable (the default is `api.wandb.ai`)
 
 ### Cursor
 <details>
@@ -73,36 +75,6 @@ We recommend using our **hosted server** at `https://mcp.withwandb.com` - no ins
    - **Name**: `wandb`
    - **URL**: `https://mcp.withwandb.com/mcp`
    - **API Key**: Your W&B API key
-
-For local installation, see [Option 2](#option-2-local-development-stdio) below.
-</details>
-
-### Claude Desktop
-<details>
-<summary>Configuration setup</summary>
-
-Add to your Claude config file:
-
-   ```bash
-# macOS
-open ~/Library/Application\ Support/Claude/claude_desktop_config.json
-
-# Windows
-notepad %APPDATA%\Claude\claude_desktop_config.json
-```
-
-```json
-{
-  "mcpServers": {
-    "wandb": {
-      "url": "https://mcp.withwandb.com/mcp",
-      "apiKey": "YOUR_WANDB_API_KEY"
-    }
-  }
-}
-```
-
-Restart Claude Desktop to activate.
 
 For local installation, see [Option 2](#option-2-local-development-stdio) below.
 </details>
@@ -132,6 +104,31 @@ print(resp.output_text)
 > **Note**: OpenAI's MCP is server-side, so localhost URLs won't work. For local servers, see [Option 2](#option-2-local-development-stdio) with ngrok.
 </details>
 
+### Claude Code
+<details>
+<summary>One-command installation</summary>
+
+```bash
+# run in terminal
+claude mcp add --transport http wandb https://mcp.withwandb.com/mcp --header "Authorization: Bearer <your-api-key-here>"
+```
+
+For local installation, see [Option 2](#option-2-local-development-stdio) below.
+</details>
+
+### OpenAI Codex
+<details>
+<summary>One-command installation</summary>
+
+```bash
+# run in terminal
+export WANDB_API_KEY=<your-api-key>
+codex mcp add wandb --url https://mcp.withwandb.com/mcp --bearer-token-env-var WANDB_API_KEY
+```
+
+For local installation, see [Option 2](#option-2-local-development-stdio) below.
+</details>
+
 ### Gemini CLI
 <details>
 <summary>One-command installation</summary>
@@ -149,30 +146,20 @@ The extension will use the configuration from `gemini-extension.json` pointing t
 For local installation, see [Option 2](#option-2-local-development-stdio) below.
 </details>
 
-### Mistral LeChat
-<details>
-<summary>Configuration setup</summary>
-
-In LeChat settings, add an MCP server:
-- **URL**: `https://mcp.withwandb.com/mcp`
-- **API Key**: Your W&B API key
-
-For local installation, see [Option 2](#option-2-local-development-stdio) below.
-</details>
-
 ### VSCode
 <details>
 <summary>Settings configuration</summary>
 
 ```bash
 # Open settings
-code ~/.config/Code/User/settings.json
+code ~/.vscode/mcp.json # or global mcp.json file
 ```
 
 ```json
 {
-  "mcp.servers": {
+  "servers": {
     "wandb": {
+      "type": "http",
       "url": "https://mcp.withwandb.com/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_WANDB_API_KEY"
@@ -184,6 +171,50 @@ code ~/.config/Code/User/settings.json
 
 For local installation, see [Option 2](#option-2-local-development-stdio) below.
 </details>
+
+### Mistral Chat
+<details>
+<summary>Configuration setup</summary>
+  Mistral is currently the best supported Chat assistant based on API-key based authentication. 
+  Simply navigate to "[Connectors](https://mistral.ai/news/le-chat-mcp-connectors-memories)" and 1) paste in the URL `https://mcp.withwandb.com/mcp` and 2) select API Key Authentication and paste WANDB API key. 
+</details>
+
+### Claude Desktop
+<details>
+<summary>Configuration setup</summary>
+
+Add to your Claude config file. Claude desktop currently doesn't support remote MCPs to be added so we're adding the local MCP. Be careful to add the full path to `uv` for the command because Claude Desktop potentially doesn't find your `uv` installation otherwise. 
+
+   ```bash
+# macOS
+open ~/Library/Application\ Support/Claude/claude_desktop_config.json
+
+# Windows
+notepad %APPDATA%\Claude\claude_desktop_config.json
+```
+
+```json
+{
+  "mcpServers": {
+    "wandb": {
+     "command": "/Users/niware_wb/.local/bin/uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/wandb/wandb-mcp-server",
+        "wandb_mcp_server"
+      ],
+      "env": {
+        "WANDB_API_KEY": "<your-api-key>"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop to activate.
+</details>
+
+We're working on adding OAuth support so that we can integrate with ChatGPT. 
 
 ---
 
