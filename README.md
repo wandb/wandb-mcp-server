@@ -123,6 +123,7 @@ resp = client.responses.create(
         "type": "mcp",
         "server_url": "https://mcp.withwandb.com/mcp",
         "authorization": os.getenv('WANDB_API_KEY'),
+        "server_label": "WandB_MCP",
     }],
     input="How many traces are in my project?"
 )
