@@ -68,15 +68,10 @@ We recommend using our **hosted server** at `https://mcp.withwandb.com` - no ins
 <details>
 <summary>One-click installation</summary>
 
-1. Open Cursor Settings (`⌘,` or `Ctrl,`)
-2. Navigate to **Features** → **Model Context Protocol**
-3. Click **"Install from Registry"** or **"Add MCP Server"**
-4. Search for "wandb" or enter:
-   - **Name**: `wandb`
-   - **URL**: `https://mcp.withwandb.com/mcp`
-   - **API Key**: Your W&B API key
+  * Click on the button above to automatically add the config to Cursor
+  * Then add your WANDB_API_KEY in the respective field `Bearer YOUR_API_KEY` and connect
 
-For local installation, see [Option 2](#option-2-local-development-stdio) below.
+For manual or local installation, see [Option 2](#general-installation-guide) below. 
 </details>
 
 ### OpenAI Response API
@@ -102,7 +97,7 @@ resp = client.responses.create(
 print(resp.output_text)
 ```
 
-> **Note**: OpenAI's MCP is server-side, so localhost URLs won't work. For local servers, see [Option 2](#option-2-local-development-stdio) with ngrok.
+> **Note**: OpenAI's MCP is server-side, so localhost URLs won't work. For local servers, see [Option 2](#general-installation-guide) with ngrok.
 </details>
 
 ### Claude Code
@@ -114,7 +109,7 @@ print(resp.output_text)
 claude mcp add --transport http wandb https://mcp.withwandb.com/mcp --header "Authorization: Bearer <your-api-key-here>"
 ```
 
-For local installation, see [Option 2](#option-2-local-development-stdio) below.
+For local installation, see [Option 2](#general-installation-guide) below.
 </details>
 
 ### OpenAI Codex
@@ -127,7 +122,7 @@ export WANDB_API_KEY=<your-api-key>
 codex mcp add wandb --url https://mcp.withwandb.com/mcp --bearer-token-env-var WANDB_API_KEY
 ```
 
-For local installation, see [Option 2](#option-2-local-development-stdio) below.
+For local installation, see [Option 2](#general-installation-guide) below.
 </details>
 
 ### Gemini CLI
@@ -144,7 +139,7 @@ gemini extensions install https://github.com/wandb/wandb-mcp-server
 
 The extension will use the configuration from `gemini-extension.json` pointing to the hosted server.
 
-For local installation, see [Option 2](#option-2-local-development-stdio) below.
+For local installation, see [Option 2](#general-installation-guide) below.
 </details>
 
 ### VSCode
@@ -170,7 +165,7 @@ code ~/.vscode/mcp.json # or global mcp.json file
 }
 ```
 
-For local installation, see [Option 2](#option-2-local-development-stdio) below.
+For local installation, see [Option 2](#general-installation-guide) below.
 </details>
 
 ### Mistral Chat
@@ -186,7 +181,7 @@ For local installation, see [Option 2](#option-2-local-development-stdio) below.
 
 Add to your Claude config file. Claude desktop currently doesn't support remote MCPs to be added so we're adding the local MCP. Be careful to add the full path to `uv` for the command because Claude Desktop potentially doesn't find your `uv` installation otherwise. 
 
-   ```bash
+```bash
 # macOS
 open ~/Library/Application\ Support/Claude/claude_desktop_config.json
 
@@ -242,7 +237,7 @@ Simply use the configurations shown in [Quick Start](#quick-start).
 <details>
 <summary><strong>Option 2: Local Development (STDIO)</strong></summary>
 
-Run the MCP server locally for development, testing, or when you need full control over your data. The local server runs directly on your machine with STDIO transport for desktop clients or HTTP transport for web-based clients. Ideal for developers who want to customize the server or work in air-gapped environments.
+Run the MCP server locally for development, testing, or when you need full control over your data. The local server runs directly on your machine with STDIO transport for desktop clients or HTTP transport for web-based clients. Ideal for developers who want to customize the server or work in air-gapped environments. **See below for client specific installation**. 
 
 ### Manual Configuration
 Add to your MCP client config:
@@ -258,7 +253,8 @@ Add to your MCP client config:
         "wandb_mcp_server"
       ],
       "env": {
-        "WANDB_API_KEY": "YOUR_API_KEY"
+        "WANDB_API_KEY": "YOUR_API_KEY",
+        "WANDB_BASE_URL": "YOUR_BASE_URL", #optional for dedicated or on-prem installations
       }
     }
   }
@@ -285,39 +281,88 @@ uv pip install wandb-mcp-server
 pip install git+https://github.com/wandb/wandb-mcp-server
 ```
 
-### Client-Specific Installation Commands
+### Cursor 
+1. Open Cursor Settings (`⌘,` or `Ctrl,`)
+2. Navigate to **Features** → **Model Context Protocol**
+3. Click **"Install from Registry"** or **"Add MCP Server"**
+4. Search for "wandb" or enter:
+   - **Name**: `wandb`
+   - **URL**: `https://mcp.withwandb.com/mcp`
+   - **API Key**: Your W&B API key
+  
+Manual hosted config in `mcp.json`: 
+```
+"wandb": {
+  "transport": "http",
+  "url": "https://mcp.withwandb.com/mcp",
+  "headers": {
+    "Authorization": "Bearer YOUR-API_KEY",
+    "Accept": "application/json, text/event-stream"
+  }
+}
+```
+Manual local (dedicated or on-prem) config in `mcp.json`:
 
-#### Cursor (Project-only)
-Enable the server for a specific project:
-```bash
-uvx --from git+https://github.com/wandb/wandb-mcp-server add_to_client --config_path .cursor/mcp.json && uvx wandb login
+```
+"wandb": {
+  "command": "uvx",
+    "args": [
+      "--from",
+      "git+https://github.com/wandb/wandb-mcp-server",
+      "wandb_mcp_server"
+    ],
+    "env": {
+      "WANDB_API_KEY": "YOUR-API_KEY",
+      "WANDB_BASE_URL": "https://your-wandb-instance.example.com", # optional
+    }
+}
 ```
 
-#### Cursor (Global)
-Enable the server for all Cursor projects:
+
+### Codex
 ```bash
-uvx --from git+https://github.com/wandb/wandb-mcp-server add_to_client --config_path ~/.cursor/mcp.json && uvx wandb login
+codex mcp add wandb \
+    --env WANDB_API_KEY=your_api_key_here \
+    --env WANDB_BASE_URL=https://your-wandb-instance.example.com \
+    -- uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
 ```
 
-#### Windsurf
+### Claude Code
+Add `--scope user` for global config.
 ```bash
-uvx --from git+https://github.com/wandb/wandb-mcp-server add_to_client --config_path ~/.codeium/windsurf/mcp_config.json && uvx wandb login
+claude mcp add wandb -e WANDB_API_KEY=your-api-key -e WANDB_BASE_URL=your-base-url -- uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
 ```
 
-#### Claude Code
+### Claude Desktop 
+Same as above. 
 ```bash
-claude mcp add wandb -- uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server && uvx wandb login
+# macOS
+open ~/Library/Application\ Support/Claude/claude_desktop_config.json
+
+# Windows
+notepad %APPDATA%\Claude\claude_desktop_config.json
 ```
 
-With API key:
-```bash
-claude mcp add wandb -e WANDB_API_KEY=your-api-key -- uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
+```json
+{
+  "mcpServers": {
+    "wandb": {
+     "command": "/Users/niware_wb/.local/bin/uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/wandb/wandb-mcp-server",
+        "wandb_mcp_server"
+      ],
+      "env": {
+        "WANDB_API_KEY": "<your-api-key>",
+        "WANDB_BASE_URL": "https://your-wandb-instance.example.com", # optional
+      }
+    }
+  }
+}
 ```
 
-#### Claude Desktop
-```bash
-uvx --from git+https://github.com/wandb/wandb-mcp-server add_to_client --config_path "~/Library/Application Support/Claude/claude_desktop_config.json" && uvx wandb login
-```
+Restart Claude Desktop to activate.
 
 ### Testing with ngrok (for server-side clients)
 
@@ -333,7 +378,6 @@ ngrok http 8080
 # 3. Use the ngrok URL in your client configuration
 ```
 
-> **Note**: These utilities are inspired by the OpenMCP Server Registry [add-to-client pattern](https://www.open-mcp.org/servers).
 </details>
 
 <details>
