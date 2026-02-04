@@ -237,7 +237,24 @@ Simply use the configurations shown in [Quick Start](#quick-start).
 <details>
 <summary><strong>Option 2: Local Development (STDIO)</strong></summary>
 
-Run the MCP server locally for development, testing, or when you need full control over your data. The local server runs directly on your machine with STDIO transport for desktop clients or HTTP transport for web-based clients. Ideal for developers who want to customize the server or work in air-gapped environments. **See below for client specific installation**. 
+Run the MCP server locally for development, testing, or when you need full control over your data. The local server runs directly on your machine with STDIO transport for desktop clients or HTTP transport for web-based clients. Ideal for developers who want to customize the server or work in air-gapped environments. **See below for client specific installation**.
+
+### Running the Server Locally
+
+**Quick Start:**
+```bash
+# Install uv if needed
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install the server
+uv pip install git+https://github.com/wandb/wandb-mcp-server
+
+# Run with STDIO transport (for desktop clients)
+export WANDB_API_KEY="your-api-key"
+uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
+```
+
+> 📖 For complete command line options and environment variables, see the [Command Line Reference](#command-line-reference) in the More Information section.
 
 ### Manual Configuration
 Add to your MCP client config:
@@ -385,18 +402,95 @@ ngrok http 8080
 
 This public repository focuses on the STDIO transport. If you need a fully managed HTTP deployment (Docker, Cloud Run, Hugging Face, etc.), start from this codebase and add your own HTTP entrypoint in a separate repo. The production-grade hosted server maintained by W&B now lives in a private repository built on top of this one.
 
-For lightweight experimentation you can still run the FastMCP HTTP transport directly:
+### Running HTTP Server Locally
+
+For lightweight experimentation and testing, you can run the FastMCP HTTP transport directly:
 
 ```bash
+# Basic HTTP server
 uvx wandb_mcp_server --transport http --host 0.0.0.0 --port 8080
+
+# With Weave tracing enabled
+uvx wandb_mcp_server \
+  --transport http \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --weave_entity your-entity \
+  --weave_project mcp-server-logs
 ```
 
-Clients must continue to provide their own W&B API key via Bearer token per the MCP spec.
+> 📖 For all available command line options, see the [Command Line Reference](#command-line-reference) in the More Information section.
+
+**Note**: Clients must continue to provide their own W&B API key via Bearer token per the MCP spec.
 </details>
 
 ---
 
 ## More Information
+
+### Command Line Reference
+
+When running the server locally, you can customize its behavior with command line arguments:
+
+#### Available Arguments
+
+> **Note**: Arguments use underscores (e.g., `--wandb_api_key`), not dashes.
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--transport` | string | `stdio` | Transport type: `stdio` for local MCP client communication or `http` for HTTP server |
+| `--host` | string | `localhost` | Host to bind HTTP server to (only used with `--transport http`) |
+| `--port` | integer | `8080` | Port to run the HTTP server on (only used with `--transport http`) |
+| `--wandb_api_key` | string | None | Weights & Biases API key for authentication |
+| `--weave_entity` | string | None | The W&B entity to log traced MCP server calls to |
+| `--weave_project` | string | `weave-mcp-server` | The W&B project to log traced MCP server calls to |
+
+#### Environment Variables
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `WANDB_API_KEY` | Your W&B API key (alternative to `--wandb_api_key` flag) | Yes |
+| `WANDB_BASE_URL` | Custom W&B instance URL (for dedicated/on-prem instances) | No |
+| `MCP_SERVER_LOG_LEVEL` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` | No |
+| `WANDB_SILENT` | Set to `"False"` to suppress W&B output | No |
+| `WEAVE_SILENT` | Set to `"False"` to suppress Weave output | No |
+| `WANDB_DEBUG` | Set to `"true"` to enable detailed W&B logging | No |
+| `MCP_AUTH_DISABLED` | Disable HTTP authentication (development only) | No |
+
+#### Usage Examples
+
+**STDIO Transport (default for desktop clients):**
+```bash
+# Basic usage with environment variable
+export WANDB_API_KEY="your-api-key"
+uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
+
+# Or with API key as argument
+uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server --wandb_api_key your-api-key
+```
+
+**HTTP Transport (for testing and development):**
+```bash
+# Basic HTTP server on localhost:8080
+uvx wandb_mcp_server --transport http --host 127.0.0.1 --port 8080
+
+# Bind to all interfaces with custom port
+uvx wandb_mcp_server --transport http --host 0.0.0.0 --port 9090
+```
+
+**With Weave Tracing (log MCP calls to W&B):**
+```bash
+uvx wandb_mcp_server \
+  --transport http \
+  --port 8080 \
+  --weave_entity my-team \
+  --weave_project mcp-monitoring
+```
+
+**View all options:**
+```bash
+uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server --help
+```
 
 ### Key Resources
 
