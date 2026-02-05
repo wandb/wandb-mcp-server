@@ -257,7 +257,7 @@ uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
 > 📖 For complete command line options and environment variables, see the [Command Line Reference](#command-line-reference) in the More Information section.
 
 ### Manual Configuration
-Add to your MCP client config:
+Add to your MCP client config (for detailed client-specific configs see below):
 
 ```json
 {
@@ -276,26 +276,6 @@ Add to your MCP client config:
     }
   }
 }
-```
-
-### Prerequisites
-
-- Python 3.10+
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip
-
-```bash
-# Install uv (if not already installed)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### Installation
-
-```bash
-# Using uv (recommended)
-uv pip install wandb-mcp-server
-
-# Or from GitHub
-pip install git+https://github.com/wandb/wandb-mcp-server
 ```
 
 ### Cursor 
