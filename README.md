@@ -106,7 +106,7 @@ print(resp.output_text)
 
 ```bash
 # run in terminal
-claude mcp add --transport http wandb https://mcp.withwandb.com/mcp --header "Authorization: Bearer <your-api-key-here>"
+claude mcp add --transport http wandb https://mcp.withwandb.com/mcp --scope user --header "Authorization: Bearer <your-api-key-here>"
 ```
 
 For local installation, see [Option 2](#general-installation-guide) below.
