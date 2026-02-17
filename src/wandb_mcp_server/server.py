@@ -415,6 +415,30 @@ def create_mcp_server(transport: str, host: str = "localhost", port: Optional[in
     return mcp
 
 
+def _run_http_with_health(mcp_server: FastMCP, host: str, port: int) -> None:
+    """Start the HTTP server with a /health endpoint for readiness/liveness probes."""
+    try:
+        from starlette.applications import Starlette
+        from starlette.routing import Route, Mount
+        from starlette.responses import JSONResponse
+        import uvicorn
+
+        async def _health_endpoint(_request):
+            return JSONResponse({"status": "ok"})
+
+        mcp_app = mcp_server.streamable_http_app()
+        app = Starlette(routes=[
+            Route("/health", _health_endpoint, methods=["GET"]),
+            Mount("/", app=mcp_app),
+        ])
+
+        logger.info(f"HTTP server with /health endpoint starting on {host}:{port}")
+        uvicorn.run(app, host=host, port=port)
+    except Exception as e:
+        logger.warning(f"Could not add /health endpoint ({e}), falling back to default MCP HTTP server")
+        mcp_server.run(transport="streamable-http")
+
+
 # ===============================================================================
 # SECTION 5: MAIN CLI ENTRY POINT
 # ===============================================================================
@@ -486,7 +510,7 @@ def cli():
     
     if args.transport == "http":
         logger.info(f"Starting HTTP server on {args.host}:{args.port or 8080}")
-        server.run(transport="streamable-http")
+        _run_http_with_health(server, args.host, args.port or 8080)
     else:
         logger.info("Starting stdio server")
         server.run(transport="stdio")
