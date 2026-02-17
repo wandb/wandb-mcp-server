@@ -289,6 +289,62 @@ class TraceProcessor:
         return dict(sorted(op_counts.items(), key=lambda x: x[1], reverse=True))
 
     @classmethod
+    def estimate_tokens(cls, text: str) -> int:
+        """Cheap token estimate: 1 token ≈ 4 chars of JSON."""
+        return max(1, len(text) // 4)
+
+    @classmethod
+    def enforce_token_budget(
+        cls,
+        result_json: str,
+        traces: List[Any],
+        budget: int,
+    ) -> tuple:
+        """Progressively truncate until *result_json* fits within *budget* tokens.
+
+        Truncation levels:
+          1. Reduce truncate_length to 100 chars
+          2. Drop heavy columns (inputs, output) from traces
+          3. Sample every other trace
+
+        Returns:
+            (truncated_traces, warning_message_or_None, applied_level)
+        """
+        est = cls.estimate_tokens(result_json)
+        if est <= budget:
+            return traces, None, 0
+
+        warning_parts = []
+
+        # Level 1: truncate string values to 100 chars
+        level1 = []
+        for t in traces:
+            d = t.model_dump() if hasattr(t, "model_dump") else (t.copy() if isinstance(t, dict) else t)
+            level1.append({k: cls.truncate_value(v, 100) for k, v in d.items()} if isinstance(d, dict) else d)
+        est = cls.estimate_tokens(json.dumps(level1, cls=DateTimeEncoder, default=str))
+        if est <= budget:
+            warning_parts.append("String values truncated to 100 chars to fit token budget.")
+            return level1, " ".join(warning_parts), 1
+
+        # Level 2: drop inputs and output columns entirely
+        level2 = []
+        for t in level1:
+            d = t.copy() if isinstance(t, dict) else t
+            if isinstance(d, dict):
+                d.pop("inputs", None)
+                d.pop("output", None)
+            level2.append(d)
+        warning_parts.append("Dropped 'inputs' and 'output' columns.")
+        est = cls.estimate_tokens(json.dumps(level2, cls=DateTimeEncoder, default=str))
+        if est <= budget:
+            return level2, " ".join(warning_parts), 2
+
+        # Level 3: sample every other trace
+        level3 = level2[::2]
+        warning_parts.append(f"Sampled {len(level3)} of {len(traces)} traces.")
+        return level3, " ".join(warning_parts), 3
+
+    @classmethod
     def process_traces(
         cls,
         traces: List[Any],
@@ -448,15 +504,39 @@ class TraceProcessor:
                     # Keep the original dictionary if conversion fails
                     converted_traces.append(trace)
 
-            return QueryResult(metadata=metadata, traces=converted_traces)
+            result = QueryResult(metadata=metadata, traces=converted_traces)
         except ImportError:
-            # If WeaveTrace can't be imported for some reason, return dicts
             logger.warning("Could not import WeaveTrace model, returning dictionaries")
-            return QueryResult(metadata=metadata, traces=processed_traces)
+            result = QueryResult(metadata=metadata, traces=processed_traces)
         except Exception as e:
-            # If there's any other error in conversion, return dictionaries
             logger.warning(f"Error converting traces to WeaveTrace: {e}")
-            return QueryResult(metadata=metadata, traces=processed_traces)
+            result = QueryResult(metadata=metadata, traces=processed_traces)
+
+        # Enforce token budget (MCP-6) -- progressively truncate if over limit
+        from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
+        try:
+            result_json = result.model_dump_json()
+            est_tokens = cls.estimate_tokens(result_json)
+            if est_tokens > MAX_RESPONSE_TOKENS and result.traces:
+                logger.warning(
+                    f"Response exceeds token budget ({est_tokens} > {MAX_RESPONSE_TOKENS}). "
+                    f"Applying progressive truncation."
+                )
+                truncated, warning_msg, level = cls.enforce_token_budget(
+                    result_json, result.traces, MAX_RESPONSE_TOKENS
+                )
+                if warning_msg:
+                    note = (
+                        f"NOTE: This response was truncated to fit within the "
+                        f"{MAX_RESPONSE_TOKENS} token budget (level {level}). {warning_msg} "
+                        f"Use more specific filters or request fewer traces for full data."
+                    )
+                    result.metadata.truncation_warning = note
+                    result = QueryResult(metadata=result.metadata, traces=truncated)
+        except Exception as e:
+            logger.warning(f"Token budget enforcement failed (non-fatal): {e}")
+
+        return result
 
     @staticmethod
     def get_cost(trace: Dict[str, Any], which_cost: str) -> float:

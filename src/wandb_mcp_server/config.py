@@ -12,3 +12,7 @@ WF_TRACE_SERVER_URL: str = (
     or os.getenv("WEAVE_TRACE_SERVER_URL")
     or "https://trace.wandb.ai"
 )
+
+# Maximum response tokens before progressive truncation kicks in.
+# Rough heuristic: 1 token ≈ 4 characters of JSON.
+MAX_RESPONSE_TOKENS: int = int(os.getenv("MAX_RESPONSE_TOKENS", "30000"))

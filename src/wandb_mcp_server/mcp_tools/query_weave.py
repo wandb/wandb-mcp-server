@@ -122,6 +122,17 @@ default 200 characters. Otherwise the trace data is returned in full.
 </truncating_trace_data_values>
 
 Remember, LLM context window is precious, only return the minimum amount of data needed to complete an analysis.
+
+<deduplication_warning>
+**IMPORTANT: Do NOT re-call this tool with identical or very similar parameters.**
+If you have already received a response from this tool, work with the data you have.
+If the response was truncated, narrow your query by:
+- Adding more specific filters (op_name_contains, time_range, status)
+- Requesting fewer columns
+- Setting metadata_only=True first to understand the data shape
+- Using count_weave_traces_tool to check project size before querying
+Do NOT re-submit the same query hoping for different results.
+</deduplication_warning>
 </managing_llm_context_window>
 
 <usage_guidance>
