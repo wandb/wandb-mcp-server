@@ -14,7 +14,7 @@ import requests
 from requests.exceptions import RetryError
 
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.config import WF_TRACE_SERVER_URL
+from wandb_mcp_server.config import WF_TRACE_SERVER_URL, WANDB_BASE_URL
 
 logger = get_rich_logger(__name__)
 
@@ -33,7 +33,7 @@ class WeaveApiClient:
 
         Args:
             api_key: API key for authentication. If None, try to get from environment.
-            server_url: Weave API server URL. Defaults to 'https://trace.wandb.ai'.
+            server_url: Weave API server URL. Defaults to auto-detected URL.
             retries: Number of retries for failed requests.
             timeout: Request timeout in seconds.
 
@@ -58,6 +58,11 @@ class WeaveApiClient:
         self.server_url = server_url or WF_TRACE_SERVER_URL
         self.retries = retries
         self.timeout = timeout
+
+        logger.info(
+            f"WeaveApiClient initialized: trace_server={self.server_url}, "
+            f"wandb_base_url={WANDB_BASE_URL}"
+        )
 
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get authentication headers for the Weave API.
@@ -128,7 +133,15 @@ class WeaveApiClient:
                     logger.error(
                         f"Specific reason for retry exhaustion: {cause.reason}"
                     )
-            raise Exception(f"Failed to query Weave traces due to network error: {e}")
+            raise Exception(
+                f"Failed to query Weave traces due to network error: {e}\n"
+                f"Trace server URL: {self.server_url}\n"
+                f"W&B base URL: {WANDB_BASE_URL}\n"
+                f"If you are using a dedicated/on-prem W&B instance, ensure "
+                f"WANDB_BASE_URL is set correctly. The trace server URL is "
+                f"auto-detected as {{WANDB_BASE_URL}}/traces for non-SaaS deployments. "
+                f"You can override it explicitly with WF_TRACE_SERVER_URL."
+            )
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding JSON from Weave server: {e}")
             raise Exception(f"Failed to parse Weave API response: {e}")

@@ -16,6 +16,7 @@ wandb/*
 
 # Local documentation and sensitive files
 local/
+resources/
 
 # Distribution / packaging
 .ruff_cache/

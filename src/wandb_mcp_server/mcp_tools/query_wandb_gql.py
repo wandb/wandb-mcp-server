@@ -527,6 +527,31 @@ use the tool again with additional filters or pagination to get a more complete 
 """
 
 
+def _prefix_gql_operation_name(query_string: str, prefix: str = "mcp_") -> str:
+    """Prefix GraphQL operation names with a given prefix for analytics filtering.
+
+    If the query already has a prefixed operation name, it is returned unchanged.
+    Anonymous operations (no name) are left untouched.
+
+    Args:
+        query_string: The raw GraphQL query string.
+        prefix: Prefix to prepend (default ``mcp_``).
+
+    Returns:
+        The query string with the operation name prefixed.
+    """
+    try:
+        doc = parse(query_string.strip())
+        for definition in doc.definitions:
+            if hasattr(definition, "name") and definition.name:
+                current_name = definition.name.value
+                if not current_name.startswith(prefix):
+                    definition.name = gql_ast.NameNode(value=f"{prefix}{current_name}")
+        return gql_printer.print_ast(doc)
+    except Exception:
+        return query_string
+
+
 def find_paginated_collections(
     obj: Dict, current_path: Optional[List[str]] = None
 ) -> List[List[str]]:
@@ -631,6 +656,9 @@ def query_paginated_wandb_gql(
             logger.debug(
                 f"No limit variable found in input, adding '{limit_key}={items_per_page}'"
             )
+
+        # Prefix operation name for analytics filtering (MCP-9)
+        query = _prefix_gql_operation_name(query)
 
         # Parse for execution
         try:
