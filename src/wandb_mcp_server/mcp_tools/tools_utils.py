@@ -325,15 +325,26 @@ def get_retry_session(
     return session
 
 
-def log_tool_call(tool_name: str, viewer: Any, params: Dict[str, Any]) -> None:
-    """
-    Minimal helper to log tool calls consistently across mcp_tools.
+_SENSITIVE_FIELD_PATTERNS = ("key", "token", "secret", "password", "credential", "auth")
 
-    No truncation/redaction.
-    """
+
+def _redact_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a shallow copy of *params* with sensitive values replaced by '***REDACTED***'."""
+    redacted = {}
+    for k, v in params.items():
+        if any(pattern in k.lower() for pattern in _SENSITIVE_FIELD_PATTERNS):
+            redacted[k] = "***REDACTED***"
+        else:
+            redacted[k] = v
+    return redacted
+
+
+def log_tool_call(tool_name: str, viewer: Any, params: Dict[str, Any]) -> None:
+    """Log tool calls consistently across mcp_tools with sensitive field redaction."""
     logger = get_rich_logger("mcp_tools")
     try:
-        logger.info(f"ToolCall name={tool_name} viewer={viewer} params={params}")
+        safe_params = _redact_params(params)
+        logger.info(f"ToolCall name={tool_name} viewer={viewer} params={safe_params}")
     except Exception:
         # Never fail tool execution due to logging
         pass

@@ -13,7 +13,7 @@ from wandb_mcp_server.utils import get_rich_logger, get_server_args
 from wandb_mcp_server.config import WF_TRACE_SERVER_URL
 from wandb_mcp_server.weave_api.client import WeaveApiClient
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.weave_api.models import QueryResult
+from wandb_mcp_server.weave_api.models import QueryResult, TraceMetadata
 from wandb_mcp_server.weave_api.processors import TraceProcessor
 from wandb_mcp_server.weave_api.query_builder import QueryBuilder
 
@@ -331,6 +331,47 @@ class TraceService:
 
         return updated_traces
 
+    def _query_stats_metadata(
+        self,
+        entity_name: str,
+        project_name: str,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> QueryResult:
+        """Fetch lightweight metadata via /calls/query_stats (no individual traces).
+
+        This is 5-10x faster than fetching all traces and discarding the bodies.
+        """
+        from wandb_mcp_server.mcp_tools.count_traces import count_traces
+
+        total_count = count_traces(
+            entity_name=entity_name,
+            project_name=project_name,
+            filters=filters or {},
+        )
+
+        # Also count root traces
+        root_filters = (filters or {}).copy()
+        root_filters["trace_roots_only"] = True
+        root_count = count_traces(
+            entity_name=entity_name,
+            project_name=project_name,
+            filters=root_filters,
+        )
+
+        metadata = TraceMetadata(
+            total_traces=total_count,
+            token_counts={
+                "total_tokens": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "average_tokens_per_trace": 0,
+            },
+            time_range={"earliest": None, "latest": None},
+            status_summary={"success": 0, "error": 0, "other": 0, "root_traces": root_count},
+            op_distribution={},
+        )
+        return QueryResult(metadata=metadata)
+
     def query_traces(
         self,
         entity_name: str,
@@ -369,6 +410,11 @@ class TraceService:
         Returns:
             QueryResult object with metadata and optionally traces.
         """
+        # Fast path: use /calls/query_stats when only metadata is needed
+        if metadata_only:
+            logger.info("metadata_only=True: using /calls/query_stats for efficient counting")
+            return self._query_stats_metadata(entity_name, project_name, filters)
+
         # Clear invalid columns from previous requests
         self.invalid_columns = set()
 
@@ -542,6 +588,11 @@ class TraceService:
         Returns:
             QueryResult object with metadata and optionally traces.
         """
+        # Fast path: use /calls/query_stats when only metadata is needed
+        if metadata_only:
+            logger.info("metadata_only=True (paginated): using /calls/query_stats for efficient counting")
+            return self._query_stats_metadata(entity_name, project_name, filters)
+
         # Special handling for cost-based sorting
         client_side_cost_sort = sort_by in self.COST_FIELDS
 
