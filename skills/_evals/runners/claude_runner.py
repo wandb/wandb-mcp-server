@@ -4,8 +4,15 @@ Invokes `claude -p` (print mode) with the W&B MCP server configured via
 --mcp-config, and parses the stream-json output to extract tool calls.
 
 Requires:
-    - `claude` CLI installed (Claude Code >= 2.0)
-    - WANDB_API_KEY environment variable set
+    - `claude` CLI installed and authenticated (Claude Code >= 2.0)
+    - Run `claude login` or `claude setup-token` first
+    - WANDB_API_KEY environment variable set (for MCP server)
+
+Known issues:
+    - `claude -p` may hang in non-TTY environments (subprocess, CI).
+      If this happens, try running from a terminal directly or use
+      `claude setup-token` for non-interactive auth.
+    - The Claude CLI needs its own auth separate from ANTHROPIC_API_KEY.
 
 Example:
     runner = ClaudeRunner()
