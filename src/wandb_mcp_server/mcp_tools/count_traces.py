@@ -1,6 +1,5 @@
 import base64
 import json
-import os
 from typing import Any, Dict
 
 import requests
@@ -16,7 +15,7 @@ logger = get_rich_logger(__name__)
 COUNT_WEAVE_TRACES_TOOL_DESCRIPTION = """count Weave traces and return the total storage \
 size in bytes for the given filters.
 
-Use this tool to query data from Weights & Biases Weave, an observability product for 
+Use this tool to query data from Weights & Biases Weave, an observability product for
 tracing and evaluating LLMs and GenAI apps.
 
 This tool only provides COUNT information and STORAGE SIZE (bytes) about traces, \
@@ -27,7 +26,7 @@ not actual logged traces data, metrics or run data.
 **IMPORTANT PRODUCT DISTINCTION:**
 W&B offers two distinct products with different purposes:
 
-1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model 
+1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model
     lifecycle management. Use `query_wandb_tool` for questions about:
     - Experiment runs, metrics, and performance comparisons
     - Artifact management and model registry
@@ -183,7 +182,7 @@ def count_traces(
     if not api_key:
         logger.error("W&B API key not found in context or environment variables.")
         raise ValueError("W&B API key is required to query Weave traces count.")
-    
+
     # Debug logging to diagnose API key issues
     logger.debug(f"Using W&B API key: length={len(api_key)}, is_40_chars={len(api_key) == 40}")
 
@@ -203,12 +202,8 @@ def count_traces(
         pass
 
     request_body: Dict[str, Any] = {"project_id": project_id}
-    filter_payload: Dict[
-        str, Any
-    ] = {}  # For fields that go into the top-level 'filter' object
-    complex_filters_for_query_expr: Dict[
-        str, Any
-    ] = {}  # For fields that go into query.$expr
+    filter_payload: Dict[str, Any] = {}  # For fields that go into the top-level 'filter' object
+    complex_filters_for_query_expr: Dict[str, Any] = {}  # For fields that go into query.$expr
 
     if filters:
         # Keys that belong inside the 'filter' object in the request body
@@ -281,9 +276,7 @@ def count_traces(
 
     # Build the query expression from remaining complex filters
     if complex_filters_for_query_expr:
-        query_expr_obj = QueryBuilder.build_query_expression(
-            complex_filters_for_query_expr
-        )
+        query_expr_obj = QueryBuilder.build_query_expression(complex_filters_for_query_expr)
         if query_expr_obj:
             dumped_query = query_expr_obj.model_dump(by_alias=True, exclude_none=True)
             if dumped_query and dumped_query.get("$expr"):
@@ -291,6 +284,7 @@ def count_traces(
 
     # Execute the HTTP query
     from wandb_mcp_server.config import WF_TRACE_SERVER_URL
+
     weave_server_url = WF_TRACE_SERVER_URL
     url = f"{weave_server_url}/calls/query_stats"
 
@@ -331,16 +325,10 @@ def count_traces(
         logger.error(f"HTTP Request failed for project {project_id}: {e}")
         if isinstance(e, requests.exceptions.RetryError):
             if e.__cause__ and hasattr(e.__cause__, "reason") and e.__cause__.reason:
-                logger.error(
-                    f"Specific reason for retry exhaustion: {e.__cause__.reason}"
-                )
-        logger.debug(
-            f"Failed request body during exception for {project_id}: {json.dumps(request_body)}"
-        )
+                logger.error(f"Specific reason for retry exhaustion: {e.__cause__.reason}")
+        logger.debug(f"Failed request body during exception for {project_id}: {json.dumps(request_body)}")
         # traceback.print_exc() # Uncomment for detailed traceback during development
-        raise Exception(
-            f"Failed to query Weave trace count for {project_id} due to network error: {e}"
-        )
+        raise Exception(f"Failed to query Weave trace count for {project_id} due to network error: {e}")
     except json.JSONDecodeError as e:
         logger.error(
             f"Failed to decode JSON response for {project_id}: {e}. Response text: {response.text if 'response' in locals() else 'N/A'}"

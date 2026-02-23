@@ -62,27 +62,20 @@ class TraceProcessor:
         # Regular truncation for non-zero max_length
         if isinstance(value, str):
             if len(value) > max_length:
-                logger.debug(
-                    f"Truncating string of length {len(value)} to {max_length}"
-                )
+                logger.debug(f"Truncating string of length {len(value)} to {max_length}")
             return value[:max_length] + "..." if len(value) > max_length else value
         elif isinstance(value, dict):
             try:
                 # Handle special case for inputs/outputs that might have complex object references
                 if "__type__" in value or "_type" in value:
-                    logger.info(
-                        f"Found potential complex object: {value.get('__type__') or value.get('_type')}"
-                    )
+                    logger.info(f"Found potential complex object: {value.get('__type__') or value.get('_type')}")
                     # For very small max_length, return empty dict to ensure proper truncation tests pass
                     if max_length < 50:
                         return {}
                     # Otherwise, convert to a simplified representation
                     return {"type": value.get("__type__") or value.get("_type")}
 
-                result = {
-                    k: TraceProcessor.truncate_value(v, max_length)
-                    for k, v in value.items()
-                }
+                result = {k: TraceProcessor.truncate_value(v, max_length) for k, v in value.items()}
                 return result
             except Exception as e:
                 logger.warning(f"Error truncating dict: {e}, returning empty dict")
@@ -97,11 +90,7 @@ class TraceProcessor:
         # For datetime objects and other non-JSON serializable types, convert to string
         elif not isinstance(value, (int, float, bool)):
             try:
-                return (
-                    str(value)[:max_length] + "..."
-                    if len(str(value)) > max_length
-                    else str(value)
-                )
+                return str(value)[:max_length] + "..." if len(str(value)) > max_length else str(value)
             except Exception as e:
                 logger.warning(f"Error converting value to string: {e}, returning None")
                 return None
@@ -121,9 +110,7 @@ class TraceProcessor:
             encoding = tiktoken.get_encoding("cl100k_base")  # Using OpenAI's encoding
             return len(encoding.encode(text))
         except Exception as e:
-            logger.warning(
-                f"Error counting tokens with tiktoken: {e}, falling back to approximation"
-            )
+            logger.warning(f"Error counting tokens with tiktoken: {e}, falling back to approximation")
             # Fallback to approximate token count if tiktoken fails
             return len(text.split())
 
@@ -170,9 +157,7 @@ class TraceProcessor:
             "total_tokens": total_tokens,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "average_tokens_per_trace": round(total_tokens / len(traces), 2)
-            if traces
-            else 0,
+            "average_tokens_per_trace": round(total_tokens / len(traces), 2) if traces else 0,
         }
 
     @staticmethod
@@ -384,16 +369,10 @@ class TraceProcessor:
                 for trace in traces:
                     if hasattr(trace, "model_dump"):  # Pydantic model
                         trace_dict = trace.model_dump()
-                        processed_trace = {
-                            k: cls.truncate_value(v, truncate_length)
-                            for k, v in trace_dict.items()
-                        }
+                        processed_trace = {k: cls.truncate_value(v, truncate_length) for k, v in trace_dict.items()}
                         processed_traces.append(processed_trace)
                     elif isinstance(trace, dict):  # Dict
-                        processed_trace = {
-                            k: cls.truncate_value(v, truncate_length)
-                            for k, v in trace.items()
-                        }
+                        processed_trace = {k: cls.truncate_value(v, truncate_length) for k, v in trace.items()}
                         processed_traces.append(processed_trace)
 
             # Log after truncation
@@ -418,22 +397,14 @@ class TraceProcessor:
                 if "started_at" in trace and isinstance(trace["started_at"], str):
                     try:
                         # Try to parse ISO format string
-                        trace["started_at"] = datetime.fromisoformat(
-                            trace["started_at"].replace("Z", "+00:00")
-                        )
+                        trace["started_at"] = datetime.fromisoformat(trace["started_at"].replace("Z", "+00:00"))
                     except (ValueError, TypeError):
                         # If parsing fails, use current time
                         trace["started_at"] = datetime.now()
 
-                if (
-                    "ended_at" in trace
-                    and trace["ended_at"]
-                    and isinstance(trace["ended_at"], str)
-                ):
+                if "ended_at" in trace and trace["ended_at"] and isinstance(trace["ended_at"], str):
                     try:
-                        trace["ended_at"] = datetime.fromisoformat(
-                            trace["ended_at"].replace("Z", "+00:00")
-                        )
+                        trace["ended_at"] = datetime.fromisoformat(trace["ended_at"].replace("Z", "+00:00"))
                     except (ValueError, TypeError):
                         trace["ended_at"] = None
 
@@ -442,9 +413,7 @@ class TraceProcessor:
                     converted_trace = WeaveTrace(**trace)
                     converted_traces.append(converted_trace)
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to convert trace {trace.get('id')} to WeaveTrace: {e}"
-                    )
+                    logger.warning(f"Failed to convert trace {trace.get('id')} to WeaveTrace: {e}")
                     # Keep the original dictionary if conversion fails
                     converted_traces.append(trace)
 
@@ -534,9 +503,7 @@ class TraceProcessor:
         return None
 
     @classmethod
-    def synthesize_fields(
-        cls, trace: Dict[str, Any], requested_fields: List[str]
-    ) -> Dict[str, Any]:
+    def synthesize_fields(cls, trace: Dict[str, Any], requested_fields: List[str]) -> Dict[str, Any]:
         """Synthesize additional fields in a trace.
 
         Args:

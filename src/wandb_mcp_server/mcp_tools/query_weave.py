@@ -8,16 +8,18 @@ from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
 
 logger = get_rich_logger(__name__)
 
+
 def get_trace_service():
     """
     Get a TraceService instance with the current request's API key.
-    
+
     This creates a new TraceService for each request to ensure
     the correct API key is used from the context.
     """
     # Get the API key from context (set by auth middleware) or environment
     api_key = WandBApiManager.get_api_key()
     return TraceService(api_key=api_key)
+
 
 QUERY_WEAVE_TRACES_TOOL_DESCRIPTION = """
 Query Weave traces, trace metadata, and trace costs with filtering and sorting options.
@@ -32,7 +34,7 @@ Query Weave traces, trace metadata, and trace costs with filtering and sorting o
 **IMPORTANT PRODUCT DISTINCTION:**
 W&B offers two distinct products with different purposes:
 
-1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model 
+1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model
     lifecycle management. Use `query_wandb_tool` for questions about:
     - Experiment runs, metrics, and performance comparisons
     - Artifact management and model registry
@@ -138,13 +140,13 @@ before querying for them as query_trace_tool can return a lot of data.
 are unsure of the exact op name.
 
 - Weave Evaluations: If asked about weave evaluations or evals traces:
-    - Evals are complicated to query, prompt the user with follow up questions if needed. 
+    - Evals are complicated to query, prompt the user with follow up questions if needed.
     - First, always try and oritent yourself - pull a summary of the evaluation, get all of the top level column names in the eval \
 and always get a count of the total number of child traces in this eval by filtering by parent_id and using the count_traces tool.
     - As part of orienting yourself, just pull a subset of child traces from the eval, maybe 3 to 5, to understand the column structure \
 and values.
     - Always be explicit about the amount of data returned and limits used in your query - return to the user the count of traces \
-analysed. 
+analysed.
     - Always stay filterd on the evaluation id (filter by `parent_id`) unless specifically asked questions across different evaulations, e.g. \
 if a parent id (or parentId) is provided then ensure to use that filter in the query.
     - filter for traces with `op_name_contains = "Evaluation.evaluate"` as a first step. These ops are parent traces that contain
@@ -167,7 +169,7 @@ project_name : str
     The Weights & Biases project name
 filters : dict
     Dict of filter conditions, supporting:
-    
+
     - display_name : str or regex pattern
         Filter by display name seen in the Weave UI
     - op_name : str or regex pattern
@@ -192,7 +194,7 @@ if given an evaluation trace id or name.
     - status : str
         Filter by trace status, defined as whether or not the trace had an exception or not. Can be
         `success` or `error`.
-        NOTE: When users ask for "failed", "wrong", or "incorrect" traces, use `status:'error'` or 
+        NOTE: When users ask for "failed", "wrong", or "incorrect" traces, use `status:'error'` or
         `has_exception:True` as the filter.
     - time_range : dict
         Dict with "start" and "end" datetime strings. Datetime strings should be in ISO format
@@ -380,9 +382,7 @@ def query_traces(
                     traces_as_dicts.append(dict(trace))
                 except Exception:
                     # If all else fails, convert to string
-                    traces_as_dicts.append(
-                        {"error": f"Could not convert {type(trace)} to dict"}
-                    )
+                    traces_as_dicts.append({"error": f"Could not convert {type(trace)} to dict"})
         return traces_as_dicts
     else:
         return []
@@ -508,7 +508,5 @@ async def query_paginated_weave_traces(
         # Convert back to QueryResult
         result = QueryResult.model_validate(result_dict)
 
-    assert isinstance(result, QueryResult), (
-        f"Result type must be a QueryResult, found: {type(result)}"
-    )
+    assert isinstance(result, QueryResult), f"Result type must be a QueryResult, found: {type(result)}"
     return result

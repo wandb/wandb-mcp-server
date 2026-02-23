@@ -1,6 +1,6 @@
 import inspect
 import re
-from typing import Any, Callable, Dict, Type, Union, Tuple, Optional
+from typing import Any, Callable, Dict, Type, Union, Tuple
 from wandb_mcp_server.utils import get_rich_logger
 import requests
 from requests.adapters import HTTPAdapter
@@ -90,9 +90,7 @@ def _parse_docstring(docstring: str) -> Tuple[Dict[str, str], str]:
     main_description = "\n".join(main_description_lines).strip()
 
     # 2. Process Parameters section if found
-    if param_definitions_start_index != -1 and param_definitions_start_index < len(
-        lines
-    ):
+    if param_definitions_start_index != -1 and param_definitions_start_index < len(lines):
         current_param_name = None
         current_param_desc_lines = []
         param_def_indent = -1
@@ -104,9 +102,7 @@ def _parse_docstring(docstring: str) -> Tuple[Dict[str, str], str]:
             stripped_line = line.strip()
 
             # Regex to find 'name :' at the start of the stripped line
-            param_match = re.match(
-                r"^(?P<name>[a-zA-Z_]\w*)\s*:(?P<desc_start>.*)$", stripped_line
-            )
+            param_match = re.match(r"^(?P<name>[a-zA-Z_]\w*)\s*:(?P<desc_start>.*)$", stripped_line)
 
             # --- Determine if this line starts a new parameter ---
             is_new_parameter_line = False
@@ -124,9 +120,7 @@ def _parse_docstring(docstring: str) -> Tuple[Dict[str, str], str]:
                     if expected_desc_indent != -1:
                         # If we have an established description indent
                         if current_indent < expected_desc_indent:
-                            is_new_parameter_line = (
-                                True  # Definitely ends previous block
-                            )
+                            is_new_parameter_line = True  # Definitely ends previous block
                     elif current_indent <= param_def_indent:
                         # If no description started yet, or if back at original indent
                         is_new_parameter_line = True
@@ -135,16 +129,12 @@ def _parse_docstring(docstring: str) -> Tuple[Dict[str, str], str]:
             if is_new_parameter_line:
                 # Save the previous parameter's description
                 if current_param_name:
-                    param_descriptions[current_param_name] = "\n".join(
-                        current_param_desc_lines
-                    ).strip()
+                    param_descriptions[current_param_name] = "\n".join(current_param_desc_lines).strip()
 
                 # Start the new parameter
                 current_param_name = param_match.group("name")
                 desc_start = param_match.group("desc_start").strip()
-                current_param_desc_lines = (
-                    [desc_start] if desc_start else []
-                )  # Use first line if present
+                current_param_desc_lines = [desc_start] if desc_start else []  # Use first line if present
                 param_def_indent = current_indent
                 expected_desc_indent = -1  # Reset for the new parameter
 
@@ -154,10 +144,7 @@ def _parse_docstring(docstring: str) -> Tuple[Dict[str, str], str]:
                     # Handle blank lines within the description
                     # Keep blank lines if they are indented same/more than expected desc indent OR
                     # if they are more indented than param def and we haven't set expected yet.
-                    if (
-                        expected_desc_indent != -1
-                        and current_indent >= expected_desc_indent
-                    ) or (
+                    if (expected_desc_indent != -1 and current_indent >= expected_desc_indent) or (
                         expected_desc_indent == -1 and current_indent > param_def_indent
                     ):
                         current_param_desc_lines.append("")  # Preserve paragraph breaks
@@ -173,9 +160,7 @@ def _parse_docstring(docstring: str) -> Tuple[Dict[str, str], str]:
                     else:
                         # Indentation is not correct for a description start. End of this param.
                         if current_param_name:  # Save description if any collected
-                            param_descriptions[current_param_name] = "\n".join(
-                                current_param_desc_lines
-                            ).strip()
+                            param_descriptions[current_param_name] = "\n".join(current_param_desc_lines).strip()
                         current_param_name = None
                         # Assume end of parameters section, stop parsing this section
                         break
@@ -185,9 +170,7 @@ def _parse_docstring(docstring: str) -> Tuple[Dict[str, str], str]:
                 else:
                     # Indentation decreased below expected description indent. End of this parameter's description.
                     if current_param_name:
-                        param_descriptions[current_param_name] = "\n".join(
-                            current_param_desc_lines
-                        ).strip()
+                        param_descriptions[current_param_name] = "\n".join(current_param_desc_lines).strip()
                     current_param_name = None
                     # Assume end of parameters section, stop parsing this section
                     break
@@ -199,9 +182,7 @@ def _parse_docstring(docstring: str) -> Tuple[Dict[str, str], str]:
 
         # Save the last parameter description after the loop finishes
         if current_param_name:
-            param_descriptions[current_param_name] = "\n".join(
-                current_param_desc_lines
-            ).strip()
+            param_descriptions[current_param_name] = "\n".join(current_param_desc_lines).strip()
 
     # Filter out empty descriptions that might result from parsing issues or empty entries
     param_descriptions = {k: v for k, v in param_descriptions.items() if v}
@@ -210,9 +191,7 @@ def _parse_docstring(docstring: str) -> Tuple[Dict[str, str], str]:
 
 
 # generate_anthropic_tool_schema remains the same, but needs slight adjustment for required logic
-def generate_anthropic_tool_schema(
-    func: Callable[..., Any], description: str | None = None
-) -> Dict[str, Any]:
+def generate_anthropic_tool_schema(func: Callable[..., Any], description: str | None = None) -> Dict[str, Any]:
     """
     Generates an Anthropic tool schema dictionary from a Python function.
 

@@ -5,7 +5,6 @@ import logging
 import traceback
 from typing import Any, Dict, List, Optional
 
-import wandb
 from graphql import parse
 from graphql.language import ast as gql_ast
 from graphql.language import printer as gql_printer
@@ -19,14 +18,14 @@ logger = get_rich_logger(__name__)
 
 QUERY_WANDB_GQL_TOOL_DESCRIPTION = """Execute an arbitrary GraphQL query against the Weights & Biases (W&B) Models API.
 
-Use this tool to query data from Weights & Biases Models features, including experiment tracking runs, 
-model registry, reports, artifacts, sweeps. 
+Use this tool to query data from Weights & Biases Models features, including experiment tracking runs,
+model registry, reports, artifacts, sweeps.
 
 <wandb_vs_weave_product_distinction>
 **IMPORTANT PRODUCT DISTINCTION:**
 W&B offers two distinct products with different purposes:
 
-1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model 
+1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model
     lifecycle management. Use `query_wandb_tool` for questions about:
     - Experiment runs, metrics, and performance comparisons
     - Artifact management and model registry
@@ -61,8 +60,8 @@ If user question contains:
 - "traces", "LLM calls" etc → Use query_weave_traces_tool
 
 **COMMON MISUSE CASES:**
-❌ "Looking at performance of my latest weave evals" - Use query_weave_traces_tool 
-❌ "what system prompt was used for my openai call" - Use query_weave_traces_tool 
+❌ "Looking at performance of my latest weave evals" - Use query_weave_traces_tool
+❌ "what system prompt was used for my openai call" - Use query_weave_traces_tool
 ❌ "Show me the traces for my weave evals" - Use query_weave_traces_tool
 
 <query_analysis_step>
@@ -103,8 +102,8 @@ variables : dict[str, Any] | None, optional
                                             Keys should match variable names defined in the query
                                             (e.g., $entity, $project). Values should match the
                                             expected types (String, Int, Float, Boolean, ID, JSONString).
-                                            **Crucially, complex arguments like `filters` MUST be provided 
-                                            as a JSON formatted *string*. Use `json.dumps()` in Python 
+                                            **Crucially, complex arguments like `filters` MUST be provided
+                                            as a JSON formatted *string*. Use `json.dumps()` in Python
                                             to create this string.**
 max_items : int, optional
     Maximum number of items to fetch across all pages. Default is 100.
@@ -133,7 +132,7 @@ All collection queries MUST include the complete W&B connection pattern with the
     - `endCursor` field (to enable pagination)
     - `hasNextPage` field (to determine if more data exists)
 
-This is a strict requirement enforced by the pagination system. Queries without this 
+This is a strict requirement enforced by the pagination system. Queries without this
 structure will fail with the error "Query doesn't follow the W&B connection pattern."
 
 Example of required pagination structure for any collection:
@@ -161,7 +160,7 @@ runs(first: 10) {  # or artifacts, files, etc.
 The results of this tool are returned to a LLM. Be mindful of the context window of the LLM!
 
 <warning_about_open_ended_queries>
-**WARNING: AVOID OPEN-ENDED QUERIES!** 
+**WARNING: AVOID OPEN-ENDED QUERIES!**
 
 Open-ended queries should be strictly avoided when:
 - There are a lot of runs in the project (e.g., hundreds or thousands)
@@ -194,13 +193,13 @@ query LimitedRuns($entity: String!, $project: String!) {
     project(name: $project, entityName: $entity) {
     # Limits runs, specifies filters, and selects only necessary fields
     runs(first: 5, filters: "{\\"state\\":\\"finished\\"}") {
-        edges { 
-        node { 
-            id 
-            name 
-            createdAt 
+        edges {
+        node {
+            id
+            name
+            createdAt
             summaryMetrics # Get summary JSON, parse later if needed
-        } 
+        }
         }
         pageInfo { endCursor hasNextPage } # Always include pageInfo for collections
     }
@@ -230,7 +229,7 @@ use the tool again with additional filters or pagination to get a more complete 
 
 *   **Core Types:** `Entity`, `Project`, `Run`, `Artifact`, `Sweep`, `Report`, `User`, `Team`.
 *   **Relationships:** Entities contain Projects. Projects contain Runs, Sweeps, Artifacts. Runs use/are used by Artifacts. Sweeps contain Runs.
-*   **Common Fields:** `id`, `name`, `description`, `createdAt`, `config` (JSONString), `summaryMetrics` (JSONString - **Note:** use this field, 
+*   **Common Fields:** `id`, `name`, `description`, `createdAt`, `config` (JSONString), `summaryMetrics` (JSONString - **Note:** use this field,
         not `summary`, to access the run's summary dictionary as a JSON string), `historyKeys` (List of String), etc.
 *   **Connections (Lists):** Many lists (like `project.runs`, `artifact.files`) use a connection pattern:
     ```graphql
@@ -366,8 +365,8 @@ use the tool again with additional filters or pagination to get a more complete 
         "filters": "{\"state\": \"finished\", \"summary_metrics.accuracy\": {\"$gt\": 0.9}}", # Escaped JSON string
         # "cursor": previous_pageInfo_endCursor # Optional for next page
     }
-    # Note: The *content* of the `filters` JSON string must adhere to the specific 
-    # filtering syntax supported by the W&B API (e.g., using operators like `$gt`, `$eq`, `$in`). 
+    # Note: The *content* of the `filters` JSON string must adhere to the specific
+    # filtering syntax supported by the W&B API (e.g., using operators like `$gt`, `$eq`, `$in`).
     # Refer to W&B documentation for the full filter specification.
     ```
 <!-- WANDB_GQL_EXAMPLE_END name=GetFilteredRuns -->
@@ -389,7 +388,7 @@ use the tool again with additional filters or pagination to get a more complete 
     variables = {"entity": "my-entity", "project": "my-project", "runName": "run-abc"}
     ```
 <!-- WANDB_GQL_EXAMPLE_END name=GetRunHistoryKeys -->
-    
+
 <!-- WANDB_GQL_EXAMPLE_START name=GetRunHistorySampled -->
 *   **Get Specific Run History Data:** (Uses `sampledHistory` for specific keys)
     ```graphql
@@ -400,11 +399,11 @@ use the tool again with additional filters or pagination to get a more complete 
             id
             name
             # Use sampledHistory with specs to get actual values for specific keys
-            sampledHistory(specs: $specs) { 
+            sampledHistory(specs: $specs) {
                 step # The step number
                 timestamp # Timestamp of the log
                 item # JSON string containing {key: value} for requested keys at this step
-            } 
+            }
         }
         }
     }
@@ -412,13 +411,13 @@ use the tool again with additional filters or pagination to get a more complete 
     ```python
     # Corrected: Define specs variable with escaped JSON string literal for keys
     variables = {
-        "entity": "my-entity", 
-        "project": "my-project", 
-        "runName": "run-abc", 
+        "entity": "my-entity",
+        "project": "my-project",
+        "runName": "run-abc",
         "specs": ["{\"keys\": [\"loss\", \"val_accuracy\"]}}"] # List containing escaped JSON string
     }
     # Note: sampledHistory returns rows where *at least one* of the specified keys was logged.
-    # The 'item' field is a JSON string, you'll need to parse it (e.g., json.loads(row['item'])) 
+    # The 'item' field is a JSON string, you'll need to parse it (e.g., json.loads(row['item']))
     # to get the actual key-value pairs for that step. It might not contain all requested keys
     # if they weren't logged together at that specific step.
     ```
@@ -475,11 +474,11 @@ use the tool again with additional filters or pagination to get a more complete 
             metadata # JSON String
             aliases { alias } # Corrected: Use 'alias' field instead of 'name'
             files { # Files is a collection, requires pagination structure
-            edges { 
+            edges {
                 node { name url digest } # Corrected: Removed 'size' from File fields
-            } 
+            }
             pageInfo { endCursor hasNextPage } # Required for files collection
-            } 
+            }
         }
         }
     }
@@ -521,15 +520,13 @@ use the tool again with additional filters or pagination to get a more complete 
 **Notes:**
 *   Refer to the official W&B GraphQL schema (via introspection or documentation) for the most up-to-date field names, types, and available filters/arguments.
 *   Structure your query to request only the necessary data fields to minimize response size and improve performance.
-*   **Sorting:** Use the `order` parameter string. Prefix with `+` for ascending, `-` for descending (default). 
+*   **Sorting:** Use the `order` parameter string. Prefix with `+` for ascending, `-` for descending (default).
         Common sortable fields: `createdAt`, `updatedAt`, `heartbeatAt`, `config.*`, `summary_metrics.*`.
 *   Handle potential errors in the returned dictionary (e.g., check for an 'errors' key in the response).
 """
 
 
-def find_paginated_collections(
-    obj: Dict, current_path: Optional[List[str]] = None
-) -> List[List[str]]:
+def find_paginated_collections(obj: Dict, current_path: Optional[List[str]] = None) -> List[List[str]]:
     """Find collections in a response that follow the W&B connection pattern. Returns List[List[str]]."""
     # Ensure this implementation correctly builds and returns List[List[str]]
     if current_path is None:
@@ -595,6 +592,7 @@ def query_paginated_wandb_gql(
         # Use API key from environment (set by auth middleware for HTTP, or by user for STDIO)
         # Get API instance with proper key handling
         from wandb_mcp_server.api_client import get_wandb_api
+
         api = get_wandb_api()
         try:
             log_tool_call(
@@ -609,9 +607,7 @@ def query_paginated_wandb_gql(
             )
         except Exception:
             pass
-        logger.info(
-            "--- Inside query_paginated_wandb_gql: Step 0: Execute Initial Query ---"
-        )
+        logger.info("--- Inside query_paginated_wandb_gql: Step 0: Execute Initial Query ---")
 
         # Determine limit key and set initial page vars
         page1_vars_func = variables.copy() if variables is not None else {}
@@ -622,15 +618,11 @@ def query_paginated_wandb_gql(
                 break
         if limit_key:
             # Ensure first page uses items_per_page if limit is too high or missing
-            page1_vars_func[limit_key] = min(
-                items_per_page, page1_vars_func.get(limit_key) or items_per_page
-            )
+            page1_vars_func[limit_key] = min(items_per_page, page1_vars_func.get(limit_key) or items_per_page)
         else:
             limit_key = "limit"
             page1_vars_func[limit_key] = items_per_page
-            logger.debug(
-                f"No limit variable found in input, adding '{limit_key}={items_per_page}'"
-            )
+            logger.debug(f"No limit variable found in input, adding '{limit_key}={items_per_page}'")
 
         # Parse for execution
         try:
@@ -641,14 +633,10 @@ def query_paginated_wandb_gql(
 
         # Execute initial query
         try:
-            result1 = api.client.execute(
-                parsed_initial_query, variable_values=page1_vars_func
-            )
+            result1 = api.client.execute(parsed_initial_query, variable_values=page1_vars_func)
             result_dict = copy.deepcopy(result1)  # Work on a copy
             if "errors" in result_dict:
-                logger.error(
-                    f"GraphQL errors in initial response: {result_dict['errors']}"
-                )
+                logger.error(f"GraphQL errors in initial response: {result_dict['errors']}")
                 return result_dict  # Return errors if found
         except Exception as e:
             logger.error(f"Failed to execute initial GraphQL query: {e}", exc_info=True)
@@ -711,18 +699,12 @@ def query_paginated_wandb_gql(
                     :max_items
                 ]  # Ensure initial list respects max_items
                 current_edge_count = len(target_collection_dict["edges"])
-            logging.info(
-                f"Stored {current_edge_count} unique edges after page 1 (max: {max_items})."
-            )
+            logging.info(f"Stored {current_edge_count} unique edges after page 1 (max: {max_items}).")
 
         if not has_next or not cursor or current_edge_count >= max_items:
-            logger.info(
-                "No further pages needed based on page 1 info or max_items reached."
-            )
+            logger.info("No further pages needed based on page 1 info or max_items reached.")
             # Ensure final pageInfo reflects reality
-            target_pi_dict = get_nested_value(
-                result_dict, path_to_paginate + ["pageInfo"]
-            )
+            target_pi_dict = get_nested_value(result_dict, path_to_paginate + ["pageInfo"])
             if target_pi_dict:
                 target_pi_dict["hasNextPage"] = False
             return result_dict
@@ -748,9 +730,7 @@ def query_paginated_wandb_gql(
         if generated_paginated_query_string is None:
             return result_dict
 
-        logging.info(
-            "\n--- Loop: Execute, Deduplicate, Aggregate In-Place, Check Limit ---"
-        )
+        logging.info("\n--- Loop: Execute, Deduplicate, Aggregate In-Place, Check Limit ---")
         page_num = 1
         current_cursor = cursor
         current_has_next = has_next
@@ -764,26 +744,18 @@ def query_paginated_wandb_gql(
 
             page_num += 1
             logging.info(f"\nFetching Page {page_num}...")
-            page_vars = (
-                variables.copy() if variables is not None else {}
-            )  # Start with original vars
+            page_vars = variables.copy() if variables is not None else {}  # Start with original vars
             page_vars[limit_key] = items_per_page  # Set correct page size
             page_vars[after_variable_name] = current_cursor  # Set cursor
 
             try:
                 # Parse and execute for the current page
                 parsed_generated = gql(generated_paginated_query_string)
-                logging.info(
-                    f"Executing generated query for page {page_num} with vars: {page_vars}"
-                )
-                result_page = api.client.execute(
-                    parsed_generated, variable_values=page_vars
-                )
+                logging.info(f"Executing generated query for page {page_num} with vars: {page_vars}")
+                result_page = api.client.execute(parsed_generated, variable_values=page_vars)
 
                 if "errors" in result_page:
-                    logger.error(
-                        f"GraphQL errors on page {page_num}: {result_page['errors']}. Stopping pagination."
-                    )
+                    logger.error(f"GraphQL errors on page {page_num}: {result_page['errors']}. Stopping pagination.")
                     current_has_next = False
                     final_page_info = {
                         **final_page_info,
@@ -803,9 +775,7 @@ def query_paginated_wandb_gql(
                     page_info = get_nested_value(runs_data, ["pageInfo"]) or {}
                     final_page_info = page_info  # Store latest page info
 
-                logging.info(
-                    f"Result (Page {page_num}): {len(edges_this_page)} runs returned."
-                )
+                logging.info(f"Result (Page {page_num}): {len(edges_this_page)} runs returned.")
                 logging.info(f"Page Info (Page {page_num}): {page_info}")
 
                 # Deduplicate & Find edges to append
@@ -813,13 +783,8 @@ def query_paginated_wandb_gql(
                 duplicates_skipped = 0
                 if edges_this_page:
                     for edge in edges_this_page:
-                        if (
-                            current_edge_count + len(new_edges_for_aggregation)
-                            >= max_items
-                        ):
-                            logging.info(
-                                f"Max items ({max_items}) reached mid-page {page_num}."
-                            )
+                        if current_edge_count + len(new_edges_for_aggregation) >= max_items:
+                            logging.info(f"Max items ({max_items}) reached mid-page {page_num}.")
                             final_page_info = {**final_page_info, "hasNextPage": False}
                             current_has_next = False
                             break
@@ -835,41 +800,27 @@ def query_paginated_wandb_gql(
                             new_edges_for_aggregation.append(edge)
 
                     if duplicates_skipped > 0:
-                        logging.info(
-                            f"Skipped {duplicates_skipped} duplicate edges on page {page_num}."
-                        )
+                        logging.info(f"Skipped {duplicates_skipped} duplicate edges on page {page_num}.")
 
                     # Append new unique edges IN-PLACE
                     if new_edges_for_aggregation:
-                        target_collection_dict_inplace = get_nested_value(
-                            result_dict, path_to_paginate
-                        )
+                        target_collection_dict_inplace = get_nested_value(result_dict, path_to_paginate)
                         if target_collection_dict_inplace and isinstance(
                             target_collection_dict_inplace.get("edges"), list
                         ):
-                            target_collection_dict_inplace["edges"].extend(
-                                new_edges_for_aggregation
-                            )
-                            current_edge_count = len(
-                                target_collection_dict_inplace["edges"]
-                            )
+                            target_collection_dict_inplace["edges"].extend(new_edges_for_aggregation)
+                            current_edge_count = len(target_collection_dict_inplace["edges"])
                             logging.info(
                                 f"Appended {len(new_edges_for_aggregation)} new edges. Total unique edges: {current_edge_count}"
                             )
                         else:
-                            logging.error(
-                                "Could not find target edges list in result_dict to append in-place."
-                            )
+                            logging.error("Could not find target edges list in result_dict to append in-place.")
                             current_has_next = False
                     else:
                         if len(edges_this_page) > 0:
-                            logging.info(
-                                "No new unique edges found on page {page_num} after deduplication."
-                            )
+                            logging.info("No new unique edges found on page {page_num} after deduplication.")
                         else:
-                            logging.info(
-                                "No edges returned on page {page_num} to aggregate."
-                            )
+                            logging.info("No edges returned on page {page_num} to aggregate.")
                 else:
                     logging.info("No edges returned on page {page_num} to aggregate.")
 
@@ -881,20 +832,14 @@ def query_paginated_wandb_gql(
 
                 # Safety checks
                 if current_has_next and not current_cursor:
-                    logging.warning(
-                        "hasNextPage is true but no endCursor received. Stopping loop."
-                    )
+                    logging.warning("hasNextPage is true but no endCursor received. Stopping loop.")
                     current_has_next = False
                 if not edges_this_page:
-                    logging.warning(
-                        f"No edges received for page {page_num}. Stopping loop."
-                    )
+                    logging.warning(f"No edges received for page {page_num}. Stopping loop.")
                     current_has_next = False
 
             except Exception as e:
-                logging.error(
-                    f"Execution failed for page {page_num}: {e}", exc_info=True
-                )
+                logging.error(f"Execution failed for page {page_num}: {e}", exc_info=True)
                 current_has_next = False  # Stop loop on error
 
         logging.info(f"\n--- Pagination Loop Finished after page {page_num} ---")
@@ -915,24 +860,16 @@ def query_paginated_wandb_gql(
         if result_dict:
             if "errors" not in result_dict:
                 result_dict["errors"] = []
-            result_dict["errors"].append(
-                {"message": "Pagination failed", "details": str(e)}
-            )
+            result_dict["errors"].append({"message": "Pagination failed", "details": str(e)})
             return result_dict
         else:
-            return {
-                "errors": [
-                    {"message": "Pagination failed catastrophically", "details": str(e)}
-                ]
-            }
+            return {"errors": [{"message": "Pagination failed catastrophically", "details": str(e)}]}
 
 
 class AddPaginationArgsVisitor(gql_visitor.Visitor):
     """Adds first/after args and variables"""
 
-    def __init__(
-        self, field_paths, first_variable_name="limit", after_variable_name="after"
-    ):
+    def __init__(self, field_paths, first_variable_name="limit", after_variable_name="after"):
         super().__init__()
         self.field_paths = set(tuple(p) for p in field_paths)
         self.first_variable_name = first_variable_name
@@ -950,23 +887,15 @@ class AddPaginationArgsVisitor(gql_visitor.Visitor):
             has_first = any(arg.name.value == "first" for arg in existing_args)
             if not has_first:
                 # Defaulting variable name to 'limit' if not found, might need refinement
-                limit_var_node = gql_ast.VariableNode(
-                    name=gql_ast.NameNode(value=self.first_variable_name)
-                )
-                existing_args.append(
-                    gql_ast.ArgumentNode(
-                        name=gql_ast.NameNode(value="first"), value=limit_var_node
-                    )
-                )
+                limit_var_node = gql_ast.VariableNode(name=gql_ast.NameNode(value=self.first_variable_name))
+                existing_args.append(gql_ast.ArgumentNode(name=gql_ast.NameNode(value="first"), value=limit_var_node))
                 args_changed = True
             has_after = any(arg.name.value == "after" for arg in existing_args)
             if not has_after:
                 existing_args.append(
                     gql_ast.ArgumentNode(
                         name=gql_ast.NameNode(value="after"),
-                        value=gql_ast.VariableNode(
-                            name=gql_ast.NameNode(value=self.after_variable_name)
-                        ),
+                        value=gql_ast.VariableNode(name=gql_ast.NameNode(value=self.after_variable_name)),
                     )
                 )
                 args_changed = True
@@ -993,9 +922,7 @@ class AddPaginationArgsVisitor(gql_visitor.Visitor):
         if current_limit_var not in existing_vars:
             new_defs_list.append(
                 gql_ast.VariableDefinitionNode(
-                    variable=gql_ast.VariableNode(
-                        name=gql_ast.NameNode(value=current_limit_var)
-                    ),
+                    variable=gql_ast.VariableNode(name=gql_ast.NameNode(value=current_limit_var)),
                     type=gql_ast.NamedTypeNode(name=gql_ast.NameNode(value="Int")),
                 )
             )
@@ -1003,9 +930,7 @@ class AddPaginationArgsVisitor(gql_visitor.Visitor):
         if self.after_variable_name not in existing_vars:
             new_defs_list.append(
                 gql_ast.VariableDefinitionNode(
-                    variable=gql_ast.VariableNode(
-                        name=gql_ast.NameNode(value=self.after_variable_name)
-                    ),
+                    variable=gql_ast.VariableNode(name=gql_ast.NameNode(value=self.after_variable_name)),
                     type=gql_ast.NamedTypeNode(name=gql_ast.NameNode(value="String")),
                 )
             )
