@@ -2,8 +2,17 @@
 
 Each scorer is a `weave.Scorer` subclass that can be versioned, published,
 and used with `weave.Evaluation` for tracked comparisons.
+
+Scorer types:
+- ToolSelectionScorer: Did the agent pick the right MCP tools?
+- WorkflowOrderScorer: Did it follow the prescribed step sequence?
+- EfficiencyScorer: How many tool calls were needed?
+- OutputQualityScorer: Does the output contain expected substrings?
+- RubricScorer: LLM-as-judge evaluation against rubric items.
+- RegexScorer: Pattern matching for verifiable outputs.
 """
 
+import re
 from typing import Any
 
 import weave
@@ -145,3 +154,130 @@ class OutputQualityScorer(weave.Scorer):
             "match_ratio": sum(results.values()) / len(results) if results else 1.0,
             "matches": results,
         }
+
+
+class RegexScorer(weave.Scorer):
+    """Score output by checking regex patterns against the response text.
+
+    Each check has an id, pattern, and optional description. Inspired by
+    the improver repo's `core.scorers.regex::RegexScorer` which validates
+    task outputs against expected numerical ranges and structural patterns.
+    """
+
+    @weave.op()
+    def score(self, output: dict[str, Any], regex_checks: list[dict[str, str]]) -> dict[str, Any]:
+        """Score output against a list of regex patterns.
+
+        Args:
+            output: Model output containing a "response_text" string.
+            regex_checks: List of dicts, each with 'id', 'pattern', and optional 'description'.
+
+        Returns:
+            Dict with 'all_passed' bool, 'pass_ratio', and per-check results.
+        """
+        response = output.get("response_text", "")
+
+        results = {}
+        for check in regex_checks:
+            check_id = check["id"]
+            pattern = check["pattern"]
+            results[check_id] = bool(re.search(pattern, response))
+
+        passed = sum(results.values())
+        total = len(results)
+
+        return {
+            "all_passed": passed == total,
+            "pass_ratio": passed / total if total > 0 else 1.0,
+            "checks": results,
+        }
+
+
+class RubricScorer(weave.Scorer):
+    """Score output by evaluating against rubric items using an LLM judge.
+
+    Each rubric item has an id and text description of what to check.
+    The scorer formats them into a prompt and asks an LLM to judge each.
+    Inspired by the improver repo's `core.scorers.rubric::RubricScorer`.
+
+    For unit testing, set `dry_run=True` to skip the LLM call and return
+    all items as passed.
+    """
+
+    dry_run: bool = False
+
+    @weave.op()
+    def score(self, output: dict[str, Any], rubric: list[dict[str, str]]) -> dict[str, Any]:
+        """Score output against rubric items.
+
+        Args:
+            output: Model output containing a "response_text" string.
+            rubric: List of dicts, each with 'id' and 'text' describing the criterion.
+
+        Returns:
+            Dict with 'all_passed' bool, 'pass_ratio', and per-item verdicts.
+        """
+        response = output.get("response_text", "")
+
+        if self.dry_run or not response:
+            items = {item["id"]: True for item in rubric}
+            return {
+                "all_passed": True,
+                "pass_ratio": 1.0,
+                "items": items,
+            }
+
+        try:
+            import json
+
+            from openai import OpenAI
+
+            rubric_text = "\n".join(
+                f"- {item['id']}: {item['text']}" for item in rubric
+            )
+
+            client = OpenAI()
+            llm_response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an evaluator. Given a response and rubric items, "
+                            "judge each item as passed or failed. Return ONLY valid JSON: "
+                            '{"items": [{"id": "...", "verdict": "pass"|"fail", "notes": "..."}]}'
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Response:\n{response}\n\nRubric:\n{rubric_text}",
+                    },
+                ],
+                temperature=0,
+            )
+
+            text = llm_response.choices[0].message.content.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1].rsplit("```", 1)[0]
+            result = json.loads(text)
+
+            items = {}
+            for item in result.get("items", []):
+                items[item["id"]] = item.get("verdict", "fail") == "pass"
+
+            passed = sum(items.values())
+            total = len(items)
+
+            return {
+                "all_passed": passed == total,
+                "pass_ratio": passed / total if total > 0 else 1.0,
+                "items": items,
+            }
+
+        except Exception as e:
+            return {
+                "all_passed": False,
+                "pass_ratio": 0.0,
+                "items": {},
+                "error": str(e),
+            }
