@@ -5,7 +5,6 @@ import logging
 import traceback
 from typing import Any, Dict, List, Optional
 
-import wandb
 from graphql import parse
 from graphql.language import ast as gql_ast
 from graphql.language import printer as gql_printer
