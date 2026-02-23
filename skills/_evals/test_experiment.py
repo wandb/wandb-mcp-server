@@ -9,6 +9,7 @@ from .scorers import (
     RubricScorer,
     ToolSelectionScorer,
     WorkflowOrderScorer,
+    run_custom_scorers,
 )
 
 RESPONSE_TEMPLATES = {
@@ -66,3 +67,14 @@ def test_rubric(scenario):
     scorer = RubricScorer(dry_run=True)
     result = scorer.score(output=output, rubric=scenario["rubric"])
     assert result["all_passed"]
+
+
+CUSTOM_SCORER_SCENARIOS = [s for s in EXPERIMENT_SCENARIOS if "custom_scorers" in s]
+
+
+@pytest.mark.parametrize("scenario", CUSTOM_SCORER_SCENARIOS, ids=[s["id"] for s in CUSTOM_SCORER_SCENARIOS])
+def test_custom_scorers(scenario):
+    output = _simulate_experiment_skill(scenario)
+    results = run_custom_scorers(output, scenario["custom_scorers"])
+    for r in results:
+        assert r["passed"], f"Custom scorer {r['scorer_name']} failed: {r['details']}"

@@ -15,6 +15,13 @@ import os
 
 import pytest
 
+from skills._evals.scorers import (
+    MetricComparisonScorer,
+    TaxonomyCoverageScorer,
+    TraceCountAccuracyScorer,
+    ValidPythonScorer,
+)
+
 EVAL_ENTITY = os.environ.get("MCP_LOGS_WANDB_ENTITY", "a-sh0ts")
 EVAL_PROJECT = os.environ.get("MCP_EVAL_PROJECT", "mcp-skill-evals")
 EVAL_SEED_ENTITY = os.environ.get("MCP_EVAL_SEED_ENTITY", EVAL_ENTITY)
@@ -58,6 +65,7 @@ EXPERIMENT_SCENARIOS = [
         "regex_checks": [
             {"id": "has_metric_name", "pattern": r"eval.loss|eval_loss", "description": "Mentions the eval_loss metric"},
         ],
+        "custom_scorers": [MetricComparisonScorer()],
     },
     {
         "id": "best-run",
@@ -102,6 +110,7 @@ TRACE_SCENARIOS = [
         "regex_checks": [
             {"id": "has_count", "pattern": r"\d+\s*(traces|calls|total)", "description": "Reports a trace count"},
         ],
+        "custom_scorers": [TraceCountAccuracyScorer()],
     },
     {
         "id": "error-investigation",
@@ -143,6 +152,7 @@ QUICKSTART_SCENARIOS = [
             {"id": "has_init", "pattern": r"weave\.init\(", "description": "Contains weave.init() call"},
             {"id": "has_import", "pattern": r"import weave", "description": "Contains import weave"},
         ],
+        "custom_scorers": [ValidPythonScorer()],
     },
     {
         "id": "langchain-app",
@@ -161,6 +171,7 @@ QUICKSTART_SCENARIOS = [
         "regex_checks": [
             {"id": "has_decorator", "pattern": r"@weave\.op\(\)", "description": "Contains @weave.op() decorator"},
         ],
+        "custom_scorers": [ValidPythonScorer()],
     },
     {
         "id": "verify-traces-live",
@@ -222,6 +233,7 @@ FAILURE_SCENARIOS = [
         "regex_checks": [
             {"id": "has_rate_limit", "pattern": r"rate.?limit|429|RateLimitError", "description": "Mentions rate limits"},
         ],
+        "custom_scorers": [TaxonomyCoverageScorer(min_categories=2)],
     },
     {
         "id": "taxonomy-generation",
@@ -236,5 +248,6 @@ FAILURE_SCENARIOS = [
         "regex_checks": [
             {"id": "has_scorer", "pattern": r"Scorer|scorer|taxonomy", "description": "Mentions scorer or taxonomy"},
         ],
+        "custom_scorers": [TaxonomyCoverageScorer(min_categories=3), ValidPythonScorer()],
     },
 ]

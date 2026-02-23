@@ -3,13 +3,22 @@
 Each scorer is a `weave.Scorer` subclass that can be versioned, published,
 and used with `weave.Evaluation` for tracked comparisons.
 
-Scorer types:
+Generic scorers (shared across all skills):
 - ToolSelectionScorer: Did the agent pick the right MCP tools?
 - WorkflowOrderScorer: Did it follow the prescribed step sequence?
 - EfficiencyScorer: How many tool calls were needed?
 - OutputQualityScorer: Does the output contain expected substrings?
 - RubricScorer: LLM-as-judge evaluation against rubric items.
 - RegexScorer: Pattern matching for verifiable outputs.
+
+Custom skill-specific scorers:
+- Defined per-skill in scenario dicts under "custom_scorers" key.
+- Each custom scorer is a callable(output: dict) -> dict with "passed" bool.
+- Enables domain-specific validation (e.g., "code is valid Python",
+  "taxonomy has >= 3 categories", "trace count is a real number").
+
+To add a custom scorer for a skill, see the CUSTOM SCORER GUIDE at the
+bottom of this file.
 """
 
 import re
@@ -281,3 +290,204 @@ class RubricScorer(weave.Scorer):
                 "items": {},
                 "error": str(e),
             }
+
+
+# ---------------------------------------------------------------------------
+# Custom skill-specific scorers
+# ---------------------------------------------------------------------------
+# These scorers encode domain knowledge unique to a specific skill.
+# They are registered in scenario dicts under "custom_scorers": [scorer_instance, ...]
+# and picked up by both pytest tests and the run_evals.py orchestrator.
+#
+# HOW TO ADD A CUSTOM SCORER:
+# 1. Define a weave.Scorer subclass below (or in a separate file).
+# 2. Add it to the relevant scenarios in conftest.py under "custom_scorers".
+# 3. The orchestrator and test files will automatically pick it up.
+# ---------------------------------------------------------------------------
+
+
+class ValidPythonScorer(weave.Scorer):
+    """Quickstart-specific: check that the response contains syntactically valid Python.
+
+    Extracts code from markdown fenced blocks (```python ... ```) and runs
+    compile() to check for syntax errors. Useful for the quickstart skill
+    which must produce runnable instrumentation code.
+    """
+
+    @weave.op()
+    def score(self, output: dict[str, Any]) -> dict[str, Any]:
+        """Check if the response contains valid Python code.
+
+        Args:
+            output: Model output containing a "response_text" string.
+
+        Returns:
+            Dict with 'passed' bool, 'code_blocks_found', and optional 'error'.
+        """
+        response = output.get("response_text", "")
+
+        blocks = re.findall(r"```(?:python)?\n(.*?)```", response, re.DOTALL)
+        if not blocks:
+            if "import weave" in response and "weave.init" in response:
+                blocks = [response]
+            else:
+                return {"passed": True, "code_blocks_found": 0, "note": "No code blocks to validate"}
+
+        errors = []
+        for i, block in enumerate(blocks):
+            try:
+                compile(block.strip(), f"<block_{i}>", "exec")
+            except SyntaxError as e:
+                errors.append({"block": i, "error": str(e), "line": e.lineno})
+
+        return {
+            "passed": len(errors) == 0,
+            "code_blocks_found": len(blocks),
+            "syntax_errors": errors,
+        }
+
+
+class TaxonomyCoverageScorer(weave.Scorer):
+    """Failure-analysis-specific: check that the taxonomy has sufficient categories.
+
+    Verifies the response mentions at least `min_categories` distinct error
+    categories, which is the core output of the failure-analysis skill.
+    """
+
+    min_categories: int = 3
+
+    @weave.op()
+    def score(self, output: dict[str, Any]) -> dict[str, Any]:
+        """Check taxonomy coverage in the response.
+
+        Args:
+            output: Model output containing a "response_text" string.
+
+        Returns:
+            Dict with 'passed' bool, 'categories_found', and the category list.
+        """
+        response = output.get("response_text", "").lower()
+
+        known_categories = [
+            "rate_limit", "rate limit", "ratelimit", "429",
+            "timeout", "timed out",
+            "validation", "validationerror",
+            "auth", "authentication", "unauthorized", "403", "401",
+            "parsing", "json", "jsondecodeerror",
+            "type_error", "typeerror", "attributeerror",
+            "context_length", "token limit", "max_tokens",
+            "refusal", "i cannot", "content filter",
+            "hallucination",
+            "empty_output", "empty output", "none",
+            "infrastructure", "server error", "500", "503",
+        ]
+
+        found = set()
+        for cat in known_categories:
+            if cat in response:
+                normalized = cat.split()[0].replace("_", "").lower()
+                found.add(normalized)
+
+        return {
+            "passed": len(found) >= self.min_categories,
+            "categories_found": len(found),
+            "categories": sorted(found),
+            "min_required": self.min_categories,
+        }
+
+
+class TraceCountAccuracyScorer(weave.Scorer):
+    """Trace-analyst-specific: check that reported trace counts are plausible.
+
+    Verifies the response contains numeric trace counts and they look
+    reasonable (not zero, not absurdly high).
+    """
+
+    @weave.op()
+    def score(self, output: dict[str, Any]) -> dict[str, Any]:
+        """Check trace count plausibility.
+
+        Args:
+            output: Model output containing a "response_text" string.
+
+        Returns:
+            Dict with 'passed' bool and extracted counts.
+        """
+        response = output.get("response_text", "")
+
+        count_patterns = re.findall(r"(\d[\d,]*)\s*(?:traces|calls|total|error|success)", response, re.IGNORECASE)
+        counts = []
+        for match in count_patterns:
+            try:
+                counts.append(int(match.replace(",", "")))
+            except ValueError:
+                continue
+
+        if not counts:
+            return {"passed": False, "counts_found": 0, "note": "No trace counts found in response"}
+
+        all_plausible = all(0 < c < 10_000_000 for c in counts)
+
+        return {
+            "passed": all_plausible and len(counts) > 0,
+            "counts_found": len(counts),
+            "counts": counts,
+        }
+
+
+class MetricComparisonScorer(weave.Scorer):
+    """Experiment-analysis-specific: check that metrics are compared across runs.
+
+    Verifies the response contains numeric metric values and mentions
+    multiple runs, indicating a proper comparison was performed.
+    """
+
+    @weave.op()
+    def score(self, output: dict[str, Any]) -> dict[str, Any]:
+        """Check metric comparison quality.
+
+        Args:
+            output: Model output containing a "response_text" string.
+
+        Returns:
+            Dict with 'passed' bool, 'metrics_found', 'runs_mentioned'.
+        """
+        response = output.get("response_text", "")
+
+        metric_values = re.findall(r"\d+\.\d+", response)
+        run_mentions = re.findall(r"(?:run|Run|model)\s*[\w-]+", response)
+
+        return {
+            "passed": len(metric_values) >= 2 and len(run_mentions) >= 2,
+            "metrics_found": len(metric_values),
+            "runs_mentioned": len(run_mentions),
+        }
+
+
+def run_custom_scorers(output: dict[str, Any], custom_scorers: list) -> list[dict]:
+    """Run a list of custom scorer instances against an output.
+
+    Args:
+        output: The standardized agent output dict.
+        custom_scorers: List of weave.Scorer instances.
+
+    Returns:
+        List of dicts with 'scorer_name', 'passed', 'details'.
+    """
+    results = []
+    for scorer in custom_scorers:
+        name = scorer.__class__.__name__
+        try:
+            result = scorer.score(output=output)
+            results.append({
+                "scorer_name": name,
+                "passed": result.get("passed", False),
+                "details": result,
+            })
+        except Exception as e:
+            results.append({
+                "scorer_name": name,
+                "passed": False,
+                "details": {"error": str(e)},
+            })
+    return results
