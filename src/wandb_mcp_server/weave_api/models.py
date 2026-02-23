@@ -113,6 +113,7 @@ class TraceMetadata(BaseModel):
     time_range: Dict[str, Optional[datetime]] = Field(default_factory=dict)
     status_summary: Dict[str, int] = Field(default_factory=dict)
     op_distribution: Dict[str, int] = Field(default_factory=dict)
+    truncation_warning: Optional[str] = None
 
 
 class WeaveTrace(BaseModel):

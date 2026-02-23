@@ -273,6 +273,115 @@ class TraceProcessor:
         # Sort by count in descending order
         return dict(sorted(op_counts.items(), key=lambda x: x[1], reverse=True))
 
+    # Field priority tiers for semantic-aware truncation.
+    # HIGH: small fields that carry the most diagnostic value.
+    # MEDIUM: structured metadata; useful but can be summarised.
+    # LOW: large payloads (inputs/output) that dominate token count.
+    HIGH_SIGNAL_FIELDS: set = {
+        "id", "op_name", "display_name", "trace_id", "parent_id",
+        "started_at", "ended_at", "status", "latency_ms", "exception",
+    }
+    MEDIUM_SIGNAL_FIELDS: set = {
+        "attributes", "summary", "costs", "feedback",
+        "wb_run_id", "wb_user_id", "project_id", "deleted_at",
+    }
+    LOW_SIGNAL_FIELDS: set = {"inputs", "output"}
+
+    @classmethod
+    def estimate_tokens(cls, text: str) -> int:
+        """Cheap token estimate: 1 token ~ 4 chars of JSON."""
+        return max(1, len(text) // 4)
+
+    @classmethod
+    def _trace_to_dict(cls, trace: Any) -> dict:
+        """Normalise a trace (Pydantic model or dict) to a plain dict."""
+        if hasattr(trace, "model_dump"):
+            return trace.model_dump()
+        if isinstance(trace, dict):
+            return trace.copy()
+        return trace
+
+    @classmethod
+    def enforce_token_budget(
+        cls,
+        result_json: str,
+        traces: List[Any],
+        budget: int,
+    ) -> tuple:
+        """Progressively truncate *traces* until they fit within *budget* tokens.
+
+        Uses a **semantic-aware** strategy that preserves the most diagnostically
+        valuable fields first, per Nico's review feedback.
+
+        Levels:
+          L0 -- Under budget: return as-is.
+          L1 -- Truncate LOW_SIGNAL fields (inputs, output) to 100 chars.
+          L2 -- Drop LOW_SIGNAL fields entirely; truncate MEDIUM_SIGNAL to 200 chars.
+          L3 -- Keep only HIGH_SIGNAL fields (compact diagnostic view).
+          L4 -- Sample every Nth trace, HIGH_SIGNAL only.
+
+        Returns:
+            ``(truncated_traces, warning_message | None, applied_level)``
+        """
+        est = cls.estimate_tokens(result_json)
+        if est <= budget:
+            return traces, None, 0
+
+        dicts = [cls._trace_to_dict(t) for t in traces]
+        warnings: list[str] = []
+
+        def _est(data: list) -> int:
+            return cls.estimate_tokens(
+                json.dumps(data, cls=DateTimeEncoder, default=str)
+            )
+
+        # L1: truncate LOW_SIGNAL to 100 chars, leave HIGH/MEDIUM intact
+        l1 = []
+        for d in dicts:
+            row = {}
+            for k, v in d.items():
+                if k in cls.LOW_SIGNAL_FIELDS:
+                    row[k] = cls.truncate_value(v, 100)
+                else:
+                    row[k] = v
+            l1.append(row)
+        if _est(l1) <= budget:
+            warnings.append(
+                "Inputs/output truncated to 100 chars (high-signal fields preserved)."
+            )
+            return l1, " ".join(warnings), 1
+
+        # L2: drop LOW_SIGNAL entirely, truncate MEDIUM_SIGNAL to 200 chars
+        l2 = []
+        for row in l1:
+            filtered = {}
+            for k, v in row.items():
+                if k in cls.LOW_SIGNAL_FIELDS:
+                    continue
+                if k in cls.MEDIUM_SIGNAL_FIELDS:
+                    filtered[k] = cls.truncate_value(v, 200)
+                else:
+                    filtered[k] = v
+            l2.append(filtered)
+        warnings.append("Dropped inputs/output; medium-signal fields truncated.")
+        if _est(l2) <= budget:
+            return l2, " ".join(warnings), 2
+
+        # L3: keep only HIGH_SIGNAL fields
+        l3 = [
+            {k: v for k, v in row.items() if k in cls.HIGH_SIGNAL_FIELDS}
+            for row in l2
+        ]
+        warnings.append("Kept only high-signal diagnostic fields.")
+        if _est(l3) <= budget:
+            return l3, " ".join(warnings), 3
+
+        # L4: sample every Nth trace (HIGH_SIGNAL only)
+        n = max(2, len(l3) // max(1, budget // max(1, _est(l3[:1]))))
+        l4 = l3[::n]
+        warnings.append(f"Sampled {len(l4)} of {len(traces)} traces.")
+        return l4, " ".join(warnings), 4
+
     @classmethod
     def process_traces(
         cls,
@@ -417,15 +526,40 @@ class TraceProcessor:
                     # Keep the original dictionary if conversion fails
                     converted_traces.append(trace)
 
-            return QueryResult(metadata=metadata, traces=converted_traces)
+            result = QueryResult(metadata=metadata, traces=converted_traces)
         except ImportError:
-            # If WeaveTrace can't be imported for some reason, return dicts
             logger.warning("Could not import WeaveTrace model, returning dictionaries")
-            return QueryResult(metadata=metadata, traces=processed_traces)
+            result = QueryResult(metadata=metadata, traces=processed_traces)
         except Exception as e:
-            # If there's any other error in conversion, return dictionaries
             logger.warning(f"Error converting traces to WeaveTrace: {e}")
-            return QueryResult(metadata=metadata, traces=processed_traces)
+            result = QueryResult(metadata=metadata, traces=processed_traces)
+
+        # Enforce token budget -- semantic-aware progressive truncation (MCP-6)
+        from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
+
+        try:
+            result_json = result.model_dump_json()
+            est_tokens = cls.estimate_tokens(result_json)
+            if est_tokens > MAX_RESPONSE_TOKENS and result.traces:
+                logger.warning(
+                    f"Response exceeds token budget ({est_tokens} > {MAX_RESPONSE_TOKENS}). "
+                    f"Applying semantic-aware truncation."
+                )
+                truncated, warning_msg, level = cls.enforce_token_budget(
+                    result_json, result.traces, MAX_RESPONSE_TOKENS
+                )
+                if warning_msg:
+                    note = (
+                        f"NOTE: Response truncated to fit {MAX_RESPONSE_TOKENS} token budget "
+                        f"(level {level}). {warning_msg} "
+                        f"Narrow your query with filters or request fewer traces for full data."
+                    )
+                    result.metadata.truncation_warning = note
+                    result = QueryResult(metadata=result.metadata, traces=truncated)
+        except Exception as e:
+            logger.warning(f"Token budget enforcement failed (non-fatal): {e}")
+
+        return result
 
     @staticmethod
     def get_cost(trace: Dict[str, Any], which_cost: str) -> float:
