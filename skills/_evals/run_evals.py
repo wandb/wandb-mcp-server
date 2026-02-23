@@ -224,6 +224,17 @@ def score_result(scenario: dict, agent_result) -> list[ScoreResult]:
             details=result,
         ))
 
+    if "custom_scorers" in scenario:
+        from skills._evals.scorers import run_custom_scorers
+
+        custom_results = run_custom_scorers(output, scenario["custom_scorers"])
+        for cr in custom_results:
+            scores.append(ScoreResult(
+                scorer_name=cr["scorer_name"],
+                passed=cr["passed"],
+                details=cr["details"],
+            ))
+
     return scores
 
 

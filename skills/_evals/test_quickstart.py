@@ -8,7 +8,7 @@ MCP tools to verify traces exist.
 import pytest
 
 from .conftest import EVAL_SEED_ENTITY, EVAL_SEED_PROJECT, QUICKSTART_SCENARIOS
-from .scorers import OutputQualityScorer, RegexScorer, RubricScorer, ToolSelectionScorer
+from .scorers import OutputQualityScorer, RegexScorer, RubricScorer, ToolSelectionScorer, run_custom_scorers
 
 MOCK_RESPONSES = {
     "openai-app": 'import weave\nweave.init("my-project")\nimport openai',
@@ -84,3 +84,14 @@ def test_rubric(scenario):
     scorer = RubricScorer(dry_run=True)
     result = scorer.score(output=output, rubric=scenario["rubric"])
     assert result["all_passed"]
+
+
+CUSTOM_SCORER_SCENARIOS = [s for s in QUICKSTART_SCENARIOS if "custom_scorers" in s]
+
+
+@pytest.mark.parametrize("scenario", CUSTOM_SCORER_SCENARIOS, ids=[s["id"] for s in CUSTOM_SCORER_SCENARIOS])
+def test_custom_scorers(scenario):
+    output = _simulate_quickstart_skill(scenario)
+    results = run_custom_scorers(output, scenario["custom_scorers"])
+    for r in results:
+        assert r["passed"], f"Custom scorer {r['scorer_name']} failed: {r['details']}"

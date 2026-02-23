@@ -9,11 +9,22 @@ from .scorers import (
     RubricScorer,
     ToolSelectionScorer,
     WorkflowOrderScorer,
+    run_custom_scorers,
 )
 
 RESPONSE_TEMPLATES = {
     "rate-limit-cluster": "Found 43 error traces. Clusters: RateLimitError (23, 429 status), TimeoutError (12), ValidationError (8).",
-    "taxonomy-generation": "Generated failure taxonomy with 6 categories. Created Scorer class AxialCodingClassifierV1 for classification.",
+    "taxonomy-generation": (
+        "Generated failure taxonomy with 6 categories:\n"
+        "- rate_limit: API rate limit errors (429)\n"
+        "- timeout: Network timeouts\n"
+        "- validation: Input validation failures\n"
+        "- auth: Authentication errors (401/403)\n"
+        "- infrastructure: Server errors (500/503)\n"
+        "- unknown: Unclassified\n\n"
+        "```python\nclass AxialCodingClassifierV1(Scorer):\n"
+        "    name: str = 'axial_coding_classifier_v1'\n```"
+    ),
 }
 
 
@@ -65,3 +76,14 @@ def test_rubric(scenario):
     scorer = RubricScorer(dry_run=True)
     result = scorer.score(output=output, rubric=scenario["rubric"])
     assert result["all_passed"]
+
+
+CUSTOM_SCORER_SCENARIOS = [s for s in FAILURE_SCENARIOS if "custom_scorers" in s]
+
+
+@pytest.mark.parametrize("scenario", CUSTOM_SCORER_SCENARIOS, ids=[s["id"] for s in CUSTOM_SCORER_SCENARIOS])
+def test_custom_scorers(scenario):
+    output = _simulate_failure_skill(scenario)
+    results = run_custom_scorers(output, scenario["custom_scorers"])
+    for r in results:
+        assert r["passed"], f"Custom scorer {r['scorer_name']} failed: {r['details']}"
