@@ -519,9 +519,17 @@ use the tool again with additional filters or pagination to get a more complete 
 *   `"Cannot query field 'step' on type 'Run'"`: The `Run` type does not have a direct `step` field. To find the maximum step count or total steps logged, query the `summaryMetrics` field (look for a key like `_step` or similar in the returned JSON string) or use the `historyLineCount` field which indicates the total number of history rows logged (often corresponding to steps).
 
 **Notes:**
+
+<deduplication_warning>
+**IMPORTANT: Do NOT re-call this tool with identical or very similar parameters.**
+If you have already received a response, work with the data you have. If the response
+was large or truncated, narrow your query by adding filters, reducing `max_items`,
+or requesting fewer fields. Do NOT re-submit the same query hoping for different results.
+</deduplication_warning>
+
 *   Refer to the official W&B GraphQL schema (via introspection or documentation) for the most up-to-date field names, types, and available filters/arguments.
 *   Structure your query to request only the necessary data fields to minimize response size and improve performance.
-*   **Sorting:** Use the `order` parameter string. Prefix with `+` for ascending, `-` for descending (default). 
+*   **Sorting:** Use the `order` parameter string. Prefix with `+` for ascending, `-` for descending (default).
         Common sortable fields: `createdAt`, `updatedAt`, `heartbeatAt`, `config.*`, `summary_metrics.*`.
 *   Handle potential errors in the returned dictionary (e.g., check for an 'errors' key in the response).
 """
