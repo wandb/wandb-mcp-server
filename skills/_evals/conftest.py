@@ -1,4 +1,15 @@
-"""Shared fixtures for skills evaluation."""
+"""Shared fixtures and scenarios for MCP skill evaluations.
+
+Scenarios are used in two modes:
+1. Unit tests (pytest): _simulate_*_skill() returns mock outputs, scored locally.
+2. Live evals (run_evals.py): Real agent CLIs run prompts, scored against real MCP data.
+
+Environment variables:
+    MCP_LOGS_WANDB_ENTITY    -- W&B entity for eval logging (default: a-sh0ts)
+    MCP_EVAL_PROJECT         -- Weave project for eval results (default: mcp-skill-evals)
+    MCP_EVAL_SEED_ENTITY     -- W&B entity for seed data (default: a-sh0ts)
+    MCP_EVAL_SEED_PROJECT    -- W&B project for seed data (default: mcp-skill-eval-seed)
+"""
 
 import os
 
@@ -6,6 +17,8 @@ import pytest
 
 EVAL_ENTITY = os.environ.get("MCP_LOGS_WANDB_ENTITY", "a-sh0ts")
 EVAL_PROJECT = os.environ.get("MCP_EVAL_PROJECT", "mcp-skill-evals")
+EVAL_SEED_ENTITY = os.environ.get("MCP_EVAL_SEED_ENTITY", EVAL_ENTITY)
+EVAL_SEED_PROJECT = os.environ.get("MCP_EVAL_SEED_PROJECT", "mcp-skill-eval-seed")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -147,6 +160,49 @@ QUICKSTART_SCENARIOS = [
         "expected_output_contains": ["weave.init", "@weave.op()"],
         "regex_checks": [
             {"id": "has_decorator", "pattern": r"@weave\.op\(\)", "description": "Contains @weave.op() decorator"},
+        ],
+    },
+    {
+        "id": "verify-traces-live",
+        "user_request": (
+            f"I already instrumented my app with Weave. "
+            f"Verify that traces are appearing in entity={EVAL_SEED_ENTITY} "
+            f"project={EVAL_SEED_PROJECT}. Tell me how many traces exist and "
+            f"give me the Weave UI link."
+        ),
+        "framework": "any",
+        "expected_tools": ["count_weave_traces_tool"],
+        "expected_workflow": ["count", "verify_traces"],
+        "expected_output_contains": ["wandb.ai"],
+        "rubric": [
+            {"id": "used_count_tool", "text": "Used count_weave_traces_tool to check for traces"},
+            {"id": "reported_count", "text": "Reported a specific number of traces found"},
+            {"id": "provided_link", "text": "Gave the user a Weave UI link to view traces"},
+        ],
+        "regex_checks": [
+            {"id": "has_count", "pattern": r"\d+\s*(traces|calls|total)", "description": "Reports a trace count"},
+            {"id": "has_link", "pattern": r"wandb\.ai", "description": "Contains W&B link"},
+        ],
+    },
+    {
+        "id": "instrument-and-verify-live",
+        "user_request": (
+            f"I have a Python app that uses OpenAI. Show me how to add Weave tracing, "
+            f"then verify traces exist in entity={EVAL_SEED_ENTITY} "
+            f"project={EVAL_SEED_PROJECT} using the MCP tools."
+        ),
+        "framework": "openai",
+        "expected_tools": ["count_weave_traces_tool", "query_weave_traces_tool"],
+        "expected_workflow": ["detect_framework", "add_init", "verify_traces"],
+        "expected_output_contains": ["weave.init", "import weave"],
+        "rubric": [
+            {"id": "provided_code", "text": "Provided weave.init() and import weave instrumentation code"},
+            {"id": "verified_traces", "text": "Used MCP tools to verify traces exist in the project"},
+            {"id": "showed_results", "text": "Showed the user trace count or summary from the project"},
+        ],
+        "regex_checks": [
+            {"id": "has_init", "pattern": r"weave\.init\(", "description": "Contains weave.init() call"},
+            {"id": "has_entity", "pattern": EVAL_SEED_ENTITY, "description": "References the eval entity"},
         ],
     },
 ]

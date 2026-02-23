@@ -1,57 +1,119 @@
 # Skills Evaluation Framework
 
-Python-native evaluation framework for MCP skills, built on Weave's `Evaluation` and `Scorer` classes.
+Python-native evaluation framework for MCP skills, built on Weave's `Evaluation` and `Scorer` classes. Supports both mock unit tests (pytest) and live agent evals (Claude Code CLI, Codex CLI) with a Textual TUI.
 
 ## Architecture
 
 ```
 _evals/
-  conftest.py          # Shared fixtures: Weave init, MCP client mock, sample data
-  scorers.py           # Reusable Weave Scorer classes
-  test_experiment.py   # Evals for experiment-analysis skill
-  test_trace.py        # Evals for trace-analyst skill
-  test_quickstart.py   # Evals for quickstart skill
-  test_failure.py      # Evals for failure-analysis skill
+  conftest.py          # Shared fixtures, scenarios, env var config
+  scorers.py           # Reusable Weave Scorer classes (6 scorers)
+  seed_project.py      # Seeds W&B project with sample runs + Weave traces
+  run_evals.py         # CLI orchestrator (scenarios -> runners -> scorers -> display)
+  tui.py               # Textual TUI for interactive eval debugging
+  run.sh               # Bash convenience script
+  runners/
+    base.py            # AgentRunner ABC, AgentResult dataclass, parsers
+    claude_runner.py   # Claude Code CLI runner (claude -p --mcp-config)
+    codex_runner.py    # Codex CLI runner (codex exec --full-auto)
+  test_experiment.py   # Experiment-analysis skill evals
+  test_trace.py        # Trace-analyst skill evals
+  test_quickstart.py   # Quickstart skill evals (code-gen + live verification)
+  test_failure.py      # Failure-analysis skill evals
 ```
 
-## Running Evals
+## Quick Start
+
+### Mock evals (no API keys needed)
 
 ```bash
-# All skills
+# Run all skill evals with mock agent
 pytest skills/_evals/ -v
 
-# Single skill
-pytest skills/_evals/test_experiment.py -v
-
-# With Weave logging (results tracked in W&B)
-WANDB_API_KEY=... pytest skills/_evals/ -v
+# Run quickstart evals with TUI
+./skills/_evals/run.sh quickstart mock
 ```
 
-## How It Works
+### Live evals (requires API keys)
 
-Each eval file defines:
+```bash
+# Set API keys
+export WANDB_API_KEY=...
+export ANTHROPIC_API_KEY=...  # for Claude Code
+export OPENAI_API_KEY=...     # for Codex
 
-1. **Dataset** -- sample inputs representing real user scenarios for the skill
-2. **Model function** -- simulates the agent executing the skill workflow
-3. **Scorers** -- `weave.Scorer` subclasses that grade skill execution quality
+# Seed the eval project with sample data (idempotent)
+python -m skills._evals.seed_project
 
-Scorers evaluate:
-- **Tool selection** -- did the agent pick the right MCP tool?
-- **Workflow ordering** -- did it follow the prescribed step sequence?
-- **Output quality** -- is the final answer useful, accurate, complete?
-- **Efficiency** -- how many tool calls were needed? (fewer is better)
+# Run quickstart evals with Claude Code + TUI
+./skills/_evals/run.sh quickstart claude
 
-## Adding a New Eval
+# Run all skills with both runners
+./skills/_evals/run.sh all all --seed
 
-1. Create `test_{skill_name}.py` in this directory
-2. Define a dataset of 5-10 scenarios as dicts
-3. Write a model function that returns the skill's output given a scenario
-4. Use scorers from `scorers.py` or define skill-specific ones
-5. Wire into `weave.Evaluation` and run with `pytest`
+# Run without TUI (table output)
+./skills/_evals/run.sh quickstart claude --no-tui
+
+# JSON output for CI
+python -m skills._evals.run_evals --skill quickstart --runner claude --json-output results.json
+```
+
+## Agent Runners
+
+### Claude Code (`claude`)
+
+Invokes `claude -p` (print mode) with MCP config pointing to the local W&B MCP server. Uses `--output-format stream-json` for structured output parsing.
+
+Requirements: `claude` CLI >= 2.0, `WANDB_API_KEY`
+
+### Codex (`codex`)
+
+Invokes `codex exec` (non-interactive mode) with MCP config.
+
+Requirements: `npx @openai/codex` >= 0.100, `WANDB_API_KEY`, `OPENAI_API_KEY`
+
+### Mock (`mock`)
+
+Returns preset responses per skill. No CLI or API keys needed. Used for testing the eval pipeline itself.
+
+## Scorers
+
+| Scorer | What it checks |
+|--------|---------------|
+| ToolSelectionScorer | Did the agent pick the right MCP tools? |
+| WorkflowOrderScorer | Did it follow the prescribed step sequence? |
+| EfficiencyScorer | How many tool calls were needed? |
+| OutputQualityScorer | Does the output contain expected substrings? |
+| RegexScorer | Pattern matching for verifiable outputs |
+| RubricScorer | LLM-as-judge evaluation against rubric items |
+
+## TUI
+
+The Textual TUI (`--tui` flag) shows:
+- **DataTable** (left): Scenarios with live status, duration, tools, scores
+- **RichLog** (right): Full agent output for selected scenario
+- **Footer**: Pass/fail counts, keyboard bindings (q=quit, Enter=detail)
+
+## Seed Project
+
+`seed_project.py` creates real W&B data for live evals:
+- 5 W&B runs with loss/accuracy/eval_loss metrics
+- 20 Weave traces with success/error mix
+
+Configure via env vars:
+- `MCP_EVAL_SEED_ENTITY` (default: `a-sh0ts`)
+- `MCP_EVAL_SEED_PROJECT` (default: `mcp-skill-eval-seed`)
+
+## Adding Evals for a New Skill
+
+1. Add scenarios to `conftest.py` (same schema as existing)
+2. Create `test_{skill}.py` with `_simulate_{skill}_skill()` and parametrized tests
+3. The seed project, runners, scorers, TUI, and orchestrator are all skill-agnostic
 
 ## Design Decisions
 
 - **Python-native over YAML** -- scorers are debuggable Python classes, not config
 - **Weave-native** -- all results logged to W&B for visual comparison across versions
-- **Pytest-compatible** -- integrates with CI, existing test infrastructure
-- **Scorer versioning** -- scorers are `weave.Scorer` subclasses, publishable and versioned
+- **Pytest + CLI dual mode** -- mock tests for CI, live agent evals for development
+- **CLI-based runners** -- tests real end-to-end behavior, not just API calls
+- **Textual TUI** -- interactive debugging without leaving the terminal

@@ -24,7 +24,7 @@ import os
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 EVAL_ENTITY = os.environ.get("MCP_LOGS_WANDB_ENTITY", "a-sh0ts")
@@ -68,7 +68,7 @@ class EvalRecord:
 
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat()
+            self.timestamp = datetime.now(UTC).isoformat()
 
 
 def load_scenarios(skill: str) -> list[dict]:

@@ -35,6 +35,10 @@ http = [
     "fastapi>=0.104.0",
     "uvicorn>=0.24.0",
 ]
+eval = [
+    "textual>=3.0.0",
+    "rich>=14.0.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wandb_mcp_server"]
