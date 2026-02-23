@@ -8,10 +8,11 @@ Clients send their W&B API keys as Bearer tokens, which the server
 then uses for all W&B operations on behalf of that client.
 """
 
-import os
+import hashlib
 import logging
+import os
 import re
-from typing import Optional
+from typing import Any, Dict, Optional
 from fastapi import HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
@@ -137,12 +138,32 @@ async def mcp_auth_middleware(request: Request, call_next):
         # Debug logging
         logger.debug(f"Auth middleware: Set API key in context with length={len(wandb_api_key)}")
 
+        viewer = None
         try:
             api = WandBApiManager.get_api()
             viewer = api.viewer
             logger.info(f"Authenticated W&B viewer: {viewer}")
         except Exception as viewer_err:
             logger.warning(f"Could not fetch W&B viewer: {viewer_err}")
+
+        try:
+            from wandb_mcp_server.analytics import get_analytics_tracker
+
+            tracker = get_analytics_tracker()
+            session_id = (
+                request.headers.get("Mcp-Session-Id")
+                or request.headers.get("mcp-session-id")
+                or hashlib.sha256(wandb_api_key.encode()).hexdigest()[:32]
+            )
+            request.state.session_id = session_id
+            if viewer:
+                tracker.track_user_session(
+                    session_id=session_id,
+                    viewer_info=viewer,
+                    api_key_hash=hashlib.sha256(wandb_api_key.encode()).hexdigest(),
+                )
+        except Exception as analytics_err:
+            logger.debug(f"Analytics tracking failed (non-fatal): {analytics_err}")
 
         try:
             # Continue processing the request
