@@ -6,7 +6,6 @@ so no real API keys or network calls are needed.
 """
 
 import json
-import pytest
 import requests
 from unittest.mock import patch, MagicMock
 
@@ -39,7 +38,11 @@ class TestAuthentication:
                 json={
                     "jsonrpc": "2.0",
                     "method": "initialize",
-                    "params": {"protocolVersion": "1.0.0", "capabilities": {}, "clientInfo": {"name": "test", "version": "1.0"}},
+                    "params": {
+                        "protocolVersion": "1.0.0",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1.0"},
+                    },
                     "id": 1,
                 },
             )
@@ -70,7 +73,9 @@ class TestAuthentication:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.headers = {"mcp-session-id": "test-session-123"}
-            mock_response.text = 'data: {"jsonrpc":"2.0","result":{"serverInfo":{"name":"wandb-mcp-server","version":"1.0.0"}},"id":1}'
+            mock_response.text = (
+                'data: {"jsonrpc":"2.0","result":{"serverInfo":{"name":"wandb-mcp-server","version":"1.0.0"}},"id":1}'
+            )
             mock_post.return_value = mock_response
 
             response = requests.post(
@@ -83,7 +88,11 @@ class TestAuthentication:
                 json={
                     "jsonrpc": "2.0",
                     "method": "initialize",
-                    "params": {"protocolVersion": "1.0.0", "capabilities": {}, "clientInfo": {"name": "test", "version": "1.0"}},
+                    "params": {
+                        "protocolVersion": "1.0.0",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1.0"},
+                    },
                     "id": 1,
                 },
             )

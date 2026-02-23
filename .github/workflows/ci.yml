@@ -29,7 +29,8 @@ jobs:
       - name: Lint with ruff
         run: |
           pip install ruff
-          ruff check src/ tests/ --select E,F,W --ignore E501
+          ruff check src/ tests/
+          ruff format --check src/ tests/
 
       - name: Run unit tests
         run: |

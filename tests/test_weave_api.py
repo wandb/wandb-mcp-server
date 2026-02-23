@@ -5,7 +5,6 @@ Ported from wandb-mcp-server-internal. All tests use mocks --
 no real API keys or network calls are needed.
 """
 
-import json
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
@@ -16,11 +15,7 @@ import requests
 from wandb_mcp_server.weave_api.client import WeaveApiClient
 from wandb_mcp_server.weave_api.models import (
     FilterOperator,
-    QueryFilter,
-    QueryParams,
     QueryResult,
-    TraceMetadata,
-    WeaveTrace,
 )
 from wandb_mcp_server.weave_api.processors import TraceProcessor
 from wandb_mcp_server.weave_api.query_builder import QueryBuilder
@@ -142,7 +137,11 @@ class TestTraceProcessor(unittest.TestCase):
         trace = {
             "costs": {
                 "gpt-4": {"prompt_tokens_total_cost": 0.5, "completion_tokens_total_cost": 1.0, "total_cost": 1.5},
-                "gpt-3.5-turbo": {"prompt_tokens_total_cost": 0.1, "completion_tokens_total_cost": 0.2, "total_cost": 0.3},
+                "gpt-3.5-turbo": {
+                    "prompt_tokens_total_cost": 0.1,
+                    "completion_tokens_total_cost": 0.2,
+                    "total_cost": 0.3,
+                },
             }
         }
         assert TraceProcessor.get_cost(trace, "total_cost") == 1.8

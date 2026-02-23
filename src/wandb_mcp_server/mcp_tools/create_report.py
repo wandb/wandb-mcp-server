@@ -29,11 +29,12 @@ logger = get_rich_logger(__name__)
 def _get_api_from_context():
     """Patched _get_api that reads API key from request context."""
     from wandb_mcp_server.api_client import WandBApiManager
+
     api_key = WandBApiManager.get_api_key()
-    
+
     if not api_key:
         raise Exception("No W&B API key available in context")
-    
+
     try:
         # Uses explicit api_key from contextvar, not singleton
         # and points to the configured base URL
@@ -48,7 +49,7 @@ wr_interface._get_api = _get_api_from_context
 
 CREATE_WANDB_REPORT_TOOL_DESCRIPTION = """Create a new Weights & Biases Report to document analysis and findings.
 
-Only call this tool if the user explicitly asks to create a report or save to wandb/weights & biases. 
+Only call this tool if the user explicitly asks to create a report or save to wandb/weights & biases.
 Always provide the returned report link to the user.
 
 <markdown_generation_guide>
@@ -56,13 +57,13 @@ When generating the markdown_report_text parameter, structure your content using
 
 **Headers**: Organize content hierarchically
 - # Main Title (H1)
-- ## Section Title (H2) 
+- ## Section Title (H2)
 - ### Subsection Title (H3)
 
 **Paragraphs**: Write clear, informative text separated by blank lines
 
 **Lists**: Present information clearly
-- Bullet points: Use - or * 
+- Bullet points: Use - or *
 - Numbered lists: Use 1. 2. 3.
 
 **Formatting**:
@@ -140,26 +141,27 @@ def create_report(
 ) -> Dict[str, str]:
     """
     SAFE VERSION - Create W&B Report with markdown-only content.
-    
+
     Security improvements:
     - No singleton contamination (no wandb.login)
     - No wandb.init() that could use contaminated state
     - Reads API key from contextvar (concurrent-safe)
     - Markdown-only output for simplicity and safety
     - Ignores plots_html parameter (for backwards compatibility)
-    
+
     Thread Safety:
     - Uses patched _get_api (set at module import) that reads from contextvar
     - Each request has its own contextvar value - no cross-contamination
     - Safe for async/concurrent report creation
     """
-    
+
     # Note if plots_html was provided (for backwards compatibility)
     if plots_html:
         logger.info("Note: plots_html parameter provided but ignored in safe markdown-only mode")
 
     # Get the current API key from context
     from wandb_mcp_server.api_client import WandBApiManager
+
     api_key = WandBApiManager.get_api_key()
 
     if not api_key:
@@ -198,22 +200,18 @@ def create_report(
         blocks = parse_markdown_to_blocks(markdown_report_text or "")
 
         # Add security notice at the top
-        security_notice = wr.P(
-            "*Report created using SAFE markdown-only version (no wandb.init/login)*"
-        )
+        security_notice = wr.P("*Report created using SAFE markdown-only version (no wandb.init/login)*")
         report.blocks = [security_notice] + blocks
 
-        logger.info(f"SAFE: Creating markdown report without wandb.init/login")
-        
+        logger.info("SAFE: Creating markdown report without wandb.init/login")
+
         # Save the report
         # Uses patched _get_api which reads from contextvar (concurrent-safe)
         report.save()
-        
+
         logger.info(f"SAFE: Created report: {title}")
-        
-        return {
-            "url": report.url
-        }
+
+        return {"url": report.url}
 
     except Exception as e:
         logger.error(f"Error creating report (safe mode): {e}")
@@ -225,14 +223,14 @@ def parse_markdown_to_blocks(
 ) -> List[Union[wr.H1, wr.H2, wr.H3, wr.P, wr.TableOfContents, wr.MarkdownBlock, wr.CodeBlock]]:
     """
     Parse markdown text into W&B report blocks.
-    
+
     Supports the following W&B report blocks:
     - Headers: H1, H2, H3 (extracted for TOC support)
     - Table of Contents: TableOfContents (via [TOC] marker)
     - Code Blocks: CodeBlock (with language syntax highlighting)
     - Rich Markdown: MarkdownBlock (for tables, lists, blockquotes, etc.)
     - Paragraphs: P (for simple text)
-    
+
     Strategy:
     - Extract top-level headers (H1, H2, H3) as separate blocks for TOC
     - Use CodeBlock for code with syntax highlighting
@@ -241,21 +239,21 @@ def parse_markdown_to_blocks(
     """
     blocks = []
     lines = text.strip().split("\n") if text else []
-    
+
     current_content = []
     in_code_block = False
     code_language = None
     code_block_content = []
-    
+
     def flush_content():
         """Helper to flush accumulated content as MarkdownBlock or P"""
         if not current_content:
             return
-        
+
         content_text = "\n".join(current_content).strip()
         if not content_text:
             return
-        
+
         # Check if content has complex markdown (tables, lists, etc.)
         has_table = "|" in content_text and "---" in content_text
         has_list = re.search(r"^\s*[-*+]\s", content_text, re.MULTILINE)
@@ -263,7 +261,7 @@ def parse_markdown_to_blocks(
         has_blockquote = re.search(r"^\s*>\s", content_text, re.MULTILINE)
         has_inline_code = "`" in content_text
         has_bold_italic = re.search(r"[*_]{1,2}\w", content_text)
-        
+
         # Use MarkdownBlock for rich content, P for simple paragraphs
         if has_table or has_list or has_ordered_list or has_blockquote:
             blocks.append(wr.MarkdownBlock(content_text))
@@ -273,13 +271,13 @@ def parse_markdown_to_blocks(
         else:
             # Simple paragraph
             blocks.append(wr.P(content_text))
-        
+
         current_content.clear()
-    
+
     i = 0
     while i < len(lines):
         line = lines[i]
-        
+
         # Handle code blocks
         if line.startswith("```"):
             if in_code_block:
@@ -287,7 +285,18 @@ def parse_markdown_to_blocks(
                 flush_content()
                 code_content = "\n".join(code_block_content)
                 # Create CodeBlock with language if specified
-                if code_language and code_language in ["python", "javascript", "typescript", "css", "json", "html", "markdown", "yaml", "bash", "shell"]:
+                if code_language and code_language in [
+                    "python",
+                    "javascript",
+                    "typescript",
+                    "css",
+                    "json",
+                    "html",
+                    "markdown",
+                    "yaml",
+                    "bash",
+                    "shell",
+                ]:
                     blocks.append(wr.CodeBlock(code=code_content, language=code_language))
                 else:
                     blocks.append(wr.CodeBlock(code=code_content))
@@ -304,24 +313,24 @@ def parse_markdown_to_blocks(
                     code_language = lang_match.group(1).lower()
             i += 1
             continue
-        
+
         # If in code block, accumulate lines
         if in_code_block:
             code_block_content.append(line)
             i += 1
             continue
-        
+
         # Check for top-level headers (extract for TOC support)
         h1_match = re.match(r"^# (.+)$", line)
         h2_match = re.match(r"^## (.+)$", line)
         h3_match = re.match(r"^### (.+)$", line)
-        
+
         # Check for Table of Contents marker
         is_toc = line.strip().lower() == "[toc]"
-        
+
         if h1_match or h2_match or h3_match or is_toc:
             flush_content()
-            
+
             if h1_match:
                 blocks.append(wr.H1(h1_match.group(1)))
             elif h2_match:
@@ -333,14 +342,14 @@ def parse_markdown_to_blocks(
         else:
             # Accumulate content
             current_content.append(line)
-        
+
         i += 1
-    
+
     # Flush any remaining content
     flush_content()
-    
+
     # If no blocks were created, add a default paragraph
     if not blocks:
         blocks.append(wr.P("*Empty report*"))
-    
+
     return blocks

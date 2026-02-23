@@ -1,16 +1,15 @@
 from typing import Any
 
-import wandb
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
 
 
 LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION = """
-Fetch all projects for a specific wandb or weave entity. Useful to use when 
-the user hasn't specified a project name or queries are failing due to a 
+Fetch all projects for a specific wandb or weave entity. Useful to use when
+the user hasn't specified a project name or queries are failing due to a
 missing or incorrect Weights & Biases project name.
 
-If no entity is provided, the tool will fetch all projects for the current user 
+If no entity is provided, the tool will fetch all projects for the current user
 as well as all the project in the teams they are part of.
 
 <critical_info>
@@ -26,19 +25,19 @@ the user to provide either their W&B username or W&B team name.
 **Error Handling:**
 
 If this function throws an error, it's likely because the W&B entity name is incorrect.
-If this is the case, ask the user to double check the W&B entity name given by the user, 
+If this is the case, ask the user to double check the W&B entity name given by the user,
 either their personal user or their W&B Team name.
 
 **Expected Project Name Not Found:**
 
 If the user doesn't see the project they're looking for in the list of projects,
-ask them to double check the W&B entity name, either their personal W&B username or their 
+ask them to double check the W&B entity name, either their personal W&B username or their
 W&B Team name.
 </debugging_tips>
 
 Args:
     entity (str): The wandb entity (username or team name)
-    
+
 Returns:
     List[Dict[str, Any]]: List of project dictionaries containing:
         - name: Project name
@@ -78,8 +77,9 @@ def list_entity_projects(entity: str | None = None) -> dict[str, list[dict[str, 
     # Will use WANDB_API_KEY from environment (set by auth middleware or user)
     # Get API instance with proper key handling
     from wandb_mcp_server.api_client import get_wandb_api
+
     api = get_wandb_api()
-   
+
     viewer = None
     # Merge entity and teams into a single list
     if entity is None:

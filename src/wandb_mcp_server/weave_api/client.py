@@ -7,7 +7,6 @@ It handles authentication, request construction, and response parsing.
 
 import base64
 import json
-import os
 from typing import Any, Dict, Iterator, Optional
 
 import requests
@@ -46,12 +45,11 @@ class WeaveApiClient:
         # NO FALLBACKS! API key must be explicitly provided
         # For HTTP: Comes from auth middleware via TraceService
         # For STDIO: Set at server startup via TraceService
-        
+
         # Validate API key
         if not api_key:
             raise ValueError(
-                "API key not provided to WeaveApiClient. "
-                "API key must be explicitly passed from TraceService."
+                "API key not provided to WeaveApiClient. API key must be explicitly passed from TraceService."
             )
 
         self.api_key = api_key
@@ -87,9 +85,7 @@ class WeaveApiClient:
         url = f"{self.server_url}/calls/stream_query"
         headers = self._get_auth_headers()
 
-        logger.info(
-            f"Sending request to Weave server:\n{json.dumps(query_params, indent=2)[:1000]}...\n"
-        )
+        logger.info(f"Sending request to Weave server:\n{json.dumps(query_params, indent=2)[:1000]}...\n")
         logger.debug(f"Full query parameters:\n{json.dumps(query_params, indent=2)}\n")
 
         try:
@@ -119,15 +115,12 @@ class WeaveApiClient:
 
         except requests.RequestException as e:
             logger.error(
-                f"Error executing HTTP request to Weave server: {e}. "
-                f"Request body snippet: {str(query_params)[:1000]}"
+                f"Error executing HTTP request to Weave server: {e}. Request body snippet: {str(query_params)[:1000]}"
             )
             if isinstance(e, RetryError):
                 cause = e.__cause__
                 if cause and hasattr(cause, "reason"):
-                    logger.error(
-                        f"Specific reason for retry exhaustion: {cause.reason}"
-                    )
+                    logger.error(f"Specific reason for retry exhaustion: {cause.reason}")
             raise Exception(f"Failed to query Weave traces due to network error: {e}")
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding JSON from Weave server: {e}")
