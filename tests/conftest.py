@@ -1,7 +1,11 @@
 """Pytest configuration and shared fixtures for wandb-mcp-server tests."""
 
 import os
+
 import pytest
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 @pytest.fixture
