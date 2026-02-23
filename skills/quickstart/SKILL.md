@@ -1,6 +1,10 @@
 ---
 name: quickstart
-description: Instrument a codebase with W&B Weave for LLM observability. Use when the user asks to "add tracing", "instrument my app", "set up Weave", "add observability", "get started with Weave", or "I want to see my LLM calls".
+description: Instrument a codebase with W&B Weave for LLM observability. Use when the user asks to "add tracing", "instrument my app", "set up Weave", "add observability", "get started with Weave", "I want to see my LLM calls", "how do I use Weave", or "add monitoring to my LLM". Do NOT use for analyzing existing traces (use trace-analyst) or for comparing experiment runs (use experiment-analysis).
+metadata:
+  author: wandb
+  version: 0.1.0
+  mcp-server: wandb-mcp-server
 ---
 
 # Quickstart / Instrumentation
@@ -97,6 +101,41 @@ Provide the user with the Weave UI link: `https://wandb.ai/{entity}/{project}/we
 
 ## Troubleshooting
 
-- "No traces appearing" -- check `WANDB_API_KEY` is set, project name is correct
-- "Module not found" -- run `pip install weave`
-- "Traces appear but no LLM calls" -- ensure `weave.init()` is called BEFORE importing the LLM library, or check that implicit patching is not disabled
+### No traces appearing
+
+1. **Check API key**: Verify `WANDB_API_KEY` is set (`echo $WANDB_API_KEY`) or run `wandb login`
+2. **Check project name**: The project in `weave.init("my-project")` must match what you query
+3. **Check entity**: Traces go to your default entity. Override with `weave.init("entity/project")`
+4. **Verify via MCP**: Use `count_weave_traces_tool` with your entity/project to confirm:
+   ```
+   count_weave_traces_tool(
+       entity_name="my-entity",
+       project_name="my-project"
+   )
+   ```
+5. **Check Weave is not disabled**: Ensure `WEAVE_DISABLED` is not set to `true`
+
+### Module not found
+
+- `pip install weave` (or `uv pip install weave`)
+- For W&B Reports: `pip install "wandb[workspaces]"`
+
+### Traces appear but no LLM calls
+
+- Ensure `weave.init()` is called BEFORE importing the LLM library
+- Check that implicit patching is not disabled (`WEAVE_IMPLICITLY_PATCH_INTEGRATIONS` should not be `false`)
+- If disabled, explicitly patch: `weave.patch_openai()`, `weave.patch_anthropic()`, etc.
+
+### MCP server connection issues
+
+If the W&B MCP server is connected but tools fail:
+
+1. Verify the server is running: check Settings > Extensions > wandb-mcp-server shows "Connected"
+2. Confirm `WANDB_API_KEY` is valid and not expired
+3. Test MCP independently: ask Claude to call `query_wandb_entity_projects` -- if this fails, the issue is the MCP connection, not the skill
+4. For dedicated/on-prem: ensure `WANDB_BASE_URL` is set correctly
+
+### weave.init() called but Evaluation doesn't run
+
+- `weave.Evaluation.evaluate()` is async -- use `asyncio.run(evaluation.evaluate(my_fn))`
+- If in a Jupyter notebook, use `await evaluation.evaluate(my_fn)` directly

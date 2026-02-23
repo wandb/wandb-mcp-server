@@ -1,6 +1,10 @@
 ---
 name: failure-analysis
-description: Investigate errors and failures in Weave traces and W&B runs. Use when the user asks "why did this fail", "what errors are happening", "debug my pipeline", "cluster my failures", "generate a taxonomy", or "create a scorer for my errors".
+description: Investigate errors and failures in Weave traces, cluster them into categories, and build automated taxonomy scorers. Use when the user asks "why did this fail", "what errors are happening", "debug my pipeline", "cluster my failures", "generate a taxonomy", "create a scorer for my errors", "error analysis", or "scoring backfill". Do NOT use for general trace overview (use trace-analyst) or for comparing experiment runs (use experiment-analysis).
+metadata:
+  author: wandb
+  version: 0.1.0
+  mcp-server: wandb-mcp-server
 ---
 
 # Failure Analysis
@@ -66,65 +70,163 @@ Identify:
 - Whether the error is recoverable
 - Suggested fix
 
-### Step 5: Generate Taxonomy (Scorer Creation)
+### Step 5: Open Coding -- Write Failure Notes
 
-This step implements the Intelligent Trace Analysis pattern from the PRD.
+> **MCP_TOOL_GAP**: Steps 5-7 require the Weave Python SDK (`weave`, `weave.flow.scorer.Scorer`).
+> There is no MCP tool yet for running scorers on traces or reading feedback.
+> Future MCP tools needed: `run_scorer_tool`, `read_feedback_tool`, `eval_calls_tool`.
 
-**Auto-generate a taxonomy** from the sampled failures:
+This follows the Open Coding -> Axial Coding methodology from qualitative research.
+
+Create a scorer that journals what went wrong for each failing call. Use an LLM to analyze the trace and produce a free-text note. Only run analysis on failing calls to reduce cost.
 
 ```python
+import json
 import weave
+from openai import OpenAI
+from weave.flow.scorer import Scorer
 
-@weave.op()
-def failure_taxonomy_scorer(output: str, exception: str, op_name: str) -> dict:
-    """Score traces into failure categories.
+class OpenCodingNoteV1(Scorer):
+    name: str = "open_coding_note_v1"
 
-    Categories discovered from error sampling:
-    - rate_limit: API rate limit errors
-    - validation: Input/output validation failures
-    - timeout: Network or API timeouts
-    - model_error: Model-level failures (hallucination, refusal)
-    - infrastructure: System-level failures
-    - unknown: Unclassified errors
-    """
-    # LLM-based classification using the taxonomy
-    category = classify_error(exception, op_name)  # implement with LLM call
-    severity = assess_severity(exception)  # "critical" | "warning" | "info"
-    return {
-        "category": category,
-        "severity": severity,
-        "recoverable": category in ("rate_limit", "timeout"),
-    }
+    @weave.op
+    def score(self, output, *, failure=None):
+        if not (
+            isinstance(failure, dict)
+            and isinstance(failure.get("output"), dict)
+            and failure["output"].get("passed") is False
+        ):
+            return {"text": "(passed or unscored)"}
+
+        record_text = (
+            f"Op: {output.get('op_name', 'unknown')}\n"
+            f"Exception: {output.get('exception', 'none')}\n"
+            f"Output summary: {str(output.get('output', ''))[:500]}"
+        )
+
+        client = OpenAI()
+        response = client.responses.create(
+            model="gpt-4o",
+            input=[
+                {"role": "system", "content": "Analyze this failed eval record. Write a concise failure note (2-4 sentences)."},
+                {"role": "user", "content": record_text},
+            ],
+            store=False,
+        )
+        return {"text": response.output_text}
 ```
 
-**Persist the scorer** as a Weave object so users can iterate:
+Run on a small sample first, then expand:
 
 ```python
-weave.publish(failure_taxonomy_scorer, name="failure-taxonomy-v1")
+from weave_tools.weave_api import init, Eval
+
+init("entity/project")
+ev = Eval.from_call_id("YOUR_EVAL_CALL_ID")
+calls = ev.model_calls()
+sample = calls.limit(200)
+
+failing = sample.filter(lambda c: (
+    isinstance(c.feedback("scorer_passfail", default=None), dict)
+    and c.feedback("scorer_passfail")["output"]["passed"] is False
+))
+
+for prog in failing.limit(10).run_scorer(
+    OpenCodingNoteV1(),
+    feedback_kwargs={"failure": "scorer_passfail"},
+    max_concurrent=3,
+):
+    print(prog.status, prog.call_id)
 ```
 
-### Step 6: Scoring Backfill
+### Step 6: Axial Coding -- Classify Into Taxonomy
 
-Run the scorer across historical traces:
+Create a second scorer that reads the open-coding notes and assigns taxonomy labels.
 
 ```python
-dataset = weave.Dataset(name="error-traces", rows=sampled_error_traces)
+from typing import ClassVar
 
-evaluation = weave.Evaluation(
-    dataset=dataset,
-    scorers=[failure_taxonomy_scorer],
-)
-results = asyncio.run(evaluation.evaluate(identity_fn))
+class AxialCodingClassifierV1(Scorer):
+    name: str = "axial_coding_classifier_v1"
+    TAXONOMY: ClassVar[list[str]] = [
+        "rate_limit", "auth_error", "timeout", "context_length",
+        "validation", "parsing", "type_error",
+        "refusal", "hallucination", "empty_output",
+        "infrastructure", "unknown",
+    ]
+
+    @weave.op
+    def score(self, output, *, note=None):
+        if not isinstance(note, dict) or note.get("text", "").startswith("(passed"):
+            return {"labels": [], "primary": "skipped", "rationale": "Not a failure"}
+
+        prompt = (
+            f"Given this failure note:\n{note['text']}\n\n"
+            f"Classify into one or more of: {self.TAXONOMY}\n"
+            "Return JSON: {\"labels\": [...], \"primary\": \"...\", \"rationale\": \"...\"}"
+        )
+
+        client = OpenAI()
+        response = client.responses.create(
+            model="gpt-4o",
+            input=[{"role": "user", "content": prompt}],
+            store=False,
+        )
+
+        text = response.output_text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0]
+        result = json.loads(text)
+
+        valid_labels = [l for l in result.get("labels", []) if l in self.TAXONOMY]
+        if not valid_labels:
+            valid_labels = ["unknown"]
+        result["labels"] = valid_labels
+        if result.get("primary") not in self.TAXONOMY:
+            result["primary"] = valid_labels[0]
+        return result
 ```
 
-### Step 7: Human-in-the-Loop Iteration
+Chain it by passing the open-coding notes as `feedback_kwargs`:
 
-Users can then:
-1. Review auto-generated taxonomy in Weave UI
-2. Edit the scoring prompt / taxonomy categories
-3. Re-publish as `failure-taxonomy-v2`
-4. Re-run backfill with new scorer version
-5. Create per-category scorers for finer analysis
+```python
+for prog in calls.run_scorer(
+    AxialCodingClassifierV1(),
+    feedback_kwargs={"note": OpenCodingNoteV1().name},
+    max_concurrent=6,
+):
+    pass
+```
+
+### Step 7: Summarize and Iterate
+
+Count failures by taxonomy label and provide actionable recommendations:
+
+```python
+from collections import Counter
+
+label_counts = Counter()
+primary_counts = Counter()
+
+for call in calls:
+    cls = call.feedback("axial_coding_classifier_v1", default=None)
+    if not isinstance(cls, dict):
+        continue
+    for label in cls.get("labels", []):
+        label_counts[label] += 1
+    primary = cls.get("primary")
+    if isinstance(primary, str):
+        primary_counts[primary] += 1
+
+print("PRIMARY:", primary_counts.most_common())
+print("MULTI:", label_counts.most_common())
+```
+
+**Human-in-the-loop iteration:**
+1. Review taxonomy results in Weave UI
+2. Edit the `TAXONOMY` list or LLM prompt in `AxialCodingClassifierV1`
+3. Re-run with `run_scorer()` -- new feedback versions stack, old ones are preserved
+4. Create per-category scorers for deeper analysis on the largest clusters
 
 ## Important Rules
 
@@ -132,11 +234,33 @@ Users can then:
 2. **Sample, don't fetch all** -- 50 error traces is enough to identify clusters
 3. **Time-bucket analysis** -- error spikes suggest deployment or external service issues
 4. **Severity tiers** -- not all errors are equal; rate limits vs. data corruption
-5. **Persist taxonomy as a Weave object** -- enables versioning and iteration
+5. **Use `Scorer` subclasses, not bare `@weave.op()` functions** -- they integrate with `run_scorer()` and feedback chaining
 6. **Use `weave.Evaluation`** -- not custom loops, for proper trace lineage
+
+## Pydantic v2 and run_scorer Gotchas
+
+- Pydantic v2 requires `name: str = "..."` (no untyped override)
+- Class constants need `ClassVar[...]` annotation
+- Access `name` via an instance (e.g., `OpenCodingNoteV1().name`) to avoid `AttributeError` on the class
+- `run_scorer` only accepts `feedback_kwargs` (no `additional_scorer_kwargs`)
+- `Progress` from `run_scorer` uses `.status` and `.error` (no `.exception`)
+- If the LLM returns fenced JSON, strip fences before `json.loads`
+- Validate labels against your taxonomy; map unknowns to `"unknown"` to keep counts clean
+- If you set `max_output_tokens`, keep it >= 16 to satisfy API minimums
 
 ## Troubleshooting
 
 - Few errors but user reports issues -- check for silent failures (status: success but bad output). Use a quality scorer instead.
 - Errors only in specific time window -- check for deployment changes or upstream API outages
 - Same exception, different root cause -- drill into `inputs` to distinguish
+- `AttributeError: 'OpenCodingNoteV1' has no attribute 'name'` -- access on instance, not class
+
+## Future MCP Tools Needed
+
+The following SDK capabilities are used in Steps 5-7 and should become MCP tools:
+
+| Capability | SDK Call | Proposed MCP Tool |
+|---|---|---|
+| Run a scorer on traces | `calls.run_scorer(MyScorer())` | `run_scorer_tool` |
+| Read feedback from calls | `call.feedback("scorer_name")` | `read_feedback_tool` |
+| Get eval model calls | `Eval.from_call_id().model_calls()` | `eval_calls_tool` |
