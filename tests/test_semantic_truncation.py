@@ -97,7 +97,7 @@ class TestSemanticTruncation:
             result_json, traces, budget
         )
         assert level == 1
-        assert "high-signal fields preserved" in warning
+        assert "inputs/output shortened" in warning
         for t in truncated:
             assert "op_name" in t
             assert "status" in t
@@ -138,7 +138,7 @@ class TestSemanticTruncation:
             result_json, traces, 1
         )
         assert level == 4
-        assert "Sampled" in warning
+        assert "sampled" in warning.lower()
         assert len(truncated) < len(traces)
 
     def test_returns_tuple_of_three(self):
