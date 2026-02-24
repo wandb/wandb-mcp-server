@@ -350,6 +350,17 @@ class TraceProcessor:
                 json.dumps(data, cls=DateTimeEncoder, default=str)
             )
 
+        # Estimate per-category token sizes for informative warnings
+        low_signal_tokens = 0
+        medium_signal_tokens = 0
+        for d in dicts:
+            for k, v in d.items():
+                v_est = cls.estimate_tokens(json.dumps(v, cls=DateTimeEncoder, default=str)) if v else 0
+                if k in cls.LOW_SIGNAL_FIELDS:
+                    low_signal_tokens += v_est
+                elif k in cls.MEDIUM_SIGNAL_FIELDS:
+                    medium_signal_tokens += v_est
+
         # L1: truncate LOW_SIGNAL to 100 chars, leave HIGH/MEDIUM intact
         l1 = []
         for d in dicts:
@@ -360,9 +371,12 @@ class TraceProcessor:
                 else:
                     row[k] = v
             l1.append(row)
-        if _est(l1) <= budget:
+        l1_est = _est(l1)
+        if l1_est <= budget:
             warnings.append(
-                "Inputs/output truncated to 100 chars (high-signal fields preserved)."
+                f"L1: inputs/output shortened to 100 chars "
+                f"(saved ~{est - l1_est} tokens from LOW_SIGNAL fields). "
+                f"Tip: request specific columns=['id','op_name','status','latency_ms'] to avoid truncation."
             )
             return l1, " ".join(warnings), 1
 
@@ -378,8 +392,13 @@ class TraceProcessor:
                 else:
                     filtered[k] = v
             l2.append(filtered)
-        warnings.append("Dropped inputs/output; medium-signal fields truncated.")
-        if _est(l2) <= budget:
+        l2_est = _est(l2)
+        warnings.append(
+            f"L2: dropped inputs/output (~{low_signal_tokens} tokens), "
+            f"trimmed attributes/summary/costs (~{medium_signal_tokens} tokens). "
+            f"Use metadata_only=True first to estimate response size before querying."
+        )
+        if l2_est <= budget:
             return l2, " ".join(warnings), 2
 
         # L3: keep only HIGH_SIGNAL fields
@@ -387,14 +406,22 @@ class TraceProcessor:
             {k: v for k, v in row.items() if k in cls.HIGH_SIGNAL_FIELDS}
             for row in l2
         ]
-        warnings.append("Kept only high-signal diagnostic fields.")
-        if _est(l3) <= budget:
+        l3_est = _est(l3)
+        warnings.append(
+            f"L3: kept only HIGH_SIGNAL fields "
+            f"(id, op_name, status, latency_ms, exception, timestamps). "
+            f"Re-query with filters or smaller limit for full trace data."
+        )
+        if l3_est <= budget:
             return l3, " ".join(warnings), 3
 
         # L4: sample every Nth trace (HIGH_SIGNAL only)
         n = max(2, len(l3) // max(1, budget // max(1, _est(l3[:1]))))
         l4 = l3[::n]
-        warnings.append(f"Sampled {len(l4)} of {len(traces)} traces.")
+        warnings.append(
+            f"L4: sampled {len(l4)} of {len(traces)} traces (every {n}th). "
+            f"Add time_range, status, or op_name_contains filters to reduce result set."
+        )
         return l4, " ".join(warnings), 4
 
     @classmethod
