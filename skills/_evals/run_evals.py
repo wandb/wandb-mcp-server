@@ -5,14 +5,14 @@ their CLIs, scores the results with Weave Scorers, and displays results
 in the terminal or a Textual TUI.
 
 Usage:
-    # Run quickstart evals with Claude Code
+    # Run quickstart evals with Claude Code (default profile)
     python -m skills._evals.run_evals --skill quickstart --runner claude
 
-    # Run all skills with both runners, seeding first
-    python -m skills._evals.run_evals --skill all --runner all --seed
+    # Run hackathon-flavored evals for Mistral Worldwide Hackathon
+    python -m skills._evals.run_evals --skill all --runner claude --profile hackathon
 
-    # Run with TUI for interactive debugging
-    python -m skills._evals.run_evals --skill quickstart --runner claude --tui
+    # Seed hackathon data and run with TUI
+    python -m skills._evals.run_evals --skill quickstart --runner mock --profile hackathon --seed --tui
 
     # Dry run (mock agent, no CLI needed)
     python -m skills._evals.run_evals --skill quickstart --runner mock
@@ -30,12 +30,8 @@ from typing import Any
 EVAL_ENTITY = os.environ.get("MCP_LOGS_WANDB_ENTITY", "a-sh0ts")
 EVAL_PROJECT = os.environ.get("MCP_EVAL_PROJECT", "mcp-skill-evals")
 
-SKILL_SCENARIOS = {
-    "quickstart": "QUICKSTART_SCENARIOS",
-    "trace": "TRACE_SCENARIOS",
-    "experiment": "EXPERIMENT_SCENARIOS",
-    "failure": "FAILURE_SCENARIOS",
-}
+AVAILABLE_SKILLS = ["quickstart", "trace", "experiment", "failure"]
+AVAILABLE_PROFILES = ["default", "hackathon"]
 
 
 @dataclass
@@ -71,21 +67,22 @@ class EvalRecord:
             self.timestamp = datetime.now(UTC).isoformat()
 
 
-def load_scenarios(skill: str) -> list[dict]:
-    """Load scenarios for a given skill from conftest.py."""
-    from skills._evals.conftest import (
-        EXPERIMENT_SCENARIOS,
-        FAILURE_SCENARIOS,
-        QUICKSTART_SCENARIOS,
-        TRACE_SCENARIOS,
-    )
+def load_scenarios(skill: str, profile: str = "default") -> list[dict]:
+    """Load scenarios for a given skill and profile.
 
-    mapping = {
-        "quickstart": QUICKSTART_SCENARIOS,
-        "trace": TRACE_SCENARIOS,
-        "experiment": EXPERIMENT_SCENARIOS,
-        "failure": FAILURE_SCENARIOS,
-    }
+    Args:
+        skill: Skill name or "all".
+        profile: Profile name ("default" or "hackathon").
+
+    Returns:
+        List of scenario dicts with "_skill" key injected.
+    """
+    from skills._evals.conftest import PROFILES
+
+    if profile not in PROFILES:
+        raise ValueError(f"Unknown profile: {profile}. Choose from: {list(PROFILES.keys())}")
+
+    mapping = PROFILES[profile]
 
     if skill == "all":
         all_scenarios = []
@@ -395,6 +392,9 @@ def main():
     parser.add_argument("--runner", default="mock",
                         choices=["claude", "codex", "mock", "all"],
                         help="Agent runner to use (default: mock)")
+    parser.add_argument("--profile", default="default",
+                        choices=AVAILABLE_PROFILES,
+                        help="Scenario profile (default: default, hackathon: Mistral hackathon)")
     parser.add_argument("--seed", action="store_true",
                         help="Seed the eval project before running")
     parser.add_argument("--tui", action="store_true",
@@ -409,12 +409,13 @@ def main():
     args = parser.parse_args()
 
     if args.seed:
-        from skills._evals.seed_project import main as seed_main
-        seed_main()
+        import subprocess
+        seed_cmd = [sys.executable, "-m", "skills._evals.seed_project", "--profile", args.profile]
+        subprocess.run(seed_cmd, check=True)
         print()
 
-    scenarios = load_scenarios(args.skill)
-    print(f"Loaded {len(scenarios)} scenarios for skill={args.skill}")
+    scenarios = load_scenarios(args.skill, profile=args.profile)
+    print(f"Loaded {len(scenarios)} scenarios for skill={args.skill} profile={args.profile}")
 
     runners = []
     if args.runner == "all":

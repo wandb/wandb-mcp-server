@@ -22,16 +22,34 @@ _evals/
   test_failure.py      # Failure-analysis skill evals
 ```
 
+## Profiles
+
+The eval framework supports multiple scenario profiles for different contexts:
+
+| Profile | Description | Scenarios |
+|---------|-------------|-----------|
+| `default` | Generic LLM scenarios (OpenAI, LangChain, custom) | 16 scenarios across 4 skills |
+| `hackathon` | Mistral Worldwide Hackathon (Feb 28 - Mar 1, 2026) | 11 scenarios matching judging criteria |
+
+The hackathon profile covers:
+- **Fine-tuning track**: Mistral model configs, LoRA adapters, training metrics
+- **Agents track**: Mistral agent tracing, Voxtral latency analysis
+- **W&B Report**: Report creation for training curves
+- **Self-improvement mini-challenge**: Automated eval-improve loop
+
 ## Quick Start
 
 ### Mock evals (no API keys needed)
 
 ```bash
-# Run all skill evals with mock agent
+# Run all skill evals with mock agent (default profile)
 pytest skills/_evals/ -v
 
 # Run quickstart evals with TUI
 ./skills/_evals/run.sh quickstart mock
+
+# Run hackathon-flavored evals
+./skills/_evals/run.sh all mock --profile hackathon --no-tui
 ```
 
 ### Live evals (requires API keys)
