@@ -2,14 +2,15 @@
 # Convenience script for running MCP skill evaluations.
 #
 # Usage:
-#   ./skills/_evals/run.sh                          # quickstart + mock + TUI
-#   ./skills/_evals/run.sh quickstart claude         # quickstart + Claude Code
-#   ./skills/_evals/run.sh all claude --seed         # all skills + seed first
-#   ./skills/_evals/run.sh quickstart mock --no-tui  # table output only
+#   ./skills/_evals/run.sh                                    # quickstart + mock + TUI (default profile)
+#   ./skills/_evals/run.sh quickstart claude                  # quickstart + Claude Code
+#   ./skills/_evals/run.sh all claude --profile hackathon     # hackathon profile
+#   ./skills/_evals/run.sh quickstart mock --no-tui           # table output only
+#   ./skills/_evals/run.sh all mock --profile hackathon --seed # seed hackathon data first
 #
 # Environment:
-#   WANDB_API_KEY     -- Required for real agent runners and seed
-#   OPENAI_API_KEY    -- Required for Codex runner
+#   WANDB_API_KEY          -- Required for real agent runners and seed
+#   OPENAI_API_KEY         -- Required for Codex runner
 #   MCP_EVAL_SEED_ENTITY   -- W&B entity for seed project (default: a-sh0ts)
 #   MCP_EVAL_SEED_PROJECT  -- W&B project for seed data (default: mcp-skill-eval-seed)
 
