@@ -1,0 +1,66 @@
+name: Deploy to Cloud Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "production"
+        type: choice
+        options: [production]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: wandb-mcp-server@wandb-mcp-production.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy wandb-mcp-server \
+            --source . \
+            --region us-central1 \
+            --port 8080 \
+            --platform managed \
+            --allow-unauthenticated \
+            --service-account wandb-mcp-server@wandb-mcp-production.iam.gserviceaccount.com \
+            --labels "git_sha=$(git rev-parse --short HEAD)" \
+            --update-env-vars "\
+          DEPLOY_TIMESTAMP=$(date +%s),\
+          MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS=true,\
+          MCP_SERVER_SECRETS_PROVIDER=gcp,\
+          MCP_SERVER_SECRETS_PROJECT=wandb-mcp-production" \
+            --memory 2Gi \
+            --cpu 2 \
+            --timeout 300 \
+            --concurrency 1000 \
+            --max-instances 10 \
+            --min-instances 0 \
+            --project wandb-mcp-production
+
+      - name: Verify deployment
+        run: |
+          URL=$(gcloud run services describe wandb-mcp-server \
+            --region us-central1 \
+            --project wandb-mcp-production \
+            --format="value(status.url)")
+          echo "Service URL: $URL"
+          sleep 5
+          curl -f "$URL/health" || echo "::warning::Health check not responding yet"
+          echo "Deployed: $URL/health"
