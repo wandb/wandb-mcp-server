@@ -531,6 +531,54 @@ or requesting fewer fields. Do NOT re-submit the same query hoping for different
 *   **Sorting:** Use the `order` parameter string. Prefix with `+` for ascending, `-` for descending (default).
         Common sortable fields: `createdAt`, `updatedAt`, `heartbeatAt`, `config.*`, `summary_metrics.*`.
 *   Handle potential errors in the returned dictionary (e.g., check for an 'errors' key in the response).
+
+<common_pitfalls>
+**CRITICAL: Common mistakes that cause query failures:**
+
+1. **`summaryMetrics` vs `summary_metrics` naming:**
+   - In GraphQL **field names**: use `summaryMetrics` (camelCase)
+   - In the `order` **parameter value**: use `summary_metrics` (snake_case)
+   - WRONG: `order: "-summaryMetrics.accuracy"` (capital M in order param)
+   - CORRECT: `order: "-summary_metrics.accuracy"` (snake_case in order param)
+
+2. **`filters` MUST be a JSON-encoded string, not a dict:**
+   - WRONG: `"filters": {"state": "finished"}`
+   - CORRECT: `"filters": "{\"state\": \"finished\"}"`
+   - Always use escaped JSON string syntax for the filters variable value.
+
+3. **Use `$exists` when sorting by metrics:**
+   - Runs missing the sort metric cause errors. Pre-filter:
+   - `"filters": "{\"summary_metrics.eval/accuracy\": {\"$exists\": true}}"`
+
+4. **`summaryMetrics` returns a JSON string, not an object:**
+   - The value of `summaryMetrics` in the response is a raw JSON string.
+   - You must parse it (e.g., `json.loads(run["summaryMetrics"])`) to access individual metrics.
+
+**Complete working example -- top 5 runs by accuracy:**
+```graphql
+query TopRuns($entity: String!, $project: String!, $order: String, $perPage: Int, $filters: JSONString) {
+  project(entityName: $entity, name: $project) {
+    runCount(filters: $filters)
+    runs(first: $perPage, order: $order, filters: $filters) {
+      edges {
+        node { id name displayName state summaryMetrics config createdAt }
+      }
+      pageInfo { endCursor hasNextPage }
+    }
+  }
+}
+```
+Variables:
+```json
+{
+  "entity": "my-team",
+  "project": "my-project",
+  "order": "-summary_metrics.eval/accuracy",
+  "perPage": 5,
+  "filters": "{\"summary_metrics.eval/accuracy\": {\"$exists\": true}}"
+}
+```
+</common_pitfalls>
 """
 
 
