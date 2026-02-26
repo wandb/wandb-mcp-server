@@ -52,5 +52,3 @@ def get_secrets_resolver_from_env() -> Optional[SecretsResolver]:
         return None
     project = os.environ.get("MCP_SERVER_SECRETS_PROJECT")
     return SecretsResolver(provider=provider, secrets_project=project)
-
-

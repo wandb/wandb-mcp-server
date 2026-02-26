@@ -46,9 +46,7 @@ def truncate_value(value: Any, max_length: int = 200) -> Any:
         try:
             # Handle special case for inputs/outputs that might have complex object references
             if "__type__" in value or "_type" in value:
-                logger.info(
-                    f"Found potential complex object: {value.get('__type__') or value.get('_type')}"
-                )
+                logger.info(f"Found potential complex object: {value.get('__type__') or value.get('_type')}")
                 # For very small max_length, return empty dict to ensure proper truncation tests pass
                 if max_length < 50:
                     return {}
@@ -70,11 +68,7 @@ def truncate_value(value: Any, max_length: int = 200) -> Any:
     # For datetime objects and other non-JSON serializable types, convert to string
     elif not isinstance(value, (int, float, bool)):
         try:
-            return (
-                str(value)[:max_length] + "..."
-                if len(str(value)) > max_length
-                else str(value)
-            )
+            return str(value)[:max_length] + "..." if len(str(value)) > max_length else str(value)
         except Exception as e:
             logger.warning(f"Error converting value to string: {e}, returning None")
             return None
@@ -107,9 +101,7 @@ def calculate_token_counts(traces: List[Dict]) -> Dict[str, int]:
         "total_tokens": total_tokens,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "average_tokens_per_trace": round(total_tokens / len(traces), 2)
-        if traces
-        else 0,
+        "average_tokens_per_trace": round(total_tokens / len(traces), 2) if traces else 0,
     }
 
 
@@ -173,9 +165,7 @@ def extract_op_name_distribution(traces: List[Dict]) -> Dict[str, int]:
     return dict(sorted(op_counts.items(), key=lambda x: x[1], reverse=True))
 
 
-def process_traces(
-    traces: List[Dict], truncate_length: int = 200, return_full_data: bool = False
-) -> Dict[str, Any]:
+def process_traces(traces: List[Dict], truncate_length: int = 200, return_full_data: bool = False) -> Dict[str, Any]:
     """Process traces and generate metadata."""
     # Add debug logging
     logger = get_rich_logger(__name__)
@@ -203,10 +193,7 @@ def process_traces(
     # Log before truncation
     logger.info(f"Truncating {len(traces)} traces to length {truncate_length}")
 
-    truncated_traces = [
-        {k: truncate_value(v, truncate_length) for k, v in trace.items()}
-        for trace in traces
-    ]
+    truncated_traces = [{k: truncate_value(v, truncate_length) for k, v in trace.items()} for trace in traces]
 
     # Log after truncation
     logger.info(f"After truncation: {len(truncated_traces)} traces")

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Set
 
-from wandb_mcp_server.utils import get_rich_logger, get_server_args
+from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.config import WF_TRACE_SERVER_URL
 from wandb_mcp_server.weave_api.client import WeaveApiClient
 from wandb_mcp_server.api_client import WandBApiManager
@@ -81,10 +81,10 @@ class TraceService:
         if api_key is None:
             # Get from context (set by auth middleware for HTTP, at startup for STDIO)
             api_key = WandBApiManager.get_api_key()
-            
+
             # NO FALLBACKS to get_server_args or environment!
             # API key must be explicitly set in context
-        
+
         # Validate we have an API key before creating client
         if not api_key:
             raise ValueError(
@@ -128,9 +128,7 @@ class TraceService:
         requested_synthetic_columns: list[str] = []
         invalid_columns_reported: set[str] = set()
 
-        processed_columns = (
-            set()
-        )  # To avoid duplicate processing if a column is listed multiple times
+        processed_columns = set()  # To avoid duplicate processing if a column is listed multiple times
 
         for col_name in columns:
             if col_name in processed_columns:
@@ -145,10 +143,7 @@ class TraceService:
                 if source_field not in filtered_columns_for_api:
                     filtered_columns_for_api.append(source_field)
                 # Also ensure 'summary' itself is added if not already, as 'summary.weave.latency_ms' implies 'summary'
-                if (
-                    "summary" not in filtered_columns_for_api
-                    and source_field.startswith("summary.")
-                ):
+                if "summary" not in filtered_columns_for_api and source_field.startswith("summary."):
                     filtered_columns_for_api.append("summary")
                 logger.info(
                     f"Column 'latency_ms' requested: will be synthesized from '{source_field}'. Added '{source_field}' to API columns."
@@ -171,9 +166,7 @@ class TraceService:
                 # If not present, it will be synthesized from summary.
                 if "status" not in filtered_columns_for_api:
                     filtered_columns_for_api.append("status")
-                if (
-                    "summary" not in filtered_columns_for_api
-                ):  # Also ensure summary for fallback
+                if "summary" not in filtered_columns_for_api:  # Also ensure summary for fallback
                     filtered_columns_for_api.append("summary")
                 logger.info(
                     "Column 'status' requested: will attempt direct fetch or synthesize from 'summary.weave.status'."
@@ -190,9 +183,7 @@ class TraceService:
                     # Valid nested field (e.g., "summary.weave.latency_ms", "attributes.foo")
                     if col_name not in filtered_columns_for_api:
                         filtered_columns_for_api.append(col_name)
-                    logger.info(
-                        f"Nested column field '{col_name}' requested, added to API columns."
-                    )
+                    logger.info(f"Nested column field '{col_name}' requested, added to API columns.")
                 else:
                     logger.warning(
                         f"Invalid base field '{base_field}' in nested column '{col_name}'. It will be ignored."
@@ -200,9 +191,7 @@ class TraceService:
                     invalid_columns_reported.add(col_name)
             else:
                 # Neither a direct valid column, nor a recognized synthetic, nor a valid-looking nested path
-                logger.warning(
-                    f"Invalid column '{col_name}' requested. It will be ignored."
-                )
+                logger.warning(f"Invalid column '{col_name}' requested. It will be ignored.")
                 invalid_columns_reported.add(col_name)
 
         # Ensure filtered_columns_for_api does not have duplicates and maintains order as much as possible
@@ -278,9 +267,7 @@ class TraceService:
             if "costs" in requested_synthetic_columns:
                 costs_data = trace.get("summary", {}).get("weave", {}).get("costs", {})
                 if costs_data:
-                    logger.debug(
-                        f"Adding synthetic 'costs' column with {len(costs_data)} providers"
-                    )
+                    logger.debug(f"Adding synthetic 'costs' column with {len(costs_data)} providers")
                     updated_trace["costs"] = costs_data
                 else:
                     logger.warning(f"No costs data found in trace {trace.get('id')}")
@@ -293,14 +280,10 @@ class TraceService:
                     # Extract from summary.weave.status
                     status = trace.get("summary", {}).get("weave", {}).get("status")
                     if status:
-                        logger.debug(
-                            f"Adding synthetic 'status' from summary: {status}"
-                        )
+                        logger.debug(f"Adding synthetic 'status' from summary: {status}")
                         updated_trace["status"] = status
                     else:
-                        logger.warning(
-                            f"No status data found in trace {trace.get('id')}"
-                        )
+                        logger.warning(f"No status data found in trace {trace.get('id')}")
                         updated_trace["status"] = None
 
             # Add latency_ms from summary if requested
@@ -308,18 +291,12 @@ class TraceService:
                 latency = trace.get("latency_ms")  # Check if it's already in the trace
                 if latency is None:
                     # Extract from summary.weave.latency_ms
-                    latency = (
-                        trace.get("summary", {}).get("weave", {}).get("latency_ms")
-                    )
+                    latency = trace.get("summary", {}).get("weave", {}).get("latency_ms")
                     if latency is not None:
-                        logger.debug(
-                            f"Adding synthetic 'latency_ms' from summary: {latency}"
-                        )
+                        logger.debug(f"Adding synthetic 'latency_ms' from summary: {latency}")
                         updated_trace["latency_ms"] = latency
                     else:
-                        logger.warning(
-                            f"No latency_ms data found in trace {trace.get('id')}"
-                        )
+                        logger.warning(f"No latency_ms data found in trace {trace.get('id')}")
                         updated_trace["latency_ms"] = None
 
             # Add warnings for invalid columns
@@ -377,9 +354,7 @@ class TraceService:
 
         # Handle latency field mapping
         if sort_by in self.LATENCY_FIELD_MAPPING:
-            logger.info(
-                f"Mapping sort field '{sort_by}' to '{self.LATENCY_FIELD_MAPPING[sort_by]}'"
-            )
+            logger.info(f"Mapping sort field '{sort_by}' to '{self.LATENCY_FIELD_MAPPING[sort_by]}'")
             server_sort_by = self.LATENCY_FIELD_MAPPING[sort_by]
             server_sort_direction = sort_direction
         elif client_side_cost_sort:
@@ -405,9 +380,7 @@ class TraceService:
                 server_sort_by = "started_at"
                 server_sort_direction = sort_direction
         elif sort_by not in VALID_COLUMNS:
-            logger.warning(
-                f"Invalid sort field '{sort_by}', falling back to 'started_at'."
-            )
+            logger.warning(f"Invalid sort field '{sort_by}', falling back to 'started_at'.")
             server_sort_by = "started_at"
             server_sort_direction = sort_direction
         else:  # sort_by is in VALID_COLUMNS and not a special case
@@ -415,9 +388,7 @@ class TraceService:
             server_sort_direction = sort_direction
 
         # Validate and filter columns using CallSchema
-        filtered_api_columns, rs_columns, inv_columns = (
-            self._validate_and_filter_columns(columns)
-        )
+        filtered_api_columns, rs_columns, inv_columns = self._validate_and_filter_columns(columns)
 
         # Store invalid columns for later
         self.invalid_columns = inv_columns  # Corrected variable name
@@ -440,9 +411,7 @@ class TraceService:
             "filters": filters or {},
             "sort_by": server_sort_by,
             "sort_direction": server_sort_direction,
-            "limit": None
-            if client_side_cost_sort
-            else limit,  # No limit if we're sorting by cost
+            "limit": None if client_side_cost_sort else limit,  # No limit if we're sorting by cost
             "offset": offset,
             "include_costs": include_costs,
             "include_feedback": include_feedback,
@@ -454,11 +423,7 @@ class TraceService:
         request_body = QueryBuilder.prepare_query_params(query_params)
 
         # Extract synthetic fields if any were specified
-        synthetic_fields = (
-            request_body.pop("_synthetic_fields", [])
-            if "_synthetic_fields" in request_body
-            else []
-        )
+        synthetic_fields = request_body.pop("_synthetic_fields", []) if "_synthetic_fields" in request_body else []
 
         # Make sure all requested synthetic columns are included in synthetic_fields
         for col in rs_columns:  # Use rs_columns
@@ -470,9 +435,7 @@ class TraceService:
 
         # Add synthetic columns and invalid column warnings back to the results
         if rs_columns or inv_columns:  # Use corrected variables
-            all_traces = self._add_synthetic_columns(
-                all_traces, rs_columns, inv_columns
-            )
+            all_traces = self._add_synthetic_columns(all_traces, rs_columns, inv_columns)
 
         # Client-side cost-based sorting if needed
         if client_side_cost_sort and all_traces:
@@ -489,10 +452,7 @@ class TraceService:
         # If we need to synthesize fields, do it
         if synthetic_fields:
             logger.info(f"Synthesizing fields: {synthetic_fields}")
-            all_traces = [
-                TraceProcessor.synthesize_fields(trace, synthetic_fields)
-                for trace in all_traces
-            ]
+            all_traces = [TraceProcessor.synthesize_fields(trace, synthetic_fields) for trace in all_traces]
 
         # Process traces
         result = TraceProcessor.process_traces(
@@ -549,36 +509,24 @@ class TraceService:
         effective_sort_by = "started_at"  # Default
         if sort_by == "latency_ms":
             effective_sort_by = self.LATENCY_FIELD_MAPPING["latency_ms"]
-            logger.info(
-                f"Paginated sort by 'latency_ms', server will use '{effective_sort_by}'."
-            )
+            logger.info(f"Paginated sort by 'latency_ms', server will use '{effective_sort_by}'.")
         elif "." in sort_by:
             base_field = sort_by.split(".")[0]
             if base_field in VALID_COLUMNS:
                 effective_sort_by = sort_by
-                logger.info(
-                    f"Paginated sort by nested field '{sort_by}', server will use it directly."
-                )
+                logger.info(f"Paginated sort by nested field '{sort_by}', server will use it directly.")
             else:
-                logger.warning(
-                    f"Paginated sort by invalid nested field '{sort_by}', defaulting to 'started_at'."
-                )
+                logger.warning(f"Paginated sort by invalid nested field '{sort_by}', defaulting to 'started_at'.")
         elif (
             sort_by in VALID_COLUMNS and sort_by not in self.COST_FIELDS
         ):  # Exclude COST_FIELDS as they are client-sorted
             effective_sort_by = sort_by
-        elif (
-            sort_by not in self.COST_FIELDS
-        ):  # If not valid and not cost, warn and default
-            logger.warning(
-                f"Paginated sort by invalid field '{sort_by}', defaulting to 'started_at'."
-            )
+        elif sort_by not in self.COST_FIELDS:  # If not valid and not cost, warn and default
+            logger.warning(f"Paginated sort by invalid field '{sort_by}', defaulting to 'started_at'.")
 
         # Validate and filter columns using CallSchema
         # Pass the original 'columns'
-        filtered_api_columns, rs_columns, inv_columns = (
-            self._validate_and_filter_columns(columns)
-        )
+        filtered_api_columns, rs_columns, inv_columns = self._validate_and_filter_columns(columns)
 
         # Store invalid columns for later
         self.invalid_columns = inv_columns  # Corrected
@@ -612,15 +560,9 @@ class TraceService:
             current_offset = 0
 
             while True:
-                logger.info(
-                    f"Querying chunk with offset {current_offset}, size {chunk_size}"
-                )
-                remaining = (
-                    target_limit - len(all_traces) if target_limit else chunk_size
-                )
-                current_chunk_size = (
-                    min(chunk_size, remaining) if target_limit else chunk_size
-                )
+                logger.info(f"Querying chunk with offset {current_offset}, size {chunk_size}")
+                remaining = target_limit - len(all_traces) if target_limit else chunk_size
+                current_chunk_size = min(chunk_size, remaining) if target_limit else chunk_size
 
                 chunk_result = self.query_traces(
                     entity_name=entity_name,
@@ -641,17 +583,13 @@ class TraceService:
                 )
 
                 # Get the traces from the QueryResult and handle both None and empty list cases
-                traces_from_chunk = (
-                    chunk_result.traces if chunk_result and chunk_result.traces else []
-                )
+                traces_from_chunk = chunk_result.traces if chunk_result and chunk_result.traces else []
                 if not traces_from_chunk:
                     break
 
                 all_traces.extend(traces_from_chunk)
 
-                if len(traces_from_chunk) < current_chunk_size or (
-                    target_limit and len(all_traces) >= target_limit
-                ):
+                if len(traces_from_chunk) < current_chunk_size or (target_limit and len(all_traces) >= target_limit):
                     break
 
                 current_offset += chunk_size
@@ -666,12 +604,8 @@ class TraceService:
             return_full_data=return_full_data,
             metadata_only=metadata_only,
         )
-        logger.debug(
-            f"Final result from query_paginated_traces:\n\n{len(result.model_dump_json(indent=2))}\n"
-        )
-        assert isinstance(result, QueryResult), (
-            f"Result type must be a QueryResult, found: {type(result)}"
-        )
+        logger.debug(f"Final result from query_paginated_traces:\n\n{len(result.model_dump_json(indent=2))}\n")
+        assert isinstance(result, QueryResult), f"Result type must be a QueryResult, found: {type(result)}"
         return result
 
     def _query_for_cost_sorting(
@@ -727,16 +661,10 @@ class TraceService:
         first_pass_request = QueryBuilder.prepare_query_params(first_pass_query)
         first_pass_results = list(self.client.query_traces(first_pass_request))
 
-        logger.info(
-            f"First pass of cost sorting request retrieved {len(first_pass_results)} traces"
-        )
+        logger.info(f"First pass of cost sorting request retrieved {len(first_pass_results)} traces")
 
         # Filter and sort by cost
-        filtered_results = [
-            t
-            for t in first_pass_results
-            if TraceProcessor.get_cost(t, sort_by) is not None
-        ]
+        filtered_results = [t for t in first_pass_results if TraceProcessor.get_cost(t, sort_by) is not None]
 
         filtered_results.sort(
             key=lambda t: TraceProcessor.get_cost(t, sort_by),
@@ -790,8 +718,6 @@ class TraceService:
 
         # Ensure the results are in the same order as the IDs
         id_to_index = {id: i for i, id in enumerate(top_ids)}
-        second_pass_results.sort(
-            key=lambda t: id_to_index.get(t.get("id"), float("inf"))
-        )
+        second_pass_results.sort(key=lambda t: id_to_index.get(t.get("id"), float("inf")))
 
         return second_pass_results

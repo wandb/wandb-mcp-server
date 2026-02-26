@@ -42,7 +42,9 @@ def query_wandbot_api(question: str) -> Dict[str, Any]:
         )
     except Exception:
         pass
-    wandbot_base_url = os.getenv("WANDBOT_BASE_URL", "https://weightsandbiases-wandbot--wandbot-api-wandbotapi-serve.modal.run")
+    wandbot_base_url = os.getenv(
+        "WANDBOT_BASE_URL", "https://weightsandbiases-wandbot--wandbot-api-wandbotapi-serve.modal.run"
+    )
     QUERY_ENDPOINT = f"{wandbot_base_url}/chat/query"
     STATUS_ENDPOINT = f"{wandbot_base_url}/status"
     QUERY_TIMEOUT_SECONDS = 40
@@ -106,11 +108,7 @@ def query_wandbot_api(question: str) -> Dict[str, Any]:
                     }
 
                 # Ensure sources is a list
-                sources = (
-                    result["sources"]
-                    if isinstance(result["sources"], list)
-                    else [result["sources"]]
-                )
+                sources = result["sources"] if isinstance(result["sources"], list) else [result["sources"]]
                 return {"answer": result["answer"], "sources": sources}
 
             except requests.Timeout:
