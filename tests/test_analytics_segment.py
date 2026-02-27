@@ -1,18 +1,37 @@
-"""Unit tests for analytics_segment.py -- Gorilla /analytics/t compatibility."""
+"""Unit tests for analytics_segment.py -- Gorilla /analytics/t compatibility.
 
+Tests the pure mapper, the gated forwarder (dry-run, live, off),
+the singleton lifecycle, and the end-to-end integration where
+AnalyticsTracker._emit() automatically feeds the SegmentForwarder.
+"""
+
+import time
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
+import pytest
 
+from wandb_mcp_server.analytics import AnalyticsTracker, reset_analytics_tracker
 from wandb_mcp_server.analytics_segment import (
     SEGMENT_EVENT_PREFIX,
     SegmentForwarder,
+    get_segment_forwarder,
     map_to_segment_track,
+    reset_segment_forwarder,
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset():
+    reset_segment_forwarder()
+    reset_analytics_tracker()
+    yield
+    reset_segment_forwarder()
+    reset_analytics_tracker()
+
+
 # ---------------------------------------------------------------------------
-# map_to_segment_track
+# map_to_segment_track (pure mapper)
 # ---------------------------------------------------------------------------
 
 
@@ -28,8 +47,6 @@ class TestMapToSegmentTrack:
         }
         base.update(overrides)
         return base
-
-    # -- tool_call --
 
     def test_tool_call_basic(self):
         event = self._make_event(
@@ -53,8 +70,6 @@ class TestMapToSegmentTrack:
         assert "timestamp" in result
         assert "2026-02-27" in result["timestamp"]
 
-    # -- user_session --
-
     def test_user_session_basic(self):
         event = self._make_event(
             "user_session",
@@ -65,8 +80,6 @@ class TestMapToSegmentTrack:
         result = map_to_segment_track(event)
         assert result["event"] == f"{SEGMENT_EVENT_PREFIX}.session_start"
         assert result["properties"]["email_domain"] == "wandb.com"
-
-    # -- request --
 
     def test_request_basic(self):
         event = self._make_event(
@@ -79,8 +92,6 @@ class TestMapToSegmentTrack:
         result = map_to_segment_track(event)
         assert result["event"] == f"{SEGMENT_EVENT_PREFIX}.http_request"
         assert result["properties"]["method"] == "POST"
-
-    # -- edge cases --
 
     def test_returns_none_for_unknown_event_type(self):
         event = self._make_event("unknown_type")
@@ -111,7 +122,7 @@ class TestMapToSegmentTrack:
 
 
 # ---------------------------------------------------------------------------
-# SegmentForwarder
+# SegmentForwarder unit tests
 # ---------------------------------------------------------------------------
 
 
@@ -144,9 +155,9 @@ class TestSegmentForwarder:
         result = f.forward({"event_type": "unknown", "user_id": "x"})
         assert result is None
 
-    @patch.dict("os.environ", {"MCP_SEGMENT_FORWARD": "true"})
-    def test_live_posts_to_gorilla(self):
-        f = SegmentForwarder(base_url="https://api.wandb.test")
+    @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
+    def test_dry_run_records_forwarded_payloads(self):
+        f = SegmentForwarder()
         event = {
             "schema_version": "1.0",
             "event_type": "tool_call",
@@ -155,18 +166,43 @@ class TestSegmentForwarder:
             "tool_name": "t",
             "success": True,
         }
+        f.forward(event)
+        payloads = f.get_forwarded_payloads()
+        assert len(payloads) == 1
+        assert payloads[0]["userId"] == "carol"
+
+    @patch.dict("os.environ", {"MCP_SEGMENT_FORWARD": "true"})
+    def test_live_dispatches_post_in_background(self):
+        f = SegmentForwarder(base_url="https://api.wandb.test")
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("wandb_mcp_server.analytics_segment.requests.post", return_value=mock_resp) as mock_post:
-            result = f.forward(event)
-            assert result is not None
-            mock_post.assert_called_once()
-            call_kwargs = mock_post.call_args
-            assert "analytics/t" in call_kwargs.args[0]
+        mock_session = MagicMock()
+        mock_session.post.return_value = mock_resp
+        f._session = mock_session
+
+        event = {
+            "schema_version": "1.0",
+            "event_type": "tool_call",
+            "timestamp": "2026-02-27T18:30:00+00:00",
+            "user_id": "carol",
+            "tool_name": "t",
+            "success": True,
+        }
+        result = f.forward(event)
+        assert result is not None
+
+        time.sleep(0.2)
+        mock_session.post.assert_called_once()
+        url_arg = mock_session.post.call_args.args[0]
+        assert "analytics/t" in url_arg
 
     @patch.dict("os.environ", {"MCP_SEGMENT_FORWARD": "true"})
     def test_live_handles_post_failure_gracefully(self):
         f = SegmentForwarder(base_url="https://api.wandb.test")
+        mock_session = MagicMock()
+        mock_session.post.side_effect = Exception("network")
+        f._session = mock_session
+
         event = {
             "schema_version": "1.0",
             "event_type": "tool_call",
@@ -175,6 +211,154 @@ class TestSegmentForwarder:
             "tool_name": "t",
             "success": True,
         }
-        with patch("wandb_mcp_server.analytics_segment.requests.post", side_effect=Exception("network")):
-            result = f.forward(event)
-            assert result is not None  # still returns payload despite failure
+        result = f.forward(event)
+        assert result is not None
+
+        time.sleep(0.2)
+        mock_session.post.assert_called_once()
+
+    @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
+    def test_clear_forwarded_payloads(self):
+        f = SegmentForwarder()
+        event = {
+            "schema_version": "1.0",
+            "event_type": "tool_call",
+            "timestamp": "2026-02-27T18:30:00+00:00",
+            "user_id": "eve",
+            "tool_name": "t",
+            "success": True,
+        }
+        f.forward(event)
+        assert len(f.get_forwarded_payloads()) == 1
+        f.clear_forwarded_payloads()
+        assert len(f.get_forwarded_payloads()) == 0
+
+
+# ---------------------------------------------------------------------------
+# Singleton lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestSingleton:
+
+    def test_get_returns_same_instance(self):
+        assert get_segment_forwarder() is get_segment_forwarder()
+
+    def test_reset_creates_new_instance(self):
+        f1 = get_segment_forwarder()
+        reset_segment_forwarder()
+        assert get_segment_forwarder() is not f1
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: AnalyticsTracker._emit() -> SegmentForwarder
+# ---------------------------------------------------------------------------
+
+
+class TestEndToEndIntegration:
+    """Verify that events emitted by AnalyticsTracker flow through to the
+    SegmentForwarder when it is enabled."""
+
+    @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
+    def test_tracker_tool_call_reaches_forwarder(self):
+        reset_segment_forwarder()
+        forwarder = get_segment_forwarder()
+        assert forwarder.enabled is True
+
+        tracker = AnalyticsTracker(enabled=True)
+        tracker.track_tool_call(
+            tool_name="query_weave",
+            session_id="s1",
+            viewer_info="alice",
+            params={"project": "test"},
+            success=True,
+        )
+
+        payloads = forwarder.get_forwarded_payloads()
+        assert len(payloads) == 1
+        p = payloads[0]
+        assert p["event"] == f"{SEGMENT_EVENT_PREFIX}.tool_call"
+        assert p["properties"]["tool_name"] == "query_weave"
+
+    @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
+    def test_tracker_user_session_reaches_forwarder(self):
+        reset_segment_forwarder()
+        forwarder = get_segment_forwarder()
+
+        from types import SimpleNamespace
+        tracker = AnalyticsTracker(enabled=True)
+        tracker.track_user_session(
+            session_id="sess-1",
+            viewer_info=SimpleNamespace(username="bob", email="b@co.com"),
+            api_key_hash="a" * 64,
+        )
+
+        payloads = forwarder.get_forwarded_payloads()
+        assert len(payloads) == 1
+        assert payloads[0]["userId"] == "bob"
+        assert payloads[0]["event"] == f"{SEGMENT_EVENT_PREFIX}.session_start"
+
+    @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
+    def test_tracker_request_reaches_forwarder(self):
+        reset_segment_forwarder()
+        forwarder = get_segment_forwarder()
+
+        tracker = AnalyticsTracker(enabled=True)
+        tracker.track_request(
+            request_id="r1",
+            session_id="s1",
+            method="POST",
+            path="/mcp/sse",
+            status_code=200,
+            duration_ms=55.0,
+            user_id="carol",
+        )
+
+        payloads = forwarder.get_forwarded_payloads()
+        assert len(payloads) == 1
+        assert payloads[0]["event"] == f"{SEGMENT_EVENT_PREFIX}.http_request"
+        assert payloads[0]["properties"]["status_code"] == 200
+
+    def test_forwarder_inactive_does_not_accumulate(self):
+        """When forwarder is off (default), no payloads should accumulate."""
+        reset_segment_forwarder()
+        forwarder = get_segment_forwarder()
+        assert forwarder.enabled is False
+
+        tracker = AnalyticsTracker(enabled=True)
+        tracker.track_tool_call(
+            tool_name="t", session_id="s", viewer_info="v",
+        )
+        assert len(forwarder.get_forwarded_payloads()) == 0
+
+    @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
+    def test_unmappable_events_not_forwarded(self):
+        """Events without user_id should not reach the forwarder."""
+        reset_segment_forwarder()
+        forwarder = get_segment_forwarder()
+
+        tracker = AnalyticsTracker(enabled=True)
+        tracker.track_tool_call(
+            tool_name="t", session_id="s", viewer_info=None,
+        )
+        assert len(forwarder.get_forwarded_payloads()) == 0
+
+    @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
+    def test_sanitised_params_in_forwarded_payload(self):
+        """Params should be sanitised by the tracker before reaching Segment."""
+        reset_segment_forwarder()
+        forwarder = get_segment_forwarder()
+
+        tracker = AnalyticsTracker(enabled=True)
+        tracker.track_tool_call(
+            tool_name="gql",
+            session_id="s",
+            viewer_info="alice",
+            params={"api_key": "super_secret", "entity": "my-team"},
+        )
+
+        payloads = forwarder.get_forwarded_payloads()
+        assert len(payloads) == 1
+        seg_params = payloads[0]["properties"]["params"]
+        assert seg_params["api_key"] == "<redacted>"
+        assert seg_params["entity"] == "my-team"

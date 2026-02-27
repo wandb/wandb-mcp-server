@@ -144,10 +144,12 @@ class AnalyticsTracker:
     # ------------------------------------------------------------------
 
     def _emit(self, event: Dict[str, Any], labels: Dict[str, str]) -> None:
-        """Write a structured event to the analytics logger.
+        """Write a structured event to the analytics logger and forward to Segment.
 
         Validates required base fields are present and catches
         serialisation errors so analytics never disrupts the server.
+        The Segment forwarder is called after Cloud Logging emission;
+        it is gated by its own env vars and fails silently.
         """
         missing = _REQUIRED_BASE_FIELDS - event.keys()
         if missing:
@@ -160,6 +162,15 @@ class AnalyticsTracker:
             )
         except Exception as exc:
             logger.debug(f"Analytics emit failed (non-fatal): {exc}")
+
+        try:
+            from wandb_mcp_server.analytics_segment import get_segment_forwarder
+
+            forwarder = get_segment_forwarder()
+            if forwarder.enabled:
+                forwarder.forward(event)
+        except Exception as exc:
+            logger.debug(f"Segment forwarding failed (non-fatal): {exc}")
 
     def track_user_session(
         self,

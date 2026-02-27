@@ -157,9 +157,11 @@ Events with empty `userId` are silently skipped. The handler forwards to the sam
 
 ### Phase 2: This PR (stacked)
 - `analytics_segment.py` provides pure mapping functions + gated forwarder.
+- `AnalyticsTracker._emit()` automatically feeds the `SegmentForwarder` singleton when enabled.
+- Live POSTs run in a daemon thread (non-blocking) with retry-capable HTTP session.
 - `MCP_SEGMENT_DRY_RUN=true` logs mapped payloads for DS inspection.
 - `MCP_SEGMENT_FORWARD=true` enables live POST to `/analytics/t`.
-- Both are **off by default**.
+- Both are **off by default**. When off, zero overhead (forwarder check short-circuits).
 
 ### Phase 3: Production enablement (post-DS approval)
 - Enable `MCP_SEGMENT_FORWARD=true` in Cloud Run deployment.

@@ -15,6 +15,7 @@ The Gorilla handler decodes a ``segmentio/analytics-go/v3.Track`` struct::
 This module provides:
 - Pure mapper functions (no network calls).
 - A gated ``SegmentForwarder`` that can dry-run or POST mapped payloads.
+- Automatic integration with ``AnalyticsTracker._emit()`` via singleton.
 
 Enable dry-run logging with ``MCP_SEGMENT_DRY_RUN=true``.
 Enable live forwarding with ``MCP_SEGMENT_FORWARD=true`` + ``WANDB_BASE_URL``.
@@ -22,10 +23,13 @@ Enable live forwarding with ``MCP_SEGMENT_FORWARD=true`` + ``WANDB_BASE_URL``.
 
 import logging
 import os
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -116,6 +120,21 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return track_payload
 
 
+def _build_retry_session() -> requests.Session:
+    """Build a requests session with retry logic for Gorilla POSTs."""
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        backoff_factor=0.3,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=["POST"],
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 class SegmentForwarder:
     """Gated forwarder that maps and optionally sends events to Gorilla /analytics/t.
 
@@ -123,6 +142,8 @@ class SegmentForwarder:
     - Off (default): does nothing.
     - Dry-run (``MCP_SEGMENT_DRY_RUN=true``): logs mapped payloads without sending.
     - Live (``MCP_SEGMENT_FORWARD=true``): POSTs to ``{WANDB_BASE_URL}/analytics/t``.
+
+    Live POSTs run in a daemon thread so they never block the MCP request path.
 
     Args:
         base_url: Override for WANDB_BASE_URL. If None, reads from env.
@@ -134,6 +155,8 @@ class SegmentForwarder:
         self.base_url = (base_url or os.environ.get("WANDB_BASE_URL", "https://api.wandb.ai")).rstrip("/")
         self._segment_logger = logging.getLogger("wandb_mcp_server.segment_dryrun")
         self._segment_logger.setLevel(logging.INFO)
+        self._session: Optional[requests.Session] = None
+        self._forwarded_payloads: List[Dict[str, Any]] = []
 
     @property
     def enabled(self) -> bool:
@@ -144,6 +167,7 @@ class SegmentForwarder:
         """Map an internal event and forward it (or dry-run log it).
 
         Returns the mapped payload if forwarding was attempted, None otherwise.
+        Live POSTs are dispatched to a background thread.
         """
         if not self.enabled:
             return None
@@ -151,6 +175,8 @@ class SegmentForwarder:
         payload = map_to_segment_track(event)
         if payload is None:
             return None
+
+        self._forwarded_payloads.append(payload)
 
         if self.dry_run:
             self._segment_logger.info(
@@ -160,15 +186,27 @@ class SegmentForwarder:
             return payload
 
         if self.live:
-            return self._post(payload)
+            thread = threading.Thread(
+                target=self._post,
+                args=(payload,),
+                daemon=True,
+            )
+            thread.start()
+            return payload
 
         return None
 
+    def _get_session(self) -> requests.Session:
+        """Lazy-init a retry-capable requests session."""
+        if self._session is None:
+            self._session = _build_retry_session()
+        return self._session
+
     def _post(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """POST the payload to Gorilla /analytics/t."""
+        """POST the payload to Gorilla /analytics/t (called from background thread)."""
         url = f"{self.base_url}/analytics/t"
         try:
-            resp = requests.post(
+            resp = self._get_session().post(
                 url,
                 json=payload,
                 timeout=5,
@@ -180,3 +218,30 @@ class SegmentForwarder:
         except Exception as exc:
             logger.warning(f"Segment forward error (non-fatal): {exc}")
             return payload
+
+    def get_forwarded_payloads(self) -> List[Dict[str, Any]]:
+        """Return all payloads that were forwarded (for testing/inspection)."""
+        return list(self._forwarded_payloads)
+
+    def clear_forwarded_payloads(self) -> None:
+        """Clear the forwarded payloads buffer."""
+        self._forwarded_payloads.clear()
+
+
+# -- Singleton access -------------------------------------------------------
+
+_segment_forwarder: Optional[SegmentForwarder] = None
+
+
+def get_segment_forwarder() -> SegmentForwarder:
+    """Get or create the global SegmentForwarder singleton."""
+    global _segment_forwarder
+    if _segment_forwarder is None:
+        _segment_forwarder = SegmentForwarder()
+    return _segment_forwarder
+
+
+def reset_segment_forwarder() -> None:
+    """Reset the global SegmentForwarder (for testing)."""
+    global _segment_forwarder
+    _segment_forwarder = None
