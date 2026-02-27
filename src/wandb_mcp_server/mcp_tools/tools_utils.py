@@ -1,6 +1,6 @@
 import inspect
 import re
-from typing import Any, Callable, Dict, Type, Union, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple, Type, Union
 from wandb_mcp_server.utils import get_rich_logger
 import requests
 from requests.adapters import HTTPAdapter
@@ -312,14 +312,16 @@ def log_tool_call(
 ) -> None:
     """Log tool calls and emit analytics events.
 
-    Debug logs include raw params; the analytics pipeline sanitises them.
+    Both the debug log and the analytics pipeline sanitise params to
+    avoid leaking API keys or other credentials into logs.
     """
     logger = get_rich_logger("mcp_tools")
     try:
-        logger.info(f"ToolCall name={tool_name} viewer={viewer} params={params}")
-        try:
-            from wandb_mcp_server.analytics import get_analytics_tracker
+        from wandb_mcp_server.analytics import AnalyticsTracker, get_analytics_tracker
 
+        safe_params = AnalyticsTracker._sanitise_params(params)
+        logger.info(f"ToolCall name={tool_name} viewer={viewer} params={safe_params}")
+        try:
             get_analytics_tracker().track_tool_call(
                 tool_name=tool_name,
                 session_id=session_id,

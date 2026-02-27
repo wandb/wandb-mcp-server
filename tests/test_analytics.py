@@ -6,11 +6,13 @@ cleaner param sanitisation.
 
 import logging
 from types import SimpleNamespace
+from typing import Any, Dict, Optional
 from unittest.mock import patch
 
 import pytest
 
 from wandb_mcp_server.analytics import (
+    SCHEMA_VERSION,
     AnalyticsTracker,
     get_analytics_tracker,
     reset_analytics_tracker,
@@ -22,6 +24,32 @@ def _reset():
     reset_analytics_tracker()
     yield
     reset_analytics_tracker()
+
+
+class _EventCapture(logging.Filter):
+    """Logging filter that captures the last analytics event payload."""
+
+    def __init__(self):
+        super().__init__()
+        self.event: Optional[Dict[str, Any]] = None
+        self.labels: Optional[Dict[str, str]] = None
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if hasattr(record, "json_fields"):
+            self.event = record.json_fields
+        if hasattr(record, "labels"):
+            self.labels = record.labels
+        return True
+
+
+@pytest.fixture()
+def capture():
+    """Yield a capture filter attached to the analytics logger."""
+    log = logging.getLogger("wandb_mcp_server.analytics")
+    cap = _EventCapture()
+    log.addFilter(cap)
+    yield cap
+    log.removeFilter(cap)
 
 
 # -- Enable / disable --------------------------------------------------------
@@ -68,6 +96,12 @@ class TestExtractEmailDomain:
     def test_lowercased(self):
         assert self.t._extract_email_domain("U@UPPER.COM") == "upper.com"
 
+    def test_empty_string(self):
+        assert self.t._extract_email_domain("") is None
+
+    def test_at_only(self):
+        assert self.t._extract_email_domain("@") == ""
+
 
 # -- User ID extraction -------------------------------------------------------
 
@@ -92,6 +126,17 @@ class TestExtractUserId:
         v = SimpleNamespace(username="u", entity="e", email="x@y.com")
         assert self.t._extract_user_id(v) == "u"
 
+    def test_none_returns_none(self):
+        assert self.t._extract_user_id(None) is None
+
+    def test_unrecognised_type_returns_none(self):
+        """Arbitrary objects should not be str()-ified (data leakage guard)."""
+        assert self.t._extract_user_id(42) is None
+
+    def test_empty_username_falls_through(self):
+        v = SimpleNamespace(username="", entity="team")
+        assert self.t._extract_user_id(v) == "team"
+
 
 # -- Param sanitisation -------------------------------------------------------
 
@@ -113,6 +158,60 @@ class TestSanitiseParams:
     def test_empty_params(self):
         assert AnalyticsTracker._sanitise_params(None) == {}
 
+    def test_nested_dict_redaction(self):
+        result = AnalyticsTracker._sanitise_params({
+            "config": {"api_key": "s3cr3t", "model": "gpt-4"}
+        })
+        assert result["config"]["api_key"] == "<redacted>"
+        assert result["config"]["model"] == "gpt-4"
+
+    def test_deeply_nested_stops_at_depth_limit(self):
+        deep = {"l1": {"l2": {"l3": {"l4": {"api_key": "leak"}}}}}
+        result = AnalyticsTracker._sanitise_params(deep)
+        assert result["l1"]["l2"]["l3"]["l4"] == {"api_key": "leak"}
+
+    def test_integer_values_pass_through(self):
+        assert AnalyticsTracker._sanitise_params({"count": 42})["count"] == 42
+
+    def test_boolean_values_pass_through(self):
+        assert AnalyticsTracker._sanitise_params({"flag": True})["flag"] is True
+
+
+# -- Schema version & base fields -------------------------------------------
+
+
+class TestSchemaVersion:
+    def test_schema_version_constant(self):
+        assert SCHEMA_VERSION == "1.0"
+
+    def test_user_session_has_schema_version(self, capture):
+        AnalyticsTracker(enabled=True).track_user_session(
+            session_id="s", viewer_info="u@t.com"
+        )
+        assert capture.event is not None
+        assert capture.event["schema_version"] == SCHEMA_VERSION
+
+    def test_tool_call_has_schema_version(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="t", session_id="s", viewer_info="v"
+        )
+        assert capture.event is not None
+        assert capture.event["schema_version"] == SCHEMA_VERSION
+
+    def test_request_has_schema_version(self, capture):
+        AnalyticsTracker(enabled=True).track_request(
+            request_id="r", session_id="s",
+            method="GET", path="/", status_code=200,
+        )
+        assert capture.event is not None
+        assert capture.event["schema_version"] == SCHEMA_VERSION
+
+    def test_emit_rejects_missing_required_fields(self, capture):
+        """Events missing schema_version/timestamp should be dropped, not emitted."""
+        t = AnalyticsTracker(enabled=True)
+        t._emit({"event_type": "test"}, {})
+        assert capture.event is None
+
 
 # -- track_user_session -------------------------------------------------------
 
@@ -131,49 +230,42 @@ class TestTrackUserSession:
             t.track_user_session(session_id="s", viewer_info="v")
         assert not any("ANALYTICS_EVENT" in r.message for r in caplog.records)
 
-    def test_api_key_hash_truncated(self):
-        class Cap(logging.Filter):
-            event = None
+    def test_api_key_hash_truncated(self, capture):
+        AnalyticsTracker(enabled=True).track_user_session(
+            session_id="s",
+            viewer_info="u@t.com",
+            api_key_hash="abcdef1234567890extra",
+        )
+        assert capture.event is not None
+        assert len(capture.event["api_key_hash"]) == 16
 
-            def filter(self, record):
-                if hasattr(record, "json_fields"):
-                    Cap.event = record.json_fields
-                return True
+    def test_uses_utc_timestamps(self, capture):
+        AnalyticsTracker(enabled=True).track_user_session(
+            session_id="s", viewer_info="v"
+        )
+        assert capture.event is not None
+        assert "+00:00" in capture.event["timestamp"] or "Z" in capture.event["timestamp"]
 
-        log = logging.getLogger("wandb_mcp_server.analytics")
-        c = Cap()
-        log.addFilter(c)
-        try:
-            AnalyticsTracker(enabled=True).track_user_session(
-                session_id="s",
-                viewer_info="u@t.com",
-                api_key_hash="abcdef1234567890extra",
-            )
-            assert Cap.event is not None
-            assert len(Cap.event["api_key_hash"]) == 16
-        finally:
-            log.removeFilter(c)
+    def test_none_api_key_hash(self, capture):
+        AnalyticsTracker(enabled=True).track_user_session(
+            session_id="s", viewer_info="v", api_key_hash=None
+        )
+        assert capture.event is not None
+        assert capture.event["api_key_hash"] is None
 
-    def test_uses_utc_timestamps(self):
-        class Cap(logging.Filter):
-            event = None
-
-            def filter(self, record):
-                if hasattr(record, "json_fields"):
-                    Cap.event = record.json_fields
-                return True
-
-        log = logging.getLogger("wandb_mcp_server.analytics")
-        c = Cap()
-        log.addFilter(c)
-        try:
-            AnalyticsTracker(enabled=True).track_user_session(
-                session_id="s", viewer_info="v"
-            )
-            assert Cap.event is not None
-            assert "+00:00" in Cap.event["timestamp"] or "Z" in Cap.event["timestamp"]
-        finally:
-            log.removeFilter(c)
+    def test_event_fields_complete(self, capture):
+        AnalyticsTracker(enabled=True).track_user_session(
+            session_id="sess-1",
+            viewer_info=SimpleNamespace(username="alice", email="a@co.com"),
+            api_key_hash="a" * 64,
+            metadata={"client": "cursor"},
+        )
+        e = capture.event
+        assert e["event_type"] == "user_session"
+        assert e["session_id"] == "sess-1"
+        assert e["user_id"] == "alice"
+        assert e["email_domain"] == "co.com"
+        assert e["metadata"] == {"client": "cursor"}
 
 
 # -- track_tool_call ----------------------------------------------------------
@@ -193,29 +285,36 @@ class TestTrackToolCall:
             tool_name="t", session_id="s", viewer_info="v"
         )
 
-    def test_sanitises_api_key(self):
-        class Cap(logging.Filter):
-            event = None
+    def test_sanitises_api_key(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="t",
+            session_id="s",
+            viewer_info="v",
+            params={"api_key": "super_secret", "project": "ok"},
+        )
+        assert capture.event["params"]["api_key"] == "<redacted>"
+        assert capture.event["params"]["project"] == "ok"
 
-            def filter(self, record):
-                if hasattr(record, "json_fields"):
-                    Cap.event = record.json_fields
-                return True
+    def test_error_field_recorded(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="t", session_id="s", viewer_info="v",
+            success=False, error="timeout",
+        )
+        assert capture.event["success"] is False
+        assert capture.event["error"] == "timeout"
 
-        log = logging.getLogger("wandb_mcp_server.analytics")
-        c = Cap()
-        log.addFilter(c)
-        try:
-            AnalyticsTracker(enabled=True).track_tool_call(
-                tool_name="t",
-                session_id="s",
-                viewer_info="v",
-                params={"api_key": "super_secret", "project": "ok"},
-            )
-            assert Cap.event["params"]["api_key"] == "<redacted>"
-            assert Cap.event["params"]["project"] == "ok"
-        finally:
-            log.removeFilter(c)
+    def test_duration_ms_recorded(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="t", session_id="s", viewer_info="v",
+            duration_ms=123.4,
+        )
+        assert capture.event["duration_ms"] == 123.4
+
+    def test_labels_include_tool_name(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_gql", session_id="s", viewer_info="v",
+        )
+        assert capture.labels["tool_name"] == "query_gql"
 
 
 # -- track_request -------------------------------------------------------------
@@ -241,6 +340,20 @@ class TestTrackRequest:
             status_code=200,
         )
 
+    def test_event_fields_complete(self, capture):
+        AnalyticsTracker(enabled=True).track_request(
+            request_id="r1", session_id="s1",
+            method="POST", path="/mcp/sse",
+            status_code=200, duration_ms=55.0,
+            user_id="alice", email_domain="co.com",
+        )
+        e = capture.event
+        assert e["event_type"] == "request"
+        assert e["method"] == "POST"
+        assert e["path"] == "/mcp/sse"
+        assert e["status_code"] == 200
+        assert e["duration_ms"] == 55.0
+
 
 # -- Global tracker singleton --------------------------------------------------
 
@@ -253,3 +366,8 @@ class TestGlobalTracker:
         t1 = get_analytics_tracker()
         reset_analytics_tracker()
         assert get_analytics_tracker() is not t1
+
+    @patch.dict("os.environ", {"MCP_ANALYTICS_DISABLED": "true"})
+    def test_singleton_respects_env(self):
+        t = get_analytics_tracker()
+        assert t.enabled is False

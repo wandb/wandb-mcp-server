@@ -16,19 +16,33 @@ datetime handling, cleaner auth integration, and structured event schema.
 import logging
 import os
 from datetime import UTC, datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
 
-_SENSITIVE_PARAM_PATTERNS = ("api_key", "token", "secret", "password", "credential", "auth")
+SCHEMA_VERSION = "1.0"
+
+_SENSITIVE_PARAM_PATTERNS: List[str] = [
+    "api_key",
+    "token",
+    "secret",
+    "password",
+    "credential",
+    "auth",
+]
+
+_MAX_PARAM_VALUE_LENGTH = 200
 
 analytics_logger = logging.getLogger("wandb_mcp_server.analytics")
 analytics_logger.setLevel(logging.INFO)
 
+_REQUIRED_BASE_FIELDS = frozenset({"schema_version", "event_type", "timestamp"})
+
 
 def _utcnow_iso() -> str:
+    """Return current UTC time in ISO-8601 format."""
     return datetime.now(UTC).isoformat()
 
 
@@ -70,14 +84,21 @@ class AnalyticsTracker:
 
     @staticmethod
     def _extract_user_id(viewer_info: Any) -> Optional[str]:
-        """Return the best available user identifier."""
+        """Return the best available user identifier.
+
+        Prefers username > entity > email. Falls back to the raw string
+        for string inputs, returns None for unrecognised types rather
+        than stringifying arbitrary objects (avoids data leakage).
+        """
         try:
             for attr in ("username", "entity", "email"):
                 if hasattr(viewer_info, attr):
-                    return getattr(viewer_info, attr)
+                    val = getattr(viewer_info, attr)
+                    if val:
+                        return str(val)
             if isinstance(viewer_info, str):
                 return viewer_info
-            return str(viewer_info)
+            return None
         except Exception:
             return None
 
@@ -85,30 +106,60 @@ class AnalyticsTracker:
     # Param sanitisation
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _sanitise_params(params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        """Strip sensitive keys and truncate large values."""
+    @classmethod
+    def _sanitise_params(cls, params: Optional[Dict[str, Any]], *, _depth: int = 0) -> Dict[str, Any]:
+        """Strip sensitive keys and truncate large values.
+
+        Recursively sanitises nested dicts up to 3 levels deep.
+        """
         if not params:
             return {}
         safe: Dict[str, Any] = {}
         for key, value in params.items():
             if any(p in key.lower() for p in _SENSITIVE_PARAM_PATTERNS):
                 safe[key] = "<redacted>"
-            elif isinstance(value, str) and len(value) > 200:
+            elif isinstance(value, dict) and _depth < 3:
+                safe[key] = cls._sanitise_params(value, _depth=_depth + 1)
+            elif isinstance(value, str) and len(value) > _MAX_PARAM_VALUE_LENGTH:
                 safe[key] = f"<truncated:{len(value)} chars>"
             else:
                 safe[key] = value
         return safe
 
     # ------------------------------------------------------------------
+    # Event helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _base_event(event_type: str) -> Dict[str, Any]:
+        """Build the required base fields present in every event."""
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "event_type": event_type,
+            "timestamp": _utcnow_iso(),
+        }
+
+    # ------------------------------------------------------------------
     # Event emitters
     # ------------------------------------------------------------------
 
     def _emit(self, event: Dict[str, Any], labels: Dict[str, str]) -> None:
-        analytics_logger.info(
-            "ANALYTICS_EVENT",
-            extra={"json_fields": event, "labels": labels},
-        )
+        """Write a structured event to the analytics logger.
+
+        Validates required base fields are present and catches
+        serialisation errors so analytics never disrupts the server.
+        """
+        missing = _REQUIRED_BASE_FIELDS - event.keys()
+        if missing:
+            logger.warning(f"Analytics event missing required fields: {missing}")
+            return
+        try:
+            analytics_logger.info(
+                "ANALYTICS_EVENT",
+                extra={"json_fields": event, "labels": labels},
+            )
+        except Exception as exc:
+            logger.debug(f"Analytics emit failed (non-fatal): {exc}")
 
     def track_user_session(
         self,
@@ -117,14 +168,13 @@ class AnalyticsTracker:
         api_key_hash: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Record a session start."""
+        """Record a session start / heartbeat."""
         if not self.enabled:
             return
         try:
             email_domain = self._extract_email_domain(viewer_info)
             event = {
-                "event_type": "user_session",
-                "timestamp": _utcnow_iso(),
+                **self._base_event("user_session"),
                 "session_id": session_id,
                 "user_id": self._extract_user_id(viewer_info),
                 "email_domain": email_domain,
@@ -151,8 +201,7 @@ class AnalyticsTracker:
         try:
             email_domain = self._extract_email_domain(viewer_info)
             event = {
-                "event_type": "tool_call",
-                "timestamp": _utcnow_iso(),
+                **self._base_event("tool_call"),
                 "session_id": session_id,
                 "user_id": self._extract_user_id(viewer_info),
                 "email_domain": email_domain,
@@ -190,8 +239,7 @@ class AnalyticsTracker:
             return
         try:
             event = {
-                "event_type": "request",
-                "timestamp": _utcnow_iso(),
+                **self._base_event("request"),
                 "request_id": request_id,
                 "session_id": session_id,
                 "user_id": user_id,
@@ -219,11 +267,13 @@ _analytics_tracker: Optional[AnalyticsTracker] = None
 
 
 def get_analytics_tracker() -> AnalyticsTracker:
-    """Get or create the global analytics tracker."""
+    """Get or create the global analytics tracker.
+
+    Respects ``MCP_ANALYTICS_DISABLED=true`` to turn off tracking.
+    """
     global _analytics_tracker
     if _analytics_tracker is None:
-        enabled = os.environ.get("MCP_ANALYTICS_ENABLED", "true").lower() == "true"
-        _analytics_tracker = AnalyticsTracker(enabled=enabled)
+        _analytics_tracker = AnalyticsTracker(enabled=True)
     return _analytics_tracker
 
 

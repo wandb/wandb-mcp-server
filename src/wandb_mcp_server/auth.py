@@ -12,10 +12,13 @@ import hashlib
 import logging
 import os
 import re
+import time
+import uuid
 from typing import Optional
+
 from fastapi import HTTPException, Request, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 logger = logging.getLogger(__name__)
 
@@ -165,12 +168,29 @@ async def mcp_auth_middleware(request: Request, call_next):
         except Exception as analytics_err:
             logger.debug(f"Analytics tracking failed (non-fatal): {analytics_err}")
 
+        request_start = time.monotonic()
+        request_id = str(uuid.uuid4())[:8]
         try:
-            # Continue processing the request
             response = await call_next(request)
         finally:
-            # Reset the context after request processing
             WandBApiManager.reset_context_api_key(token)
+
+        try:
+            from wandb_mcp_server.analytics import get_analytics_tracker
+
+            elapsed_ms = (time.monotonic() - request_start) * 1000
+            get_analytics_tracker().track_request(
+                request_id=request_id,
+                session_id=getattr(request.state, "session_id", None),
+                method=request.method,
+                path=request.url.path,
+                status_code=response.status_code,
+                duration_ms=round(elapsed_ms, 2),
+                user_id=viewer.username if viewer and hasattr(viewer, "username") else None,
+                email_domain=None,
+            )
+        except Exception:
+            pass
 
         return response
 
