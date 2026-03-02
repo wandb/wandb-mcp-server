@@ -1,54 +1,39 @@
----
-name: version-mapping
-description: Maintain strict mapping between code version, prompt version, run labels, and per-question outcomes for reproducible iteration tracking.
----
+# Version And Run Mapping
 
-# Version Mapping
+Maintain reproducibility across iterations.
 
-Use this skill for release hygiene and reproducibility in the eval loop.
+## Required Mapping Fields
 
-## Required Mappings
-
-For every benchmark run, map:
-1. `git_sha` (agent version)
+For every run, track:
+1. `git_sha` or code version ID
 2. `prompt_version`
-3. `run_id`
-4. `run_label` (`run_n`)
-5. evaluation slice (`offset`, `limit`)
+3. `tooling_version` (if separate)
+4. `scorer_version`
+5. dataset version or benchmark slice (`offset`, `limit`, split)
+6. `run_id`
+7. `run_label` (`run_n`)
+8. run URL
 
 ## Procedure
 
-1. Commit accepted fixes before running eval.
-2. Run benchmark and capture run ID/URL.
-3. Label run with `run_n`.
-4. Publish canonical dashboard summary.
-5. Create/update `analytics-agent/outputs/runs/run_n/` with:
-   - `metadata.json`
-   - `README.md`
-   - `observability/`
-   - `rca/`
-6. Build/refresh question history across runs.
+1. Commit accepted changes before running comparison eval.
+2. Execute run and capture ID/URL.
+3. Apply stable label (`run_n`).
+4. Store run metadata in a run-centric folder.
+5. Store observability and RCA artifacts under same run label.
+6. Rebuild question-level history across runs.
 
-## Commands
+## Recommended Run-Centric Folder Contract
 
-```powershell
-# version check
-git rev-parse --short HEAD
+Under configurable output root:
+1. `run_n/metadata.json`
+2. `run_n/README.md`
+3. `run_n/observability/*`
+4. `run_n/rca/*`
 
-# run label
-& .\.venv\Scripts\python.exe analytics-agent/eval/label_runs.py --set <run_id>=run_3
+## Guardrails
 
-# publish dashboard summary and RCA tables
-& .\.venv\Scripts\python.exe analytics-agent/eval/publish_run_dashboard.py --run-id <run_id> --run-name "run 3" --run-label run_3
-
-# rebuild longitudinal history
-& .\.venv\Scripts\python.exe analytics-agent/eval/question_history.py
-```
-
-## Release Guardrails
-
-1. Do not run eval on uncommitted fix batches when comparing versions.
-2. Keep `run_n` sequence unique.
-3. If slice differs, mark comparability limits in report.
-4. Preserve historical rows; never overwrite prior run artifacts.
-5. Demo navigation should start at `analytics-agent/outputs/runs/`.
+1. Do not compare uncommitted local code against committed runs.
+2. Keep `run_n` labels unique and monotonic.
+3. Mark comparability limits when dataset/slice/scorer changes.
+4. Never overwrite prior run artifacts.

@@ -1,46 +1,62 @@
----
-name: mcp-project-bootstrap
-description: Resolve correct W&B entity/project context before running eval or RCA, using MCP tools and local config, then persist normalized runtime context.
----
+# Project Bootstrap
 
-# MCP Project Bootstrap
+Resolve correct W&B coordinates before any eval, trace query, or dashboard step.
 
-Use this skill when you need to confirm or recover W&B project coordinates (`entity`, `project`, run IDs) before running eval, dashboard publish, or trace analysis.
+## Purpose
+
+Use this reference to reliably determine:
+1. `entity`
+2. `project`
+3. auth/runtime readiness
+
+This should work for any existing agent repository (LangGraph, Mastra, custom).
 
 ## Inputs
 
-1. Optional user-provided `entity` and `project`.
-2. Local `.env` and `analytics-agent/.env`.
-3. MCP W&B tools access.
+1. Optional user-provided `entity` and `project`
+2. Repo env files (for example `.env`, `.env.local`, framework config)
+3. W&B MCP tools
+
+## Preflight (Mandatory)
+
+1. Confirm runtime is available (`python` or `node`, depending on agent stack).
+2. Confirm `WANDB_API_KEY` exists.
+3. Capture optional defaults: `WANDB_ENTITY`, `WANDB_PROJECT`, `WANDB_BASE_URL`, `WEAVE_PROJECT`.
+
+Stop if runtime or API key is missing.
 
 ## Procedure
 
-1. Read local env defaults first.
-2. If entity is missing or uncertain, query MCP projects for the user/team entity.
-3. Confirm project exists (`jupybot` here).
-4. Persist resolved runtime context in one JSON file for downstream scripts.
+1. Load env/config defaults.
+2. If `entity` is missing or uncertain, query MCP for available projects by entity.
+3. Resolve exact `project` under that entity.
+4. Validate project exists and is accessible.
+5. Persist resolved context in a runtime artifact file for downstream steps.
 
-## Required Output
+## Output Contract
 
-Write `analytics-agent/outputs/runtime/project_context.json` with:
-1. `entity`
-2. `project`
-3. `resolved_at`
-4. `source` (`env`, `mcp`, or `mixed`)
+Write a single context JSON (path configurable by repo). Minimum fields:
+
+```json
+{
+  "entity": "<resolved-entity>",
+  "project": "<resolved-project>",
+  "base_url": "<optional>",
+  "resolved_at": "<iso-timestamp>",
+  "source": "env|mcp|mixed",
+  "validated": true
+}
+```
 
 ## Guardrails
 
-1. Never run eval/publish scripts until entity/project are confirmed.
-2. If MCP returns transport errors, fall back to env + explicit user confirmation.
-3. Keep one canonical project context file per session and update timestamp on refresh.
+1. Do not run eval loops before context is validated.
+2. Do not silently guess entity/project when multiple candidates exist.
+3. Keep one canonical context file per session and refresh timestamp on re-resolve.
 
-## Common Commands
+## Fallbacks
 
-```powershell
-# read env files
-Get-Content .env
-Get-Content analytics-agent/.env
-
-# verify project exists via MCP tool:
-# query_wandb_entity_projects(entity="<entity>")
-```
+1. If MCP project listing fails:
+   - use env values only with explicit user confirmation.
+2. If env and MCP disagree:
+   - treat MCP as source of truth and record reconciliation note.

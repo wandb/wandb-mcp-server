@@ -1,6 +1,6 @@
 ---
 name: coding-agent-self-eval
-description: Execute the full jupyBot-style self-evaluation loop for coding agents (Cursor, Claude Code, Codex) using W&B runs, traces, evals, dashboards, RCA, and human-gated fix promotion.
+description: Execute a full self-evaluation loop for coding agents (Cursor, Claude Code, Codex) on existing agent codebases using W&B runs, traces, evals, dashboards, RCA, and human-gated fix promotion; validated in jupyBot and generalized for reuse.
 ---
 
 # Coding Agent Self Eval

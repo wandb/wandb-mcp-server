@@ -1,28 +1,36 @@
----
-name: submission-packaging
-description: Build final presentation-ready README and evidence set from run artifacts, fixes, and RCA outputs.
----
+# Evidence Packaging
 
-# Submission Packaging
+Package proof that the self-eval loop actually ran and produced measurable outcomes.
 
-Use this skill to produce the final project presentation package quickly.
+## Purpose
 
-## Required Outputs
+Produce an evidence bundle that reviewers can verify without rerunning the entire project.
 
-1. Root `README.md` as the main presentation entrypoint.
-2. Run comparison table with slice, SHA, and accuracy.
-3. Fix table with status (`implemented`, `accepted`, `deferred`).
-4. Evidence links to RCA artifacts and run URLs.
-5. Run-centric demo data structure under `analytics-agent/outputs/runs/run_n/`.
+## Minimum Evidence Bundle
+
+1. Run comparison table:
+   - run label, run ID, dataset/slice, version ID, accuracy
+2. Fix ledger:
+   - proposed/accepted/deferred/rejected
+3. RCA summaries per run:
+   - failure categories and counts
+4. Artifact links:
+   - predictions/failures/trace mapping
+5. dashboard/report links
+
+## Optional Presentation Outputs
+
+1. Root `README.md` summary
+2. flowchart of eval loop
+3. skill index links
 
 ## Checklist
 
-1. Confirm final run IDs and metrics from artifacts.
-2. Highlight what improved and what regressed.
-3. Mark cross-slice comparability limits explicitly.
-4. Link skills index: `skills/skills.md`.
-5. Keep backlog in separate doc, not in main presentation body.
-6. Ensure each run folder has a local `README.md` with:
-   - run metrics
-   - RCA summary
-   - applied/proposed/deferred fixes.
+1. Confirm run IDs and canonical metrics from artifacts.
+2. Mark comparability limits when slice/scorer changes.
+3. Ensure each run folder has:
+   - run metadata,
+   - observability files,
+   - RCA outputs,
+   - short run summary.
+4. Keep backlog/next ideas in separate doc from evidence summary.

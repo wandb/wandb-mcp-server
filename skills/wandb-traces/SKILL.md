@@ -22,7 +22,8 @@ Use Weave traces as primary evidence for failure analysis.
 
 1. Use W&B MCP Weave tools (`count_weave_traces_tool`, `query_weave_traces_tool`).
 2. If query semantics are unclear, use official Weave docs.
-3. If needed, inspect local instrumentation code and generated trace schema.
+3. If MCP transport fails or returns decode errors, use local run artifacts (`trace_index`, failures rows, logs).
+4. If needed, inspect local instrumentation code and generated trace schema.
 
 ## Output Contract
 

@@ -14,11 +14,13 @@ Create comparable runs with stable naming and schema.
    - code version (`git_sha`)
    - prompt/tool version
    - dataset slice (`offset`, `limit`)
+   - scorer version / dataset version
    - model identifier
 3. Log per-question metrics with explicit step indexing.
 4. Log run-level summary metrics at completion (`accuracy`, `correct`, `total`, error rates).
-5. Apply canonical tags (for example `baseline`, `fix-batch`, `agent-vX`).
-6. Keep key names stable between runs; avoid renaming metrics mid-series.
+5. Log prompt budget metrics when available (`prompt_chars`, `prompt_tokens_est`, budget status).
+6. Apply canonical tags (for example `baseline`, `fix-batch`, `agent-vX`).
+7. Keep key names stable between runs; avoid renaming metrics mid-series.
 
 ## Fallback Order
 
