@@ -6,12 +6,27 @@ This is the main entrypoint for using W&B skills with coding agents.
 
 Use this package to help a coding agent:
 1. find the correct W&B project context,
-2. run tracked evals with stable schemas,
-3. inspect traces and failures,
-4. publish comparable dashboards,
-5. run an RCA-driven self-eval loop with human-gated fix promotion.
+2. define eval data (benchmark or custom test set),
+3. run tracked evals with stable schemas,
+4. inspect traces and failures,
+5. publish comparable dashboards,
+6. run an RCA-driven self-eval loop with human-gated fix promotion.
 
-This was designed from a real loop executed in jupyBot and is intended to be reusable across agents.
+This package is for coding agents working on an existing agent codebase, including:
+1. LangGraph agents,
+2. Mastra agents,
+3. custom Python/TypeScript agent stacks.
+
+This was designed from a real loop executed in jupyBot and is intended to be reusable across existing agent implementations.
+
+## What This Should Help A Coding Agent Do
+
+A coding agent should use this package to:
+1. discover where the target agent is implemented,
+2. identify the execution entrypoint and tool/runtime files,
+3. set up W&B + Weave logging correctly,
+4. create or select eval datasets/test cases,
+5. run the eval loop and track improvements by run version.
 
 ## Required Environment
 
@@ -23,6 +38,20 @@ Set these before running any workflow:
 5. `WEAVE_PROJECT` (optional, for explicit Weave routing)
 
 If `WANDB_ENTITY` or `WANDB_PROJECT` are missing, start with `wandb-projects` to resolve them.
+
+## Eval Data Requirement (Mandatory Before Runs)
+
+Before any eval run, define one of:
+1. benchmark slice (for example Spider with explicit `offset` and `limit`), or
+2. custom eval dataset + scorer (question, expected output, correctness logic).
+
+If no dataset exists, create a first test pack with:
+1. 20 to 50 representative cases,
+2. expected outputs or judge rubric,
+3. tags for category and difficulty,
+4. stable IDs so failures can be tracked across runs.
+
+Do not run RCA loops without a defined eval set.
 
 ## How This Skill Pack Should Be Used
 
@@ -50,12 +79,12 @@ Then follow the ordered references listed in:
 
 1. [wandb-projects](./wandb-projects/SKILL.md)
    Resolve entity/project and block execution if unresolved.
-2. [wandb-runs](./wandb-runs/SKILL.md)
+2. [wandb-evals](./wandb-evals/SKILL.md)
+   Define benchmark/test dataset and scoring contract before first run.
+3. [wandb-runs](./wandb-runs/SKILL.md)
    Start a run with stable naming, tags, and version metadata.
-3. [wandb-traces](./wandb-traces/SKILL.md)
+4. [wandb-traces](./wandb-traces/SKILL.md)
    Capture and query trace evidence for debugging and RCA.
-4. [wandb-evals](./wandb-evals/SKILL.md)
-   Run question-level scoring with canonical correctness fields.
 5. [wandb-reports](./wandb-reports/SKILL.md)
    Publish dashboards/tables for run comparison and failure analysis.
 6. [coding-agent-self-eval](./coding-agent-self-eval/SKILL.md)
@@ -64,11 +93,12 @@ Then follow the ordered references listed in:
 ## Agent Discovery Checklist
 
 Before running eval loops on a new agent, collect:
-1. agent entrypoint file,
-2. tool files invoked by the agent,
-3. eval runner location,
-4. scorer implementation location,
-5. run artifact output path.
+1. framework/runtime (`LangGraph`, `Mastra`, or custom),
+2. agent entrypoint file,
+3. tool files invoked by the agent,
+4. eval runner location,
+5. scorer implementation location,
+6. run artifact output path.
 
 Do not start comparison runs until these are confirmed.
 
@@ -88,6 +118,13 @@ Per run, ensure you can access:
 1. Re-run `wandb-projects`.
 2. Validate with MCP project listing.
 3. If MCP fails, use env values and require explicit user confirmation.
+
+### No eval dataset or weak test coverage
+
+1. Stop iteration runs.
+2. Build a minimum eval set with stable IDs and expected outputs.
+3. Add category tags to support RCA clustering.
+4. Re-run baseline before proposing fixes.
 
 ### Traces missing or incomplete
 
