@@ -56,6 +56,31 @@ When asking broad, general questions such as "what are my best performing runs/e
 
 ---
 
+## Skills
+
+This repository includes a modular `skills/` package so users can install only the W&B capability they need.
+
+### Available Skills
+
+1. `wandb-projects`: resolve/validate entity and project context.
+2. `wandb-runs`: standardize run naming, tags, config, and metric schema.
+3. `wandb-traces`: query Weave traces for debugging and RCA evidence.
+4. `wandb-evals`: run question-level evals with canonical correctness logging.
+5. `wandb-reports`: publish dashboards/reports for run comparison and fix impact.
+6. `coding-agent-self-eval`: orchestrate the full RCA -> fix -> re-eval loop.
+
+### Install Examples
+
+```bash
+npx skills add wandb/wandb-mcp-server --skill wandb-traces
+npx skills add wandb/wandb-mcp-server --skill wandb-evals
+npx skills add wandb/wandb-mcp-server --skill coding-agent-self-eval
+```
+
+See [skills/skills.md](skills/skills.md) for the full sequence and usage guidance.
+
+---
+
 ## Quick Start
 
 We recommend using our **hosted server** at `https://mcp.withwandb.com` - no installation required! <br>
