@@ -1,56 +1,109 @@
 # Skills Index
 
-This is the main entrypoint for the W&B feature-first skills package.
+This is the main entrypoint for using W&B skills with coding agents.
 
 ## Purpose
 
-Use these skills to help any coding agent set up and run a reliable W&B + Weave evaluation loop, then scale to a self-improving agent workflow.
+Use this package to help a coding agent:
+1. find the correct W&B project context,
+2. run tracked evals with stable schemas,
+3. inspect traces and failures,
+4. publish comparable dashboards,
+5. run an RCA-driven self-eval loop with human-gated fix promotion.
 
-## How To Use
+This was designed from a real loop executed in jupyBot and is intended to be reusable across agents.
 
-1. Start with this file.
-2. Select only the feature skills you need.
-3. Combine them with the orchestration skill for a full self-eval loop.
+## Required Environment
 
-Recommended progression:
-1. `wandb-projects`
-2. `wandb-runs`
-3. `wandb-traces`
-4. `wandb-evals`
-5. `wandb-reports`
-6. `coding-agent-self-eval`
+Set these before running any workflow:
+1. `WANDB_API_KEY` (required)
+2. `WANDB_ENTITY` (recommended)
+3. `WANDB_PROJECT` (recommended)
+4. `WANDB_BASE_URL` (optional for dedicated/on-prem)
+5. `WEAVE_PROJECT` (optional, for explicit Weave routing)
 
-## Install Pattern
+If `WANDB_ENTITY` or `WANDB_PROJECT` are missing, start with `wandb-projects` to resolve them.
 
-Use one skill at a time, for example:
+## How This Skill Pack Should Be Used
+
+### Mode A: Install a single capability
+
+Use this when you only need one task (for example traces or eval setup).
 
 ```bash
 npx skills add wandb/wandb-mcp-server --skill wandb-traces
 npx skills add wandb/wandb-mcp-server --skill wandb-evals
 ```
 
-Install full loop orchestration:
+### Mode B: Run full coding-agent self-eval loop
+
+Use this when you want RCA -> fix -> re-eval iterations.
 
 ```bash
 npx skills add wandb/wandb-mcp-server --skill coding-agent-self-eval
 ```
 
-## Available Skills
+Then follow the ordered references listed in:
+`coding-agent-self-eval/references/`
 
-1. [wandb-projects](./wandb-projects/SKILL.md)  
-Resolve and validate W&B entity/project context using MCP before any automation.
+## Step Order For Full Loop
 
-2. [wandb-runs](./wandb-runs/SKILL.md)  
-Standardize run naming, config, tags, and metrics logging for comparable experiments.
+1. [wandb-projects](./wandb-projects/SKILL.md)
+   Resolve entity/project and block execution if unresolved.
+2. [wandb-runs](./wandb-runs/SKILL.md)
+   Start a run with stable naming, tags, and version metadata.
+3. [wandb-traces](./wandb-traces/SKILL.md)
+   Capture and query trace evidence for debugging and RCA.
+4. [wandb-evals](./wandb-evals/SKILL.md)
+   Run question-level scoring with canonical correctness fields.
+5. [wandb-reports](./wandb-reports/SKILL.md)
+   Publish dashboards/tables for run comparison and failure analysis.
+6. [coding-agent-self-eval](./coding-agent-self-eval/SKILL.md)
+   Execute human-gated fix promotion and next-run iteration flow.
 
-3. [wandb-traces](./wandb-traces/SKILL.md)  
-Query and analyze Weave traces for debugging, RCA evidence, and trace-linked diagnostics.
+## Agent Discovery Checklist
 
-4. [wandb-evals](./wandb-evals/SKILL.md)  
-Set up benchmark/eval execution and scorer-aligned logging for agent-level outcomes.
+Before running eval loops on a new agent, collect:
+1. agent entrypoint file,
+2. tool files invoked by the agent,
+3. eval runner location,
+4. scorer implementation location,
+5. run artifact output path.
 
-5. [wandb-reports](./wandb-reports/SKILL.md)  
-Publish dashboards and reports that compare runs, failures, and fix impact.
+Do not start comparison runs until these are confirmed.
 
-6. [coding-agent-self-eval](./coding-agent-self-eval/SKILL.md)  
-Orchestrate end-to-end self-evaluation with human-gated fix decisions and version mapping.
+## Expected Artifacts For Reliable RCA
+
+Per run, ensure you can access:
+1. predictions rows (question-level outputs),
+2. failure rows (incorrect-only rows),
+3. trace mapping (`question_id` -> trace/call IDs),
+4. run summary metrics (`correct`, `failed`, `accuracy`),
+5. version metadata (`git_sha`, prompt/tool version, slice metadata).
+
+## Troubleshooting And Fallbacks
+
+### Project or entity looks wrong
+
+1. Re-run `wandb-projects`.
+2. Validate with MCP project listing.
+3. If MCP fails, use env values and require explicit user confirmation.
+
+### Traces missing or incomplete
+
+1. Confirm tracing is enabled in run code path.
+2. Query root traces first, then narrow.
+3. If MCP trace transport fails, use local artifact trace index as fallback.
+
+### Dashboard metrics do not match run outputs
+
+1. Treat question-level rows as canonical source.
+2. Recompute aggregate metrics from rows.
+3. Regenerate RCA and republish dashboard for the same run.
+4. Do not approve new fixes until data is reconciled.
+
+### A fix improves one slice but regresses another
+
+1. Mark as potential overfit.
+2. Require human decision (`accepted`, `deferred`, `rejected`).
+3. Record decision and rationale before next full eval.
