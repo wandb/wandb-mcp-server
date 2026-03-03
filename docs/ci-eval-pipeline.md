@@ -1,45 +1,159 @@
-# CI/Eval Pipeline: Connecting WBAF Evals to MCP Server CI
+# CI, Eval, and Deployment Pipeline
 
 **Status:** Proposal for alignment meeting
-**Depends on:** PR #21 (wandb-mcp-server CI), WBAF `eval-skills.yml` workflow
+**Audience:** MCP + Skills stakeholders
 
 ---
 
-## Current state: two disconnected CI systems
+## Overview
 
 ```
-wandb-mcp-server CI (PR #21)          WBAF CI (eval-skills.yml)
-┌───────────────────────┐              ┌───────────────────────┐
-│ Trigger: push to main │              │ Trigger: push to main │
-│ Runs: ruff + pytest   │              │   in agent-skills     │
-│ Tests: unit only      │              │ Runs: skill evals     │
-│ No eval coverage      │              │   via codex agent     │
-│                       │              │ No MCP path tested    │
-└───────────────────────┘              └───────────────────────┘
+Local dev          PR              Merge to main       Deploy
+┌─────────┐       ┌─────────┐     ┌──────────────┐    ┌──────────────┐
+│ MCP local│       │ ruff    │     │ test-repo CI │    │ test-repo    │
+│ + ngrok  │──PR──>│ pytest  │──┬─>│ smoke tests  │    │ deploy.yml   │
+│ + WBAF   │       │ unit    │  │  │ integration  │    │ workflow_    │
+│ run_task │       └─────────┘  │  └──────────────┘    │ dispatch     │
+└─────────┘                     │  ┌──────────────┐    │              │
+                                └─>│ WBAF eval    │    │ ref=<sha>    │
+                                   │ codex-mcp    │    │ env=prod     │
+                                   │ -> Weave     │    │ -> approve   │
+                                   └──────────────┘    └──────────────┘
 ```
 
-Neither system tests MCP tools against real analytical tasks. Unit tests verify tool code doesn't crash; they don't verify that an agent can use the tools to answer "how many evals are in this project?"
+Four stages, each with increasing confidence:
+1. **Local dev** -- fast iteration on tools and skills with real eval feedback
+2. **PR CI** -- lint + unit tests gate merge
+3. **Merge to main** -- integration tests + WBAF eval against production MCP
+4. **Deploy** -- manual approval from wandb-mcp-server-test, pins exact SHA
 
 ---
 
-## Proposed: cross-repo eval trigger
+## 1. Local dev loop
 
-When MCP tool code changes, trigger WBAF evals against the live MCP server:
+The inner loop for iterating on MCP tools and skills. No deployment required.
 
-```
-wandb-mcp-server                       WBAF
-┌───────────────────┐                  ┌───────────────────────┐
-│ push to main      │  workflow_       │ eval-skills.yml       │
-│ src/wandb_mcp_    │  dispatch        │ agent: codex-mcp      │
-│ server/mcp_tools/ ├────────────────> │ tasks: L0 + L1 subset │
-│                   │                  │ results -> Weave      │
-└───────────────────┘                  └───────────────────────┘
+### Start the MCP server locally
+
+```bash
+# In wandb-mcp-server/
+uv run wandb_mcp_server --transport http --port 8000
 ```
 
-### wandb-mcp-server workflow
+The server starts on `http://localhost:8000` with your local tool changes. Analytics events log to stdout as structured JSON.
+
+### Expose to WBAF's Modal sandbox
+
+WBAF runs agents in Modal containers (remote). They can't reach your localhost. Use ngrok to create a public tunnel:
+
+```bash
+ngrok http 8000
+# Output: https://abc123.ngrok-free.app -> http://localhost:8000
+```
+
+### Create a local WBAF agent config
 
 ```yaml
-# .github/workflows/eval-mcp-tools.yml
+# WandBAgentFactory/agents/codex/codex-mcp-local/config.yaml
+extends: codex
+env_from_host:
+  - OPENAI_API_KEY
+  - WANDB_API_KEY
+mcp_servers:
+  wandb:
+    url: https://abc123.ngrok-free.app/mcp    # <-- your ngrok URL
+    bearer_token_env_var: WANDB_API_KEY
+```
+
+This is identical to `agents/codex/codex-mcp/config.yaml` except `url` points at your tunnel instead of `https://mcp.withwandb.com/mcp`.
+
+### Run a single task
+
+```bash
+# In WandBAgentFactory/
+uv run python -W ignore -m core.run_task \
+  --agent codex-mcp-local \
+  --task count-evals
+```
+
+This runs one WBAF task using your local MCP server. Output shows:
+- Agent messages and tool calls
+- Scorer results (pass/fail)
+- Weave trace link (full trajectory at `wandb/wb-agent-frozen`)
+
+On the MCP server side you see analytics events in stdout:
+```json
+{"event_type": "tool_call", "tool_name": "count_weave_traces_tool", "session_id": "sess_abc...", ...}
+```
+
+### Run a full eval
+
+```bash
+uv run python -W ignore -m core.run_eval evals/all.yaml \
+  --agent codex-mcp-local \
+  --weave-parallelism 5
+```
+
+Results land in Weave. Compare against SDK baseline:
+
+```bash
+uv run python -W ignore -m core.run_eval evals/all.yaml \
+  --agent codex \
+  --weave-parallelism 5
+```
+
+### Iterate
+
+Change tool code in `wandb-mcp-server/src/wandb_mcp_server/mcp_tools/` -> restart the server -> re-run the task. No redeploy, no Docker build.
+
+For skills: edit SKILL.md in `WandBAgentFactory/skills/` -> re-run the task. WBAF loads skills fresh each run.
+
+---
+
+## 2. PR-level CI
+
+When you open a PR against `main` in wandb-mcp-server:
+
+**Automatic** (from `hackathon/ci-tests` branch workflow, once merged):
+```yaml
+# wandb-mcp-server/.github/workflows/ci.yml
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    # ruff check + ruff format --check + pytest tests/ -x -v
+```
+
+This catches lint violations, import errors, and unit test regressions in <60 seconds.
+
+**Manual** (for significant tool changes): trigger a WBAF eval via `workflow_dispatch` against your branch. Useful when changing tool response formats or adding new tools.
+
+---
+
+## 3. Merge to main
+
+Two things fire when a PR merges to `main`:
+
+### wandb-mcp-server-test CI
+
+The private test repo's CI ([`.github/workflows/ci.yml`](https://github.com/wandb/wandb-mcp-server-test/blob/main/.github/workflows/ci.yml)) triggers on push to its own main. It installs `wandb-mcp-server@main` from the public repo and runs:
+
+1. **Build + import verification** (Python 3.11 + 3.12 matrix)
+2. **Server smoke tests**: start with `MCP_AUTH_DISABLED=true`, hit `/health`, MCP `initialize`, `tools/list` (expects 6 tools)
+3. **Integration tests** (push to main only): real `WANDB_API_KEY`, `pytest tests/ -x -v -m "not slow"` -- tests actual W&B API calls
+
+If the test repo tracks the public repo's main (via `WANDB_MCP_SERVER_REF: "main"`), this fires automatically when the public repo updates.
+
+### WBAF eval trigger (proposed)
+
+Add a workflow in wandb-mcp-server that dispatches a WBAF eval when tool code changes:
+
+```yaml
+# wandb-mcp-server/.github/workflows/eval-mcp-tools.yml
 name: Eval MCP tools via WBAF
 
 on:
@@ -72,11 +186,10 @@ jobs:
             });
 ```
 
-### WBAF eval config for MCP CI
+WBAF eval config for CI (fast tasks only):
 
 ```yaml
-# WBAF: evals/mcp-ci.yaml
-# Lightweight eval for CI -- fast tasks only (L0 + L1)
+# WandBAgentFactory/evals/mcp-ci.yaml
 tasks:
   - count-evals
   - count-traces
@@ -90,9 +203,106 @@ scorers: [rubric, regex]
 trials: 1
 ```
 
+Results land in Weave (`wandb/wb-agent-frozen`). If pass rates drop below baseline, the tool change broke something.
+
+---
+
+## 4. Deployment approval
+
+Production deployment is controlled entirely from **wandb-mcp-server-test** (the private repo). This is the release gate.
+
+### Existing flow
+
+The test repo already has [`deploy.yml`](https://github.com/wandb/wandb-mcp-server-test/blob/hackathon/deployment-infra/.github/workflows/deploy.yml):
+
+- **Trigger**: `workflow_dispatch` only (manual)
+- **Input `mcp_server_ref`**: SHA, tag, or branch from wandb-mcp-server. Resolved to exact SHA via `git ls-remote`.
+- **Input `environment`**: currently `production` only
+- **Target**: Cloud Run (`wandb-mcp-production`, `us-central1`, `wandb-mcp-server` service)
+- **Post-deploy checks**: health, auth enforcement (401 for unauthed), authenticated MCP initialize
+
+### How to deploy
+
+1. Go to [wandb-mcp-server-test Actions](https://github.com/wandb/wandb-mcp-server-test/actions/workflows/deploy.yml)
+2. Click "Run workflow"
+3. Set `mcp_server_ref` to the SHA you want to deploy (e.g. `fa67cfb` from the PR #19 fix)
+4. Set `environment` to `production`
+5. If GitHub environment protection rules are configured, an approval prompt appears
+6. Deploy runs: Docker build (Chainguard base) -> Cloud Run -> verify
+
+### Approval gate
+
+The `deploy` job uses `environment: ${{ inputs.environment }}`. GitHub environment protection rules can require:
+- Reviewer approval (1+ people)
+- Wait timer (e.g. 5 minutes after CI passes)
+- Branch restrictions (only deploy from `main`)
+
+Configure these in: GitHub repo settings -> Environments -> `production` -> Protection rules.
+
+---
+
+## 5. Adding staging
+
+The test repo is set up for this but doesn't have it yet.
+
+### What exists
+
+- `deploy.yml` has an `environment` input but only `production` is listed
+- `e2e_test.py` already has a `STAGING_URL` constant (`https://wandb-mcp-server-staging-778262415675.us-central1.run.app`)
+- The Dockerfile and `app.py` are environment-agnostic
+
+### Proposed changes to deploy.yml
+
+```yaml
+# wandb-mcp-server-test/.github/workflows/deploy.yml
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "staging"      # <-- default to staging, not prod
+        type: choice
+        options:
+          - staging             # <-- new
+          - production
+      mcp_server_ref:
+        description: "wandb-mcp-server git ref"
+        required: false
+        default: "main"
+```
+
+Map environment to Cloud Run service name:
+
+```yaml
+    env:
+      SERVICE_NAME: ${{ inputs.environment == 'staging' && 'wandb-mcp-server-staging' || 'wandb-mcp-server' }}
+```
+
+### Staging workflow
+
+1. Merge tool changes to `main` in wandb-mcp-server
+2. Deploy to staging: `workflow_dispatch` with `environment=staging`, `mcp_server_ref=main`
+3. Run WBAF eval against staging:
+   ```yaml
+   # WandBAgentFactory/agents/codex/codex-mcp-staging/config.yaml
+   extends: codex
+   mcp_servers:
+     wandb:
+       url: https://wandb-mcp-server-staging-778262415675.us-central1.run.app/mcp
+       bearer_token_env_var: WANDB_API_KEY
+   ```
+   ```bash
+   uv run python -m core.run_eval evals/mcp-ci.yaml --agent codex-mcp-staging
+   ```
+4. Check Weave results. If pass rates look good, deploy to production.
+5. Deploy to production: `workflow_dispatch` with `environment=production`, `mcp_server_ref=<same-sha>`
+
 ---
 
 ## Results flow
+
+Two data streams from every eval run:
 
 ```
 MCP server      Cloud Logging    BigQuery     Hex dashboard
@@ -106,38 +316,21 @@ WBAF eval       Weave traces     Weave UI     task pass rate
                                  frozen
 ```
 
-Two data streams, joinable by timestamp window:
-- **MCP analytics** (BigQuery): per-tool latency, success/failure, params, session_id
-- **WBAF eval results** (Weave): per-task pass/fail, agent trajectory, skill used, scorer breakdown
+Cross-join by timestamp window gives tool-level signal: "when the agent called `query_weave_traces_tool` with these params, did the task pass?"
 
-Cross-joining them gives: "when the agent called `query_weave_traces_tool` with these params, did the task pass?" This is tool-level signal that guides which tools need improvement.
-
----
-
-## GTC readiness
-
-The full CI pipeline is not needed for GTC. The manual version is:
-
-```bash
-# In WBAF repo
-uv run python -m core.run_eval evals/mcp-vs-sdk.yaml \
-  --agent codex-mcp \
-  --weave-parallelism 5
-```
-
-Check results in Weave at `wandb/wb-agent-frozen`. Compare `codex-mcp` pass rates against `codex` (SDK) pass rates for the same tasks.
-
-If MCP pass rate >= SDK pass rate on L0/L1 tasks, MCP tools are GTC-ready.
-If not, the failing tasks point to specific tools that need improvement.
+For local dev: the MCP server logs to stdout (analytics JSON), and WBAF logs to Weave. Both are visible in real time.
 
 ---
 
 ## Automation timeline
 
-| Phase | What | When |
-|-------|------|------|
-| Manual | Run `codex-mcp` eval in WBAF, inspect Weave | Now |
-| Semi-auto | GitHub Action in wandb-mcp-server triggers WBAF eval on tool changes | Post-GTC |
-| Full auto | Results parsed, badge updated, Slack notification on regression | Sprint 4+ |
+| Phase | What | Effort | When |
+|-------|------|--------|------|
+| Now | Local dev loop (ngrok + WBAF `run_task`) | Zero code changes | Today |
+| Now | Manual WBAF eval (`run_eval --agent codex-mcp`) | Zero code changes | Today |
+| Sprint 3 | PR-level CI (ruff + pytest) on wandb-mcp-server | Merge PR #21 | This week |
+| Sprint 3 | Staging environment in deploy.yml | ~20 lines YAML | This week |
+| Sprint 4 | Cross-repo WBAF eval trigger on merge to main | GitHub Action + PAT | Post-GTC |
+| Sprint 4+ | Badge, Slack notification on regression | Parse eval results | Later |
 
-The manual phase is sufficient for GTC. Each subsequent phase reduces human-in-the-loop but the signal quality is the same.
+The local dev loop and manual eval are usable today with zero code changes. Each subsequent phase adds automation but the signal quality is the same.
