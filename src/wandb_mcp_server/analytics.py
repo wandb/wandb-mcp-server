@@ -13,8 +13,10 @@ Based on prior art by @NiWaRe (PR #2), rewritten for improved
 datetime handling, cleaner auth integration, and structured event schema.
 """
 
+import json
 import logging
 import os
+import sys
 from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 
@@ -35,8 +37,34 @@ _SENSITIVE_PARAM_PATTERNS: List[str] = [
 
 _MAX_PARAM_VALUE_LENGTH = 200
 
+
+class _StructuredJsonFormatter(logging.Formatter):
+    """Format log records as single-line JSON for Cloud Logging ingestion.
+
+    Cloud Run's logging agent parses stdout lines as jsonPayload when
+    they are valid JSON with a ``severity`` field. This lets BigQuery
+    and Hex query analytics fields (event_type, tool_name, session_id,
+    etc.) directly without regex.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: Dict[str, Any] = {}
+        if hasattr(record, "json_fields"):
+            payload.update(record.json_fields)
+        if hasattr(record, "labels"):
+            payload["labels"] = record.labels
+        payload["severity"] = record.levelname
+        payload["message"] = record.getMessage()
+        return json.dumps(payload, default=str)
+
+
 analytics_logger = logging.getLogger("wandb_mcp_server.analytics")
 analytics_logger.setLevel(logging.INFO)
+analytics_logger.propagate = False
+
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(_StructuredJsonFormatter())
+analytics_logger.addHandler(_handler)
 
 _REQUIRED_BASE_FIELDS = frozenset({"schema_version", "event_type", "timestamp"})
 
