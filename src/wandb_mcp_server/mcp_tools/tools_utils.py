@@ -314,17 +314,23 @@ def log_tool_call(
 
     Both the debug log and the analytics pipeline sanitise params to
     avoid leaking API keys or other credentials into logs.
+
+    ``session_id`` is resolved automatically from the contextvar set by
+    auth middleware; the explicit parameter is kept for backward compat
+    and STDIO transport where no middleware runs.
     """
     logger = get_rich_logger("mcp_tools")
     try:
         from wandb_mcp_server.analytics import AnalyticsTracker, get_analytics_tracker
+        from wandb_mcp_server.session_manager import current_session_id
 
+        resolved_session = session_id or current_session_id.get()
         safe_params = AnalyticsTracker._sanitise_params(params)
-        logger.info(f"ToolCall name={tool_name} viewer={viewer} params={safe_params}")
+        logger.info(f"ToolCall name={tool_name} params={safe_params}")
         try:
             get_analytics_tracker().track_tool_call(
                 tool_name=tool_name,
-                session_id=session_id,
+                session_id=resolved_session,
                 viewer_info=viewer,
                 params=params,
                 success=True,

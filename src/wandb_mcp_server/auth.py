@@ -6,6 +6,11 @@ MCP specification: https://modelcontextprotocol.io/specification/draft/basic/aut
 
 Clients send their W&B API keys as Bearer tokens, which the server
 then uses for all W&B operations on behalf of that client.
+
+Session management follows MCP Streamable HTTP transport: the server
+issues an ``Mcp-Session-Id`` on the first authenticated request.
+Clients must include it on subsequent requests.  Sessions are tracked
+via :class:`MultiTenantSessionManager` with TTL-based cleanup.
 """
 
 import hashlib
@@ -95,19 +100,29 @@ async def validate_bearer_token(credentials: Optional[HTTPAuthorizationCredentia
     return token
 
 
-async def mcp_auth_middleware(request: Request, call_next):
-    """
-    FastAPI middleware for MCP authentication on HTTP transport.
+def _resolve_session_id(request: Request, wandb_api_key: str) -> tuple[str, bool]:
+    """Determine the MCP session ID for this request.
 
-    Only applies to MCP endpoints (/mcp/*).
-    Extracts the client's W&B API key from the Bearer token and stores it
-    for use in W&B operations.
+    Returns:
+        ``(session_id, is_new)`` -- *is_new* is ``True`` when the server
+        generated the ID (no client header present).
     """
-    # Only apply auth to MCP endpoints
+    client_session = request.headers.get("Mcp-Session-Id") or request.headers.get("mcp-session-id")
+    if client_session:
+        return client_session, False
+    return f"sess_{uuid.uuid4().hex}", True
+
+
+async def mcp_auth_middleware(request: Request, call_next):
+    """FastAPI middleware for MCP authentication and session management.
+
+    Only applies to ``/mcp/*`` endpoints.  Extracts the W&B API key from
+    the Bearer token, resolves or issues an ``Mcp-Session-Id``, sets the
+    session contextvar, and emits analytics events.
+    """
     if not request.url.path.startswith("/mcp"):
         return await call_next(request)
 
-    # Skip auth if explicitly disabled (development only)
     if os.environ.get("MCP_AUTH_DISABLED", "false").lower() == "true":
         logger.warning("MCP authentication is disabled - endpoints are publicly accessible")
         return await call_next(request)
@@ -115,30 +130,20 @@ async def mcp_auth_middleware(request: Request, call_next):
     config = MCPAuthConfig()
 
     try:
-        # Extract bearer token from Authorization header
         authorization = request.headers.get("Authorization", "")
         credentials = None
         if authorization.startswith("Bearer "):
-            # Remove "Bearer " prefix and strip any whitespace
             token = authorization[7:].strip()
             credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
-        # Validate and get the W&B API key
         wandb_api_key = await validate_bearer_token(credentials, config)
-
-        # Make sure the key is clean (no extra whitespace or encoding issues)
         wandb_api_key = wandb_api_key.strip()
 
-        # Store the API key in request state for W&B operations
         request.state.wandb_api_key = wandb_api_key
 
-        # Set the API key in context for this request
-        # Tools will use WandBApiManager.get_api_key() to retrieve it
         from wandb_mcp_server.api_client import WandBApiManager
 
-        token = WandBApiManager.set_context_api_key(wandb_api_key)
-
-        # Debug logging
+        api_key_token = WandBApiManager.set_context_api_key(wandb_api_key)
         logger.debug(f"Auth middleware: Set API key in context with length={len(wandb_api_key)}")
 
         viewer = None
@@ -149,17 +154,26 @@ async def mcp_auth_middleware(request: Request, call_next):
         except Exception as viewer_err:
             logger.warning(f"Could not fetch W&B viewer: {viewer_err}")
 
+        # --- Session management -------------------------------------------
+        from wandb_mcp_server.session_manager import current_session_id
+
+        session_id, is_new_session = _resolve_session_id(request, wandb_api_key)
+        request.state.session_id = session_id
+        session_ctx_token = current_session_id.set(session_id)
+
+        try:
+            from wandb_mcp_server.session_manager import get_session_manager
+
+            mgr = get_session_manager()
+            mgr.create_session(wandb_api_key, session_id=session_id)
+        except Exception as sm_err:
+            logger.debug(f"Session manager registration failed (non-fatal): {sm_err}")
+
+        # --- Analytics: session event -------------------------------------
         try:
             from wandb_mcp_server.analytics import get_analytics_tracker
 
-            tracker = get_analytics_tracker()
-            session_id = (
-                request.headers.get("Mcp-Session-Id")
-                or request.headers.get("mcp-session-id")
-                or hashlib.sha256(wandb_api_key.encode()).hexdigest()[:32]
-            )
-            request.state.session_id = session_id
-            tracker.track_user_session(
+            get_analytics_tracker().track_user_session(
                 session_id=session_id,
                 viewer_info=viewer,
                 api_key_hash=hashlib.sha256(wandb_api_key.encode()).hexdigest(),
@@ -167,20 +181,27 @@ async def mcp_auth_middleware(request: Request, call_next):
         except Exception as analytics_err:
             logger.debug(f"Analytics tracking failed (non-fatal): {analytics_err}")
 
+        # --- Execute request ----------------------------------------------
         request_start = time.monotonic()
         request_id = str(uuid.uuid4())[:8]
         try:
             response = await call_next(request)
         finally:
-            WandBApiManager.reset_context_api_key(token)
+            WandBApiManager.reset_context_api_key(api_key_token)
+            current_session_id.reset(session_ctx_token)
 
+        # Return Mcp-Session-Id so the client includes it on follow-ups
+        if is_new_session:
+            response.headers["Mcp-Session-Id"] = session_id
+
+        # --- Analytics: request event -------------------------------------
         try:
             from wandb_mcp_server.analytics import AnalyticsTracker, get_analytics_tracker
 
             elapsed_ms = (time.monotonic() - request_start) * 1000
             get_analytics_tracker().track_request(
                 request_id=request_id,
-                session_id=getattr(request.state, "session_id", None),
+                session_id=session_id,
                 method=request.method,
                 path=request.url.path,
                 status_code=response.status_code,
@@ -194,7 +215,6 @@ async def mcp_auth_middleware(request: Request, call_next):
         return response
 
     except HTTPException as e:
-        # Return proper error response
         return JSONResponse(status_code=e.status_code, content={"error": e.detail}, headers=e.headers)
     except Exception as e:
         logger.error(f"Authentication error: {e}")
