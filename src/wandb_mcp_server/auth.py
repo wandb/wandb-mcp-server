@@ -159,12 +159,11 @@ async def mcp_auth_middleware(request: Request, call_next):
                 or hashlib.sha256(wandb_api_key.encode()).hexdigest()[:32]
             )
             request.state.session_id = session_id
-            if viewer:
-                tracker.track_user_session(
-                    session_id=session_id,
-                    viewer_info=viewer,
-                    api_key_hash=hashlib.sha256(wandb_api_key.encode()).hexdigest(),
-                )
+            tracker.track_user_session(
+                session_id=session_id,
+                viewer_info=viewer,
+                api_key_hash=hashlib.sha256(wandb_api_key.encode()).hexdigest(),
+            )
         except Exception as analytics_err:
             logger.debug(f"Analytics tracking failed (non-fatal): {analytics_err}")
 
@@ -176,7 +175,7 @@ async def mcp_auth_middleware(request: Request, call_next):
             WandBApiManager.reset_context_api_key(token)
 
         try:
-            from wandb_mcp_server.analytics import get_analytics_tracker
+            from wandb_mcp_server.analytics import AnalyticsTracker, get_analytics_tracker
 
             elapsed_ms = (time.monotonic() - request_start) * 1000
             get_analytics_tracker().track_request(
@@ -186,8 +185,8 @@ async def mcp_auth_middleware(request: Request, call_next):
                 path=request.url.path,
                 status_code=response.status_code,
                 duration_ms=round(elapsed_ms, 2),
-                user_id=viewer.username if viewer and hasattr(viewer, "username") else None,
-                email_domain=None,
+                user_id=AnalyticsTracker._extract_user_id(viewer) if viewer else None,
+                email_domain=AnalyticsTracker._extract_email_domain(viewer) if viewer else None,
             )
         except Exception:
             pass

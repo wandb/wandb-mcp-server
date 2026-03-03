@@ -116,11 +116,16 @@ class TestExtractUserId:
     def test_entity_attr(self):
         assert self.t._extract_user_id(SimpleNamespace(entity="team")) == "team"
 
-    def test_email_attr(self):
-        assert self.t._extract_user_id(SimpleNamespace(email="e@x.com")) == "e@x.com"
+    def test_email_attr_returns_domain_not_full_address(self):
+        """Email-only viewers must return domain, never the full address (PII)."""
+        assert self.t._extract_user_id(SimpleNamespace(email="e@x.com")) == "x.com"
 
     def test_string(self):
         assert self.t._extract_user_id("raw") == "raw"
+
+    def test_string_email_returns_domain(self):
+        """String inputs that look like emails must return domain only."""
+        assert self.t._extract_user_id("alice@wandb.com") == "wandb.com"
 
     def test_username_priority(self):
         v = SimpleNamespace(username="u", entity="e", email="x@y.com")
@@ -136,6 +141,12 @@ class TestExtractUserId:
     def test_empty_username_falls_through(self):
         v = SimpleNamespace(username="", entity="team")
         assert self.t._extract_user_id(v) == "team"
+
+    def test_email_only_viewer_never_leaks_full_email(self):
+        """Regression: _extract_user_id must never return a full email address."""
+        viewer = SimpleNamespace(email="secret@corp.com")
+        result = self.t._extract_user_id(viewer)
+        assert "@" not in (result or ""), f"Full email leaked: {result}"
 
 
 # -- Param sanitisation -------------------------------------------------------
@@ -159,9 +170,7 @@ class TestSanitiseParams:
         assert AnalyticsTracker._sanitise_params(None) == {}
 
     def test_nested_dict_redaction(self):
-        result = AnalyticsTracker._sanitise_params({
-            "config": {"api_key": "s3cr3t", "model": "gpt-4"}
-        })
+        result = AnalyticsTracker._sanitise_params({"config": {"api_key": "s3cr3t", "model": "gpt-4"}})
         assert result["config"]["api_key"] == "<redacted>"
         assert result["config"]["model"] == "gpt-4"
 
@@ -176,6 +185,25 @@ class TestSanitiseParams:
     def test_boolean_values_pass_through(self):
         assert AnalyticsTracker._sanitise_params({"flag": True})["flag"] is True
 
+    def test_list_of_dicts_sanitised(self):
+        result = AnalyticsTracker._sanitise_params({"items": [{"api_key": "leak", "name": "ok"}]})
+        assert result["items"][0]["api_key"] == "<redacted>"
+        assert result["items"][0]["name"] == "ok"
+
+    def test_nested_list_of_dicts_sanitised(self):
+        result = AnalyticsTracker._sanitise_params({"filters": [{"config": {"token": "secret", "model": "gpt-4"}}]})
+        assert result["filters"][0]["config"]["token"] == "<redacted>"
+        assert result["filters"][0]["config"]["model"] == "gpt-4"
+
+    def test_list_of_primitives_unchanged(self):
+        result = AnalyticsTracker._sanitise_params({"ids": [1, 2, 3]})
+        assert result["ids"] == [1, 2, 3]
+
+    def test_deeply_nested_list_stops_at_depth_limit(self):
+        deep = {"l1": [{"l2": [{"l3": [{"api_key": "leak"}]}]}]}
+        result = AnalyticsTracker._sanitise_params(deep)
+        assert result["l1"][0]["l2"][0]["l3"] == [{"api_key": "leak"}]
+
 
 # -- Schema version & base fields -------------------------------------------
 
@@ -185,23 +213,22 @@ class TestSchemaVersion:
         assert SCHEMA_VERSION == "1.0"
 
     def test_user_session_has_schema_version(self, capture):
-        AnalyticsTracker(enabled=True).track_user_session(
-            session_id="s", viewer_info="u@t.com"
-        )
+        AnalyticsTracker(enabled=True).track_user_session(session_id="s", viewer_info="u@t.com")
         assert capture.event is not None
         assert capture.event["schema_version"] == SCHEMA_VERSION
 
     def test_tool_call_has_schema_version(self, capture):
-        AnalyticsTracker(enabled=True).track_tool_call(
-            tool_name="t", session_id="s", viewer_info="v"
-        )
+        AnalyticsTracker(enabled=True).track_tool_call(tool_name="t", session_id="s", viewer_info="v")
         assert capture.event is not None
         assert capture.event["schema_version"] == SCHEMA_VERSION
 
     def test_request_has_schema_version(self, capture):
         AnalyticsTracker(enabled=True).track_request(
-            request_id="r", session_id="s",
-            method="GET", path="/", status_code=200,
+            request_id="r",
+            session_id="s",
+            method="GET",
+            path="/",
+            status_code=200,
         )
         assert capture.event is not None
         assert capture.event["schema_version"] == SCHEMA_VERSION
@@ -240,16 +267,12 @@ class TestTrackUserSession:
         assert len(capture.event["api_key_hash"]) == 16
 
     def test_uses_utc_timestamps(self, capture):
-        AnalyticsTracker(enabled=True).track_user_session(
-            session_id="s", viewer_info="v"
-        )
+        AnalyticsTracker(enabled=True).track_user_session(session_id="s", viewer_info="v")
         assert capture.event is not None
         assert "+00:00" in capture.event["timestamp"] or "Z" in capture.event["timestamp"]
 
     def test_none_api_key_hash(self, capture):
-        AnalyticsTracker(enabled=True).track_user_session(
-            session_id="s", viewer_info="v", api_key_hash=None
-        )
+        AnalyticsTracker(enabled=True).track_user_session(session_id="s", viewer_info="v", api_key_hash=None)
         assert capture.event is not None
         assert capture.event["api_key_hash"] is None
 
@@ -281,9 +304,7 @@ class TestTrackToolCall:
         )
 
     def test_skipped_disabled(self):
-        AnalyticsTracker(enabled=False).track_tool_call(
-            tool_name="t", session_id="s", viewer_info="v"
-        )
+        AnalyticsTracker(enabled=False).track_tool_call(tool_name="t", session_id="s", viewer_info="v")
 
     def test_sanitises_api_key(self, capture):
         AnalyticsTracker(enabled=True).track_tool_call(
@@ -297,22 +318,29 @@ class TestTrackToolCall:
 
     def test_error_field_recorded(self, capture):
         AnalyticsTracker(enabled=True).track_tool_call(
-            tool_name="t", session_id="s", viewer_info="v",
-            success=False, error="timeout",
+            tool_name="t",
+            session_id="s",
+            viewer_info="v",
+            success=False,
+            error="timeout",
         )
         assert capture.event["success"] is False
         assert capture.event["error"] == "timeout"
 
     def test_duration_ms_recorded(self, capture):
         AnalyticsTracker(enabled=True).track_tool_call(
-            tool_name="t", session_id="s", viewer_info="v",
+            tool_name="t",
+            session_id="s",
+            viewer_info="v",
             duration_ms=123.4,
         )
         assert capture.event["duration_ms"] == 123.4
 
     def test_labels_include_tool_name(self, capture):
         AnalyticsTracker(enabled=True).track_tool_call(
-            tool_name="query_gql", session_id="s", viewer_info="v",
+            tool_name="query_gql",
+            session_id="s",
+            viewer_info="v",
         )
         assert capture.labels["tool_name"] == "query_gql"
 
@@ -342,10 +370,14 @@ class TestTrackRequest:
 
     def test_event_fields_complete(self, capture):
         AnalyticsTracker(enabled=True).track_request(
-            request_id="r1", session_id="s1",
-            method="POST", path="/mcp/sse",
-            status_code=200, duration_ms=55.0,
-            user_id="alice", email_domain="co.com",
+            request_id="r1",
+            session_id="s1",
+            method="POST",
+            path="/mcp/sse",
+            status_code=200,
+            duration_ms=55.0,
+            user_id="alice",
+            email_domain="co.com",
         )
         e = capture.event
         assert e["event_type"] == "request"

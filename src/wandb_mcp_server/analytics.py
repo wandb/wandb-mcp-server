@@ -54,10 +54,7 @@ class AnalyticsTracker:
     """
 
     def __init__(self, enabled: bool = True):
-        self.enabled = (
-            enabled
-            and os.environ.get("MCP_ANALYTICS_DISABLED", "false").lower() != "true"
-        )
+        self.enabled = enabled and os.environ.get("MCP_ANALYTICS_DISABLED", "false").lower() != "true"
         if not self.enabled:
             logger.info("Analytics tracking is disabled")
 
@@ -84,19 +81,28 @@ class AnalyticsTracker:
 
     @staticmethod
     def _extract_user_id(viewer_info: Any) -> Optional[str]:
-        """Return the best available user identifier.
+        """Return the best available non-PII user identifier.
 
-        Prefers username > entity > email. Falls back to the raw string
-        for string inputs, returns None for unrecognised types rather
-        than stringifying arbitrary objects (avoids data leakage).
+        Prefers ``username`` > ``entity`` (the W&B team/org slug).
+        Email is deliberately **not** returned to avoid logging PII;
+        when only an email is available the domain portion is returned
+        instead.  Raw string inputs are returned only when they do not
+        look like email addresses.  Returns ``None`` for unrecognised
+        types rather than stringifying arbitrary objects.
         """
         try:
-            for attr in ("username", "entity", "email"):
+            for attr in ("username", "entity"):
                 if hasattr(viewer_info, attr):
                     val = getattr(viewer_info, attr)
                     if val:
                         return str(val)
+            if hasattr(viewer_info, "email"):
+                email = getattr(viewer_info, "email")
+                if email and "@" in str(email):
+                    return str(email).split("@")[1].lower()
             if isinstance(viewer_info, str):
+                if "@" in viewer_info:
+                    return viewer_info.split("@")[1].lower()
                 return viewer_info
             return None
         except Exception:
@@ -110,7 +116,7 @@ class AnalyticsTracker:
     def _sanitise_params(cls, params: Optional[Dict[str, Any]], *, _depth: int = 0) -> Dict[str, Any]:
         """Strip sensitive keys and truncate large values.
 
-        Recursively sanitises nested dicts up to 3 levels deep.
+        Recursively sanitises nested dicts and lists up to 3 levels deep.
         """
         if not params:
             return {}
@@ -120,11 +126,26 @@ class AnalyticsTracker:
                 safe[key] = "<redacted>"
             elif isinstance(value, dict) and _depth < 3:
                 safe[key] = cls._sanitise_params(value, _depth=_depth + 1)
+            elif isinstance(value, list) and _depth < 3:
+                safe[key] = cls._sanitise_list(value, _depth=_depth + 1)
             elif isinstance(value, str) and len(value) > _MAX_PARAM_VALUE_LENGTH:
                 safe[key] = f"<truncated:{len(value)} chars>"
             else:
                 safe[key] = value
         return safe
+
+    @classmethod
+    def _sanitise_list(cls, items: list, *, _depth: int = 0) -> list:
+        """Sanitise each element in a list, recursing into dicts and nested lists."""
+        result = []
+        for item in items:
+            if isinstance(item, dict) and _depth < 3:
+                result.append(cls._sanitise_params(item, _depth=_depth))
+            elif isinstance(item, list) and _depth < 3:
+                result.append(cls._sanitise_list(item, _depth=_depth + 1))
+            else:
+                result.append(item)
+        return result
 
     # ------------------------------------------------------------------
     # Event helpers
