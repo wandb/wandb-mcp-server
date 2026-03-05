@@ -127,7 +127,6 @@ class TestMapToSegmentTrack:
 
 
 class TestSegmentForwarder:
-
     def test_disabled_by_default(self):
         f = SegmentForwarder()
         assert f.enabled is False
@@ -240,7 +239,6 @@ class TestSegmentForwarder:
 
 
 class TestSingleton:
-
     def test_get_returns_same_instance(self):
         assert get_segment_forwarder() is get_segment_forwarder()
 
@@ -286,6 +284,7 @@ class TestEndToEndIntegration:
         forwarder = get_segment_forwarder()
 
         from types import SimpleNamespace
+
         tracker = AnalyticsTracker(enabled=True)
         tracker.track_user_session(
             session_id="sess-1",
@@ -327,7 +326,9 @@ class TestEndToEndIntegration:
 
         tracker = AnalyticsTracker(enabled=True)
         tracker.track_tool_call(
-            tool_name="t", session_id="s", viewer_info="v",
+            tool_name="t",
+            session_id="s",
+            viewer_info="v",
         )
         assert len(forwarder.get_forwarded_payloads()) == 0
 
@@ -339,7 +340,9 @@ class TestEndToEndIntegration:
 
         tracker = AnalyticsTracker(enabled=True)
         tracker.track_tool_call(
-            tool_name="t", session_id="s", viewer_info=None,
+            tool_name="t",
+            session_id="s",
+            viewer_info=None,
         )
         assert len(forwarder.get_forwarded_payloads()) == 0
 
