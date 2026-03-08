@@ -249,3 +249,137 @@ class TestAuthMiddlewareSession:
 
         result = await mcp_auth_middleware(req, call_next)
         assert result is resp
+
+
+# ---------------------------------------------------------------------------
+# Session fixation prevention (cross-tenant session ID reuse)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionFixationPrevention:
+    """Verify that a client cannot hijack another tenant's session ID.
+
+    Scenario: User A authenticates and gets sess_aaa. User B authenticates
+    with a different API key but sends Mcp-Session-Id: sess_aaa. The
+    middleware must detect the mismatch and issue a fresh session for B,
+    never allowing B's actions to correlate with A's session.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _env(self):
+        with patch.dict("os.environ", {"MCP_ANALYTICS_DISABLED": "true"}):
+            yield
+
+    @pytest.fixture()
+    def _mock_deps(self):
+        with (
+            patch("wandb_mcp_server.api_client.WandBApiManager") as mock_wbm,
+            patch("wandb_mcp_server.session_manager.MultiTenantSessionManager._start_cleanup_task"),
+        ):
+            mock_wbm.set_context_api_key.return_value = "tok"
+            mock_wbm.reset_context_api_key.return_value = None
+            mock_api = MagicMock()
+            mock_api.viewer = SimpleNamespace(username="alice", entity="team", email="a@co.com")
+            mock_wbm.get_api.return_value = mock_api
+            yield mock_wbm
+
+    @pytest.mark.asyncio
+    async def test_stolen_session_id_replaced(self, _mock_deps):
+        """User B sending User A's session ID gets a fresh session, not A's."""
+        tenant_a_key = "key_AAAA_1234567890_abcdefgh"
+        tenant_b_key = "key_BBBB_1234567890_xyzwvuts"
+        stolen_session = "sess_aaa_owned_by_tenant_a"
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {}
+
+        async def call_next(_):
+            return resp
+
+        req_a = _make_fake_request(api_key=tenant_a_key, session_header=stolen_session)
+        await mcp_auth_middleware(req_a, call_next)
+        assert req_a.state.session_id == stolen_session
+
+        req_b = _make_fake_request(api_key=tenant_b_key, session_header=stolen_session)
+        resp_b = MagicMock()
+        resp_b.status_code = 200
+        resp_b.headers = {}
+
+        async def call_next_b(_):
+            return resp_b
+
+        result_b = await mcp_auth_middleware(req_b, call_next_b)
+
+        assert req_b.state.session_id != stolen_session
+        assert req_b.state.session_id.startswith("sess_")
+        assert "Mcp-Session-Id" in result_b.headers
+        assert result_b.headers["Mcp-Session-Id"] != stolen_session
+
+    @pytest.mark.asyncio
+    async def test_stolen_session_contextvar_not_leaked(self, _mock_deps):
+        """The contextvar during B's request must hold B's fresh session, not A's."""
+        tenant_a_key = "key_AAAA_1234567890_abcdefgh"
+        tenant_b_key = "key_BBBB_1234567890_xyzwvuts"
+        stolen_session = "sess_aaa_for_leak_test"
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {}
+
+        async def call_next(_):
+            return resp
+
+        await mcp_auth_middleware(
+            _make_fake_request(api_key=tenant_a_key, session_header=stolen_session),
+            call_next,
+        )
+
+        captured_session_during_b = None
+
+        async def call_next_capture(_):
+            nonlocal captured_session_during_b
+            captured_session_during_b = current_session_id.get()
+            r = MagicMock()
+            r.status_code = 200
+            r.headers = {}
+            return r
+
+        await mcp_auth_middleware(
+            _make_fake_request(api_key=tenant_b_key, session_header=stolen_session),
+            call_next_capture,
+        )
+
+        assert captured_session_during_b is not None
+        assert captured_session_during_b != stolen_session
+        assert captured_session_during_b.startswith("sess_")
+
+    @pytest.mark.asyncio
+    async def test_legitimate_session_reuse_works(self, _mock_deps):
+        """Same tenant re-sending their own session ID should keep it."""
+        tenant_key = "key_SAME_1234567890_abcdefgh"
+        session = "sess_my_own_session"
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {}
+
+        async def call_next(_):
+            return resp
+
+        await mcp_auth_middleware(
+            _make_fake_request(api_key=tenant_key, session_header=session),
+            call_next,
+        )
+
+        req2 = _make_fake_request(api_key=tenant_key, session_header=session)
+        resp2 = MagicMock()
+        resp2.status_code = 200
+        resp2.headers = {}
+
+        async def call_next2(_):
+            return resp2
+
+        result2 = await mcp_auth_middleware(req2, call_next2)
+        assert req2.state.session_id == session
+        assert "Mcp-Session-Id" not in result2.headers
