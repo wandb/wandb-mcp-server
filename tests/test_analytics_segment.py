@@ -97,13 +97,17 @@ class TestMapToSegmentTrack:
         event = self._make_event("unknown_type")
         assert map_to_segment_track(event) is None
 
-    def test_returns_none_when_user_id_empty(self):
+    def test_anonymous_when_user_id_empty(self):
         event = self._make_event("tool_call", user_id="")
-        assert map_to_segment_track(event) is None
+        result = map_to_segment_track(event)
+        assert result is not None
+        assert result["userId"] == "anonymous"
 
-    def test_returns_none_when_user_id_missing(self):
-        event = {"event_type": "tool_call", "timestamp": "t"}
-        assert map_to_segment_track(event) is None
+    def test_anonymous_when_user_id_missing(self):
+        event = {"event_type": "tool_call", "timestamp": "t", "schema_version": "1.0"}
+        result = map_to_segment_track(event)
+        assert result is not None
+        assert result["userId"] == "anonymous"
 
     def test_invalid_timestamp_omitted(self):
         event = self._make_event("tool_call", timestamp="not-a-date", tool_name="t")
@@ -333,8 +337,8 @@ class TestEndToEndIntegration:
         assert len(forwarder.get_forwarded_payloads()) == 0
 
     @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
-    def test_unmappable_events_not_forwarded(self):
-        """Events without user_id should not reach the forwarder."""
+    def test_anonymous_events_forwarded(self):
+        """Events without user_id should be forwarded as anonymous."""
         reset_segment_forwarder()
         forwarder = get_segment_forwarder()
 
@@ -344,7 +348,9 @@ class TestEndToEndIntegration:
             session_id="s",
             viewer_info=None,
         )
-        assert len(forwarder.get_forwarded_payloads()) == 0
+        payloads = forwarder.get_forwarded_payloads()
+        assert len(payloads) == 1
+        assert payloads[0]["userId"] == "anonymous"
 
     @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
     def test_sanitised_params_in_forwarded_payload(self):

@@ -85,9 +85,7 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not segment_event_name:
         return None
 
-    user_id = event.get("user_id") or ""
-    if not user_id:
-        return None
+    user_id = event.get("user_id") or "anonymous"
 
     property_keys = {
         "user_session": _SESSION_PROPERTY_KEYS,
@@ -176,9 +174,8 @@ class SegmentForwarder:
         if payload is None:
             return None
 
-        self._forwarded_payloads.append(payload)
-
         if self.dry_run:
+            self._forwarded_payloads.append(payload)
             self._segment_logger.info(
                 "SEGMENT_DRY_RUN",
                 extra={"json_fields": payload},

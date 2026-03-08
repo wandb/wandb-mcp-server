@@ -307,7 +307,6 @@ class MultiTenantSessionManager:
         """Cleanup old sessions for a specific API key."""
         with self._lock:
             session_ids = list(self._api_key_sessions[api_key_hash])
-            datetime.now()
 
             # Sort by last accessed time
             sessions_by_age = sorted(

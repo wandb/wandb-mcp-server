@@ -182,11 +182,15 @@ class AnalyticsTracker:
     @staticmethod
     def _base_event(event_type: str) -> Dict[str, Any]:
         """Build the required base fields present in every event."""
-        return {
+        event: Dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "event_type": event_type,
             "timestamp": _utcnow_iso(),
         }
+        deployment_id = os.environ.get("MCP_DEPLOYMENT_ID")
+        if deployment_id:
+            event["deployment_id"] = deployment_id
+        return event
 
     # ------------------------------------------------------------------
     # Event emitters

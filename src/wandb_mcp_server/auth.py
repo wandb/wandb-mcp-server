@@ -129,6 +129,7 @@ async def mcp_auth_middleware(request: Request, call_next):
 
     config = MCPAuthConfig()
 
+    # --- Authenticate (narrow scope: only auth errors become 401) ----------
     try:
         authorization = request.headers.get("Authorization", "")
         credentials = None
@@ -138,82 +139,6 @@ async def mcp_auth_middleware(request: Request, call_next):
 
         wandb_api_key = await validate_bearer_token(credentials, config)
         wandb_api_key = wandb_api_key.strip()
-
-        request.state.wandb_api_key = wandb_api_key
-
-        from wandb_mcp_server.api_client import WandBApiManager
-
-        api_key_token = WandBApiManager.set_context_api_key(wandb_api_key)
-        logger.debug(f"Auth middleware: Set API key in context with length={len(wandb_api_key)}")
-
-        viewer = None
-        try:
-            api = WandBApiManager.get_api()
-            viewer = api.viewer
-            logger.info(f"Authenticated W&B viewer: {viewer}")
-        except Exception as viewer_err:
-            logger.warning(f"Could not fetch W&B viewer: {viewer_err}")
-
-        # --- Session management -------------------------------------------
-        from wandb_mcp_server.session_manager import current_session_id
-
-        session_id, is_new_session = _resolve_session_id(request, wandb_api_key)
-        request.state.session_id = session_id
-        session_ctx_token = current_session_id.set(session_id)
-
-        try:
-            from wandb_mcp_server.session_manager import get_session_manager
-
-            mgr = get_session_manager()
-            mgr.create_session(wandb_api_key, session_id=session_id)
-        except Exception as sm_err:
-            logger.debug(f"Session manager registration failed (non-fatal): {sm_err}")
-
-        # --- Analytics: session event -------------------------------------
-        try:
-            from wandb_mcp_server.analytics import get_analytics_tracker
-
-            get_analytics_tracker().track_user_session(
-                session_id=session_id,
-                viewer_info=viewer,
-                api_key_hash=hashlib.sha256(wandb_api_key.encode()).hexdigest(),
-            )
-        except Exception as analytics_err:
-            logger.debug(f"Analytics tracking failed (non-fatal): {analytics_err}")
-
-        # --- Execute request ----------------------------------------------
-        request_start = time.monotonic()
-        request_id = str(uuid.uuid4())[:8]
-        try:
-            response = await call_next(request)
-        finally:
-            WandBApiManager.reset_context_api_key(api_key_token)
-            current_session_id.reset(session_ctx_token)
-
-        # Return Mcp-Session-Id so the client includes it on follow-ups
-        if is_new_session:
-            response.headers["Mcp-Session-Id"] = session_id
-
-        # --- Analytics: request event -------------------------------------
-        try:
-            from wandb_mcp_server.analytics import AnalyticsTracker, get_analytics_tracker
-
-            elapsed_ms = (time.monotonic() - request_start) * 1000
-            get_analytics_tracker().track_request(
-                request_id=request_id,
-                session_id=session_id,
-                method=request.method,
-                path=request.url.path,
-                status_code=response.status_code,
-                duration_ms=round(elapsed_ms, 2),
-                user_id=AnalyticsTracker._extract_user_id(viewer) if viewer else None,
-                email_domain=AnalyticsTracker._extract_email_domain(viewer) if viewer else None,
-            )
-        except Exception:
-            pass
-
-        return response
-
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"error": e.detail}, headers=e.headers)
     except Exception as e:
@@ -223,6 +148,90 @@ async def mcp_auth_middleware(request: Request, call_next):
             content={"error": "Authentication failed"},
             headers={"WWW-Authenticate": 'Bearer realm="W&B MCP"'},
         )
+
+    # --- Set up request context (API key, viewer, session) ----------------
+    request.state.wandb_api_key = wandb_api_key
+
+    from wandb_mcp_server.api_client import WandBApiManager
+
+    api_key_token = WandBApiManager.set_context_api_key(wandb_api_key)
+
+    viewer = None
+    try:
+        api = WandBApiManager.get_api()
+        viewer = api.viewer
+        logger.info(f"Authenticated W&B viewer: {viewer}")
+    except Exception as viewer_err:
+        logger.warning(f"Could not fetch W&B viewer: {viewer_err}")
+
+    # --- Session management -----------------------------------------------
+    from wandb_mcp_server.session_manager import current_session_id
+
+    session_id, is_new_session = _resolve_session_id(request, wandb_api_key)
+    request.state.session_id = session_id
+    session_ctx_token = current_session_id.set(session_id)
+
+    try:
+        from wandb_mcp_server.session_manager import get_session_manager
+
+        mgr = get_session_manager()
+        mgr.create_session(wandb_api_key, session_id=session_id)
+    except ValueError:
+        logger.warning("Session ID rejected (API key mismatch); issuing new server session")
+        session_id = f"sess_{uuid.uuid4().hex}"
+        is_new_session = True
+        request.state.session_id = session_id
+        session_ctx_token = current_session_id.set(session_id)
+        try:
+            mgr.create_session(wandb_api_key, session_id=session_id)
+        except Exception:
+            pass
+    except Exception as sm_err:
+        logger.debug(f"Session manager unavailable (non-fatal): {sm_err}")
+
+    # --- Analytics: session event -----------------------------------------
+    try:
+        from wandb_mcp_server.analytics import get_analytics_tracker
+
+        get_analytics_tracker().track_user_session(
+            session_id=session_id,
+            viewer_info=viewer,
+            api_key_hash=hashlib.sha256(wandb_api_key.encode()).hexdigest(),
+        )
+    except Exception as analytics_err:
+        logger.debug(f"Analytics tracking failed (non-fatal): {analytics_err}")
+
+    # --- Execute request (errors here propagate as 500, not 401) ----------
+    request_start = time.monotonic()
+    request_id = str(uuid.uuid4())[:8]
+    try:
+        response = await call_next(request)
+    finally:
+        WandBApiManager.reset_context_api_key(api_key_token)
+        current_session_id.reset(session_ctx_token)
+
+    if is_new_session:
+        response.headers["Mcp-Session-Id"] = session_id
+
+    # --- Analytics: request event -----------------------------------------
+    try:
+        from wandb_mcp_server.analytics import AnalyticsTracker, get_analytics_tracker
+
+        elapsed_ms = (time.monotonic() - request_start) * 1000
+        get_analytics_tracker().track_request(
+            request_id=request_id,
+            session_id=session_id,
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            duration_ms=round(elapsed_ms, 2),
+            user_id=AnalyticsTracker._extract_user_id(viewer) if viewer else None,
+            email_domain=AnalyticsTracker._extract_email_domain(viewer) if viewer else None,
+        )
+    except Exception:
+        pass
+
+    return response
 
 
 # OAuth-related functions removed - see AUTH_README.md for details
