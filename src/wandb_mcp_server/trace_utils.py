@@ -218,3 +218,39 @@ def process_traces(
     logger.info(f"After truncation: {len(truncated_traces)} traces")
 
     return {"metadata": metadata, "traces": truncated_traces}
+
+
+def enforce_token_budget(
+    result_json: str,
+    traces: list,
+    max_tokens: int,
+) -> tuple[str, int]:
+    """Drop least-recent traces until the serialized result fits within the token budget.
+
+    Args:
+        result_json: The serialized JSON string of the query result.
+        traces: The list of trace dicts (mutated in place by the caller after).
+        max_tokens: Maximum token budget.
+
+    Returns:
+        Tuple of (possibly-truncated JSON string, number of traces dropped).
+        If no truncation was needed, returns (original string, 0).
+    """
+    token_count = count_tokens(result_json)
+    if token_count <= max_tokens:
+        return result_json, 0
+
+    logger = get_rich_logger(__name__)
+    original_count = len(traces)
+    dropped = 0
+
+    while token_count > max_tokens and len(traces) > 1:
+        traces.pop()
+        dropped += 1
+        result_json = json.dumps(traces, cls=DateTimeEncoder)
+        token_count = count_tokens(result_json)
+
+    logger.info(
+        f"Token budget enforced: dropped {dropped}/{original_count} traces ({token_count} tokens, budget {max_tokens})"
+    )
+    return result_json, dropped

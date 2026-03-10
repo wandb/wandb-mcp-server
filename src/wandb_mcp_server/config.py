@@ -10,3 +10,7 @@ WANDB_BASE_URL: str = os.getenv("WANDB_BASE_URL", "https://api.wandb.ai")
 WF_TRACE_SERVER_URL: str = (
     os.getenv("WF_TRACE_SERVER_URL") or os.getenv("WEAVE_TRACE_SERVER_URL") or "https://trace.wandb.ai"
 )
+
+# Token budget for response truncation. When a query result exceeds this
+# budget, least-recent traces are dropped and a truncation note is appended.
+MAX_RESPONSE_TOKENS: int = int(os.getenv("MAX_RESPONSE_TOKENS", "30000"))
