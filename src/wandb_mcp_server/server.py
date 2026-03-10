@@ -359,6 +359,26 @@ def register_tools(mcp_instance: FastMCP) -> None:
     def query_wandb_support_bot(question: str) -> Dict[str, Any]:
         return query_wandbot_api(question)
 
+    from wandb_mcp_server.mcp_tools.infer_schema import (
+        INFER_TRACE_SCHEMA_TOOL_DESCRIPTION,
+        infer_trace_schema,
+    )
+
+    @mcp_instance.tool(description=INFER_TRACE_SCHEMA_TOOL_DESCRIPTION)
+    def infer_trace_schema_tool(
+        entity_name: str,
+        project_name: str,
+        sample_size: int = 20,
+        top_n_values: int = 5,
+    ) -> str:
+        """Discover the schema of Weave traces in a project."""
+        return infer_trace_schema(
+            entity_name=entity_name,
+            project_name=project_name,
+            sample_size=sample_size,
+            top_n_values=top_n_values,
+        )
+
 
 # ===============================================================================
 # SECTION 4: MCP SERVER SETUP (STDIO & HTTP)
