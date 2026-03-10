@@ -24,6 +24,14 @@ def get_trace_service():
 QUERY_WEAVE_TRACES_TOOL_DESCRIPTION = """
 Query Weave traces, trace metadata, and trace costs with filtering and sorting options.
 
+<when_to_use>
+Call this tool when you need to retrieve, filter, or analyze Weave trace data (LLM calls,
+agent execution traces, evaluation results). Before querying a new project, call
+infer_trace_schema_tool first to discover available fields and values. For large projects,
+call count_weave_traces_tool first to understand the data size. Use detail_level="schema"
+for browsing, "summary" (default) for analysis, and "full" only for specific trace_ids.
+</when_to_use>
+
 ---
 **Cost Calculation and Sorting Enhancements:**
 - For each model in the `costs` dictionary, a new field `total_cost` is computed as the sum of `completion_tokens_total_cost` and `prompt_tokens_total_cost`.
@@ -253,6 +261,15 @@ return_full_data : bool, optional
 `False` returns truncation_length = 0, no values for the column keys are returned. Defaults to True.
 metadata_only : bool, optional
     Return only metadata without traces. Defaults to False
+detail_level : str, optional
+    Controls how much data is returned per trace. Use this instead of manually tuning
+    truncate_length/return_full_data. Defaults to "summary".
+    - "schema": Structural fields only (op_name, trace_id, started_at, ended_at, status,
+      parent_id, display_name). Fastest option, ideal for browsing and filtering large sets.
+    - "summary": Schema fields plus truncated inputs/outputs (200 chars) and summary/usage
+      data. Good default for understanding what traces contain.
+    - "full": Everything untruncated. Use only when drilling into specific trace_ids, never
+      for bulk queries as it can overwhelm the context window.
 
 Returns
 -------
@@ -285,6 +302,22 @@ str
         project_name="my-project",
         filters={"op_name_contains": "Evaluation.summarize"},
         columns=["id", "op_name", "started_at", "costs"]
+    )
+
+    # Schema-first workflow: browse traces quickly, then drill into specific ones
+    # Step 1: Get structural overview
+    query_traces_tool(
+        entity_name="my-team",
+        project_name="my-project",
+        filters={"trace_roots_only": True},
+        detail_level="schema"
+    )
+    # Step 2: Drill into a specific trace with full data
+    query_traces_tool(
+        entity_name="my-team",
+        project_name="my-project",
+        filters={"call_ids": ["01958ab9-3c68-7c23-8ccd-c135c7037769"]},
+        detail_level="full"
     )
     ```
 </examples>

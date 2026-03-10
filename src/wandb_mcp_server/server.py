@@ -357,6 +357,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         description: Optional[str] = None,
         markdown_report_text: str = "",
         plots_html: Optional[Union[Dict[str, str], str]] = None,
+        panels: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         try:
             result = create_report(
@@ -365,10 +366,10 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 title=title,
                 description=description,
                 markdown_report_text=markdown_report_text,
-                plots_html=plots_html,  # Kept for backwards compatibility, ignored by safe version
+                plots_html=plots_html,
+                panels=panels,
             )
 
-            # Simple return message
             return f"The report was saved here: {result['url']}"
         except Exception as e:
             raise e
@@ -399,6 +400,45 @@ def register_tools(mcp_instance: FastMCP) -> None:
             project_name=project_name,
             sample_size=sample_size,
             top_n_values=top_n_values,
+        )
+
+    from wandb_mcp_server.mcp_tools.docs_search import (
+        SEARCH_WANDB_DOCS_TOOL_DESCRIPTION,
+        is_docs_proxy_enabled,
+        search_wandb_docs,
+    )
+
+    if is_docs_proxy_enabled():
+
+        @mcp_instance.tool(description=SEARCH_WANDB_DOCS_TOOL_DESCRIPTION)
+        async def search_wandb_docs_tool(query: str) -> str:
+            """Search the official W&B documentation."""
+            return await search_wandb_docs(query)
+
+    from wandb_mcp_server.mcp_tools.run_history import (
+        GET_RUN_HISTORY_TOOL_DESCRIPTION,
+        get_run_history,
+    )
+
+    @mcp_instance.tool(description=GET_RUN_HISTORY_TOOL_DESCRIPTION)
+    def get_run_history_tool(
+        entity_name: str,
+        project_name: str,
+        run_id: str,
+        keys: Optional[List[str]] = None,
+        samples: int = 500,
+        min_step: Optional[int] = None,
+        max_step: Optional[int] = None,
+    ) -> str:
+        """Retrieve sampled time-series metric data from a W&B run."""
+        return get_run_history(
+            entity_name=entity_name,
+            project_name=project_name,
+            run_id=run_id,
+            keys=keys,
+            samples=samples,
+            min_step=min_step,
+            max_step=max_step,
         )
 
 

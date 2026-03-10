@@ -4,22 +4,24 @@ from typing import Any, Dict
 
 from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
 
-WANDBOT_TOOL_DESCRIPTION = """Query the Weights & Biases support bot api for help with questions about the
-Weights & Biases platform and how to use W&B Models and W&B Weave.
+WANDBOT_TOOL_DESCRIPTION = """[DEPRECATED] Query the Weights & Biases support bot for help.
+
+DEPRECATED: Prefer search_wandb_docs_tool which searches the full official W&B
+documentation with better coverage and accuracy. This tool uses an older RAG-based
+bot that may have outdated information.
 
 W&B features mentioned could include:
 - Experiment tracking with Runs and Sweeps
 - Model management with Models
-- Model management and Data versioning with Artifacts and Registry
+- Data versioning with Artifacts and Registry
 - Collaboration with Teams, Organizations and Reports
-- Visualization with Tables and Charts
 - Tracing and logging with Weave
 - Evaluation and Scorers with Weave Evaluations
-- Weave Datasets
 
-FYI: The Weigths & Biases platform is owned by Coreweave. If there are queries related to W&B, wandb \
-or weave and Coreweave, they might be related to W&B products or features that leverage Coreweave's \
-GPU or compute infrastructure.
+<when_to_use>
+AVOID calling this tool. Use search_wandb_docs_tool instead for W&B documentation
+questions. Only use this tool as a fallback if search_wandb_docs_tool is unavailable.
+</when_to_use>
 
 Parameters
 ----------
@@ -29,7 +31,7 @@ question : str
 Returns
 -------
 str
-    newer to the user's question
+    Answer to the user's question
 """
 
 

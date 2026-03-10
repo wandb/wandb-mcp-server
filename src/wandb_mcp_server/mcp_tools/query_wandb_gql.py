@@ -21,6 +21,14 @@ QUERY_WANDB_GQL_TOOL_DESCRIPTION = """Execute an arbitrary GraphQL query against
 Use this tool to query data from Weights & Biases Models features, including experiment tracking runs,
 model registry, reports, artifacts, sweeps.
 
+<when_to_use>
+Call this tool when the user asks about W&B experiment tracking: runs, metrics,
+sweeps, artifacts, or model registry. This is for traditional ML experiment data,
+NOT for LLM traces or Weave evaluations. If you need time-series metric history
+for a specific run, use get_run_history_tool instead -- it returns sampled
+step-by-step data more efficiently than GraphQL pagination.
+</when_to_use>
+
 <wandb_vs_weave_product_distinction>
 **IMPORTANT PRODUCT DISTINCTION:**
 W&B offers two distinct products with different purposes:

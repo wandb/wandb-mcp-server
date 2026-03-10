@@ -21,6 +21,13 @@ tracing and evaluating LLMs and GenAI apps.
 This tool only provides COUNT information and STORAGE SIZE (bytes) about traces, \
 not actual logged traces data, metrics or run data.
 
+<when_to_use>
+Call this tool BEFORE running large query_weave_traces_tool queries to understand
+how many traces match your filters. This avoids overwhelming the context window
+with unexpectedly large result sets. Also useful for quick aggregate questions
+like "how many failed traces are there?" without retrieving the actual data.
+</when_to_use>
+
 <tool_choice_guidance>
 <wandb_vs_weave_product_distinction>
 **IMPORTANT PRODUCT DISTINCTION:**

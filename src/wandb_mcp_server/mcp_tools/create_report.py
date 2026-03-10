@@ -5,7 +5,7 @@ This version eliminates the singleton contamination vulnerability and uses only 
 """
 
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 import re
 
 import wandb_workspaces.reports.v2 as wr
@@ -52,6 +52,13 @@ CREATE_WANDB_REPORT_TOOL_DESCRIPTION = """Create a new Weights & Biases Report t
 Only call this tool if the user explicitly asks to create a report or save to wandb/weights & biases.
 Always provide the returned report link to the user.
 
+<when_to_use>
+Call this tool AFTER completing analysis to create a shareable report. Combine
+markdown text (for narrative, tables, and findings) with optional panels (for
+line/bar charts) to produce a polished deliverable. If you have metric data
+from get_run_history_tool, use panels to visualize it in the report.
+</when_to_use>
+
 <markdown_generation_guide>
 When generating the markdown_report_text parameter, structure your content using:
 
@@ -94,6 +101,15 @@ Args:
     title: str, Title of the W&B Report - required
     description: str, Optional brief description of the report
     markdown_report_text: str, Well-structured markdown content for the report body
+    panels: list of dict, optional - Chart panels to add after the markdown content.
+        Each dict specifies a chart type and configuration:
+        - {"type": "line", "x": "_step", "y": ["loss", "val_loss"], "title": "Training Loss"}
+          Creates a LinePlot tracking metrics over steps.
+        - {"type": "bar", "metrics": ["accuracy", "f1"], "title": "Metrics"}
+          Creates a BarPlot comparing metrics across runs.
+        - {"type": "run_comparison", "metrics": ["loss", "accuracy"], "run_ids": ["abc", "def"], "title": "Compare"}
+          Creates a PanelGrid comparing specific runs on selected metrics.
+        Panels are additive to markdown content. If omitted, report is markdown-only.
 
 Returns:
     The URL to the created report
@@ -138,28 +154,16 @@ def create_report(
     description: Optional[str] = None,
     markdown_report_text: Optional[str] = None,
     plots_html: Optional[Union[Dict[str, str], str]] = None,
+    panels: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, str]:
+    """Create a W&B Report with markdown content and optional chart panels.
+
+    Security: No singleton contamination, reads API key from contextvar.
+    Thread Safety: Each request has its own contextvar value.
     """
-    SAFE VERSION - Create W&B Report with markdown-only content.
-
-    Security improvements:
-    - No singleton contamination (no wandb.login)
-    - No wandb.init() that could use contaminated state
-    - Reads API key from contextvar (concurrent-safe)
-    - Markdown-only output for simplicity and safety
-    - Ignores plots_html parameter (for backwards compatibility)
-
-    Thread Safety:
-    - Uses patched _get_api (set at module import) that reads from contextvar
-    - Each request has its own contextvar value - no cross-contamination
-    - Safe for async/concurrent report creation
-    """
-
-    # Note if plots_html was provided (for backwards compatibility)
     if plots_html:
         logger.info("Note: plots_html parameter provided but ignored in safe markdown-only mode")
 
-    # Get the current API key from context
     from wandb_mcp_server.api_client import WandBApiManager
 
     api_key = WandBApiManager.get_api_key()
@@ -168,7 +172,6 @@ def create_report(
         logger.warning("No API key available for W&B")
         raise Exception("No W&B API key available")
 
-    # Obtain viewer once and log tool call after API context is established
     try:
         api = WandBApiManager.get_api()
         log_tool_call(
@@ -179,15 +182,13 @@ def create_report(
                 "project_name": project_name,
                 "title": title,
                 "description": description,
+                "has_panels": bool(panels),
             },
         )
     except Exception:
         pass
 
     try:
-        # Create the report using wandb_workspaces
-        # The patched _get_api will automatically read API key from contextvar
-        # This is SAFE for concurrent requests - no shared state
         report = wr.Report(
             entity=entity_name,
             project=project_name,
@@ -196,26 +197,84 @@ def create_report(
             width="fluid",
         )
 
-        # Parse markdown to blocks (headers, paragraphs, markdown blocks only)
         blocks = parse_markdown_to_blocks(markdown_report_text or "")
 
-        # Add security notice at the top
-        security_notice = wr.P("*Report created using SAFE markdown-only version (no wandb.init/login)*")
+        security_notice = wr.P("*Report created via W&B MCP Server*")
         report.blocks = [security_notice] + blocks
 
-        logger.info("SAFE: Creating markdown report without wandb.init/login")
+        if panels:
+            panel_blocks = _build_panel_blocks(panels, entity_name, project_name)
+            if panel_blocks:
+                report.blocks.append(wr.H2("Charts"))
+                report.blocks.extend(panel_blocks)
 
-        # Save the report
-        # Uses patched _get_api which reads from contextvar (concurrent-safe)
         report.save()
 
-        logger.info(f"SAFE: Created report: {title}")
+        logger.info(f"Created report: {title} (panels={len(panels or [])})")
 
         return {"url": report.url}
 
     except Exception as e:
-        logger.error(f"Error creating report (safe mode): {e}")
-        raise Exception(f"Error creating report (safe mode): {e}")
+        logger.error(f"Error creating report: {e}")
+        raise Exception(f"Error creating report: {e}")
+
+
+def _build_panel_blocks(
+    panels: List[Dict[str, Any]],
+    entity_name: str,
+    project_name: str,
+) -> List:
+    """Convert panel dicts to wandb_workspaces report blocks."""
+    blocks = []
+    for panel_spec in panels:
+        panel_type = panel_spec.get("type", "").lower()
+        panel_title = panel_spec.get("title", "")
+
+        try:
+            if panel_type == "line":
+                x_key = panel_spec.get("x", "_step")
+                y_keys = panel_spec.get("y", [])
+                if not y_keys:
+                    continue
+                pg = wr.PanelGrid(
+                    runsets=[wr.Runset(entity=entity_name, project=project_name)],
+                    panels=[wr.LinePlot(x=x_key, y=y_keys, title=panel_title)],
+                )
+                blocks.append(pg)
+
+            elif panel_type == "bar":
+                metrics = panel_spec.get("metrics", [])
+                if not metrics:
+                    continue
+                pg = wr.PanelGrid(
+                    runsets=[wr.Runset(entity=entity_name, project=project_name)],
+                    panels=[wr.BarPlot(metrics=metrics, title=panel_title)],
+                )
+                blocks.append(pg)
+
+            elif panel_type == "run_comparison":
+                metrics = panel_spec.get("metrics", [])
+                run_ids = panel_spec.get("run_ids", [])
+                if not metrics:
+                    continue
+                runset_kwargs: Dict[str, Any] = {"entity": entity_name, "project": project_name}
+                if run_ids:
+                    runset_kwargs["filters"] = {"$or": [{"name": rid} for rid in run_ids]}
+                chart_panels = [wr.LinePlot(x="_step", y=metrics, title=panel_title)]
+                pg = wr.PanelGrid(
+                    runsets=[wr.Runset(**runset_kwargs)],
+                    panels=chart_panels,
+                )
+                blocks.append(pg)
+
+            else:
+                logger.warning(f"Unknown panel type: {panel_type}")
+
+        except Exception as e:
+            logger.warning(f"Failed to build panel '{panel_title}': {e}")
+            blocks.append(wr.P(f"*Panel '{panel_title}' could not be rendered: {e}*"))
+
+    return blocks
 
 
 def parse_markdown_to_blocks(

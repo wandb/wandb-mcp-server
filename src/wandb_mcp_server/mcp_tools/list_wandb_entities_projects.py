@@ -12,6 +12,12 @@ missing or incorrect Weights & Biases project name.
 If no entity is provided, the tool will fetch all projects for the current user
 as well as all the project in the teams they are part of.
 
+<when_to_use>
+Call this tool FIRST when the user mentions a W&B entity but has not specified a
+project name, or when queries fail due to "project not found" errors. This
+resolves entity/project discovery before any data query.
+</when_to_use>
+
 <critical_info>
 
 **Important:**
