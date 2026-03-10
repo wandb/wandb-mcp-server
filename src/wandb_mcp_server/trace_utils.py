@@ -165,13 +165,31 @@ def extract_op_name_distribution(traces: List[Dict]) -> Dict[str, int]:
     return dict(sorted(op_counts.items(), key=lambda x: x[1], reverse=True))
 
 
-def process_traces(traces: List[Dict], truncate_length: int = 200, return_full_data: bool = False) -> Dict[str, Any]:
-    """Process traces and generate metadata."""
-    # Add debug logging
+_SCHEMA_FIELDS = {"id", "trace_id", "op_name", "started_at", "ended_at", "status", "parent_id", "display_name"}
+
+
+def process_traces(
+    traces: List[Dict],
+    truncate_length: int = 200,
+    return_full_data: bool = False,
+    detail_level: str = "summary",
+) -> Dict[str, Any]:
+    """Process traces and generate metadata.
+
+    Args:
+        traces: Raw trace dicts.
+        truncate_length: Max chars for truncated string values.
+        return_full_data: If True, return everything untruncated (overrides detail_level).
+        detail_level: One of "schema", "summary", "full".
+            - "schema": Only structural fields (id, op_name, timestamps, status).
+            - "summary": Structural fields + truncated inputs/outputs/summary.
+            - "full": Everything untruncated (same as return_full_data=True).
+    """
     logger = get_rich_logger(__name__)
 
     logger.info(
-        f"process_traces called with {len(traces)} traces, truncate_length={truncate_length}, return_full_data={return_full_data}"
+        f"process_traces called with {len(traces)} traces, "
+        f"detail_level={detail_level}, truncate_length={truncate_length}, return_full_data={return_full_data}"
     )
 
     if traces:
@@ -186,16 +204,17 @@ def process_traces(traces: List[Dict], truncate_length: int = 200, return_full_d
         "op_distribution": extract_op_name_distribution(traces),
     }
 
-    if return_full_data:
+    if return_full_data or detail_level == "full":
         logger.info("Returning full trace data")
         return {"metadata": metadata, "traces": traces}
 
-    # Log before truncation
+    if detail_level == "schema":
+        logger.info(f"Returning schema-only for {len(traces)} traces")
+        schema_traces = [{k: v for k, v in t.items() if k in _SCHEMA_FIELDS} for t in traces]
+        return {"metadata": metadata, "traces": schema_traces}
+
     logger.info(f"Truncating {len(traces)} traces to length {truncate_length}")
-
     truncated_traces = [{k: truncate_value(v, truncate_length) for k, v in trace.items()} for trace in traces]
-
-    # Log after truncation
     logger.info(f"After truncation: {len(truncated_traces)} traces")
 
     return {"metadata": metadata, "traces": truncated_traces}

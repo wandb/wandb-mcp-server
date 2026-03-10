@@ -274,7 +274,15 @@ def register_tools(mcp_instance: FastMCP) -> None:
         truncate_length: int = 200,
         return_full_data: bool = False,
         metadata_only: bool = False,
+        detail_level: str = "summary",
     ) -> str:
+        """Query traces with optional detail_level control.
+
+        detail_level: "schema" (structural fields only), "summary" (truncated, default),
+        "full" (everything untruncated, same as return_full_data=True).
+        """
+        if detail_level == "full":
+            return_full_data = True
         try:
             result_model: QueryResult = await query_paginated_weave_traces(
                 entity_name=entity_name,
@@ -292,6 +300,20 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 return_full_data=return_full_data,
                 metadata_only=metadata_only,
             )
+
+            if detail_level == "schema" and result_model.traces:
+                schema_fields = {
+                    "id",
+                    "trace_id",
+                    "op_name",
+                    "started_at",
+                    "ended_at",
+                    "status",
+                    "parent_id",
+                    "display_name",
+                }
+                result_model.traces = [{k: v for k, v in t.items() if k in schema_fields} for t in result_model.traces]
+
             return result_model.model_dump_json()
         except Exception as e:
             logger.error(f"Error in query_weave_traces_tool: {e}", exc_info=True)
