@@ -175,13 +175,15 @@ class TestSegmentForwarder:
         assert payloads[0]["userId"] == "carol"
 
     @patch.dict("os.environ", {"MCP_SEGMENT_FORWARD": "true"})
-    def test_live_dispatches_post_in_background(self):
-        f = SegmentForwarder(base_url="https://api.wandb.test")
+    @patch("wandb_mcp_server.analytics_segment._build_retry_session")
+    def test_live_dispatches_post_in_background(self, mock_build):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_session = MagicMock()
         mock_session.post.return_value = mock_resp
-        f._session = mock_session
+        mock_build.return_value = mock_session
+
+        f = SegmentForwarder(base_url="https://api.wandb.test")
 
         event = {
             "schema_version": "1.0",
@@ -194,17 +196,19 @@ class TestSegmentForwarder:
         result = f.forward(event)
         assert result is not None
 
-        time.sleep(0.2)
+        time.sleep(0.5)
         mock_session.post.assert_called_once()
         url_arg = mock_session.post.call_args.args[0]
         assert "analytics/t" in url_arg
 
     @patch.dict("os.environ", {"MCP_SEGMENT_FORWARD": "true"})
-    def test_live_handles_post_failure_gracefully(self):
-        f = SegmentForwarder(base_url="https://api.wandb.test")
+    @patch("wandb_mcp_server.analytics_segment._build_retry_session")
+    def test_live_handles_post_failure_gracefully(self, mock_build):
         mock_session = MagicMock()
         mock_session.post.side_effect = Exception("network")
-        f._session = mock_session
+        mock_build.return_value = mock_session
+
+        f = SegmentForwarder(base_url="https://api.wandb.test")
 
         event = {
             "schema_version": "1.0",
@@ -217,7 +221,7 @@ class TestSegmentForwarder:
         result = f.forward(event)
         assert result is not None
 
-        time.sleep(0.2)
+        time.sleep(0.5)
         mock_session.post.assert_called_once()
 
     @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})

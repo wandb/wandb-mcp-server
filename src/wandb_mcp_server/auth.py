@@ -89,10 +89,10 @@ async def validate_bearer_token(credentials: Optional[HTTPAuthorizationCredentia
 
     # Basic format validation
     if not is_valid_wandb_api_key(token):
+        logger.debug(f"Rejected API key: length={len(token)}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid W&B API key format. Got {len(token)} characters. "
-            f"Get your key at: https://wandb.ai/authorize",
+            detail="Invalid W&B API key format. Get your key at: https://wandb.ai/authorize",
             headers={"WWW-Authenticate": 'Bearer realm="W&B MCP", error="invalid_token"'},
         )
 
@@ -109,6 +109,9 @@ def _resolve_session_id(request: Request, wandb_api_key: str) -> tuple[str, bool
     """
     client_session = request.headers.get("Mcp-Session-Id") or request.headers.get("mcp-session-id")
     if client_session:
+        if len(client_session) > 128 or not re.match(r"^[a-zA-Z0-9_\-]+$", client_session):
+            logger.warning("Invalid session ID format from client; issuing server-generated ID")
+            return f"sess_{uuid.uuid4().hex}", True
         return client_session, False
     return f"sess_{uuid.uuid4().hex}", True
 
@@ -160,7 +163,8 @@ async def mcp_auth_middleware(request: Request, call_next):
     try:
         api = WandBApiManager.get_api()
         viewer = api.viewer
-        logger.info(f"Authenticated W&B viewer: {viewer}")
+        viewer_id = getattr(viewer, "username", None) or getattr(viewer, "entity", None) or "<unknown>"
+        logger.info(f"Authenticated W&B viewer: {viewer_id}")
     except Exception as viewer_err:
         logger.warning(f"Could not fetch W&B viewer: {viewer_err}")
 
@@ -190,8 +194,15 @@ async def mcp_auth_middleware(request: Request, call_next):
         is_new_session = True
         try:
             mgr.create_session(wandb_api_key, session_id=session_id)
+        except SessionCapacityError:
+            logger.warning("Session capacity exceeded on retry")
+            WandBApiManager.reset_context_api_key(api_key_token)
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Too many concurrent sessions for this API key"},
+            )
         except Exception:
-            pass
+            logger.debug("Session creation failed on mismatch retry (non-fatal)")
     except Exception as sm_err:
         logger.debug(f"Session manager unavailable (non-fatal): {sm_err}")
 

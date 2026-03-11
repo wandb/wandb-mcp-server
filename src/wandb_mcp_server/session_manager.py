@@ -381,9 +381,16 @@ def get_session_manager() -> MultiTenantSessionManager:
     """Get or create the global session manager."""
     global _session_manager
     if _session_manager is None:
-        # Read configuration from environment
-        ttl = int(os.environ.get("SESSION_TTL_SECONDS", "3600"))
-        max_sessions = int(os.environ.get("MAX_SESSIONS_PER_KEY", "10"))
+        try:
+            ttl = int(os.environ.get("SESSION_TTL_SECONDS", "3600"))
+        except ValueError:
+            raise ValueError("SESSION_TTL_SECONDS must be an integer (got: %r)" % os.environ.get("SESSION_TTL_SECONDS"))
+        try:
+            max_sessions = int(os.environ.get("MAX_SESSIONS_PER_KEY", "10"))
+        except ValueError:
+            raise ValueError(
+                "MAX_SESSIONS_PER_KEY must be an integer (got: %r)" % os.environ.get("MAX_SESSIONS_PER_KEY")
+            )
         enable_hmac_sessions = os.environ.get("MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS", "false").lower() == "true"
         try:
             _session_manager = MultiTenantSessionManager(
@@ -391,9 +398,8 @@ def get_session_manager() -> MultiTenantSessionManager:
                 max_sessions_per_key=max_sessions,
                 enable_hmac_sha256_sessions=enable_hmac_sessions,
             )
-        except Exception:
-            # Server-side logging has already occurred; surface opaque message upward
-            raise RuntimeError("Unable to initialize _session_manager")
+        except Exception as e:
+            raise RuntimeError(f"Unable to initialize session manager: {e}") from e
 
     return _session_manager
 

@@ -24,6 +24,7 @@ Enable live forwarding with ``MCP_SEGMENT_FORWARD=true`` + ``WANDB_BASE_URL``.
 import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -153,8 +154,9 @@ class SegmentForwarder:
         self.base_url = (base_url or os.environ.get("WANDB_BASE_URL", "https://api.wandb.ai")).rstrip("/")
         self._segment_logger = logging.getLogger("wandb_mcp_server.segment_dryrun")
         self._segment_logger.setLevel(logging.INFO)
-        self._session: Optional[requests.Session] = None
         self._forwarded_payloads: List[Dict[str, Any]] = []
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._thread_local = threading.local()
 
     @property
     def enabled(self) -> bool:
@@ -183,27 +185,23 @@ class SegmentForwarder:
             return payload
 
         if self.live:
-            thread = threading.Thread(
-                target=self._post,
-                args=(payload,),
-                daemon=True,
-            )
-            thread.start()
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(max_workers=4)
+            self._executor.submit(self._post, payload)
             return payload
 
         return None
 
-    def _get_session(self) -> requests.Session:
-        """Lazy-init a retry-capable requests session."""
-        if self._session is None:
-            self._session = _build_retry_session()
-        return self._session
-
     def _post(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """POST the payload to Gorilla /analytics/t (called from background thread)."""
+        """POST the payload to Gorilla /analytics/t (called from thread pool)."""
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = _build_retry_session()
+            self._thread_local.session = session
+
         url = f"{self.base_url}/analytics/t"
         try:
-            resp = self._get_session().post(
+            resp = session.post(
                 url,
                 json=payload,
                 timeout=5,

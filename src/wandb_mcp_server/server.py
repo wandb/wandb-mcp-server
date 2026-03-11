@@ -71,12 +71,7 @@ __all__ = [
 ]
 from wandb_mcp_server.weave_api.models import QueryResult
 
-print("Starting W&B MCP Server...", file=sys.stderr)
-
-# Load environment variables
-load_dotenv(dotenv_path=Path(__file__).parent.parent.parent / ".env")
-
-# Configure logging
+# Configure logging (no side effects beyond logger setup)
 logging.basicConfig(level=logging.INFO)
 logger = get_rich_logger("weave-mcp-server", default_level_str="WARNING", env_var_name="MCP_SERVER_LOG_LEVEL")
 
@@ -101,7 +96,8 @@ def validate_api_key(api_key: str) -> bool:
         # This validates the key without setting any global state
         api = wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
         viewer = api.viewer  # This will fail if the key is invalid
-        logger.info(f"W&B API key validated successfully. Viewer: {viewer}")
+        viewer_id = getattr(viewer, "username", None) or getattr(viewer, "entity", None) or "<unknown>"
+        logger.info(f"W&B API key validated successfully. Viewer: {viewer_id}")
         return True
     except Exception as e:
         logger.error(f"Invalid W&B API key: {e}")
@@ -267,14 +263,14 @@ def register_tools(mcp_instance: FastMCP) -> None:
     async def query_weave_traces_tool(
         entity_name: str,
         project_name: str,
-        filters: Dict[str, Any] = {},
+        filters: Optional[Dict[str, Any]] = None,
         sort_by: str = "started_at",
         sort_direction: str = "desc",
         limit: int = 10000000,
         include_costs: bool = True,
         include_feedback: bool = True,
-        columns: List[str] = [],
-        expand_columns: List[str] = [],
+        columns: Optional[List[str]] = None,
+        expand_columns: Optional[List[str]] = None,
         truncate_length: int = 200,
         return_full_data: bool = False,
         metadata_only: bool = False,
@@ -284,14 +280,14 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 entity_name=entity_name,
                 project_name=project_name,
                 chunk_size=50,
-                filters=filters,
+                filters=filters or {},
                 sort_by=sort_by,
                 sort_direction=sort_direction,
                 target_limit=limit,
                 include_costs=include_costs,
                 include_feedback=include_feedback,
-                columns=columns,
-                expand_columns=expand_columns,
+                columns=columns or [],
+                expand_columns=expand_columns or [],
                 truncate_length=truncate_length,
                 return_full_data=return_full_data,
                 metadata_only=metadata_only,
@@ -439,6 +435,11 @@ def cli():
         WANDB_DEBUG                 Set to "true" to enable W&B debug logging
         MCP_AUTH_DISABLED           Set to "true" to disable HTTP auth (dev only)
     """
+    print("Starting W&B MCP Server...", file=sys.stderr)
+
+    # Load .env only when running as CLI, not on import
+    load_dotenv(dotenv_path=Path(__file__).parent.parent.parent / ".env")
+
     # Parse command line arguments
     import simple_parsing
 
@@ -467,7 +468,8 @@ def cli():
             try:
                 api = WandBApiManager.get_api()
                 viewer = api.viewer
-                logger.info(f"Authenticated W&B viewer: {viewer}")
+                viewer_id = getattr(viewer, "username", None) or getattr(viewer, "entity", None) or "<unknown>"
+                logger.info(f"Authenticated W&B viewer: {viewer_id}")
             except Exception as viewer_err:
                 logger.warning(f"Could not fetch W&B viewer: {viewer_err}")
 
@@ -476,7 +478,7 @@ def cli():
 
     logger.info("Starting Weights & Biases MCP Server")
     logger.info(f"Transport: {args.transport}")
-    logger.info("API Key configured: Yes")
+    logger.info(f"API Key configured: {'Yes' if api_key else 'No (clients provide their own)'}")
 
     # Validate transport type
     if args.transport not in ["stdio", "http"]:

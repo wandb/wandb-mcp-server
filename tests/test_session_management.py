@@ -557,3 +557,86 @@ class TestContextvarResetAfterMismatch:
         await mcp_auth_middleware(req_b, call_next_b)
 
         assert current_session_id.get() is None
+
+
+# ---------------------------------------------------------------------------
+# TTL enforcement and request lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestSessionTTLAndRequests:
+    @pytest.fixture()
+    def mgr(self):
+        with patch("wandb_mcp_server.session_manager.MultiTenantSessionManager._start_cleanup_task"):
+            return MultiTenantSessionManager(
+                session_ttl_seconds=1,
+                max_sessions_per_key=5,
+                enable_hmac_sha256_sessions=False,
+            )
+
+    def test_expired_session_cleaned_up(self, mgr):
+        key = "fake_key_1234567890_abcdefgh"
+        sid = mgr.create_session(key, session_id="ttl-test")
+        assert mgr.get_session(sid) is not None
+
+        from datetime import timedelta
+
+        session = mgr.get_session(sid)
+        session.last_accessed = session.last_accessed - timedelta(seconds=10)
+
+        mgr._cleanup_expired_sessions()
+        assert mgr.get_session(sid) is None
+
+    def test_active_session_not_cleaned_up(self, mgr):
+        key = "fake_key_1234567890_abcdefgh"
+        sid = mgr.create_session(key, session_id="active-test")
+        mgr.start_request(sid, "req-1")
+
+        from datetime import timedelta
+
+        session = mgr.get_session(sid)
+        session.last_accessed = session.last_accessed - timedelta(seconds=10)
+
+        mgr._cleanup_expired_sessions()
+        assert mgr.get_session(sid) is not None
+
+    def test_start_request_unknown_session(self, mgr):
+        assert mgr.start_request("nonexistent", "req-1") is False
+
+    def test_start_and_end_request(self, mgr):
+        key = "fake_key_1234567890_abcdefgh"
+        sid = mgr.create_session(key, session_id="lifecycle-test")
+
+        assert mgr.start_request(sid, "req-1") is True
+        session = mgr.get_session(sid)
+        assert "req-1" in session.active_requests
+
+        mgr.end_request(sid, "req-1")
+        assert "req-1" not in session.active_requests
+
+    def test_end_request_unknown_session_no_error(self, mgr):
+        mgr.end_request("nonexistent", "req-1")
+
+
+class TestSessionEnvVarValidation:
+    def test_invalid_ttl_raises_clear_error(self):
+        with patch.dict("os.environ", {"SESSION_TTL_SECONDS": "30m"}):
+            from wandb_mcp_server.session_manager import reset_session_manager
+
+            reset_session_manager()
+            with pytest.raises(ValueError, match="SESSION_TTL_SECONDS must be an integer"):
+                from wandb_mcp_server.session_manager import get_session_manager
+
+                get_session_manager()
+            reset_session_manager()
+
+    def test_invalid_max_sessions_raises_clear_error(self):
+        with patch.dict("os.environ", {"MAX_SESSIONS_PER_KEY": ""}):
+            from wandb_mcp_server.session_manager import reset_session_manager
+
+            reset_session_manager()
+            with pytest.raises(ValueError, match="MAX_SESSIONS_PER_KEY must be an integer"):
+                from wandb_mcp_server.session_manager import get_session_manager
+
+                get_session_manager()
+            reset_session_manager()
