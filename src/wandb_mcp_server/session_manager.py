@@ -35,6 +35,10 @@ current_session_id: ContextVar[Optional[str]] = ContextVar("session_id", default
 current_api_key_hash: ContextVar[Optional[str]] = ContextVar("api_key_hash", default=None)
 
 
+class SessionCapacityError(ValueError):
+    """Raised when a key has reached its maximum number of concurrent sessions."""
+
+
 @dataclass
 class Session:
     """Represents an isolated session for a specific API key."""
@@ -166,7 +170,7 @@ class MultiTenantSessionManager:
                     _log.warning(
                         f"Max sessions ({self._max_sessions_per_key}) reached for API key hash {api_key_hash[:8]}..."
                     )
-                    raise ValueError(
+                    raise SessionCapacityError(
                         f"Maximum concurrent sessions ({self._max_sessions_per_key}) exceeded for this API key"
                     )
 

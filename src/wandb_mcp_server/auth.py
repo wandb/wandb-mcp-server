@@ -165,29 +165,38 @@ async def mcp_auth_middleware(request: Request, call_next):
         logger.warning(f"Could not fetch W&B viewer: {viewer_err}")
 
     # --- Session management -----------------------------------------------
-    from wandb_mcp_server.session_manager import current_session_id
+    # Finalize session_id *before* setting the contextvar so that
+    # reset() always restores the original value (None), not a
+    # stale/stolen session ID from a mismatch recovery path.
+    from wandb_mcp_server.session_manager import SessionCapacityError, current_session_id
 
     session_id, is_new_session = _resolve_session_id(request, wandb_api_key)
-    request.state.session_id = session_id
-    session_ctx_token = current_session_id.set(session_id)
 
     try:
         from wandb_mcp_server.session_manager import get_session_manager
 
         mgr = get_session_manager()
         mgr.create_session(wandb_api_key, session_id=session_id)
+    except SessionCapacityError:
+        logger.warning("Session capacity exceeded for API key")
+        WandBApiManager.reset_context_api_key(api_key_token)
+        return JSONResponse(
+            status_code=429,
+            content={"error": "Too many concurrent sessions for this API key"},
+        )
     except ValueError:
         logger.warning("Session ID rejected (API key mismatch); issuing new server session")
         session_id = f"sess_{uuid.uuid4().hex}"
         is_new_session = True
-        request.state.session_id = session_id
-        session_ctx_token = current_session_id.set(session_id)
         try:
             mgr.create_session(wandb_api_key, session_id=session_id)
         except Exception:
             pass
     except Exception as sm_err:
         logger.debug(f"Session manager unavailable (non-fatal): {sm_err}")
+
+    request.state.session_id = session_id
+    session_ctx_token = current_session_id.set(session_id)
 
     # --- Analytics: session event -----------------------------------------
     try:
@@ -206,6 +215,9 @@ async def mcp_auth_middleware(request: Request, call_next):
     request_id = str(uuid.uuid4())[:8]
     try:
         response = await call_next(request)
+    except Exception:
+        _track_request_event(request_start, request_id, session_id, request, 500, viewer)
+        raise
     finally:
         WandBApiManager.reset_context_api_key(api_key_token)
         current_session_id.reset(session_ctx_token)
@@ -213,7 +225,20 @@ async def mcp_auth_middleware(request: Request, call_next):
     if is_new_session:
         response.headers["Mcp-Session-Id"] = session_id
 
-    # --- Analytics: request event -----------------------------------------
+    _track_request_event(request_start, request_id, session_id, request, response.status_code, viewer)
+
+    return response
+
+
+def _track_request_event(
+    request_start: float,
+    request_id: str,
+    session_id: str,
+    request: Request,
+    status_code: int,
+    viewer: object,
+) -> None:
+    """Emit a request analytics event, swallowing any errors."""
     try:
         from wandb_mcp_server.analytics import AnalyticsTracker, get_analytics_tracker
 
@@ -223,15 +248,13 @@ async def mcp_auth_middleware(request: Request, call_next):
             session_id=session_id,
             method=request.method,
             path=request.url.path,
-            status_code=response.status_code,
+            status_code=status_code,
             duration_ms=round(elapsed_ms, 2),
             user_id=AnalyticsTracker._extract_user_id(viewer) if viewer else None,
             email_domain=AnalyticsTracker._extract_email_domain(viewer) if viewer else None,
         )
     except Exception:
         pass
-
-    return response
 
 
 # OAuth-related functions removed - see AUTH_README.md for details

@@ -18,6 +18,7 @@ import pytest
 from wandb_mcp_server.auth import _resolve_session_id, mcp_auth_middleware
 from wandb_mcp_server.session_manager import (
     MultiTenantSessionManager,
+    SessionCapacityError,
     current_session_id,
     reset_session_manager,
 )
@@ -383,3 +384,176 @@ class TestSessionFixationPrevention:
         result2 = await mcp_auth_middleware(req2, call_next2)
         assert req2.state.session_id == session
         assert "Mcp-Session-Id" not in result2.headers
+
+
+# ---------------------------------------------------------------------------
+# SessionCapacityError and per-key cap enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestSessionCapacityError:
+    @pytest.fixture()
+    def mgr(self):
+        with patch("wandb_mcp_server.session_manager.MultiTenantSessionManager._start_cleanup_task"):
+            return MultiTenantSessionManager(
+                session_ttl_seconds=300,
+                max_sessions_per_key=2,
+                enable_hmac_sha256_sessions=False,
+            )
+
+    def test_capacity_raises_correct_type(self, mgr):
+        """When cleanup cannot free enough sessions, SessionCapacityError is raised."""
+        key = "fake_key_1234567890_abcdefgh"
+        mgr.create_session(key, session_id="s1")
+        mgr.create_session(key, session_id="s2")
+        with patch.object(mgr, "_cleanup_api_key_sessions"):
+            with pytest.raises(SessionCapacityError, match="Maximum concurrent sessions"):
+                mgr.create_session(key, session_id="s3")
+
+    def test_capacity_error_is_subclass_of_value_error(self):
+        assert issubclass(SessionCapacityError, ValueError)
+
+    def test_mismatch_still_raises_plain_value_error(self, mgr):
+        """API key mismatch must remain a plain ValueError, not SessionCapacityError."""
+        mgr.create_session("fake_key_1234567890_abcdefgh", session_id="shared")
+        with pytest.raises(ValueError, match="mismatch") as exc_info:
+            mgr.create_session("other_key_1234567890_different", session_id="shared")
+        assert not isinstance(exc_info.value, SessionCapacityError)
+
+
+class TestSessionCapacityMiddleware:
+    """Auth middleware returns 429 when session capacity is exhausted."""
+
+    @pytest.fixture(autouse=True)
+    def _env(self):
+        with patch.dict("os.environ", {"MCP_ANALYTICS_DISABLED": "true"}):
+            yield
+
+    @pytest.fixture()
+    def _mock_deps(self):
+        with (
+            patch("wandb_mcp_server.api_client.WandBApiManager") as mock_wbm,
+            patch("wandb_mcp_server.session_manager.MultiTenantSessionManager._start_cleanup_task"),
+        ):
+            mock_wbm.set_context_api_key.return_value = "tok"
+            mock_wbm.reset_context_api_key.return_value = None
+            mock_api = MagicMock()
+            mock_api.viewer = SimpleNamespace(username="alice", entity="team", email="a@co.com")
+            mock_wbm.get_api.return_value = mock_api
+            yield mock_wbm
+
+    @pytest.mark.asyncio
+    async def test_capacity_returns_429(self, _mock_deps):
+        call_next_called = False
+
+        async def call_next(_):
+            nonlocal call_next_called
+            call_next_called = True
+            r = MagicMock()
+            r.status_code = 200
+            r.headers = {}
+            return r
+
+        with patch("wandb_mcp_server.session_manager.get_session_manager") as mock_get_mgr:
+            mock_mgr = MagicMock()
+            mock_mgr.create_session.side_effect = SessionCapacityError("cap exceeded")
+            mock_get_mgr.return_value = mock_mgr
+
+            req = _make_fake_request()
+            result = await mcp_auth_middleware(req, call_next)
+
+        assert result.status_code == 429
+        assert not call_next_called
+
+
+# ---------------------------------------------------------------------------
+# Downstream crash analytics
+# ---------------------------------------------------------------------------
+
+
+class TestDownstreamCrashAnalytics:
+    @pytest.fixture(autouse=True)
+    def _env(self):
+        with patch.dict("os.environ", {"MCP_ANALYTICS_DISABLED": "false"}):
+            yield
+
+    @pytest.fixture()
+    def _mock_deps(self):
+        with (
+            patch("wandb_mcp_server.api_client.WandBApiManager") as mock_wbm,
+            patch("wandb_mcp_server.session_manager.MultiTenantSessionManager._start_cleanup_task"),
+        ):
+            mock_wbm.set_context_api_key.return_value = "tok"
+            mock_wbm.reset_context_api_key.return_value = None
+            mock_api = MagicMock()
+            mock_api.viewer = SimpleNamespace(username="alice", entity="team", email="a@co.com")
+            mock_wbm.get_api.return_value = mock_api
+            yield mock_wbm
+
+    @pytest.mark.asyncio
+    async def test_crash_emits_500_analytics(self, _mock_deps):
+        async def crashing_call_next(_):
+            raise RuntimeError("handler exploded")
+
+        with patch("wandb_mcp_server.auth._track_request_event") as mock_track:
+            req = _make_fake_request()
+            with pytest.raises(RuntimeError, match="handler exploded"):
+                await mcp_auth_middleware(req, crashing_call_next)
+
+            mock_track.assert_called_once()
+            call_args = mock_track.call_args
+            assert call_args[0][4] == 500  # status_code positional arg
+
+
+# ---------------------------------------------------------------------------
+# Contextvar reset correctness after mismatch recovery
+# ---------------------------------------------------------------------------
+
+
+class TestContextvarResetAfterMismatch:
+    @pytest.fixture(autouse=True)
+    def _env(self):
+        with patch.dict("os.environ", {"MCP_ANALYTICS_DISABLED": "true"}):
+            yield
+
+    @pytest.fixture()
+    def _mock_deps(self):
+        with (
+            patch("wandb_mcp_server.api_client.WandBApiManager") as mock_wbm,
+            patch("wandb_mcp_server.session_manager.MultiTenantSessionManager._start_cleanup_task"),
+        ):
+            mock_wbm.set_context_api_key.return_value = "tok"
+            mock_wbm.reset_context_api_key.return_value = None
+            mock_api = MagicMock()
+            mock_api.viewer = SimpleNamespace(username="alice", entity="team", email="a@co.com")
+            mock_wbm.get_api.return_value = mock_api
+            yield mock_wbm
+
+    @pytest.mark.asyncio
+    async def test_contextvar_is_none_after_mismatch_request(self, _mock_deps):
+        """After mismatch recovery, contextvar must be None, not the stolen session."""
+        tenant_a_key = "key_AAAA_1234567890_abcdefgh"
+        tenant_b_key = "key_BBBB_1234567890_xyzwvuts"
+        stolen = "sess_stolen_id_from_a"
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {}
+
+        async def call_next(_):
+            return resp
+
+        req_a = _make_fake_request(api_key=tenant_a_key, session_header=stolen)
+        await mcp_auth_middleware(req_a, call_next)
+
+        req_b = _make_fake_request(api_key=tenant_b_key, session_header=stolen)
+        resp_b = MagicMock()
+        resp_b.status_code = 200
+        resp_b.headers = {}
+
+        async def call_next_b(_):
+            return resp_b
+
+        await mcp_auth_middleware(req_b, call_next_b)
+
+        assert current_session_id.get() is None
