@@ -112,6 +112,8 @@ def get_run_history(
         run = wandb_api.run(run_path)
     except wandb.errors.CommError as e:
         raise ValueError(f"Run not found: {run_path}. Error: {e}")
+    except Exception as e:
+        raise ValueError(f"Failed to access run {entity_name}/{project_name}/{run_id}: {type(e).__name__}")
 
     clamped_samples = min(samples, MAX_HISTORY_ROWS)
 
@@ -146,7 +148,7 @@ def get_run_history(
         keys_in_response.update(row.keys())
     keys_in_response.discard("_step")
 
-    return json.dumps(
+    result = json.dumps(
         {
             "rows": clean_rows,
             "run_id": run_id,
@@ -156,3 +158,9 @@ def get_run_history(
             "keys_returned": sorted(keys_in_response),
         }
     )
+
+    from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
+    from wandb_mcp_server.trace_utils import warn_if_response_large
+
+    warn_if_response_large("get_run_history", result, MAX_RESPONSE_TOKENS)
+    return result

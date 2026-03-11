@@ -220,12 +220,19 @@ def process_traces(
     return {"metadata": metadata, "traces": truncated_traces}
 
 
+_METADATA_TOKEN_RESERVE = 2000
+
+
 def enforce_token_budget(
     result_json: str,
     traces: list,
     max_tokens: int,
 ) -> tuple[str, int]:
     """Drop least-recent traces until the serialized result fits within the token budget.
+
+    Reserves `_METADATA_TOKEN_RESERVE` tokens for the metadata/truncation-note
+    envelope so the final re-serialized response (metadata + traces) stays
+    within budget even though the loop only re-serializes the traces array.
 
     Args:
         result_json: The serialized JSON string of the query result.
@@ -243,14 +250,32 @@ def enforce_token_budget(
     logger = get_rich_logger(__name__)
     original_count = len(traces)
     dropped = 0
+    effective_budget = max(1, max_tokens - _METADATA_TOKEN_RESERVE)
 
-    while token_count > max_tokens and len(traces) > 1:
+    while token_count > effective_budget and len(traces) > 1:
         traces.pop()
         dropped += 1
         result_json = json.dumps(traces, cls=DateTimeEncoder)
         token_count = count_tokens(result_json)
 
     logger.info(
-        f"Token budget enforced: dropped {dropped}/{original_count} traces ({token_count} tokens, budget {max_tokens})"
+        f"Token budget enforced: dropped {dropped}/{original_count} traces "
+        f"({token_count} tokens, budget {max_tokens}, reserve {_METADATA_TOKEN_RESERVE})"
     )
     return result_json, dropped
+
+
+def warn_if_response_large(tool_name: str, response_json: str, max_tokens: int) -> None:
+    """Log a warning if a tool response exceeds the token budget.
+
+    This is informational only -- it does NOT truncate the response.
+    Agents and operators can tune `MAX_RESPONSE_TOKENS` or the tool's
+    sampling parameters if responses are consistently too large.
+    """
+    token_count = count_tokens(response_json)
+    if token_count > max_tokens:
+        logger = get_rich_logger(__name__)
+        logger.warning(
+            f"{tool_name} response is {token_count} tokens (budget {max_tokens}). "
+            "Consider reducing samples/sample_size or increasing MAX_RESPONSE_TOKENS."
+        )

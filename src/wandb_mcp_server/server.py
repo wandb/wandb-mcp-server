@@ -281,6 +281,9 @@ def register_tools(mcp_instance: FastMCP) -> None:
         detail_level: "schema" (structural fields only), "summary" (truncated, default),
         "full" (everything untruncated, same as return_full_data=True).
         """
+        _VALID_DETAIL_LEVELS = {"schema", "summary", "full"}
+        if detail_level not in _VALID_DETAIL_LEVELS:
+            raise ValueError(f"detail_level must be one of {_VALID_DETAIL_LEVELS}, got '{detail_level}'")
         if detail_level == "full":
             return_full_data = True
         try:

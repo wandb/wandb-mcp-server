@@ -79,8 +79,14 @@ def _infer_type(value: Any) -> str:
     if isinstance(value, float):
         return "float"
     if isinstance(value, str):
-        if len(value) >= 20 and ("T" in value or "-" in value):
-            return "datetime"
+        if len(value) >= 19:
+            from datetime import datetime as _dt
+
+            try:
+                _dt.fromisoformat(value.replace("Z", "+00:00"))
+                return "datetime"
+            except (ValueError, TypeError):
+                pass
         return "string"
     if isinstance(value, list):
         return "array"
@@ -99,6 +105,9 @@ def infer_trace_schema(
     from wandb_mcp_server.mcp_tools.count_traces import count_traces
     from wandb_mcp_server.mcp_tools.query_weave import get_trace_service
 
+    if sample_size > 500:
+        logger.warning(f"Large sample_size={sample_size} for schema inference; consider using a smaller value")
+
     try:
         api = WandBApiManager.get_api()
         log_tool_call(
@@ -113,25 +122,29 @@ def infer_trace_schema(
     except Exception:
         pass
 
-    total_traces = count_traces(entity_name, project_name)
-    root_traces = count_traces(entity_name, project_name, filters={"trace_roots_only": True})
+    try:
+        total_traces = count_traces(entity_name, project_name)
+        root_traces = count_traces(entity_name, project_name, filters={"trace_roots_only": True})
 
-    service = get_trace_service()
-    result = service.query_traces(
-        entity_name=entity_name,
-        project_name=project_name,
-        filters={},
-        sort_by="started_at",
-        sort_direction="desc",
-        target_limit=sample_size,
-        include_costs=False,
-        include_feedback=False,
-        columns=[],
-        expand_columns=[],
-        truncate_length=100,
-        return_full_data=False,
-        metadata_only=False,
-    )
+        service = get_trace_service()
+        result = service.query_traces(
+            entity_name=entity_name,
+            project_name=project_name,
+            filters={},
+            sort_by="started_at",
+            sort_direction="desc",
+            limit=sample_size,
+            include_costs=False,
+            include_feedback=False,
+            columns=[],
+            expand_columns=[],
+            truncate_length=100,
+            return_full_data=False,
+            metadata_only=False,
+        )
+    except Exception as e:
+        logger.error(f"Failed to query traces for schema inference: {e}")
+        return json.dumps({"error": f"Failed to infer schema for {entity_name}/{project_name}: {type(e).__name__}"})
 
     traces = result.traces if hasattr(result, "traces") else []
     if not traces:
@@ -150,7 +163,12 @@ def infer_trace_schema(
     field_non_null: Dict[str, int] = defaultdict(int)
 
     for trace in traces:
-        trace_dict = trace if isinstance(trace, dict) else {}
+        if isinstance(trace, dict):
+            trace_dict = trace
+        elif hasattr(trace, "model_dump"):
+            trace_dict = trace.model_dump()
+        else:
+            trace_dict = {}
         flat = _flatten_dict(trace_dict)
         for path, value in flat.items():
             inferred = _infer_type(value)
@@ -177,7 +195,7 @@ def infer_trace_schema(
             }
         )
 
-    return json.dumps(
+    result = json.dumps(
         {
             "fields": fields,
             "total_traces": total_traces,
@@ -185,3 +203,9 @@ def infer_trace_schema(
             "sample_size": len(traces),
         }
     )
+
+    from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
+    from wandb_mcp_server.trace_utils import warn_if_response_large
+
+    warn_if_response_large("infer_trace_schema", result, MAX_RESPONSE_TOKENS)
+    return result

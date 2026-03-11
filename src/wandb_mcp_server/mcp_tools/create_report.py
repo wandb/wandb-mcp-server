@@ -4,23 +4,17 @@ SAFE VERSION - W&B Report creation with markdown-only output
 This version eliminates the singleton contamination vulnerability and uses only markdown.
 """
 
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import re
 
 import wandb_workspaces.reports.v2 as wr
 import wandb_workspaces.reports.v2.interface as wr_interface
-from dotenv import load_dotenv
 
 import wandb
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.config import WANDB_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
 
-# Load environment variables
-load_dotenv(dotenv_path=Path(__file__).parent.parent.parent / ".env")
-
-# Configure logging
 logger = get_rich_logger(__name__)
 
 
@@ -271,8 +265,8 @@ def _build_panel_blocks(
                 logger.warning(f"Unknown panel type: {panel_type}")
 
         except Exception as e:
-            logger.warning(f"Failed to build panel '{panel_title}': {e}")
-            blocks.append(wr.P(f"*Panel '{panel_title}' could not be rendered: {e}*"))
+            logger.warning(f"Failed to build panel '{panel_title}': {e}", exc_info=True)
+            blocks.append(wr.P(f"*Panel '{panel_title}' could not be rendered.*"))
 
     return blocks
 

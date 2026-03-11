@@ -13,4 +13,7 @@ WF_TRACE_SERVER_URL: str = (
 
 # Token budget for response truncation. When a query result exceeds this
 # budget, least-recent traces are dropped and a truncation note is appended.
-MAX_RESPONSE_TOKENS: int = int(os.getenv("MAX_RESPONSE_TOKENS", "30000"))
+try:
+    MAX_RESPONSE_TOKENS: int = int(os.getenv("MAX_RESPONSE_TOKENS", "30000"))
+except (ValueError, TypeError):
+    MAX_RESPONSE_TOKENS: int = 30000
