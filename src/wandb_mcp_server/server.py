@@ -266,7 +266,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         filters: Optional[Dict[str, Any]] = None,
         sort_by: str = "started_at",
         sort_direction: str = "desc",
-        limit: int = 10000000,
+        limit: int = 1000,
         include_costs: bool = True,
         include_feedback: bool = True,
         columns: Optional[List[str]] = None,
@@ -303,6 +303,15 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 return_full_data=return_full_data,
                 metadata_only=metadata_only,
             )
+
+            # Normalize traces to plain dicts -- the processor may return
+            # WeaveTrace Pydantic objects which aren't JSON-serializable by
+            # json.dumps and don't support .items() for schema filtering.
+            if result_model.traces:
+                result_model.traces = [
+                    t.model_dump() if hasattr(t, "model_dump") else (t if isinstance(t, dict) else {})
+                    for t in result_model.traces
+                ]
 
             if detail_level == "schema" and result_model.traces:
                 schema_fields = {

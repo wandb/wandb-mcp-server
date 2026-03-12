@@ -378,54 +378,11 @@ class TraceProcessor:
             # Log after truncation
             logger.info(f"After truncation: {len(processed_traces)} traces")
 
-        # Convert dictionaries to WeaveTrace objects
-        try:
-            from wandb_mcp_server.weave_api.models import WeaveTrace
-
-            # Ensure all required fields are present in each trace
-            for trace in processed_traces:
-                # Check for required fields and provide default values if missing
-                if "trace_id" not in trace and "id" in trace:
-                    trace["trace_id"] = trace["id"]
-                if "started_at" not in trace:
-                    trace["started_at"] = datetime.now().isoformat()
-
-            # Convert to Pydantic models
-            converted_traces = []
-            for trace in processed_traces:
-                # Handle datetime strings
-                if "started_at" in trace and isinstance(trace["started_at"], str):
-                    try:
-                        # Try to parse ISO format string
-                        trace["started_at"] = datetime.fromisoformat(trace["started_at"].replace("Z", "+00:00"))
-                    except (ValueError, TypeError):
-                        # If parsing fails, use current time
-                        trace["started_at"] = datetime.now()
-
-                if "ended_at" in trace and trace["ended_at"] and isinstance(trace["ended_at"], str):
-                    try:
-                        trace["ended_at"] = datetime.fromisoformat(trace["ended_at"].replace("Z", "+00:00"))
-                    except (ValueError, TypeError):
-                        trace["ended_at"] = None
-
-                # Create WeaveTrace object
-                try:
-                    converted_trace = WeaveTrace(**trace)
-                    converted_traces.append(converted_trace)
-                except Exception as e:
-                    logger.warning(f"Failed to convert trace {trace.get('id')} to WeaveTrace: {e}")
-                    # Keep the original dictionary if conversion fails
-                    converted_traces.append(trace)
-
-            return QueryResult(metadata=metadata, traces=converted_traces)
-        except ImportError:
-            # If WeaveTrace can't be imported for some reason, return dicts
-            logger.warning("Could not import WeaveTrace model, returning dictionaries")
-            return QueryResult(metadata=metadata, traces=processed_traces)
-        except Exception as e:
-            # If there's any other error in conversion, return dictionaries
-            logger.warning(f"Error converting traces to WeaveTrace: {e}")
-            return QueryResult(metadata=metadata, traces=processed_traces)
+        # Return processed dicts directly. The server.py layer normalizes
+        # any remaining Pydantic objects to dicts before serialization.
+        # Skipping WeaveTrace conversion avoids fragile type coercion and
+        # the mixed-type lists that caused JSON serialization failures.
+        return QueryResult(metadata=metadata, traces=processed_traces)
 
     @staticmethod
     def get_cost(trace: Dict[str, Any], which_cost: str) -> float:
