@@ -30,6 +30,7 @@ test = [
     "anthropic>=0.50.0",
     "pytest-xdist>=3.6.1",
     "pytest-asyncio>=0.26.0",
+    "fastapi>=0.104.0",
 ]
 http = [
     "fastapi>=0.104.0",
@@ -59,7 +60,20 @@ filterwarnings = [
     'ignore:The \`__fields_set__\` attribute is deprecated:pydantic.warnings.PydanticDeprecatedSince20:weave\.trace\.object_record',
 ]
 
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
 [dependency-groups]
 dev = [
     "ruff>=0.11.12",
+    "pre-commit>=4.0.0",
 ]

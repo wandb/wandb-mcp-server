@@ -511,6 +511,28 @@ print(resp.output_text)
 ```
 </details>
 
+### Development
+
+#### Running Tests
+
+Unit tests run without API keys or network access:
+
+```bash
+pip install -e ".[test]"
+pytest tests/ -v
+```
+
+CI runs automatically on every push and PR via GitHub Actions.
+
+#### Two-Repo Model
+
+| Repo | Visibility | Contains |
+|------|-----------|----------|
+| `wandb/wandb-mcp-server` | Public | Tool logic, core server, unit tests |
+| `wandb/wandb-mcp-server-internal` | Private | LLM evals, load tests, Dockerfile, Helm, CI/CD |
+
+The internal repo installs the public repo as a pip dependency.
+
 ### Support
 
 - [GitHub Issues](https://github.com/wandb/wandb-mcp-server/issues)

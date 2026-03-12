@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import sys
-import subprocess
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 
@@ -87,21 +86,21 @@ def add_to_client(args: AddToClientArgs) -> None:
     """
     # Handle potential path parsing issues
     config_path = args.config_path
-    
+
     # Debug: Log the raw config_path to help diagnose issues
     logger.debug(f"Raw config_path argument: '{config_path}'")
-    
+
     # Check if config_path looks malformed (starts with --)
     if config_path.startswith("--"):
         logger.error(f"Invalid config path detected: '{config_path}'")
         logger.error("This usually happens when command line arguments are not properly parsed.")
         logger.error("Try running the command on a single line or check for syntax errors.")
         sys.exit(1)
-    
+
     # Expand user path and resolve to absolute path
     config_path = os.path.expanduser(config_path)
     config_path = os.path.abspath(config_path)
-    
+
     logger.info(f"Using config path: {config_path}")
 
     # Read existing config file or initialize a default structure
@@ -119,25 +118,17 @@ def add_to_client(args: AddToClientArgs) -> None:
                 else:
                     # Loaded JSON is not a dictionary (e.g. `null`, `[]`, `true`)
                     # This is unexpected for a config file that should hold mcpServers.
-                    logger.warning(
-                        f"Config file {config_path} did not contain a JSON object. Using default config."
-                    )
+                    logger.warning(f"Config file {config_path} did not contain a JSON object. Using default config.")
                     # config remains the default {"mcpServers": {}}
         else:
-            logger.info(
-                f"Config file {config_path} doesn't exist. Will create new file."
-            )
+            logger.info(f"Config file {config_path} doesn't exist. Will create new file.")
             # config remains the default {"mcpServers": {}}
     except json.JSONDecodeError as e:
         # This handles empty file or malformed JSON.
-        logger.warning(
-            f"Config file {config_path} is empty or contains invalid JSON: {e}. Using default config."
-        )
+        logger.warning(f"Config file {config_path} is empty or contains invalid JSON: {e}. Using default config.")
         # config remains the default {"mcpServers": {}}.
     except IOError as e:
-        logger.error(
-            f"Fatal error reading config file {config_path}: {e}. Cannot proceed."
-        )
+        logger.error(f"Fatal error reading config file {config_path}: {e}. Cannot proceed.")
         sys.exit(f"Fatal error reading config file: {e}")  # Exit if we can't read
 
     if not isinstance(config.get("mcpServers"), dict):
@@ -157,9 +148,7 @@ def add_to_client(args: AddToClientArgs) -> None:
     overlapping_keys = existing_keys.intersection(new_keys)
 
     if overlapping_keys:
-        logger.info(
-            "The following tools already exist in your config and will be overwritten:"
-        )
+        logger.info("The following tools already exist in your config and will be overwritten:")
         for key in overlapping_keys:
             logger.info(f"- {key}")
 
@@ -181,7 +170,7 @@ def add_to_client(args: AddToClientArgs) -> None:
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
     logger.info(f"Successfully updated config at {config_path}")
-    
+
 
 def add_to_client_cli():
     args = simple_parsing.parse(AddToClientArgs)

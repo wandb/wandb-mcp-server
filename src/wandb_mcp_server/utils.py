@@ -64,6 +64,7 @@ def get_rich_logger(
         show_path=False,
         markup=True,
     )
+
     # Inject session prefix into message if provided via LoggerAdapter extra
     class _SessionPrefixInjectFilter(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:
@@ -92,9 +93,7 @@ def get_rich_logger(
         env_level_value = os.environ.get(env_var_name)
         if env_level_value:
             effective_level_str = env_level_value.upper()
-            source_of_level = (
-                f"environment variable '{env_var_name}' ('{env_level_value}')"
-            )
+            source_of_level = f"environment variable '{env_var_name}' ('{env_level_value}')"
 
     # Attempt to convert the string to a logging level integer
     final_log_level = getattr(logging, effective_level_str, None)
@@ -107,19 +106,11 @@ def get_rich_logger(
         ]
 
         # Check if the issue was with an environment variable and if the original default_level_str is valid
-        if (
-            env_var_name
-            and os.environ.get(env_var_name)
-            and effective_level_str != default_level_str.upper()
-        ):
-            fallback_to_default_level = getattr(
-                logging, default_level_str.upper(), None
-            )
+        if env_var_name and os.environ.get(env_var_name) and effective_level_str != default_level_str.upper():
+            fallback_to_default_level = getattr(logging, default_level_str.upper(), None)
             if isinstance(fallback_to_default_level, int):
                 final_log_level = fallback_to_default_level
-                warning_msg_parts.append(
-                    f"Falling back to function default '{default_level_str.upper()}'."
-                )
+                warning_msg_parts.append(f"Falling back to function default '{default_level_str.upper()}'.")
             else:  # Function default is also bad, use hardcoded INFO
                 final_log_level = logging.INFO
                 warning_msg_parts.append(
@@ -145,32 +136,22 @@ utils_logger = get_rich_logger(__name__)
 class ServerMCPArgs:
     """Arguments for the Weave MCP Server."""
 
-    wandb_api_key: Optional[str] = field(
-        default=None, metadata=dict(help="Weights & Biases API key")
-    )
+    wandb_api_key: Optional[str] = field(default=None, metadata=dict(help="Weights & Biases API key"))
     weave_entity: Optional[str] = field(
         default=None,
-        metadata=dict(
-            help="The Weights & Biases entity to log traced MCP server calls to"
-        ),
+        metadata=dict(help="The Weights & Biases entity to log traced MCP server calls to"),
     )
     weave_project: Optional[str] = field(
         default="weave-mcp-server",
-        metadata=dict(
-            help="The Weights & Biases project to log traced MCP server calls to"
-        ),
+        metadata=dict(help="The Weights & Biases project to log traced MCP server calls to"),
     )
     transport: str = field(
         default="stdio",
-        metadata=dict(
-            help="Transport type: 'stdio' for local MCP client communication or 'http' for HTTP server"
-        ),
+        metadata=dict(help="Transport type: 'stdio' for local MCP client communication or 'http' for HTTP server"),
     )
     port: Optional[int] = field(
         default=None,
-        metadata=dict(
-            help="Port to run the HTTP server on. Defaults to 8080 when using HTTP transport."
-        ),
+        metadata=dict(help="Port to run the HTTP server on. Defaults to 8080 when using HTTP transport."),
     )
     host: str = field(
         default="localhost",
@@ -277,16 +258,10 @@ def merge_metadata(metadata_list: List[Dict]) -> Dict:
         # Update time range
         time_range = metadata.get("time_range", {})
         if time_range.get("earliest"):
-            if (
-                not merged["time_range"]["earliest"]
-                or time_range["earliest"] < merged["time_range"]["earliest"]
-            ):
+            if not merged["time_range"]["earliest"] or time_range["earliest"] < merged["time_range"]["earliest"]:
                 merged["time_range"]["earliest"] = time_range["earliest"]
         if time_range.get("latest"):
-            if (
-                not merged["time_range"]["latest"]
-                or time_range["latest"] > merged["time_range"]["latest"]
-            ):
+            if not merged["time_range"]["latest"] or time_range["latest"] > merged["time_range"]["latest"]:
                 merged["time_range"]["latest"] = time_range["latest"]
 
         # Sum up status counts
@@ -311,9 +286,7 @@ def merge_metadata(metadata_list: List[Dict]) -> Dict:
 def get_git_commit():
     logger = get_rich_logger(__name__)
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True
-        )
+        result = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
         return str(result.stdout.strip())[:8]
     except Exception as e:
         logger.warning(f"Failed to get git commit: {e}")

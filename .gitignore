@@ -16,6 +16,7 @@ wandb/*
 
 # Local documentation and sensitive files
 local/
+resources/
 
 # Distribution / packaging
 .ruff_cache/
@@ -139,7 +140,9 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-.vscode/
+# VS Code / Cursor -- track workspace settings, ignore personal state
+.vscode/*
+!.vscode/settings.json
 
 .cursor/
 
