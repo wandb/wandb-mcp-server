@@ -15,9 +15,10 @@ logger = get_rich_logger(__name__)
 COUNT_WEAVE_TRACES_TOOL_DESCRIPTION = """Count Weave traces matching filters. Returns total count and root trace count.
 
 <when_to_use>
-Use only when you need a count WITHOUT trace data. For most queries, use
-query_weave_traces_tool instead -- it includes `total_matching_count` in the
-response metadata. For W&B runs/metrics, use query_wandb_tool instead.
+Call for quick aggregate counts ("how many traces?", "how many errors?") without
+fetching trace data. Also useful before large queries to check data volume.
+query_weave_traces_tool responses also include `total_matching_count` in metadata.
+For W&B runs/metrics, use query_wandb_tool instead.
 </when_to_use>
 
 Returns the total number of traces in a project and the number of root

@@ -42,14 +42,14 @@ class TestTotalMatchingCountInDescription:
     def test_query_weave_mentions_total_matching_count(self):
         assert "total_matching_count" in QUERY_WEAVE_TRACES_TOOL_DESCRIPTION
 
-    def test_query_weave_says_no_separate_count_needed(self):
-        desc_lower = QUERY_WEAVE_TRACES_TOOL_DESCRIPTION.lower()
-        assert "do not need to call count_weave_traces_tool" in desc_lower
+    def test_query_weave_clarifies_filter_scope(self):
+        assert "current filters" in QUERY_WEAVE_TRACES_TOOL_DESCRIPTION
+        assert "not the project-wide total" in QUERY_WEAVE_TRACES_TOOL_DESCRIPTION.lower()
 
-    def test_count_traces_no_longer_says_call_before(self):
-        assert "Call before large" not in COUNT_WEAVE_TRACES_TOOL_DESCRIPTION
+    def test_count_traces_mentions_quick_counts(self):
+        assert "quick aggregate counts" in COUNT_WEAVE_TRACES_TOOL_DESCRIPTION.lower()
 
-    def test_count_traces_says_use_query_instead(self):
+    def test_count_traces_cross_references_query_tool(self):
         assert "query_weave_traces_tool" in COUNT_WEAVE_TRACES_TOOL_DESCRIPTION
 
 

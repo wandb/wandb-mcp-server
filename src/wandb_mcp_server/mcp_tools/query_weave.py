@@ -221,8 +221,9 @@ Returns
 str
     JSON string containing either full trace data or metadata only, depending on parameters.
     The response metadata includes `total_matching_count` -- the total traces matching your
-    filters before any limit is applied. You do NOT need to call count_weave_traces_tool
-    separately; the count is already in this response.
+    current filters before the limit is applied. Note: this reflects whatever filters you
+    used, not the project-wide total. Use `count_weave_traces_tool` if you need a separate
+    unfiltered count.
 
 <examples>
     ```python
