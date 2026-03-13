@@ -12,62 +12,12 @@ from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
 
 logger = get_rich_logger(__name__)
 
-COUNT_WEAVE_TRACES_TOOL_DESCRIPTION = """count Weave traces and return the total storage \
-size in bytes for the given filters.
-
-Use this tool to query data from Weights & Biases Weave, an observability product for
-tracing and evaluating LLMs and GenAI apps.
-
-This tool only provides COUNT information and STORAGE SIZE (bytes) about traces, \
-not actual logged traces data, metrics or run data.
+COUNT_WEAVE_TRACES_TOOL_DESCRIPTION = """Count Weave traces matching filters. Returns total count and root trace count.
 
 <when_to_use>
-Call this tool BEFORE running large query_weave_traces_tool queries to understand
-how many traces match your filters. This avoids overwhelming the context window
-with unexpectedly large result sets. Also useful for quick aggregate questions
-like "how many failed traces are there?" without retrieving the actual data.
+Call before large query_weave_traces_tool queries to check data size. Also good for quick aggregate questions ("how many failed traces?").
+For W&B runs/metrics, use query_wandb_tool instead.
 </when_to_use>
-
-<tool_choice_guidance>
-<wandb_vs_weave_product_distinction>
-**IMPORTANT PRODUCT DISTINCTION:**
-W&B offers two distinct products with different purposes:
-
-1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model
-    lifecycle management. Use `query_wandb_tool` for questions about:
-    - Experiment runs, metrics, and performance comparisons
-    - Artifact management and model registry
-    - Hyperparameter optimization and sweeps
-    - Project dashboards and reports
-
-2. W&B Weave: A toolkit for LLM and GenAI application observability and evaluation. Use
-    `query_weave_traces_tool` (this tool) for questions about:
-    - Execution traces and paths of LLM operations
-    - LLM inputs, outputs, and intermediate results
-    - Chain of thought visualization and debugging
-    - LLM evaluation results and feedback
-</wandb_vs_weave_product_distinction>
-
-<use_case_selector>
-**USE CASE SELECTOR - READ FIRST:**
-- For runs, metrics, experiments, artifacts, sweeps etc → use query_wandb_tool
-- For traces, LLM calls, chain-of-thought, LLM evaluations, AI agent traces, AI apps etc → use query_weave_traces_tool
-
-=====================================================================
-⚠️ TOOL SELECTION WARNING ⚠️
-This tool is ONLY for WEAVE TRACES (LLM operations), NOT for run metrics or experiments!
-=====================================================================
-
-**KEYWORD GUIDE:**
-If user question contains:
-- "runs", "experiments", "metrics" → Use query_wandb_tool
-- "traces", "LLM calls" etc → Use this tool
-
-**COMMON MISUSE CASES:**
-❌ "Looking at metrics of my latest runs" - Do NOT use this tool, use query_wandb_tool instead
-❌ "Compare performance across experiments" - Do NOT use this tool, use query_wandb_tool instead
-</use_case_selector>
-</tool_choice_guidance>
 
 Returns the total number of traces in a project and the number of root
 (i.e. "parent" or top-level) traces.

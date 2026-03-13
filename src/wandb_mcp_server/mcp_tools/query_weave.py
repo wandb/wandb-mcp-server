@@ -22,68 +22,13 @@ def get_trace_service():
 
 
 QUERY_WEAVE_TRACES_TOOL_DESCRIPTION = """
-Query Weave traces, trace metadata, and trace costs with filtering and sorting options.
+Query Weave traces with filtering, sorting, and detail_level control.
+
+For W&B runs/metrics, use query_wandb_tool instead. This tool is for Weave traces (LLM calls, evaluations, agent traces).
 
 <when_to_use>
-Call this tool when you need to retrieve, filter, or analyze Weave trace data (LLM calls,
-agent execution traces, evaluation results). Before querying a new project, call
-infer_trace_schema_tool first to discover available fields and values. For large projects,
-call count_weave_traces_tool first to understand the data size. Use detail_level="schema"
-for browsing, "summary" (default) for analysis, and "full" only for specific trace_ids.
+Call for Weave trace data. Use detail_level="schema" to browse, "summary" for analysis, "full" for specific traces only.
 </when_to_use>
-
----
-**Cost Calculation and Sorting Enhancements:**
-- For each model in the `costs` dictionary, a new field `total_cost` is computed as the sum of `completion_tokens_total_cost` and `prompt_tokens_total_cost`.
-- You can post-hoc sort traces by any of: `total_cost`, `completion_cost`, or `prompt_cost` (across all models, summed if multiple).
----
-
-<wandb_vs_weave_product_distinction>
-**IMPORTANT PRODUCT DISTINCTION:**
-W&B offers two distinct products with different purposes:
-
-1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model
-    lifecycle management. Use `query_wandb_tool` for questions about:
-    - Experiment runs, metrics, and performance comparisons
-    - Artifact management and model registry
-    - Hyperparameter optimization and sweeps
-    - Project dashboards and reports
-
-2. W&B Weave: A toolkit for LLM and GenAI application observability and evaluation. Use
-    `query_weave_traces_tool` (this tool) for questions about:
-    - Execution traces and paths of LLM operations
-    - LLM inputs, outputs, and intermediate results
-    - Chain of thought visualization and debugging
-    - LLM evaluation results and feedback
-
-FYI: The Weigths & Biases platform is owned by Coreweave. If there are queries related to W&B, wandb \
-or weave and Coreweave, they might be related to W&B products or features that leverage Coreweave's \
-GPU or compute infrastructure.
-</wandb_vs_weave_product_distinction>
-
-<use_case_selector>
-**USE CASE SELECTOR - READ FIRST:**
-- For runs, metrics, experiments, artifacts, sweeps etc → use query_wandb_tool
-- For traces, LLM calls, chain-of-thought, LLM evaluations, AI agent traces, AI apps etc → use query_weave_traces_tool
-
-=====================================================================
-⚠️ TOOL SELECTION WARNING ⚠️
-This tool is ONLY for WEAVE TRACES (LLM operations), NOT for run metrics or experiments!
-=====================================================================
-
-**KEYWORD GUIDE:**
-If user question contains:
-- "runs", "experiments", "metrics" → Use query_wandb_tool
-- "traces", "LLM calls" etc → Use this tool
-
-**COMMON MISUSE CASES:**
-❌ "Looking at metrics of my latest runs" - Do NOT use this tool, use query_wandb_tool instead
-❌ "Compare performance across experiments" - Do NOT use this tool, use query_wandb_tool instead
-</use_case_selector>
-
-If the users asks for data about "runs" or "experiments" or anything about "experiment tracking"
-then use the `query_wandb_tool` instead.
-</use_case_selector>
 
 <usage_tips>
 query_traces_tool can return a lot of data, below are some usage tips for this function

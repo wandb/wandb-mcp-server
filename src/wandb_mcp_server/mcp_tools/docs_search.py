@@ -20,25 +20,10 @@ logger = get_rich_logger(__name__)
 DOCS_MCP_URL = "https://docs.wandb.ai/mcp"
 DOCS_SEARCH_TIMEOUT = 30
 
-SEARCH_WANDB_DOCS_TOOL_DESCRIPTION = """Search the official Weights & Biases documentation.
-
-Returns relevant documentation snippets for questions about W&B SDK usage,
-Weave APIs, report configuration, scorer design, artifact management, sweep
-configuration, and any other W&B product feature.
+SEARCH_WANDB_DOCS_TOOL_DESCRIPTION = """Search official W&B documentation for API usage, code examples, and guides.
 
 <when_to_use>
-Call this tool when the agent or user needs to know HOW to use a W&B feature,
-what parameters an API accepts, or how to write code that uses W&B/Weave.
-
-This tool searches the full docs.wandb.ai documentation. It is complementary
-to the data query tools -- use those to inspect actual project data, and use
-this tool to look up API usage and best practices.
-
-Examples of when to call this tool:
-- "How do I create a custom Weave scorer?"
-- "What filter options does Runset support for W&B Reports?"
-- "How do I log images to a W&B run?"
-- "What metrics can I track with wandb.log?"
+Call when you need to know HOW to use a W&B/Weave feature or API. Searches docs.wandb.ai.
 </when_to_use>
 
 Parameters
@@ -73,16 +58,37 @@ async def search_wandb_docs(query: str) -> str:
                     "jsonrpc": "2.0",
                     "method": "tools/call",
                     "params": {
-                        "name": "SearchWeightsBiasesDocumentation",
+                        "name": "search_weights_biases_documentation",
                         "arguments": {"query": query},
                     },
                     "id": 1,
                 },
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
                 timeout=DOCS_SEARCH_TIMEOUT,
             )
             resp.raise_for_status()
-            result = resp.json()
+
+            # The docs MCP returns SSE format: "event: message\ndata: {...}\n"
+            body = resp.text
+            result = None
+            for line in body.split("\n"):
+                if line.startswith("data: "):
+                    try:
+                        result = json.loads(line[6:])
+                        break
+                    except json.JSONDecodeError:
+                        continue
+
+            if not result:
+                result = resp.json()
+
+            if "error" in result:
+                return json.dumps(
+                    {"error": result["error"].get("message", "Unknown docs search error"), "query": query}
+                )
 
             content_list = result.get("result", {}).get("content", [])
             if content_list and isinstance(content_list, list):

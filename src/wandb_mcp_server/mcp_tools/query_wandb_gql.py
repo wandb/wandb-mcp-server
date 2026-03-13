@@ -16,61 +16,15 @@ from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
 logger = get_rich_logger(__name__)
 
 
-QUERY_WANDB_GQL_TOOL_DESCRIPTION = """Execute an arbitrary GraphQL query against the Weights & Biases (W&B) Models API.
+QUERY_WANDB_GQL_TOOL_DESCRIPTION = """Execute a GraphQL query against the W&B Models API.
 
-Use this tool to query data from Weights & Biases Models features, including experiment tracking runs,
-model registry, reports, artifacts, sweeps.
+Use for experiment tracking runs, metrics, configs, artifacts, sweeps, and model registry.
+For LLM traces or Weave evaluations, use query_weave_traces_tool instead.
+For time-series metric history of a specific run, use get_run_history_tool instead.
 
 <when_to_use>
-Call this tool when the user asks about W&B experiment tracking: runs, metrics,
-sweeps, artifacts, or model registry. This is for traditional ML experiment data,
-NOT for LLM traces or Weave evaluations. If you need time-series metric history
-for a specific run, use get_run_history_tool instead -- it returns sampled
-step-by-step data more efficiently than GraphQL pagination.
+Call when user asks about runs, experiments, metrics, sweeps, or artifacts.
 </when_to_use>
-
-<wandb_vs_weave_product_distinction>
-**IMPORTANT PRODUCT DISTINCTION:**
-W&B offers two distinct products with different purposes:
-
-1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model
-    lifecycle management. Use `query_wandb_tool` for questions about:
-    - Experiment runs, metrics, and performance comparisons
-    - Artifact management and model registry
-    - Hyperparameter optimization and sweeps
-    - Project dashboards and reports
-
-2. W&B Weave: A toolkit for LLM and GenAI application observability and evaluation. Use
-    `query_weave_traces_tool` for questions about:
-    - Execution traces and paths of LLM operations
-    - LLM inputs, outputs, and intermediate results
-    - Chain of thought visualization and debugging
-    - LLM evaluation results and feedback
-
-FYI: The Weigths & Biases platform is owned by Coreweave. If there are queries related to W&B, wandb \
-or weave and Coreweave, they might be related to W&B products or features that leverage Coreweave's \
-GPU or compute infrastructure.
-</wandb_vs_weave_product_distinction>
-
-<use_case_selector>
-**USE CASE SELECTOR - READ FIRST:**
-- For runs, metrics, experiments, artifacts, sweeps etc → use query_wandb_tool (this tool)
-- For traces, LLM calls, chain-of-thought, LLM evaluations, AI agent traces, AI apps etc → use query_weave_traces_tool
-
-=====================================================================
-⚠️ TOOL SELECTION WARNING ⚠️
-This tool is ONLY for WANDB MODELS DATA (MLOps), NOT for LLM TRACES or GENAI APPS!
-=====================================================================
-
-**KEYWORD GUIDE:**
-If user question contains:
-- "runs", "experiments", "metrics" → Use query_wandb_tool (this tool)
-- "traces", "LLM calls" etc → Use query_weave_traces_tool
-
-**COMMON MISUSE CASES:**
-❌ "Looking at performance of my latest weave evals" - Use query_weave_traces_tool
-❌ "what system prompt was used for my openai call" - Use query_weave_traces_tool
-❌ "Show me the traces for my weave evals" - Use query_weave_traces_tool
 
 <query_analysis_step>
 **STEP 1: ANALYZE THE USER QUERY FIRST!**

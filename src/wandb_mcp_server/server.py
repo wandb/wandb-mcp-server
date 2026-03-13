@@ -48,10 +48,8 @@ from wandb_mcp_server.mcp_tools.query_wandb_gql import (
     QUERY_WANDB_GQL_TOOL_DESCRIPTION,
     query_paginated_wandb_gql,
 )
-from wandb_mcp_server.mcp_tools.query_wandbot import (
-    WANDBOT_TOOL_DESCRIPTION,
-    query_wandbot_api,
-)
+
+# wandbot removed -- zero usage across 400+ benchmark runs, superseded by search_wandb_docs_tool
 from wandb_mcp_server.mcp_tools.query_weave import (
     QUERY_WEAVE_TRACES_TOOL_DESCRIPTION,
     query_paginated_weave_traces,
@@ -253,7 +251,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
     - query_wandb_tool: Execute GraphQL queries against W&B experiment data
     - create_wandb_report_tool: Create shareable reports with visualizations
     - query_wandb_entity_projects: List available entities and projects
-    - query_wandb_support_bot: Get help via wandbot RAG-powered support
+    - search_wandb_docs_tool: Search official W&B documentation
 
     Args:
         mcp_instance: The FastMCP instance to register tools on
@@ -403,10 +401,6 @@ def register_tools(mcp_instance: FastMCP) -> None:
     @mcp_instance.tool(description=LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION)
     def query_wandb_entity_projects(entity: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
         return list_entity_projects(entity)
-
-    @mcp_instance.tool(description=WANDBOT_TOOL_DESCRIPTION)
-    def query_wandb_support_bot(question: str) -> Dict[str, Any]:
-        return query_wandbot_api(question)
 
     from wandb_mcp_server.mcp_tools.infer_schema import (
         INFER_TRACE_SCHEMA_TOOL_DESCRIPTION,
