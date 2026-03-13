@@ -109,6 +109,7 @@ class TraceMetadata(BaseModel):
     """Metadata about a collection of traces."""
 
     total_traces: int = 0
+    total_matching_count: int = 0
     token_counts: Dict[str, Union[int, float]] = Field(default_factory=dict)
     time_range: Dict[str, Optional[datetime]] = Field(default_factory=dict)
     status_summary: Dict[str, int] = Field(default_factory=dict)

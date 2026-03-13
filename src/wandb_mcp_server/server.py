@@ -302,6 +302,16 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 metadata_only=metadata_only,
             )
 
+            try:
+                matching_count = count_traces(
+                    entity_name=entity_name,
+                    project_name=project_name,
+                    filters=filters or {},
+                )
+                result_model.metadata.total_matching_count = matching_count
+            except Exception:
+                pass
+
             # Normalize traces to plain dicts -- the processor may return
             # WeaveTrace Pydantic objects which aren't JSON-serializable by
             # json.dumps and don't support .items() for schema filtering.
@@ -362,7 +372,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             return json.dumps({"total_count": total_count, "root_traces_count": root_traces_count})
         except Exception as e:
             logger.error(f"Error in count_weave_traces_tool: {e}")
-            return f"Error counting traces: {str(e)}"
+            return json.dumps({"error": f"Error counting traces: {str(e)}"})
 
     @mcp_instance.tool(description=QUERY_WANDB_GQL_TOOL_DESCRIPTION)
     async def query_wandb_tool(
@@ -451,15 +461,19 @@ def register_tools(mcp_instance: FastMCP) -> None:
         max_step: Optional[int] = None,
     ) -> str:
         """Retrieve sampled time-series metric data from a W&B run."""
-        return get_run_history(
-            entity_name=entity_name,
-            project_name=project_name,
-            run_id=run_id,
-            keys=keys,
-            samples=samples,
-            min_step=min_step,
-            max_step=max_step,
-        )
+        try:
+            return get_run_history(
+                entity_name=entity_name,
+                project_name=project_name,
+                run_id=run_id,
+                keys=keys,
+                samples=samples,
+                min_step=min_step,
+                max_step=max_step,
+            )
+        except Exception as e:
+            logger.error(f"Error in get_run_history_tool: {e}")
+            return json.dumps({"error": str(e)})
 
 
 # ===============================================================================

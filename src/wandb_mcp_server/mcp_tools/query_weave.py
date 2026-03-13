@@ -219,7 +219,10 @@ detail_level : str, optional
 Returns
 -------
 str
-    JSON string containing either full trace data or metadata only, depending on parameters
+    JSON string containing either full trace data or metadata only, depending on parameters.
+    The response metadata includes `total_matching_count` -- the total traces matching your
+    filters before any limit is applied. You do NOT need to call count_weave_traces_tool
+    separately; the count is already in this response.
 
 <examples>
     ```python
@@ -227,7 +230,7 @@ str
     query_traces_tool(
         entity_name="my-team",
         project_name="my-project",
-        filters={"root_traces_only": True},
+        filters={"trace_roots_only": True},
         metadata_only=True,
         return_full_data=False
     )
