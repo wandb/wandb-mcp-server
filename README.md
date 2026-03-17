@@ -2,6 +2,13 @@
 
 Query and analyze your Weights & Biases data using natural language through the Model Context Protocol.
 
+[![CI](https://github.com/wandb/wandb-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/wandb/wandb-mcp-server/actions/workflows/ci.yml)
+[![Eval](https://github.com/wandb/wandb-mcp-server/actions/workflows/eval.yml/badge.svg)](https://github.com/wandb/wandb-mcp-server/actions/workflows/eval.yml)
+<!-- BEGIN EVAL BADGES -->
+[![SDK](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wandb/wandb-mcp-server/main/.badges/sdk.json)](https://wandb.ai/wandb/mcp-server-ci/weave)
+[![MCP](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wandb/wandb-mcp-server/main/.badges/mcp.json)](https://wandb.ai/wandb/mcp-server-ci/weave)
+<!-- END EVAL BADGES -->
+
 <div align="center">
   <a href="https://cursor.com/en/install-mcp?name=wandb&config=eyJ0cmFuc3BvcnQiOiJodHRwIiwidXJsIjoiaHR0cHM6Ly9tY3Aud2l0aHdhbmRiLmNvbS9tY3AiLCJoZWFkZXJzIjp7IkF1dGhvcml6YXRpb24iOiJCZWFyZXIge3tXQU5EQl9BUElfS0VZfX0iLCJBY2NlcHQiOiJhcHBsaWNhdGlvbi9qc29uLCB0ZXh0L2V2ZW50LXN0cmVhbSJ9fQ%3D%3D"><img src="https://cursor.com/deeplink/mcp-install-dark.svg" alt="Cursor" height="28"/></a>
   <a href="#claude-desktop"><img src="https://img.shields.io/badge/Claude-6B5CE6?logo=anthropic&logoColor=white" alt="Claude" height="28"/></a>

@@ -1,0 +1,227 @@
+name: Eval
+
+# Nightly + manual eval benchmark against staging.
+# Runs both SDK-only (baseline) and MCP agents via WandBAgentFactory,
+# then updates README badges with pass rates.
+
+on:
+  schedule:
+    # Daily at 11 PM PT (7 AM UTC)
+    - cron: "0 7 * * *"
+
+  workflow_dispatch:
+    inputs:
+      agents:
+        description: 'JSON array of agent variants, e.g. ["wandb-primary","mcp-v3-lazy"]'
+        required: false
+        default: ""
+        type: string
+      parallelism:
+        description: "Weave parallelism (concurrent tasks)"
+        required: false
+        default: "15"
+        type: string
+
+jobs:
+  eval:
+    name: "Eval (${{ matrix.variant }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJson(inputs.agents || '["wandb-primary", "mcp-v3-lazy"]') }}
+
+    env:
+      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+
+    steps:
+      - name: Checkout wandb-mcp-server
+        uses: actions/checkout@v4
+
+      - name: Checkout WandBAgentFactory
+        uses: actions/checkout@v4
+        with:
+          repository: wandb/WandBAgentFactory
+          ref: main
+          token: ${{ secrets.WBAF_PAT }}
+          path: wbaf
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        working-directory: wbaf
+        run: uv python install
+
+      - name: Install dependencies
+        working-directory: wbaf
+        run: uv sync
+
+      - name: Configure Weave project
+        working-directory: wbaf
+        run: |
+          printf 'entity: wandb\nproject: mcp-server-ci\n' > wandb_settings.yaml
+
+      - name: Run evaluation
+        working-directory: wbaf
+        run: |
+          PARALLELISM="${{ inputs.parallelism || '15' }}"
+          AGENT="claude-code-${{ matrix.variant }}"
+          echo "Agent: $AGENT, parallelism: $PARALLELISM"
+          uv run python -W ignore -m core.run_eval \
+            evals/mcp-v030-staging.yaml \
+            --agent "$AGENT" \
+            --weave-parallelism "$PARALLELISM" \
+            2>&1 | tee eval-output.log
+
+      - name: Extract results summary
+        if: always()
+        id: results
+        working-directory: wbaf
+        run: |
+          python3 -c "
+          import re, json, sys
+
+          log = open('eval-output.log').read()
+
+          summary = {}
+          for line in log.splitlines():
+              m = re.match(r'^[\w-]+:\s*(\{.+\})\s*$', line)
+              if m:
+                  try:
+                      summary = eval(m.group(1))
+                  except Exception:
+                      pass
+
+          scorer = summary.get('scorer') or {}
+          output = summary.get('output', {})
+
+          passed = scorer.get('passed', {}).get('true_count', 0)
+          total = (output.get('succeeded', {}).get('true_count', 0)
+                   + output.get('succeeded', {}).get('false_count', 0))
+          score_mean = scorer.get('score', {}).get('mean', 0)
+
+          result = {
+              'passed': passed,
+              'failed': total - passed,
+              'total': total,
+              'score_mean': round(score_mean, 4),
+          }
+
+          print(json.dumps(result, indent=2))
+          with open('results-summary.json', 'w') as f:
+              json.dump(result, f)
+          " || echo '{"passed":0,"failed":0,"total":0,"score_mean":0}' > wbaf/results-summary.json
+
+      - name: Upload results summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.variant }}
+          path: wbaf/results-summary.json
+          retention-days: 90
+
+  update-badges:
+    name: Update README & Badges
+    needs: eval
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.WBAF_PAT }}
+
+      - name: Download all result summaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          path: results/
+
+      - name: Update badges and README
+        run: |
+          python3 -c "
+          import json, re
+          from pathlib import Path
+
+          agents = {}
+          for result_dir in sorted(Path('results').iterdir()):
+              if not result_dir.is_dir():
+                  continue
+              variant = result_dir.name.replace('results-', '')
+              summary_file = result_dir / 'results-summary.json'
+              if summary_file.exists():
+                  agents[variant] = json.loads(summary_file.read_text())
+
+          badge_names = {
+              'wandb-primary': 'sdk',
+              'mcp-v3-lazy': 'mcp',
+          }
+
+          badges_dir = Path('.badges')
+          badges_dir.mkdir(exist_ok=True)
+
+          for variant, data in agents.items():
+              passed = data.get('passed', 0)
+              total = data.get('total', 0)
+              badge_key = badge_names.get(variant, variant)
+
+              if total > 0:
+                  pct = passed / total
+                  label = f'{passed}/{total} ({pct:.0%})'
+                  color = 'brightgreen' if pct >= 0.8 else 'yellow' if pct >= 0.5 else 'red'
+              else:
+                  label = 'no data'
+                  color = 'lightgrey'
+
+              badge = {
+                  'schemaVersion': 1,
+                  'label': badge_key.upper(),
+                  'message': label,
+                  'color': color,
+              }
+              (badges_dir / f'{badge_key}.json').write_text(
+                  json.dumps(badge, indent=2) + '\n'
+              )
+              print(f'{badge_key}: {label} ({color})')
+
+          readme = Path('README.md')
+          content = readme.read_text()
+
+          parts = []
+          for variant, data in sorted(agents.items()):
+              passed = data.get('passed', 0)
+              total = data.get('total', 0)
+              badge_key = badge_names.get(variant, variant)
+              if total > 0:
+                  parts.append(f'{badge_key.upper()}: {passed}/{total} ({passed/total:.0%})')
+          status = ' | '.join(parts) if parts else 'pending'
+
+          pattern = r'<!-- BEGIN EVAL BADGES -->.*?<!-- END EVAL BADGES -->'
+          if re.search(pattern, content, re.DOTALL):
+              sdk_badge = '[![SDK](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wandb/wandb-mcp-server/main/.badges/sdk.json)](https://wandb.ai/wandb/mcp-server-ci/weave)'
+              mcp_badge = '[![MCP](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wandb/wandb-mcp-server/main/.badges/mcp.json)](https://wandb.ai/wandb/mcp-server-ci/weave)'
+              replacement = f'<!-- BEGIN EVAL BADGES -->\n{sdk_badge}\n{mcp_badge}\n<!-- END EVAL BADGES -->'
+              content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+              readme.write_text(content)
+              print(f'Updated README badges: {status}')
+          else:
+              print('No badge markers found in README, skipping update')
+          "
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md .badges/
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "chore: update eval badges [skip ci]"
+            git push
+          fi
