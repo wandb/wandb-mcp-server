@@ -120,7 +120,7 @@ def infer_trace_schema(
             },
         )
     except Exception:
-        pass
+        logger.debug("analytics emit failed", exc_info=True)
 
     try:
         total_traces = count_traces(entity_name, project_name)

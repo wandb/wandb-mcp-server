@@ -1,12 +1,20 @@
 """Utility functions for processing Weave traces."""
 
+import functools
 import json
 import re
 from datetime import datetime
 from typing import Any, Dict, List
 
 import tiktoken
+
 from wandb_mcp_server.utils import get_rich_logger
+
+
+@functools.lru_cache(maxsize=1)
+def _get_tiktoken_encoding():
+    """Cached tiktoken encoding to avoid per-call overhead."""
+    return tiktoken.get_encoding("cl100k_base")
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -78,10 +86,8 @@ def truncate_value(value: Any, max_length: int = 200) -> Any:
 def count_tokens(text: str) -> int:
     """Count tokens in a string using tiktoken."""
     try:
-        encoding = tiktoken.get_encoding("cl100k_base")  # Using OpenAI's encoding
-        return len(encoding.encode(text))
+        return len(_get_tiktoken_encoding().encode(text))
     except Exception:
-        # Fallback to approximate token count if tiktoken fails
         return len(text.split())
 
 
@@ -187,6 +193,9 @@ def process_traces(
     """
     logger = get_rich_logger(__name__)
 
+    # Normalize Pydantic models to dicts so .items()/.get() work uniformly.
+    traces = [t.model_dump() if hasattr(t, "model_dump") else t for t in traces]
+
     logger.info(
         f"process_traces called with {len(traces)} traces, "
         f"detail_level={detail_level}, truncate_length={truncate_length}, return_full_data={return_full_data}"
@@ -234,9 +243,13 @@ def enforce_token_budget(
     envelope so the final re-serialized response (metadata + traces) stays
     within budget even though the loop only re-serializes the traces array.
 
+    Works on a copy to avoid mutating the caller's list. The caller should
+    use the returned JSON and dropped count, then slice their own list if
+    needed (e.g. ``traces[:len(traces) - dropped]``).
+
     Args:
         result_json: The serialized JSON string of the query result.
-        traces: The list of trace dicts (mutated in place by the caller after).
+        traces: The list of trace dicts (NOT mutated).
         max_tokens: Maximum token budget.
 
     Returns:
@@ -248,14 +261,15 @@ def enforce_token_budget(
         return result_json, 0
 
     logger = get_rich_logger(__name__)
-    original_count = len(traces)
+    working = list(traces)
+    original_count = len(working)
     dropped = 0
     effective_budget = max(1, max_tokens - _METADATA_TOKEN_RESERVE)
 
-    while token_count > effective_budget and len(traces) > 1:
-        traces.pop()
+    while token_count > effective_budget and len(working) > 1:
+        working.pop()
         dropped += 1
-        result_json = json.dumps(traces, cls=DateTimeEncoder)
+        result_json = json.dumps(working, cls=DateTimeEncoder)
         token_count = count_tokens(result_json)
 
     logger.info(

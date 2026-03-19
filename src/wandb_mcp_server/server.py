@@ -310,7 +310,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 )
                 result_model.metadata.total_matching_count = matching_count
             except Exception:
-                pass
+                logger.debug("count_traces for total_matching_count failed", exc_info=True)
 
             # Normalize traces to plain dicts -- the processor may return
             # WeaveTrace Pydantic objects which aren't JSON-serializable by
@@ -339,8 +339,9 @@ def register_tools(mcp_instance: FastMCP) -> None:
 
             response_json = result_model.model_dump_json()
             if result_model.traces:
-                _, dropped = enforce_token_budget(response_json, result_model.traces, MAX_RESPONSE_TOKENS)
+                truncated_json, dropped = enforce_token_budget(response_json, result_model.traces, MAX_RESPONSE_TOKENS)
                 if dropped > 0:
+                    result_model.traces = result_model.traces[: len(result_model.traces) - dropped]
                     result_model.metadata.truncation_applied = True
                     result_model.metadata.truncation_dropped_count = dropped
                     result_model.metadata.truncation_note = (

@@ -130,3 +130,67 @@ class TestGetRunHistory:
 
         with pytest.raises(ValueError, match="API key"):
             get_run_history("e", "p", "run1")
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_step_range_uses_scan_history(self, mock_wandb_mod, mock_api_mgr):
+        """min_step/max_step must use scan_history, not history (which doesn't support them)."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        mock_run = MagicMock()
+        mock_run.name = "r1"
+        mock_run.lastHistoryStep = 1000
+        mock_run.scan_history.return_value = [
+            {"_step": 50, "loss": 1.5},
+            {"_step": 100, "loss": 1.0},
+            {"_step": 150, "loss": 0.7},
+        ]
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(get_run_history("e", "p", "run1", min_step=50, max_step=200))
+
+        mock_run.scan_history.assert_called_once()
+        call_kwargs = mock_run.scan_history.call_args[1]
+        assert call_kwargs["min_step"] == 50
+        assert call_kwargs["max_step"] == 200
+        mock_run.history.assert_not_called()
+        assert result["sampled_points"] == 3
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_no_step_range_uses_history(self, mock_wandb_mod, mock_api_mgr):
+        """Without min_step/max_step, should use history() for sampled data."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        mock_run = MagicMock()
+        mock_run.name = "r1"
+        mock_run.lastHistoryStep = 100
+        mock_run.history.return_value = [{"_step": 0, "loss": 1.0}]
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        get_run_history("e", "p", "run1", samples=100)
+
+        mock_run.history.assert_called_once()
+        mock_run.scan_history.assert_not_called()
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_scan_history_samples_large_result(self, mock_wandb_mod, mock_api_mgr):
+        """scan_history results should be client-side sampled to match the samples parameter."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        mock_run = MagicMock()
+        mock_run.name = "r1"
+        mock_run.lastHistoryStep = 10000
+        mock_run.scan_history.return_value = [{"_step": i, "loss": float(i)} for i in range(5000)]
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(get_run_history("e", "p", "run1", min_step=0, samples=500))
+
+        assert result["sampled_points"] <= 500

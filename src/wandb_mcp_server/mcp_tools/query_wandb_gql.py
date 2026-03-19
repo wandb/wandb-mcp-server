@@ -568,7 +568,7 @@ def query_paginated_wandb_gql(
                 },
             )
         except Exception:
-            pass
+            logger.debug("analytics emit failed", exc_info=True)
         logger.info("--- Inside query_paginated_wandb_gql: Step 0: Execute Initial Query ---")
 
         # Determine limit key and set initial page vars

@@ -35,15 +35,12 @@ class TestEnforceTokenBudget:
 
         _, dropped = enforce_token_budget(result_json, traces, budget)
         assert dropped > 0
-        assert len(traces) < 20
-        assert len(traces) + dropped == 20
 
     def test_keeps_at_least_one_trace(self):
         traces = self._make_traces(5)
         result_json = json.dumps(traces)
 
         _, dropped = enforce_token_budget(result_json, traces, max_tokens=1)
-        assert len(traces) >= 1
         assert dropped == 4
 
     def test_drops_from_end(self):
@@ -51,9 +48,9 @@ class TestEnforceTokenBudget:
         result_json = json.dumps(traces)
         full_tokens = count_tokens(result_json)
 
-        _, dropped = enforce_token_budget(result_json, traces, max_tokens=full_tokens // 2)
-        remaining_ids = [t["id"] for t in traces]
-        assert remaining_ids[0] == "t0"
+        new_json, dropped = enforce_token_budget(result_json, traces, max_tokens=full_tokens // 2)
+        remaining = json.loads(new_json)
+        assert remaining[0]["id"] == "t0"
 
     def test_returns_valid_json(self):
         traces = self._make_traces(10)
@@ -63,6 +60,17 @@ class TestEnforceTokenBudget:
         new_json, _ = enforce_token_budget(result_json, traces, max_tokens=full_tokens // 4)
         parsed = json.loads(new_json)
         assert isinstance(parsed, list)
+
+    def test_does_not_mutate_input_list(self):
+        """enforce_token_budget must not mutate the caller's trace list."""
+        traces = self._make_traces(20)
+        original_len = len(traces)
+        result_json = json.dumps(traces)
+        budget = count_tokens(result_json) // 3
+
+        _, dropped = enforce_token_budget(result_json, traces, budget)
+        assert dropped > 0
+        assert len(traces) == original_len
 
 
 class TestTraceMetadataTruncationFields:

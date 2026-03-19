@@ -502,6 +502,8 @@ class TraceService:
         Returns:
             QueryResult object with metadata and optionally traces.
         """
+        self.invalid_columns = set()
+
         # Special handling for cost-based sorting
         client_side_cost_sort = sort_by in self.COST_FIELDS
 

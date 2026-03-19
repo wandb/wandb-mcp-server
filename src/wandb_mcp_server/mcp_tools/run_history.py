@@ -1,7 +1,7 @@
 """Retrieve sampled time-series metric history for a W&B run.
 
-Uses `wandb.Api().run().history()` to return step-indexed metric rows
-without pulling the entire history DataFrame.
+Uses `wandb.Api().run().history()` for sampled data and
+`run.scan_history()` when a step range (min_step/max_step) is provided.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ def get_run_history(
             },
         )
     except Exception:
-        pass
+        logger.debug("analytics emit failed", exc_info=True)
 
     api_key = WandBApiManager.get_api_key()
     if not api_key:
@@ -117,18 +117,27 @@ def get_run_history(
 
     clamped_samples = min(samples, MAX_HISTORY_ROWS)
 
-    history_kwargs: Dict[str, Any] = {"samples": clamped_samples, "pandas": False}
-    if keys:
-        history_kwargs["keys"] = keys
-    if min_step is not None:
-        history_kwargs["x_axis"] = "_step"
-        history_kwargs["min_step"] = min_step
-    if max_step is not None:
-        history_kwargs["x_axis"] = "_step"
-        history_kwargs["max_step"] = max_step
-
     try:
-        rows = list(run.history(**history_kwargs))
+        if min_step is not None or max_step is not None:
+            # scan_history supports min_step/max_step; history() does not.
+            scan_kwargs: Dict[str, Any] = {}
+            if keys:
+                scan_kwargs["keys"] = keys
+            if min_step is not None:
+                scan_kwargs["min_step"] = min_step
+            if max_step is not None:
+                scan_kwargs["max_step"] = max_step
+            all_rows = list(run.scan_history(**scan_kwargs))
+            if len(all_rows) > clamped_samples:
+                step = max(1, len(all_rows) // clamped_samples)
+                rows = all_rows[::step][:clamped_samples]
+            else:
+                rows = all_rows
+        else:
+            history_kwargs: Dict[str, Any] = {"samples": clamped_samples, "pandas": False}
+            if keys:
+                history_kwargs["keys"] = keys
+            rows = list(run.history(**history_kwargs))
     except Exception as e:
         raise ValueError(f"Failed to fetch history for run {run_id}: {e}")
 

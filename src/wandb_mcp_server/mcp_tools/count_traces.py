@@ -142,8 +142,7 @@ def count_traces(
         logger.error("W&B API key not found in context or environment variables.")
         raise ValueError("W&B API key is required to query Weave traces count.")
 
-    # Debug logging to diagnose API key issues
-    logger.debug(f"Using W&B API key: length={len(api_key)}, is_40_chars={len(api_key) == 40}")
+    logger.debug("W&B API key: present")
 
     try:
         api = WandBApiManager.get_api()
@@ -158,7 +157,7 @@ def count_traces(
             },
         )
     except Exception:
-        pass
+        logger.debug("analytics emit failed", exc_info=True)
 
     request_body: Dict[str, Any] = {"project_id": project_id}
     filter_payload: Dict[str, Any] = {}  # For fields that go into the top-level 'filter' object
@@ -269,10 +268,8 @@ def count_traces(
         if response.status_code != 200:
             error_msg = f"Error querying Weave trace count: {response.status_code} - {response.text}"
             logger.error(error_msg)
-            # Log API key info for debugging
-            logger.error(f"API key info: length={len(api_key)}, is_40_chars={len(api_key) == 40}")
             if "40 characters" in response.text:
-                logger.error(f"W&B requires exactly 40 character API keys. Current key has {len(api_key)} characters.")
+                logger.error("W&B API key does not meet length requirements.")
             # Log request body for easier debugging on error
             logger.debug(f"Failed request body: {json.dumps(request_body)}")
             raise Exception(error_msg)

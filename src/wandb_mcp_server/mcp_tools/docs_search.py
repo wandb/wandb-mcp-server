@@ -48,7 +48,7 @@ async def search_wandb_docs(query: str) -> str:
     try:
         log_tool_call("search_wandb_docs", "n/a", {"query": query})
     except Exception:
-        pass
+        logger.debug("analytics emit failed", exc_info=True)
 
     try:
         async with httpx.AsyncClient() as client:

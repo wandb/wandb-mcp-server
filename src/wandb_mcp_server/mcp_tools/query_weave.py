@@ -328,7 +328,7 @@ def query_traces(
             },
         )
     except Exception:
-        pass
+        logger.debug("analytics emit failed", exc_info=True)
 
     # Query traces
     result = service.query_traces(
@@ -462,7 +462,7 @@ async def query_paginated_weave_traces(
             },
         )
     except Exception:
-        pass
+        logger.debug("analytics emit failed", exc_info=True)
 
     # Query traces with pagination
     result = service.query_paginated_traces(

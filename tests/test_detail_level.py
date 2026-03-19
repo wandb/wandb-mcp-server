@@ -77,3 +77,27 @@ class TestProcessTracesDetailLevel:
         allowed = {"id", "trace_id", "op_name", "started_at", "ended_at", "status", "parent_id", "display_name"}
         for key in trace:
             assert key in allowed, f"Unexpected key '{key}' in schema-level trace"
+
+    def test_process_traces_handles_pydantic_models(self):
+        """process_traces should handle Pydantic models via model_dump() normalization."""
+        from unittest.mock import MagicMock
+
+        mock_model = MagicMock()
+        mock_model.model_dump.return_value = {
+            "id": "t1",
+            "trace_id": "tr1",
+            "op_name": "weave:///entity/proj/op/test:abc",
+            "started_at": "2026-03-06T12:00:00Z",
+            "ended_at": "2026-03-06T12:01:00Z",
+            "status": "success",
+            "parent_id": None,
+            "display_name": "test",
+            "inputs": {"text": "hello"},
+            "output": {"result": "world"},
+        }
+
+        result = process_traces([mock_model], detail_level="schema")
+        mock_model.model_dump.assert_called_once()
+        trace = result["traces"][0]
+        assert trace["id"] == "t1"
+        assert "inputs" not in trace
