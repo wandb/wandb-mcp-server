@@ -60,9 +60,10 @@ class TestBuildPanelBlocks:
         blocks = _build_panel_blocks(panels, "entity", "project")
 
         assert len(blocks) == 1
-        mock_wr.Runset.assert_called_once()
-        call_kwargs = mock_wr.Runset.call_args[1]
-        assert "filters" in call_kwargs
+        assert mock_wr.Runset.call_count == 2
+        calls = mock_wr.Runset.call_args_list
+        assert calls[0][1]["name"] == "r1"
+        assert calls[1][1]["name"] == "r2"
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     def test_empty_panels_list(self, mock_wr):

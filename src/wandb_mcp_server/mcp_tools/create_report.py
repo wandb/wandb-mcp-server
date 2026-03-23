@@ -180,7 +180,7 @@ def create_report(
             },
         )
     except Exception:
-        pass
+        logger.debug("analytics emit failed", exc_info=True)
 
     try:
         report = wr.Report(
@@ -251,14 +251,14 @@ def _build_panel_blocks(
                 run_ids = panel_spec.get("run_ids", [])
                 if not metrics:
                     continue
-                runset_kwargs: Dict[str, Any] = {"entity": entity_name, "project": project_name}
+                runsets = []
                 if run_ids:
-                    runset_kwargs["filters"] = {"$or": [{"name": rid} for rid in run_ids]}
+                    for rid in run_ids:
+                        runsets.append(wr.Runset(entity=entity_name, project=project_name, name=rid))
+                else:
+                    runsets.append(wr.Runset(entity=entity_name, project=project_name))
                 chart_panels = [wr.LinePlot(x="_step", y=metrics, title=panel_title)]
-                pg = wr.PanelGrid(
-                    runsets=[wr.Runset(**runset_kwargs)],
-                    panels=chart_panels,
-                )
+                pg = wr.PanelGrid(runsets=runsets, panels=chart_panels)
                 blocks.append(pg)
 
             else:

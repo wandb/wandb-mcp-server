@@ -115,7 +115,7 @@ jobs:
           print(json.dumps(result, indent=2))
           with open('results-summary.json', 'w') as f:
               json.dump(result, f)
-          " || echo '{"passed":0,"failed":0,"total":0,"score_mean":0}' > wbaf/results-summary.json
+          " || echo '{"passed":0,"failed":0,"total":0,"score_mean":0}' > results-summary.json
 
       - name: Upload results summary
         if: always()

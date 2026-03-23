@@ -375,12 +375,17 @@ class MultiTenantSessionManager:
 
 # Global session manager instance
 _session_manager: Optional[MultiTenantSessionManager] = None
+_session_manager_lock = threading.Lock()
 
 
 def get_session_manager() -> MultiTenantSessionManager:
     """Get or create the global session manager."""
     global _session_manager
-    if _session_manager is None:
+    if _session_manager is not None:
+        return _session_manager
+    with _session_manager_lock:
+        if _session_manager is not None:
+            return _session_manager
         try:
             ttl = int(os.environ.get("SESSION_TTL_SECONDS", "3600"))
         except ValueError:

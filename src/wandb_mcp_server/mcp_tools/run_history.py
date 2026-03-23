@@ -127,7 +127,12 @@ def get_run_history(
                 scan_kwargs["min_step"] = min_step
             if max_step is not None:
                 scan_kwargs["max_step"] = max_step
-            all_rows = list(run.scan_history(**scan_kwargs))
+            max_scan = clamped_samples * 10
+            all_rows = []
+            for row in run.scan_history(**scan_kwargs):
+                all_rows.append(row)
+                if len(all_rows) >= max_scan:
+                    break
             if len(all_rows) > clamped_samples:
                 step = max(1, len(all_rows) // clamped_samples)
                 rows = all_rows[::step][:clamped_samples]
