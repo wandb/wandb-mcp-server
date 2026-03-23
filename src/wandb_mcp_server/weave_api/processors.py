@@ -273,6 +273,119 @@ class TraceProcessor:
         # Sort by count in descending order
         return dict(sorted(op_counts.items(), key=lambda x: x[1], reverse=True))
 
+    HIGH_SIGNAL_FIELDS: set = {
+        "id",
+        "op_name",
+        "display_name",
+        "trace_id",
+        "parent_id",
+        "started_at",
+        "ended_at",
+        "status",
+        "latency_ms",
+        "exception",
+    }
+    MEDIUM_SIGNAL_FIELDS: set = {
+        "attributes",
+        "summary",
+        "costs",
+        "feedback",
+        "wb_run_id",
+        "wb_user_id",
+        "project_id",
+        "deleted_at",
+    }
+    LOW_SIGNAL_FIELDS: set = {"inputs", "output"}
+
+    @classmethod
+    def estimate_tokens(cls, text: str) -> int:
+        """Cheap token estimate (~1 token per 4 chars of JSON)."""
+        return max(1, len(text) // 4)
+
+    @classmethod
+    def _trace_to_dict(cls, trace: Any) -> dict:
+        """Normalise a trace (Pydantic model or dict) to a plain dict."""
+        if hasattr(trace, "model_dump"):
+            return trace.model_dump()
+        if isinstance(trace, dict):
+            return trace.copy()
+        return trace
+
+    @classmethod
+    def enforce_token_budget(
+        cls,
+        result_json: str,
+        traces: List[Any],
+        budget: int,
+    ) -> tuple:
+        """Progressively truncate traces to fit within budget tokens.
+
+        Preserves HIGH_SIGNAL fields (id, op_name, status, timestamps) first,
+        then progressively drops LOW_SIGNAL (inputs, output) and
+        MEDIUM_SIGNAL (attributes, summary, costs) fields.
+
+        Levels:
+          L0 -- Under budget: return as-is.
+          L1 -- Truncate LOW_SIGNAL fields to 100 chars.
+          L2 -- Drop LOW_SIGNAL; truncate MEDIUM_SIGNAL to 200 chars.
+          L3 -- Keep only HIGH_SIGNAL fields.
+          L4 -- Sample every Nth trace, HIGH_SIGNAL only.
+
+        Returns:
+            (truncated_traces, warning_message | None, applied_level)
+        """
+        est = cls.estimate_tokens(result_json)
+        if est <= budget:
+            return traces, None, 0
+
+        dicts = [cls._trace_to_dict(t) for t in traces]
+
+        def _est(data: list) -> int:
+            return cls.estimate_tokens(json.dumps(data, cls=DateTimeEncoder, default=str))
+
+        # L1: truncate LOW_SIGNAL to 100 chars
+        l1 = []
+        for d in dicts:
+            row = {}
+            for k, v in d.items():
+                if k in cls.LOW_SIGNAL_FIELDS:
+                    row[k] = cls.truncate_value(v, 100)
+                else:
+                    row[k] = v
+            l1.append(row)
+        if _est(l1) <= budget:
+            return l1, "L1: inputs/output shortened to 100 chars. Use columns= to avoid truncation.", 1
+
+        # L2: drop LOW_SIGNAL, truncate MEDIUM_SIGNAL to 200 chars
+        l2 = []
+        for row in l1:
+            filtered = {}
+            for k, v in row.items():
+                if k in cls.LOW_SIGNAL_FIELDS:
+                    continue
+                if k in cls.MEDIUM_SIGNAL_FIELDS:
+                    filtered[k] = cls.truncate_value(v, 200)
+                else:
+                    filtered[k] = v
+            l2.append(filtered)
+        if _est(l2) <= budget:
+            return l2, "L2: dropped inputs/output, trimmed metadata. Use metadata_only=True to estimate size first.", 2
+
+        # L3: HIGH_SIGNAL fields only
+        l3 = [{k: v for k, v in row.items() if k in cls.HIGH_SIGNAL_FIELDS} for row in l2]
+        if _est(l3) <= budget:
+            return (
+                l3,
+                "L3: kept only diagnostic fields (id, op_name, status, timestamps). Re-query with filters for details.",
+                3,
+            )
+
+        # L4: sample traces, HIGH_SIGNAL only
+        per_trace = max(1, _est(l3[:1]))
+        n = max(2, len(l3) // max(1, budget // per_trace))
+        l4 = l3[::n]
+        return l4, f"L4: sampled {len(l4)} of {len(traces)} traces. Add filters to reduce result set.", 4
+
     @classmethod
     def process_traces(
         cls,

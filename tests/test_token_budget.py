@@ -121,3 +121,80 @@ class TestTraceMetadataTruncationFields:
         parsed = json.loads(json_str)
         assert parsed["metadata"]["truncation_applied"] is True
         assert parsed["metadata"]["truncation_note"] == "10 more traces."
+
+
+class TestSemanticTokenBudget:
+    """Tests for TraceProcessor.enforce_token_budget (semantic 5-level truncation)."""
+
+    def _make_traces(self, n: int) -> list:
+        return [
+            {
+                "id": f"t{i}",
+                "op_name": f"weave:///entity/proj/op/op_{i}:abc",
+                "trace_id": f"tr{i}",
+                "started_at": "2026-03-20T12:00:00Z",
+                "ended_at": "2026-03-20T12:01:00Z",
+                "status": "success",
+                "parent_id": None,
+                "display_name": f"op_{i}",
+                "inputs": {"text": f"input data for trace {i} " * 100},
+                "output": {"result": f"output data for trace {i} " * 100},
+                "summary": {"weave": {"status": "success", "latency_ms": 500}},
+                "attributes": {"key": "value"},
+                "costs": {},
+                "feedback": {},
+            }
+            for i in range(n)
+        ]
+
+    def test_l0_under_budget(self):
+        from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+        traces = self._make_traces(2)
+        result_json = json.dumps(traces)
+        big_budget = len(result_json)
+
+        out, warning, level = TraceProcessor.enforce_token_budget(result_json, traces, big_budget)
+        assert level == 0
+        assert warning is None
+        assert len(out) == 2
+
+    def test_l1_preserves_high_signal(self):
+        from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+        traces = self._make_traces(10)
+        result_json = json.dumps(traces)
+        small_budget = len(result_json) // 8
+
+        out, warning, level = TraceProcessor.enforce_token_budget(result_json, traces, small_budget)
+        assert level >= 1
+        for t in out:
+            assert "id" in t
+            assert "op_name" in t
+            assert "status" in t
+
+    def test_high_levels_drop_low_signal(self):
+        from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+        traces = self._make_traces(20)
+        result_json = json.dumps(traces)
+        tiny_budget = 5
+
+        out, warning, level = TraceProcessor.enforce_token_budget(result_json, traces, tiny_budget)
+        assert level >= 3
+        for t in out:
+            assert "id" in t
+            assert "inputs" not in t
+            assert "output" not in t
+
+    def test_does_not_mutate_input(self):
+        from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+        traces = self._make_traces(5)
+        original_len = len(traces)
+        original_keys = set(traces[0].keys())
+        result_json = json.dumps(traces)
+
+        TraceProcessor.enforce_token_budget(result_json, traces, 10)
+        assert len(traces) == original_len
+        assert set(traces[0].keys()) == original_keys

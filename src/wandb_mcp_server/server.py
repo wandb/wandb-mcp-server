@@ -335,18 +335,22 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 result_model.traces = [{k: v for k, v in t.items() if k in schema_fields} for t in result_model.traces]
 
             from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
-            from wandb_mcp_server.trace_utils import enforce_token_budget
+            from wandb_mcp_server.weave_api.processors import TraceProcessor
 
             response_json = result_model.model_dump_json()
             if result_model.traces:
-                truncated_json, dropped = enforce_token_budget(response_json, result_model.traces, MAX_RESPONSE_TOKENS)
-                if dropped > 0:
-                    result_model.traces = result_model.traces[: len(result_model.traces) - dropped]
+                truncated_traces, warning, level = TraceProcessor.enforce_token_budget(
+                    response_json, result_model.traces, MAX_RESPONSE_TOKENS
+                )
+                if level > 0:
+                    result_model.traces = truncated_traces
                     result_model.metadata.truncation_applied = True
-                    result_model.metadata.truncation_dropped_count = dropped
-                    result_model.metadata.truncation_note = (
-                        f"{dropped} more traces match this query. Narrow with filters or request specific trace_ids."
+                    result_model.metadata.truncation_dropped_count = (
+                        len(result_model.traces) - len(truncated_traces)
+                        if len(truncated_traces) < len(result_model.traces)
+                        else 0
                     )
+                    result_model.metadata.truncation_note = warning
                     response_json = result_model.model_dump_json()
 
             return response_json
