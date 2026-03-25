@@ -198,3 +198,20 @@ class TestSemanticTokenBudget:
         TraceProcessor.enforce_token_budget(result_json, traces, 10)
         assert len(traces) == original_len
         assert set(traces[0].keys()) == original_keys
+
+    def test_l4_rechecks_budget_with_large_exception_fields(self):
+        """Even after sampling, large HIGH_SIGNAL fields must still fit under budget."""
+        from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+        traces = self._make_traces(8)
+        for i, trace in enumerate(traces):
+            trace["exception"] = f"huge-exception-{i} " * 5000
+
+        result_json = json.dumps(traces)
+        budget = 200
+
+        out, warning, level = TraceProcessor.enforce_token_budget(result_json, traces, budget)
+        serialized = json.dumps(out)
+
+        assert level >= 4
+        assert TraceProcessor.estimate_tokens(serialized) <= budget

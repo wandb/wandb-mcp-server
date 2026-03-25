@@ -384,7 +384,41 @@ class TraceProcessor:
         per_trace = max(1, _est(l3[:1]))
         n = max(2, len(l3) // max(1, budget // per_trace))
         l4 = l3[::n]
-        return l4, f"L4: sampled {len(l4)} of {len(traces)} traces. Add filters to reduce result set.", 4
+        warning = f"L4: sampled {len(l4)} of {len(traces)} traces. Add filters to reduce result set."
+
+        # Re-check after sampling. Large HIGH_SIGNAL fields like `exception`
+        # can still exceed the budget even with fewer traces.
+        while _est(l4) > budget and len(l4) > 1:
+            l4 = l4[::2]
+
+        if _est(l4) > budget:
+            # Final safety valve: bound large string-valued HIGH_SIGNAL fields.
+            tightened = []
+            for row in l4:
+                new_row = {}
+                for k, v in row.items():
+                    if isinstance(v, str):
+                        new_row[k] = cls.truncate_value(v, 200)
+                    else:
+                        new_row[k] = v
+                tightened.append(new_row)
+            l4 = tightened
+
+        if _est(l4) > budget:
+            # Last resort: keep a single compact diagnostic trace.
+            compact = []
+            for row in l4[:1]:
+                compact_row = {}
+                for key in ("id", "op_name", "status", "started_at", "ended_at", "exception"):
+                    if key not in row:
+                        continue
+                    value = row[key]
+                    compact_row[key] = cls.truncate_value(value, 100) if isinstance(value, str) else value
+                compact.append(compact_row)
+            l4 = compact
+            warning += " Final safety valve applied to large exception fields."
+
+        return l4, warning, 4
 
     @classmethod
     def process_traces(

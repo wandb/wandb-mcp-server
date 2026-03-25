@@ -127,17 +127,20 @@ def get_run_history(
                 scan_kwargs["min_step"] = min_step
             if max_step is not None:
                 scan_kwargs["max_step"] = max_step
-            max_scan = clamped_samples * 10
-            all_rows = []
-            for row in run.scan_history(**scan_kwargs):
-                all_rows.append(row)
-                if len(all_rows) >= max_scan:
-                    break
-            if len(all_rows) > clamped_samples:
-                step = max(1, len(all_rows) // clamped_samples)
-                rows = all_rows[::step][:clamped_samples]
+            total_rows = sum(1 for _ in run.scan_history(**scan_kwargs))
+            if total_rows <= clamped_samples:
+                rows = list(run.scan_history(**scan_kwargs))
             else:
-                rows = all_rows
+                if clamped_samples == 1:
+                    target_indices = {0}
+                else:
+                    target_indices = {
+                        round(i * (total_rows - 1) / (clamped_samples - 1)) for i in range(clamped_samples)
+                    }
+                rows = []
+                for idx, row in enumerate(run.scan_history(**scan_kwargs)):
+                    if idx in target_indices:
+                        rows.append(row)
         else:
             history_kwargs: Dict[str, Any] = {"samples": clamped_samples, "pandas": False}
             if keys:

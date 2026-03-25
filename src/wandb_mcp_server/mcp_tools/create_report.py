@@ -7,6 +7,7 @@ This version eliminates the singleton contamination vulnerability and uses only 
 from typing import Any, Dict, List, Optional, Union
 import re
 
+import wandb_workspaces.expr as expr
 import wandb_workspaces.reports.v2 as wr
 import wandb_workspaces.reports.v2.interface as wr_interface
 
@@ -251,14 +252,17 @@ def _build_panel_blocks(
                 run_ids = panel_spec.get("run_ids", [])
                 if not metrics:
                     continue
-                runsets = []
+                runset_kwargs: Dict[str, Any] = {"entity": entity_name, "project": project_name}
                 if run_ids:
-                    for rid in run_ids:
-                        runsets.append(wr.Runset(entity=entity_name, project=project_name, name=rid))
-                else:
-                    runsets.append(wr.Runset(entity=entity_name, project=project_name))
+                    # Runset.filters expects a filter expression string, not a dict.
+                    # Use the report expr helpers so the panel actually selects the
+                    # requested runs instead of merely labeling the runset.
+                    runset_kwargs["filters"] = str(expr.Metric("name").isin(run_ids))
                 chart_panels = [wr.LinePlot(x="_step", y=metrics, title=panel_title)]
-                pg = wr.PanelGrid(runsets=runsets, panels=chart_panels)
+                pg = wr.PanelGrid(
+                    runsets=[wr.Runset(**runset_kwargs)],
+                    panels=chart_panels,
+                )
                 blocks.append(pg)
 
             else:

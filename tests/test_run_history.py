@@ -151,7 +151,7 @@ class TestGetRunHistory:
 
         result = json.loads(get_run_history("e", "p", "run1", min_step=50, max_step=200))
 
-        mock_run.scan_history.assert_called_once()
+        assert mock_run.scan_history.call_count == 2
         call_kwargs = mock_run.scan_history.call_args[1]
         assert call_kwargs["min_step"] == 50
         assert call_kwargs["max_step"] == 200
@@ -194,3 +194,26 @@ class TestGetRunHistory:
         result = json.loads(get_run_history("e", "p", "run1", min_step=0, samples=500))
 
         assert result["sampled_points"] <= 500
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_step_range_samples_across_full_window(self, mock_wandb_mod, mock_api_mgr):
+        """Step-range sampling should cover the full requested range, not just a prefix."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        mock_run = MagicMock()
+        mock_run.name = "r1"
+        mock_run.lastHistoryStep = 99
+        rows = [{"_step": i, "loss": float(i)} for i in range(100)]
+        mock_run.scan_history.return_value = rows
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(get_run_history("e", "p", "run1", min_step=0, max_step=99, samples=5))
+        steps = [row["_step"] for row in result["rows"]]
+
+        assert len(steps) == 5
+        assert steps[0] == 0
+        assert steps[-1] == 99
+        assert steps == sorted(steps)
