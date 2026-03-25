@@ -269,7 +269,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         include_feedback: bool = True,
         columns: Optional[List[str]] = None,
         expand_columns: Optional[List[str]] = None,
-        truncate_length: int = 200,
+        truncate_length: int = 1000,
         return_full_data: bool = False,
         metadata_only: bool = False,
         detail_level: str = "summary",

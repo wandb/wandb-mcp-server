@@ -73,7 +73,7 @@ trace data is returned either in full or truncated to `truncate_length` characte
 <truncating_trace_data_values>
 
 If `return_full_data = False` the trace data is truncated to `truncate_length` characters,
-default 200 characters. Otherwise the trace data is returned in full.
+default 1000 characters. Otherwise the trace data is returned in full.
 </truncating_trace_data_values>
 
 Remember, LLM context window is precious, only return the minimum amount of data needed to complete an analysis.
@@ -200,7 +200,7 @@ columns : list of str, optional
 expand_columns : list of str, optional
     List of columns to expand in the results. Defaults to None
 truncate_length : int, optional
-    Maximum length for string values in weave traces. Defaults to 200
+    Maximum length for string values in weave traces. Defaults to 1000
 return_full_data : bool, optional
     Whether to include full untruncated trace data. If True, the `truncate_length` parameter is ignored. If  \
 `False` returns truncation_length = 0, no values for the column keys are returned. Defaults to True.
