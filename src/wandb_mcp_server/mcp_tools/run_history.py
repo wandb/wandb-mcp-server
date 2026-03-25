@@ -7,6 +7,7 @@ Uses `wandb.Api().run().history()` for sampled data and
 from __future__ import annotations
 
 import json
+import random
 from typing import Any, Dict, List, Optional
 
 import wandb
@@ -127,20 +128,17 @@ def get_run_history(
                 scan_kwargs["min_step"] = min_step
             if max_step is not None:
                 scan_kwargs["max_step"] = max_step
-            total_rows = sum(1 for _ in run.scan_history(**scan_kwargs))
-            if total_rows <= clamped_samples:
-                rows = list(run.scan_history(**scan_kwargs))
-            else:
-                if clamped_samples == 1:
-                    target_indices = {0}
+            # Single-pass reservoir sampling gives representative coverage of the
+            # full requested step window without doubling API cost via two scans.
+            rows = []
+            for idx, row in enumerate(run.scan_history(**scan_kwargs)):
+                if idx < clamped_samples:
+                    rows.append(row)
                 else:
-                    target_indices = {
-                        round(i * (total_rows - 1) / (clamped_samples - 1)) for i in range(clamped_samples)
-                    }
-                rows = []
-                for idx, row in enumerate(run.scan_history(**scan_kwargs)):
-                    if idx in target_indices:
-                        rows.append(row)
+                    j = random.randint(0, idx)
+                    if j < clamped_samples:
+                        rows[j] = row
+            rows.sort(key=lambda r: r.get("_step", 0))
         else:
             history_kwargs: Dict[str, Any] = {"samples": clamped_samples, "pandas": False}
             if keys:

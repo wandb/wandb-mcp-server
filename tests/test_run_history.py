@@ -151,7 +151,7 @@ class TestGetRunHistory:
 
         result = json.loads(get_run_history("e", "p", "run1", min_step=50, max_step=200))
 
-        assert mock_run.scan_history.call_count == 2
+        mock_run.scan_history.assert_called_once()
         call_kwargs = mock_run.scan_history.call_args[1]
         assert call_kwargs["min_step"] == 50
         assert call_kwargs["max_step"] == 200
@@ -214,6 +214,7 @@ class TestGetRunHistory:
         steps = [row["_step"] for row in result["rows"]]
 
         assert len(steps) == 5
-        assert steps[0] == 0
-        assert steps[-1] == 99
         assert steps == sorted(steps)
+        assert min(steps) >= 0
+        assert max(steps) <= 99
+        assert len(set(steps)) == 5

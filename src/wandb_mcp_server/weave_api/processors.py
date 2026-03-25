@@ -371,8 +371,15 @@ class TraceProcessor:
         if _est(l2) <= budget:
             return l2, "L2: dropped inputs/output, trimmed metadata. Use metadata_only=True to estimate size first.", 2
 
-        # L3: HIGH_SIGNAL fields only
-        l3 = [{k: v for k, v in row.items() if k in cls.HIGH_SIGNAL_FIELDS} for row in l2]
+        # L3: HIGH_SIGNAL fields only, with bounded string payloads so a single
+        # large exception cannot defeat the budget before L4 sampling.
+        l3 = []
+        for row in l2:
+            filtered = {k: v for k, v in row.items() if k in cls.HIGH_SIGNAL_FIELDS}
+            for k, v in filtered.items():
+                if isinstance(v, str) and len(v) > 500:
+                    filtered[k] = cls.truncate_value(v, 500)
+            l3.append(filtered)
         if _est(l3) <= budget:
             return (
                 l3,
@@ -388,7 +395,7 @@ class TraceProcessor:
 
         # Re-check after sampling. Large HIGH_SIGNAL fields like `exception`
         # can still exceed the budget even with fewer traces.
-        while _est(l4) > budget and len(l4) > 1:
+        while len(l4) * per_trace > budget and len(l4) > 1:
             l4 = l4[::2]
 
         if _est(l4) > budget:

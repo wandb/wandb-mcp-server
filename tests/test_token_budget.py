@@ -215,3 +215,35 @@ class TestSemanticTokenBudget:
 
         assert level >= 4
         assert TraceProcessor.estimate_tokens(serialized) <= budget
+
+    def test_full_response_pipeline_respects_budget(self):
+        """Server-style metadata + traces response should stay within total budget."""
+        from wandb_mcp_server.weave_api.models import QueryResult, TraceMetadata
+        from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+        traces = self._make_traces(12)
+        for i, trace in enumerate(traces):
+            trace["exception"] = f"oversized-exception-{i} " * 3000
+
+        metadata = TraceMetadata(
+            total_traces=len(traces),
+            op_distribution={f"op_{i}": i for i in range(10)},
+        )
+        result = QueryResult(metadata=metadata, traces=traces)
+        total_budget = 400
+
+        metadata_json = result.metadata.model_dump_json()
+        metadata_tokens = TraceProcessor.estimate_tokens(metadata_json)
+        trace_budget = max(1, total_budget - metadata_tokens)
+
+        response_json = result.model_dump_json()
+        truncated_traces, warning, level = TraceProcessor.enforce_token_budget(
+            response_json,
+            result.traces,
+            trace_budget,
+        )
+        result.traces = truncated_traces
+        final_json = result.model_dump_json()
+
+        assert level >= 1
+        assert TraceProcessor.estimate_tokens(final_json) <= total_budget

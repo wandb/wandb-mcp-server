@@ -52,6 +52,8 @@ class TestBuildPanelBlocks:
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     def test_run_comparison_panel(self, mock_wr):
+        import wandb_workspaces.expr as expr
+
         mock_wr.PanelGrid = MagicMock()
         mock_wr.LinePlot = MagicMock()
         mock_wr.Runset = MagicMock()
@@ -63,8 +65,8 @@ class TestBuildPanelBlocks:
         mock_wr.Runset.assert_called_once()
         call_kwargs = mock_wr.Runset.call_args[1]
         assert "filters" in call_kwargs
-        assert "r1" in call_kwargs["filters"]
-        assert "r2" in call_kwargs["filters"]
+        expected = str(expr.Metric("name").isin(["r1", "r2"]))
+        assert call_kwargs["filters"] == expected
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     def test_empty_panels_list(self, mock_wr):

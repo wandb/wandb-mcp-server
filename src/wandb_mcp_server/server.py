@@ -340,8 +340,11 @@ def register_tools(mcp_instance: FastMCP) -> None:
             response_json = result_model.model_dump_json()
             if result_model.traces:
                 original_count = len(result_model.traces)
+                metadata_json = result_model.metadata.model_dump_json()
+                metadata_tokens = TraceProcessor.estimate_tokens(metadata_json)
+                trace_budget = max(1, MAX_RESPONSE_TOKENS - metadata_tokens)
                 truncated_traces, warning, level = TraceProcessor.enforce_token_budget(
-                    response_json, result_model.traces, MAX_RESPONSE_TOKENS
+                    response_json, result_model.traces, trace_budget
                 )
                 if level > 0:
                     result_model.traces = truncated_traces
