@@ -3,8 +3,8 @@ name = "wandb_mcp_server"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "weave>=0.51.56",
-    "wandb>=0.22.2",
+    "weave>=0.52.35",
+    "wandb>=0.25.1",
     "httpx>=0.28.1",
     "mcp[cli]>=1.0.0",
     "simple-parsing>=0.1.7",
