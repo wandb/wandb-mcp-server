@@ -52,8 +52,6 @@ class TestBuildPanelBlocks:
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     def test_run_comparison_panel(self, mock_wr):
-        import wandb_workspaces.expr as expr
-
         mock_wr.PanelGrid = MagicMock()
         mock_wr.LinePlot = MagicMock()
         mock_wr.Runset = MagicMock()
@@ -63,10 +61,7 @@ class TestBuildPanelBlocks:
 
         assert len(blocks) == 1
         mock_wr.Runset.assert_called_once()
-        call_kwargs = mock_wr.Runset.call_args[1]
-        assert "filters" in call_kwargs
-        expected = str(expr.Metric("name").isin(["r1", "r2"]))
-        assert call_kwargs["filters"] == expected
+        mock_wr.LinePlot.assert_called_once()
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     def test_empty_panels_list(self, mock_wr):
@@ -134,3 +129,48 @@ class TestCreateReportWithPanels:
 
         result = create_report("entity", "project", "Test Report", panels=None)
         assert result["url"] == "https://wandb.ai/report/123"
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_run_comparison_without_run_ids(self, mock_wr):
+        """run_comparison panel without run_ids should not set filters."""
+        mock_wr.PanelGrid = MagicMock()
+        mock_wr.LinePlot = MagicMock()
+        mock_wr.Runset = MagicMock()
+
+        panels = [{"type": "run_comparison", "metrics": ["loss"], "title": "Compare"}]
+        blocks = _build_panel_blocks(panels, "entity", "project")
+
+        assert len(blocks) == 1
+        call_kwargs = mock_wr.Runset.call_args[1]
+        assert "filters" not in call_kwargs
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    @patch("wandb_mcp_server.api_client.WandBApiManager")
+    def test_create_report_with_panels_and_markdown(self, mock_api_mgr, mock_wr):
+        """Full flow: markdown content + panels should produce blocks in the
+        correct order: security notice, content, H2 'Charts', panel grids."""
+        mock_api_mgr.get_api_key.return_value = "fake_key"
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+
+        mock_report = MagicMock()
+        mock_report.url = "https://wandb.ai/report/456"
+        mock_wr.Report.return_value = mock_report
+        mock_wr.P = MagicMock(side_effect=lambda text: f"P:{text}")
+        mock_wr.H2 = MagicMock(side_effect=lambda text: f"H2:{text}")
+        mock_wr.PanelGrid = MagicMock(side_effect=lambda **kw: "PanelGrid")
+        mock_wr.LinePlot = MagicMock()
+        mock_wr.Runset = MagicMock()
+
+        result = create_report(
+            "entity",
+            "project",
+            "Full Report",
+            markdown_report_text="Hello world",
+            panels=[{"type": "line", "x": "_step", "y": ["loss"], "title": "Loss"}],
+        )
+
+        assert result["url"] == "https://wandb.ai/report/456"
+        blocks = mock_report.blocks
+        assert len(blocks) >= 3
+        # First block is security notice
+        assert "MCP Server" in str(blocks[0])

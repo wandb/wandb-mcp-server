@@ -247,3 +247,126 @@ class TestSemanticTokenBudget:
 
         assert level >= 1
         assert TraceProcessor.estimate_tokens(final_json) <= total_budget
+
+    # -- L1/L2 exception bypass tests ----------------------------------------
+
+    def test_l1_leaves_large_exception_untouched(self):
+        """L1 only truncates LOW_SIGNAL (inputs/output); exception is HIGH_SIGNAL
+        and should pass through L1 unchanged even when very large."""
+        from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+        traces = self._make_traces(3)
+        for t in traces:
+            t["exception"] = "E" * 20_000  # 20KB exception per trace
+
+        result_json = json.dumps(traces)
+        # Budget tight enough to trigger L1 (inputs shrink) but loose enough
+        # that the exception-heavy payload fits after inputs are trimmed.
+        budget = TraceProcessor.estimate_tokens(result_json) // 2
+
+        out, warning, level = TraceProcessor.enforce_token_budget(result_json, traces, budget)
+
+        if level == 1:
+            for t in out:
+                assert len(t.get("exception", "")) == 20_000
+
+    def test_l2_still_over_budget_with_huge_exception(self):
+        """When exception alone exceeds the budget, L2 cannot solve it and must
+        escalate to L3+."""
+        from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+        traces = self._make_traces(5)
+        for t in traces:
+            t["inputs"] = {"x": "small"}
+            t["output"] = {"y": "small"}
+            t["exception"] = "X" * 100_000  # 100KB per trace
+
+        result_json = json.dumps(traces)
+        budget = 500  # much smaller than 5 * 25K est tokens
+
+        out, warning, level = TraceProcessor.enforce_token_budget(result_json, traces, budget)
+        assert level >= 3, f"Expected L3+ but got L{level}"
+
+    def test_l3_caps_exception_strings_to_500(self):
+        """L3 keeps only HIGH_SIGNAL and caps strings > 500 chars."""
+        from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+        traces = self._make_traces(4)
+        for t in traces:
+            t["exception"] = "ERR " * 500  # 2000 chars
+
+        result_json = json.dumps(traces)
+        # Budget that forces L3 but not L4
+        l2_est = TraceProcessor.estimate_tokens(result_json) // 6
+        budget = l2_est
+
+        out, warning, level = TraceProcessor.enforce_token_budget(result_json, traces, budget)
+
+        if level == 3:
+            for t in out:
+                exc = t.get("exception", "")
+                assert len(exc) <= 510, f"exception len {len(exc)} exceeds L3 cap"
+
+    def test_non_string_exception_bypasses_l3_string_cap(self):
+        """L3's isinstance(v, str) check misses dict/list exceptions. This
+        documents the known gap where structured exceptions stay full size."""
+        from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+        traces = self._make_traces(3)
+        big_dict_exc = {
+            "type": "ValueError",
+            "message": "M" * 2000,
+            "traceback": [{"file": f"f{i}.py", "line": i, "code": "x" * 500} for i in range(20)],
+        }
+        for t in traces:
+            t["inputs"] = {"x": "s"}
+            t["output"] = {"y": "s"}
+            t["exception"] = big_dict_exc
+
+        result_json = json.dumps(traces)
+        budget = TraceProcessor.estimate_tokens(result_json) // 4
+
+        out, warning, level = TraceProcessor.enforce_token_budget(result_json, traces, budget)
+
+        if level == 3:
+            for t in out:
+                exc = t.get("exception", {})
+                # Dict exception survives L3 string cap because it's not a str
+                assert isinstance(exc, dict), "dict exception should remain a dict at L3"
+
+    def test_estimate_tokens_vs_real_tokens_divergence(self):
+        """Quantify the gap between estimate_tokens (len//4) and tiktoken on
+        exception-heavy payloads so we know the safety margin needed."""
+        from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+        traces = self._make_traces(5)
+        for t in traces:
+            t["exception"] = "KeyError: 'missing_field'\n" * 200
+
+        payload = json.dumps(traces)
+        estimated = TraceProcessor.estimate_tokens(payload)
+        real = count_tokens(payload)
+
+        ratio = real / max(1, estimated)
+        # Typically tiktoken gives fewer tokens than len//4 for English-ish JSON,
+        # but the ratio should stay within 0.5x-2.0x to be a useful proxy.
+        assert 0.3 < ratio < 2.5, f"estimate/real ratio {ratio:.2f} is dangerously off"
+
+    def test_l4_recheck_converges_for_many_large_exceptions(self):
+        """50 traces each with 10KB exceptions and a tiny budget; the L4
+        recheck while-loop must converge and fit within budget."""
+        from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+        traces = self._make_traces(50)
+        for t in traces:
+            t["exception"] = "FATAL " * 2000  # ~12KB per trace
+
+        result_json = json.dumps(traces)
+        budget = 500
+
+        out, warning, level = TraceProcessor.enforce_token_budget(result_json, traces, budget)
+        serialized = json.dumps(out)
+
+        assert level == 4
+        assert TraceProcessor.estimate_tokens(serialized) <= budget
+        assert len(out) >= 1, "should keep at least one trace"

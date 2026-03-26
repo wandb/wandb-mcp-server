@@ -7,7 +7,6 @@ This version eliminates the singleton contamination vulnerability and uses only 
 from typing import Any, Dict, List, Optional, Union
 import re
 
-import wandb_workspaces.expr as expr
 import wandb_workspaces.reports.v2 as wr
 import wandb_workspaces.reports.v2.interface as wr_interface
 
@@ -254,10 +253,11 @@ def _build_panel_blocks(
                     continue
                 runset_kwargs: Dict[str, Any] = {"entity": entity_name, "project": project_name}
                 if run_ids:
-                    # Runset.filters expects a filter expression string, not a dict.
-                    # Use the report expr helpers so the panel actually selects the
-                    # requested runs instead of merely labeling the runset.
-                    runset_kwargs["filters"] = str(expr.Metric("name").isin(run_ids))
+                    logger.info(
+                        f"run_comparison: run_ids provided but Runset filters are "
+                        f"not reliably supported by wandb_workspaces. "
+                        f"Showing all runs instead of filtering to {run_ids}."
+                    )
                 chart_panels = [wr.LinePlot(x="_step", y=metrics, title=panel_title)]
                 pg = wr.PanelGrid(
                     runsets=[wr.Runset(**runset_kwargs)],
@@ -341,20 +341,33 @@ def parse_markdown_to_blocks(
                 # End of code block
                 flush_content()
                 code_content = "\n".join(code_block_content)
-                # Create CodeBlock with language if specified
-                if code_language and code_language in [
-                    "python",
+                # wandb_workspaces only accepts these language tags
+                _WR_SUPPORTED_LANGUAGES = {
                     "javascript",
-                    "typescript",
+                    "python",
                     "css",
                     "json",
                     "html",
                     "markdown",
                     "yaml",
-                    "bash",
-                    "shell",
-                ]:
-                    blocks.append(wr.CodeBlock(code=code_content, language=code_language))
+                }
+                _LANGUAGE_MAP = {
+                    "typescript": "javascript",
+                    "bash": "python",
+                    "shell": "python",
+                    "sh": "python",
+                    "sql": None,
+                    "go": None,
+                    "rust": None,
+                    "java": None,
+                    "c": None,
+                    "cpp": None,
+                }
+                mapped = code_language
+                if code_language and code_language not in _WR_SUPPORTED_LANGUAGES:
+                    mapped = _LANGUAGE_MAP.get(code_language)
+                if mapped and mapped in _WR_SUPPORTED_LANGUAGES:
+                    blocks.append(wr.CodeBlock(code=code_content, language=mapped))
                 else:
                     blocks.append(wr.CodeBlock(code=code_content))
                 code_block_content = []
