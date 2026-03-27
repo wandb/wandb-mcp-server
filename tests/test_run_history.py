@@ -1,7 +1,6 @@
 """Tests for the get_run_history_tool."""
 
 import json
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -426,14 +425,13 @@ class TestHistoryTruncation:
         assert len(result) == 5
 
 
-class TestBetaScanHistory:
-    """Tests for opt-in beta_scan_history support (H5)."""
+class TestTieredStepRangeFetch:
+    """Tests for the tiered step-range strategy: beta -> scan -> history fallback."""
 
-    @patch.dict(os.environ, {"WANDB_USE_BETA_HISTORY": "true"})
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
-    def test_beta_scan_history_used_when_enabled(self, mock_wandb_mod, mock_api_mgr):
-        """When WANDB_USE_BETA_HISTORY=true and step range set, beta_scan_history is called."""
+    def test_beta_scan_history_tried_first(self, mock_wandb_mod, mock_api_mgr):
+        """beta_scan_history is the first strategy attempted for step-range queries."""
         mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
         mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
 
@@ -450,10 +448,9 @@ class TestBetaScanHistory:
         mock_run.scan_history.assert_not_called()
         assert result["sampled_points"] == 50
 
-    @patch.dict(os.environ, {"WANDB_USE_BETA_HISTORY": "true"})
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
-    def test_beta_scan_history_fallback_on_error(self, mock_wandb_mod, mock_api_mgr):
+    def test_fallback_to_scan_history_on_beta_error(self, mock_wandb_mod, mock_api_mgr):
         """If beta_scan_history raises, falls back to scan_history."""
         mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
         mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
@@ -474,25 +471,27 @@ class TestBetaScanHistory:
 
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
-    def test_beta_scan_history_disabled_by_default(self, mock_wandb_mod, mock_api_mgr):
-        """Without env var, only scan_history is used."""
+    def test_fallback_to_history_when_both_return_empty(self, mock_wandb_mod, mock_api_mgr):
+        """When beta returns empty and scan returns empty with lastHistoryStep<=0, falls back to history()."""
         mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
         mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
 
-        scan_rows = [{"_step": i, "loss": 0.1} for i in range(10)]
+        history_rows = [{"_step": i, "acc": 0.9} for i in range(10)]
         mock_run = MagicMock()
-        mock_run.name = "default-run"
-        mock_run.lastHistoryStep = 10
-        mock_run.scan_history.return_value = iter(scan_rows)
+        mock_run.name = "broken-step-run"
+        mock_run.lastHistoryStep = -1
+        mock_run.beta_scan_history.return_value = iter([])
+        mock_run.scan_history.return_value = iter([])
+        mock_run.history.return_value = history_rows
         mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
-        os.environ.pop("WANDB_USE_BETA_HISTORY", None)
-        json.loads(get_run_history("e", "p", "run1", min_step=0))
-        mock_run.beta_scan_history.assert_not_called()
+        result = json.loads(get_run_history("e", "p", "run1", min_step=0, max_step=100))
+        mock_run.beta_scan_history.assert_called_once()
         mock_run.scan_history.assert_called_once()
+        mock_run.history.assert_called_once()
+        assert result["sampled_points"] == 10
 
-    @patch.dict(os.environ, {"WANDB_USE_BETA_HISTORY": "true"})
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
     def test_beta_scan_history_passes_keys_and_range(self, mock_wandb_mod, mock_api_mgr):
@@ -512,3 +511,22 @@ class TestBetaScanHistory:
         assert call_kwargs["keys"] == ["loss"]
         assert call_kwargs["min_step"] == 10
         assert call_kwargs["max_step"] == 100
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_no_history_fallback_when_last_step_positive(self, mock_wandb_mod, mock_api_mgr):
+        """When lastHistoryStep > 0 and scan returns empty, do NOT fall back to history()."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        mock_run = MagicMock()
+        mock_run.name = "normal-run"
+        mock_run.lastHistoryStep = 1000
+        mock_run.beta_scan_history.return_value = iter([])
+        mock_run.scan_history.return_value = iter([])
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(get_run_history("e", "p", "run1", min_step=5000, max_step=6000))
+        mock_run.history.assert_not_called()
+        assert result["sampled_points"] == 0

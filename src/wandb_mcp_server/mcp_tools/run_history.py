@@ -1,15 +1,13 @@
 """Retrieve sampled time-series metric history for a W&B run.
 
-Uses `wandb.Api().run().history()` for sampled data and
-`run.scan_history()` when a step range (min_step/max_step) is provided.
-Optionally uses `run.beta_scan_history()` (parquet-backed) when
-WANDB_USE_BETA_HISTORY=true.
+Uses `wandb.Api().run().history()` for sampled data and a tiered
+strategy for step-range queries: beta_scan_history (parquet) first,
+scan_history (GraphQL) second, history() (sampled) as last resort.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import random
 from typing import Any, Dict, List, Optional
 
@@ -121,11 +119,9 @@ def get_run_history(
 
     clamped_samples = min(samples, MAX_HISTORY_ROWS)
 
-    use_beta = os.environ.get("WANDB_USE_BETA_HISTORY", "").lower() == "true"
-
     try:
         if min_step is not None or max_step is not None:
-            rows = _fetch_step_range(run, clamped_samples, keys, min_step, max_step, use_beta)
+            rows = _fetch_step_range(run, clamped_samples, keys, min_step, max_step)
         else:
             history_kwargs: Dict[str, Any] = {"samples": clamped_samples, "pandas": False}
             if keys:
@@ -181,31 +177,30 @@ def _fetch_step_range(
     keys: Optional[List[str]],
     min_step: Optional[int],
     max_step: Optional[int],
-    use_beta: bool,
 ) -> List[Dict[str, Any]]:
-    """Fetch history rows for a step range, with optional beta_scan_history.
+    """Fetch history rows for a step range using a tiered strategy.
 
-    Args:
-        run: The wandb Run object.
-        clamped_samples: Max rows to return.
-        keys: Optional metric keys to select.
-        min_step: Minimum step (inclusive).
-        max_step: Maximum step (inclusive).
-        use_beta: Whether to try beta_scan_history first.
+    Strategy order:
+      1. beta_scan_history (parquet via wandb-core, works on all run types)
+      2. scan_history (GraphQL, fails silently when lastHistoryStep == -1)
+      3. history() sampled fallback (always works, ignores step bounds)
     """
-    if use_beta:
-        try:
-            beta_kwargs: Dict[str, Any] = {"min_step": min_step or 0}
-            if keys:
-                beta_kwargs["keys"] = keys
-            if max_step is not None:
-                beta_kwargs["max_step"] = max_step
-            beta_kwargs["page_size"] = min(clamped_samples, 1000)
-            iterator = run.beta_scan_history(**beta_kwargs)
-            return _reservoir_sample(iterator, clamped_samples)
-        except Exception as e:
-            logger.warning(f"beta_scan_history failed, falling back to scan_history: {e}")
+    # Strategy 1: beta_scan_history
+    try:
+        beta_kwargs: Dict[str, Any] = {"min_step": min_step or 0}
+        if keys:
+            beta_kwargs["keys"] = keys
+        if max_step is not None:
+            beta_kwargs["max_step"] = max_step
+        beta_kwargs["page_size"] = min(clamped_samples, 1000)
+        rows = _reservoir_sample(run.beta_scan_history(**beta_kwargs), clamped_samples)
+        if rows:
+            return rows
+        logger.info("beta_scan_history returned 0 rows, trying scan_history")
+    except Exception as e:
+        logger.info(f"beta_scan_history unavailable ({type(e).__name__}), trying scan_history")
 
+    # Strategy 2: scan_history
     scan_kwargs: Dict[str, Any] = {}
     if keys:
         scan_kwargs["keys"] = keys
@@ -213,7 +208,25 @@ def _fetch_step_range(
         scan_kwargs["min_step"] = min_step
     if max_step is not None:
         scan_kwargs["max_step"] = max_step
-    return _reservoir_sample(run.scan_history(**scan_kwargs), clamped_samples)
+    rows = _reservoir_sample(run.scan_history(**scan_kwargs), clamped_samples)
+    if rows:
+        return rows
+
+    # Strategy 3: history() sampled fallback (ignores step bounds but always works)
+    last_step = getattr(run, "lastHistoryStep", 0) or 0
+    if last_step <= 0:
+        logger.warning(
+            "scan_history returned 0 rows (lastHistoryStep=%s). "
+            "Falling back to history(samples=%d) which ignores step bounds.",
+            last_step,
+            clamped_samples,
+        )
+        history_kwargs: Dict[str, Any] = {"samples": clamped_samples, "pandas": False}
+        if keys:
+            history_kwargs["keys"] = keys
+        return list(run.history(**history_kwargs))
+
+    return rows
 
 
 def _reservoir_sample(iterator: Any, max_rows: int) -> List[Dict[str, Any]]:
