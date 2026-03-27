@@ -10,7 +10,9 @@ import json
 from typing import Any, Dict, Iterator, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
 from requests.exceptions import RetryError
+from urllib3.util.retry import Retry
 
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.config import WF_TRACE_SERVER_URL
@@ -21,12 +23,15 @@ logger = get_rich_logger(__name__)
 class WeaveApiClient:
     """Client for interacting with the Weights & Biases Weave API."""
 
+    DEFAULT_TIMEOUT = 30
+    RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
+
     def __init__(
         self,
         api_key: Optional[str] = None,
         server_url: Optional[str] = None,
         retries: int = 3,
-        timeout: int = 10,
+        timeout: int = DEFAULT_TIMEOUT,
     ):
         """Initialize the WeaveApiClient.
 
@@ -39,8 +44,16 @@ class WeaveApiClient:
         Raises:
             ValueError: If no API key is provided or found in environment.
         """
-        # Set up a session for connection pooling and better request handling
         self.session = requests.Session()
+        retry_strategy = Retry(
+            total=retries,
+            backoff_factor=1.0,
+            status_forcelist=self.RETRYABLE_STATUS_CODES,
+            allowed_methods=["POST", "GET"],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
         # NO FALLBACKS! API key must be explicitly provided
         # For HTTP: Comes from auth middleware via TraceService

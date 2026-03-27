@@ -1,5 +1,9 @@
 """Tests for the detail_level parameter on query_weave_traces_tool."""
 
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
 from wandb_mcp_server.mcp_tools.query_weave import QUERY_WEAVE_TRACES_TOOL_DESCRIPTION
 from wandb_mcp_server.trace_utils import process_traces
 
@@ -101,3 +105,78 @@ class TestProcessTracesDetailLevel:
         trace = result["traces"][0]
         assert trace["id"] == "t1"
         assert "inputs" not in trace
+
+
+class TestSchemaProjection:
+    """Verify detail_level='schema' passes server-side column projection."""
+
+    @pytest.mark.asyncio
+    @patch("wandb_mcp_server.server.count_traces", return_value=5)
+    @patch("wandb_mcp_server.server.query_paginated_weave_traces", new_callable=AsyncMock)
+    async def test_schema_level_passes_columns_to_query(self, mock_query, mock_count):
+        from wandb_mcp_server.weave_api.models import QueryResult, TraceMetadata
+
+        mock_query.return_value = QueryResult(
+            metadata=TraceMetadata(total_traces=0),
+            traces=[],
+        )
+        from wandb_mcp_server.server import register_tools
+        from mcp.server.fastmcp import FastMCP
+
+        mcp = FastMCP("test")
+        register_tools(mcp)
+
+        tool_fn = None
+        for name, fn in mcp._tool_manager._tools.items():
+            if "query_weave_traces" in name:
+                tool_fn = fn
+                break
+        assert tool_fn is not None
+
+        with patch("wandb_mcp_server.api_client.WandBApiManager.get_api_key", return_value="fake_key"):
+            await tool_fn.fn(
+                entity_name="ent",
+                project_name="proj",
+                detail_level="schema",
+            )
+
+        call_kwargs = mock_query.call_args[1]
+        expected_cols = ["id", "trace_id", "op_name", "started_at", "ended_at", "display_name", "parent_id", "summary"]
+        assert call_kwargs["columns"] == expected_cols
+        assert call_kwargs["include_costs"] is False
+        assert call_kwargs["include_feedback"] is False
+
+    @pytest.mark.asyncio
+    @patch("wandb_mcp_server.server.count_traces", return_value=5)
+    @patch("wandb_mcp_server.server.query_paginated_weave_traces", new_callable=AsyncMock)
+    async def test_schema_level_user_columns_not_overridden(self, mock_query, mock_count):
+        """If user passes explicit columns with detail_level='schema', user columns win."""
+        from wandb_mcp_server.weave_api.models import QueryResult, TraceMetadata
+
+        mock_query.return_value = QueryResult(
+            metadata=TraceMetadata(total_traces=0),
+            traces=[],
+        )
+        from wandb_mcp_server.server import register_tools
+        from mcp.server.fastmcp import FastMCP
+
+        mcp = FastMCP("test")
+        register_tools(mcp)
+
+        tool_fn = None
+        for name, fn in mcp._tool_manager._tools.items():
+            if "query_weave_traces" in name:
+                tool_fn = fn
+                break
+
+        user_columns = ["id", "op_name", "inputs"]
+        with patch("wandb_mcp_server.api_client.WandBApiManager.get_api_key", return_value="fake_key"):
+            await tool_fn.fn(
+                entity_name="ent",
+                project_name="proj",
+                columns=user_columns,
+                detail_level="schema",
+            )
+
+        call_kwargs = mock_query.call_args[1]
+        assert call_kwargs["columns"] == user_columns

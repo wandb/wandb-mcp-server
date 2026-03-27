@@ -284,6 +284,21 @@ def register_tools(mcp_instance: FastMCP) -> None:
             raise ValueError(f"detail_level must be one of {_VALID_DETAIL_LEVELS}, got '{detail_level}'")
         if detail_level == "full":
             return_full_data = True
+
+        _SCHEMA_COLUMNS = [
+            "id",
+            "trace_id",
+            "op_name",
+            "started_at",
+            "ended_at",
+            "display_name",
+            "parent_id",
+            "summary",
+        ]
+        effective_columns = columns or []
+        if detail_level == "schema" and not effective_columns:
+            effective_columns = _SCHEMA_COLUMNS
+
         try:
             result_model: QueryResult = await query_paginated_weave_traces(
                 entity_name=entity_name,
@@ -293,9 +308,9 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 sort_by=sort_by,
                 sort_direction=sort_direction,
                 target_limit=limit,
-                include_costs=include_costs,
-                include_feedback=include_feedback,
-                columns=columns or [],
+                include_costs=include_costs if detail_level != "schema" else False,
+                include_feedback=include_feedback if detail_level != "schema" else False,
+                columns=effective_columns,
                 expand_columns=expand_columns or [],
                 truncate_length=truncate_length,
                 return_full_data=return_full_data,
@@ -362,17 +377,21 @@ def register_tools(mcp_instance: FastMCP) -> None:
     async def count_weave_traces_tool(
         entity_name: str, project_name: str, filters: Optional[Dict[str, Any]] = None
     ) -> str:
-        try:
-            total_count = count_traces(entity_name=entity_name, project_name=project_name, filters=filters or {})
+        from concurrent.futures import ThreadPoolExecutor
 
-            # Also count root traces for better understanding of project scope
+        try:
             root_filters = filters.copy() if filters else {}
             root_filters["trace_roots_only"] = True
-            root_traces_count = count_traces(
-                entity_name=entity_name,
-                project_name=project_name,
-                filters=root_filters,
-            )
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                total_future = executor.submit(
+                    count_traces, entity_name=entity_name, project_name=project_name, filters=filters or {}
+                )
+                root_future = executor.submit(
+                    count_traces, entity_name=entity_name, project_name=project_name, filters=root_filters
+                )
+                total_count = total_future.result()
+                root_traces_count = root_future.result()
 
             return json.dumps({"total_count": total_count, "root_traces_count": root_traces_count})
         except Exception as e:

@@ -2149,7 +2149,6 @@ source = { editable = "." }
 dependencies = [
     { name = "httpx" },
     { name = "mcp", extra = ["cli"] },
-    { name = "networkx" },
     { name = "pytest" },
     { name = "python-dotenv" },
     { name = "requests" },
@@ -2187,7 +2186,6 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "litellm", marker = "extra == 'test'", specifier = ">=1.67.2,<=1.82.6" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.0.0" },
-    { name = "networkx", specifier = ">=3.4.2" },
     { name = "pytest", specifier = ">=8.3.1" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.26.0" },
     { name = "pytest-xdist", marker = "extra == 'test'", specifier = ">=3.6.1" },

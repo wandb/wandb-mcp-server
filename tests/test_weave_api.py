@@ -221,6 +221,39 @@ class TestQueryBuilder(unittest.TestCase):
 
         assert QueryBuilder.create_comparison_operation("field", "invalid_operator", "v") is None
 
+    def test_in_operation(self):
+        """$in filter produces an InOperation with correct field and values."""
+        filters = {"$in": {"summary.weave.status": ["error", "running"]}}
+        query = QueryBuilder.build_query_expression(filters)
+        assert query is not None
+        dumped = query.model_dump(by_alias=True)
+        assert "$in" in str(dumped)
+
+    def test_or_operation(self):
+        """$or combines sub-filters with OrOperation."""
+        filters = {"$or": [{"status": "error"}, {"status": "running"}]}
+        query = QueryBuilder.build_query_expression(filters)
+        assert query is not None
+        dumped = query.model_dump(by_alias=True)
+        expr = dumped.get("$expr", {})
+        assert "$or" in str(expr) or "$and" in str(expr)
+
+    def test_or_with_single_clause_unwraps(self):
+        """$or with one clause should simplify to just that clause."""
+        filters = {"$or": [{"status": "error"}]}
+        query = QueryBuilder.build_query_expression(filters)
+        assert query is not None
+        dumped = query.model_dump(by_alias=True)
+        assert "$or" not in str(dumped.get("$expr", {}))
+
+    def test_in_and_regular_filters_combine(self):
+        """$in coexists with regular filters under $and."""
+        filters = {"has_exception": True, "$in": {"summary.weave.status": ["error", "running"]}}
+        query = QueryBuilder.build_query_expression(filters)
+        assert query is not None
+        dumped = query.model_dump(by_alias=True)
+        assert "$and" in str(dumped) or "$in" in str(dumped)
+
 
 # ---------------------------------------------------------------------------
 # WeaveApiClient tests
@@ -234,7 +267,7 @@ class TestWeaveApiClient(unittest.TestCase):
         client = WeaveApiClient(api_key="test_key_12345")
         assert client.api_key == "test_key_12345"
         assert client.retries == 3
-        assert client.timeout == 10
+        assert client.timeout == WeaveApiClient.DEFAULT_TIMEOUT
 
     def test_init_without_key_raises(self):
         with pytest.raises(ValueError, match="API key not provided"):
@@ -279,6 +312,31 @@ class TestWeaveApiClient(unittest.TestCase):
         client = WeaveApiClient(api_key="test_key")
         with pytest.raises(Exception, match="Failed to query Weave traces"):
             list(client.query_traces({"project_id": "entity/project"}))
+
+    def test_retry_adapter_mounted(self):
+        """Verify retry adapter is mounted on the session for https and http."""
+        client = WeaveApiClient(api_key="test_key")
+        https_adapter = client.session.get_adapter("https://trace.wandb.ai")
+        http_adapter = client.session.get_adapter("http://localhost:8080")
+        assert https_adapter.max_retries.total == 3
+        assert 429 in https_adapter.max_retries.status_forcelist
+        assert 503 in https_adapter.max_retries.status_forcelist
+        assert http_adapter.max_retries.total == 3
+
+    def test_custom_retries_and_timeout(self):
+        """Verify custom retries and timeout are applied."""
+        client = WeaveApiClient(api_key="test_key", retries=5, timeout=60)
+        assert client.timeout == 60
+        adapter = client.session.get_adapter("https://trace.wandb.ai")
+        assert adapter.max_retries.total == 5
+
+    def test_no_retry_on_client_error_status(self):
+        """Status codes like 400 should not be in the retry list."""
+        client = WeaveApiClient(api_key="test_key")
+        adapter = client.session.get_adapter("https://trace.wandb.ai")
+        assert 400 not in adapter.max_retries.status_forcelist
+        assert 401 not in adapter.max_retries.status_forcelist
+        assert 404 not in adapter.max_retries.status_forcelist
 
 
 if __name__ == "__main__":
