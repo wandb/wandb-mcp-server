@@ -11,6 +11,7 @@ This server provides tools for:
 - Discovering available entities and projects
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -300,6 +301,27 @@ def register_tools(mcp_instance: FastMCP) -> None:
             effective_columns = _SCHEMA_COLUMNS
 
         try:
+            if detail_level != "schema" and limit > 100 and not metadata_only:
+                try:
+                    pre_count = count_traces(entity_name, project_name, filters or {})
+                    if pre_count > 500:
+                        return json.dumps(
+                            {
+                                "error": "query_too_large",
+                                "message": f"Found {pre_count} matching traces. Queries over 500 traces "
+                                f"risk server memory limits. Narrow your query.",
+                                "trace_count": pre_count,
+                                "suggestions": [
+                                    "detail_level='schema' (structural fields only, fast)",
+                                    f"limit={min(100, pre_count)} (reduce result count)",
+                                    "metadata_only=True (counts and stats without trace data)",
+                                    "Add filters to narrow results",
+                                ],
+                            }
+                        )
+                except Exception:
+                    pass
+
             result_model: QueryResult = await query_paginated_weave_traces(
                 entity_name=entity_name,
                 project_name=project_name,
@@ -369,9 +391,23 @@ def register_tools(mcp_instance: FastMCP) -> None:
                     response_json = result_model.model_dump_json()
 
             return response_json
+        except MemoryError:
+            logger.error("MemoryError in query_weave_traces_tool", exc_info=True)
+            return json.dumps(
+                {
+                    "error": "out_of_memory",
+                    "message": "This query exceeded server memory limits. "
+                    "Try: detail_level='schema', smaller limit, or metadata_only=True.",
+                }
+            )
         except Exception as e:
             logger.error(f"Error in query_weave_traces_tool: {e}", exc_info=True)
-            raise e
+            return json.dumps(
+                {
+                    "error": "query_failed",
+                    "message": str(e)[:500],
+                }
+            )
 
     @mcp_instance.tool(description=COUNT_WEAVE_TRACES_TOOL_DESCRIPTION)
     async def count_weave_traces_tool(
@@ -438,6 +474,44 @@ def register_tools(mcp_instance: FastMCP) -> None:
             return f"The report was saved here: {result['url']}"
         except Exception as e:
             raise e
+
+    from wandb_mcp_server.mcp_tools.log_analysis import (
+        LOG_ANALYSIS_TOOL_DESCRIPTION,
+        log_analysis,
+    )
+
+    @mcp_instance.tool(description=LOG_ANALYSIS_TOOL_DESCRIPTION)
+    async def log_analysis_to_wandb(
+        entity_name: str,
+        project_name: str,
+        analysis_name: str,
+        data: List[Dict[str, Any]],
+        charts: Optional[List[Dict[str, Any]]] = None,
+        scalars: Optional[Dict[str, float]] = None,
+    ) -> str:
+        from concurrent.futures import ThreadPoolExecutor
+        from wandb_mcp_server.api_client import WandBApiManager
+
+        try:
+            api_key = WandBApiManager.get_api_key()
+
+            def _log_with_context():
+                WandBApiManager.set_context_api_key(api_key)
+                return log_analysis(
+                    entity_name=entity_name,
+                    project_name=project_name,
+                    analysis_name=analysis_name,
+                    data=data,
+                    charts=charts,
+                    scalars=scalars,
+                )
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                result = await asyncio.get_event_loop().run_in_executor(pool, _log_with_context)
+            return json.dumps(result)
+        except Exception as e:
+            logger.error(f"Error in log_analysis_to_wandb: {e}", exc_info=True)
+            return json.dumps({"error": "log_failed", "message": str(e)[:500]})
 
     @mcp_instance.tool(description=LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION)
     def query_wandb_entity_projects(entity: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:

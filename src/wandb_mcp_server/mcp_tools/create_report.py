@@ -155,9 +155,6 @@ def create_report(
     Security: No singleton contamination, reads API key from contextvar.
     Thread Safety: Each request has its own contextvar value.
     """
-    if plots_html:
-        logger.info("Note: plots_html parameter provided but ignored in safe markdown-only mode")
-
     from wandb_mcp_server.api_client import WandBApiManager
 
     api_key = WandBApiManager.get_api_key()
@@ -193,6 +190,24 @@ def create_report(
 
         blocks = parse_markdown_to_blocks(markdown_report_text or "")
 
+        if plots_html:
+            import base64 as b64
+
+            if isinstance(plots_html, str):
+                plots_html = {"chart": plots_html}
+            for label, html_content in plots_html.items():
+                content = html_content.strip() if isinstance(html_content, str) else ""
+                if content.startswith("<svg") or content.startswith("data:image/svg"):
+                    if content.startswith("<svg"):
+                        data_uri = f"data:image/svg+xml;base64,{b64.b64encode(content.encode()).decode()}"
+                    else:
+                        data_uri = content
+                    blocks.append(wr.Image(url=data_uri, caption=label))
+                    logger.info(f"Added SVG Image block: {label}")
+                elif content:
+                    blocks.append(wr.MarkdownBlock(content))
+                    logger.info(f"Added HTML MarkdownBlock: {label}")
+
         security_notice = wr.P("*Report created via W&B MCP Server*")
         report.blocks = [security_notice] + blocks
 
@@ -219,10 +234,22 @@ def _build_panel_blocks(
     project_name: str,
 ) -> List:
     """Convert panel dicts to wandb_workspaces report blocks."""
+    import json as _json
+
     blocks = []
     for panel_spec in panels:
         panel_type = panel_spec.get("type", "").lower()
         panel_title = panel_spec.get("title", "")
+
+        run_id = panel_spec.get("analysis_run_id")
+        if run_id:
+            runset = wr.Runset(
+                entity=entity_name,
+                project=project_name,
+                filters=_json.dumps({"name": {"$eq": run_id}}),
+            )
+        else:
+            runset = wr.Runset(entity=entity_name, project=project_name)
 
         try:
             if panel_type == "line":
@@ -231,7 +258,7 @@ def _build_panel_blocks(
                 if not y_keys:
                     continue
                 pg = wr.PanelGrid(
-                    runsets=[wr.Runset(entity=entity_name, project=project_name)],
+                    runsets=[runset],
                     panels=[wr.LinePlot(x=x_key, y=y_keys, title=panel_title)],
                 )
                 blocks.append(pg)
@@ -241,8 +268,19 @@ def _build_panel_blocks(
                 if not metrics:
                     continue
                 pg = wr.PanelGrid(
-                    runsets=[wr.Runset(entity=entity_name, project=project_name)],
+                    runsets=[runset],
                     panels=[wr.BarPlot(metrics=metrics, title=panel_title)],
+                )
+                blocks.append(pg)
+
+            elif panel_type == "scatter":
+                x_key = panel_spec.get("x", "")
+                y_key = panel_spec.get("y", "")
+                if not x_key or not y_key:
+                    continue
+                pg = wr.PanelGrid(
+                    runsets=[runset],
+                    panels=[wr.ScatterPlot(x=x_key, y=y_key, title=panel_title)],
                 )
                 blocks.append(pg)
 
@@ -251,17 +289,43 @@ def _build_panel_blocks(
                 run_ids = panel_spec.get("run_ids", [])
                 if not metrics:
                     continue
-                runset_kwargs: Dict[str, Any] = {"entity": entity_name, "project": project_name}
-                if run_ids:
-                    logger.info(
-                        f"run_comparison: run_ids provided but Runset filters are "
-                        f"not reliably supported by wandb_workspaces. "
-                        f"Showing all runs instead of filtering to {run_ids}."
-                    )
-                chart_panels = [wr.LinePlot(x="_step", y=metrics, title=panel_title)]
+                if run_ids and not run_id:
+                    try:
+                        comp_runset = wr.Runset(
+                            entity=entity_name,
+                            project=project_name,
+                            filters=_json.dumps({"$or": [{"name": rid} for rid in run_ids]}),
+                        )
+                    except Exception:
+                        logger.warning("Runset filter failed, falling back to all runs")
+                        comp_runset = runset
+                else:
+                    comp_runset = runset
                 pg = wr.PanelGrid(
-                    runsets=[wr.Runset(**runset_kwargs)],
-                    panels=chart_panels,
+                    runsets=[comp_runset],
+                    panels=[wr.LinePlot(x="_step", y=metrics, title=panel_title)],
+                )
+                blocks.append(pg)
+
+            elif panel_type == "markdown_table":
+                headers = panel_spec.get("headers", [])
+                rows = panel_spec.get("rows", [])
+                if not headers or not rows:
+                    continue
+                md = f"### {panel_title}\n\n" if panel_title else ""
+                md += "| " + " | ".join(str(h) for h in headers) + " |\n"
+                md += "| " + " | ".join(["---"] * len(headers)) + " |\n"
+                for row in rows:
+                    md += "| " + " | ".join(str(v) for v in row) + " |\n"
+                blocks.append(wr.MarkdownBlock(md))
+
+            elif panel_type == "markdown_panel":
+                markdown = panel_spec.get("markdown", "")
+                if not markdown:
+                    continue
+                pg = wr.PanelGrid(
+                    runsets=[runset],
+                    panels=[wr.MarkdownPanel(markdown=markdown)],
                 )
                 blocks.append(pg)
 

@@ -7,10 +7,11 @@ It orchestrates the client, query builder, and processor components.
 
 from __future__ import annotations
 
+import sys
 from typing import Any, Dict, List, Optional, Set
 
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.config import WF_TRACE_SERVER_URL
+from wandb_mcp_server.config import WF_TRACE_SERVER_URL, MAX_ACCUMULATED_BYTES
 from wandb_mcp_server.weave_api.client import WeaveApiClient
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.weave_api.models import QueryResult
@@ -432,8 +433,20 @@ class TraceService:
             if col not in synthetic_fields:
                 synthetic_fields.append(col)
 
-        # Execute query
-        all_traces = list(self.client.query_traces(request_body))
+        # Execute query with memory guard
+        all_traces = []
+        accumulated_bytes = 0
+        for trace in self.client.query_traces(request_body):
+            trace_size = sys.getsizeof(str(trace))
+            if accumulated_bytes + trace_size > MAX_ACCUMULATED_BYTES:
+                logger.warning(
+                    f"Memory guard: stopping at {len(all_traces)} traces "
+                    f"({accumulated_bytes / 1024 / 1024:.0f}MB). "
+                    f"Use filters or detail_level='schema' to reduce data."
+                )
+                break
+            all_traces.append(trace)
+            accumulated_bytes += trace_size
 
         # Add synthetic columns and invalid column warnings back to the results
         if rs_columns or inv_columns:  # Use corrected variables
@@ -592,6 +605,14 @@ class TraceService:
                     break
 
                 all_traces.extend(traces_from_chunk)
+
+                accumulated = sys.getsizeof(str(all_traces))
+                if accumulated > MAX_ACCUMULATED_BYTES:
+                    logger.warning(
+                        f"Memory guard (paginated): stopping at {len(all_traces)} traces "
+                        f"({accumulated / 1024 / 1024:.0f}MB)."
+                    )
+                    break
 
                 if len(traces_from_chunk) < current_chunk_size or (target_limit and len(all_traces) >= target_limit):
                     break

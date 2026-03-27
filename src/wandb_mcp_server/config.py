@@ -17,3 +17,10 @@ try:
     MAX_RESPONSE_TOKENS: int = int(os.getenv("MAX_RESPONSE_TOKENS", "30000"))
 except (ValueError, TypeError):
     MAX_RESPONSE_TOKENS: int = 30000
+
+# Memory guard for trace queries. Stops accumulating trace data when this
+# threshold is reached, returning a partial result instead of OOM-crashing.
+try:
+    MAX_ACCUMULATED_BYTES: int = int(os.getenv("MAX_ACCUMULATED_BYTES", str(1024 * 1024 * 1024)))
+except (ValueError, TypeError):
+    MAX_ACCUMULATED_BYTES: int = 1024 * 1024 * 1024  # 1GB

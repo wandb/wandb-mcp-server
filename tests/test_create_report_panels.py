@@ -60,7 +60,7 @@ class TestBuildPanelBlocks:
         blocks = _build_panel_blocks(panels, "entity", "project")
 
         assert len(blocks) == 1
-        mock_wr.Runset.assert_called_once()
+        assert mock_wr.Runset.call_count == 2
         mock_wr.LinePlot.assert_called_once()
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
