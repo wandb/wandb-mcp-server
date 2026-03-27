@@ -378,17 +378,24 @@ def register_tools(mcp_instance: FastMCP) -> None:
         entity_name: str, project_name: str, filters: Optional[Dict[str, Any]] = None
     ) -> str:
         from concurrent.futures import ThreadPoolExecutor
+        from wandb_mcp_server.api_client import WandBApiManager
 
         try:
             root_filters = filters.copy() if filters else {}
             root_filters["trace_roots_only"] = True
 
+            api_key = WandBApiManager.get_api_key()
+
+            def _count_with_context(**kwargs):
+                WandBApiManager.set_context_api_key(api_key)
+                return count_traces(**kwargs)
+
             with ThreadPoolExecutor(max_workers=2) as executor:
                 total_future = executor.submit(
-                    count_traces, entity_name=entity_name, project_name=project_name, filters=filters or {}
+                    _count_with_context, entity_name=entity_name, project_name=project_name, filters=filters or {}
                 )
                 root_future = executor.submit(
-                    count_traces, entity_name=entity_name, project_name=project_name, filters=root_filters
+                    _count_with_context, entity_name=entity_name, project_name=project_name, filters=root_filters
                 )
                 total_count = total_future.result()
                 root_traces_count = root_future.result()
