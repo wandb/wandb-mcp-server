@@ -56,6 +56,8 @@ class TraceService:
     # Define cost fields once as a class constant
     COST_FIELDS = {"total_cost", "completion_cost", "prompt_cost"}
 
+    COST_SORT_MAX_FIRST_PASS = 10_000
+
     # Define synthetic columns that shouldn't be passed to the API but can be reconstructed
     SYNTHETIC_COLUMNS = {"costs"}
 
@@ -647,23 +649,28 @@ class TraceService:
         if invalid_columns is None:
             invalid_columns = set()
 
-        # First pass: Fetch all trace IDs and costs
         first_pass_query = {
             "entity_name": entity_name,
             "project_name": project_name,
             "filters": filters or {},
-            "sort_by": "started_at",  # Use a standard sort for the first pass
+            "sort_by": "started_at",
             "sort_direction": "desc",
-            "limit": 1000000,  # Explicitly set a large limit to get all traces
-            "include_costs": True,  # We need costs for sorting
-            "include_feedback": False,  # Don't need feedback for the first pass
-            "columns": ["id", "summary"],  # Need summary for costs data
+            "limit": self.COST_SORT_MAX_FIRST_PASS,
+            "include_costs": True,
+            "include_feedback": False,
+            "columns": ["id", "summary"],
         }
 
         first_pass_request = QueryBuilder.prepare_query_params(first_pass_query)
         first_pass_results = list(self.client.query_traces(first_pass_request))
 
         logger.info(f"First pass of cost sorting request retrieved {len(first_pass_results)} traces")
+        if len(first_pass_results) >= self.COST_SORT_MAX_FIRST_PASS:
+            logger.warning(
+                f"Cost sort first pass hit cap of {self.COST_SORT_MAX_FIRST_PASS} traces. "
+                "Results may not include the most/least expensive traces. "
+                "Add filters to narrow the scope."
+            )
 
         # Filter and sort by cost
         filtered_results = [t for t in first_pass_results if TraceProcessor.get_cost(t, sort_by) is not None]

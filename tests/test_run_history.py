@@ -351,3 +351,182 @@ class TestGetRunHistory:
         assert result["rows"] == []
         assert result["sampled_points"] == 0
         assert result["keys_returned"] == []
+
+
+class TestHistoryTruncation:
+    """Tests for row-budget enforcement on history responses (M1)."""
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_large_response_truncated(self, mock_wandb_mod, mock_api_mgr):
+        """History exceeding token budget should be downsampled."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        rows = [{"_step": i, "loss": 1.0 / (i + 1), "acc": i * 0.01, "lr": 0.001} for i in range(2000)]
+        mock_run = MagicMock()
+        mock_run.name = "big-run"
+        mock_run.lastHistoryStep = 2000
+        mock_run.history.return_value = rows
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        with patch("wandb_mcp_server.config.MAX_RESPONSE_TOKENS", 500):
+            result = json.loads(get_run_history("e", "p", "run1", samples=2000))
+        assert result["sampled_points"] < 2000
+        assert "truncation_note" in result
+        assert len(result["rows"]) > 0
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_small_response_not_truncated(self, mock_wandb_mod, mock_api_mgr):
+        """History under budget passes through unchanged."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        rows = [{"_step": i, "loss": 0.5} for i in range(10)]
+        mock_run = MagicMock()
+        mock_run.name = "small-run"
+        mock_run.lastHistoryStep = 10
+        mock_run.history.return_value = rows
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(get_run_history("e", "p", "run1", samples=10))
+        assert result["sampled_points"] == 10
+        assert "truncation_note" not in result
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_truncation_preserves_step_ordering(self, mock_wandb_mod, mock_api_mgr):
+        """Truncated rows must remain sorted by _step."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        rows = [{"_step": i, "val": i * 0.1} for i in range(2000)]
+        mock_run = MagicMock()
+        mock_run.name = "ordered-run"
+        mock_run.lastHistoryStep = 2000
+        mock_run.history.return_value = rows
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        with patch("wandb_mcp_server.config.MAX_RESPONSE_TOKENS", 500):
+            result = json.loads(get_run_history("e", "p", "run1", samples=2000))
+        steps = [r["_step"] for r in result["rows"]]
+        assert steps == sorted(steps)
+
+    def test_enforce_row_budget_noop_when_small(self):
+        """_enforce_row_budget returns rows unchanged when under budget."""
+        from wandb_mcp_server.mcp_tools.run_history import _enforce_row_budget
+
+        rows = [{"_step": i, "v": 1.0} for i in range(5)]
+        result = _enforce_row_budget(rows, budget_chars=100000)
+        assert len(result) == 5
+
+
+class TestTieredStepRangeFetch:
+    """Tests for the tiered step-range strategy: beta -> scan -> history fallback."""
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_beta_scan_history_tried_first(self, mock_wandb_mod, mock_api_mgr):
+        """beta_scan_history is the first strategy attempted for step-range queries."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        beta_rows = [{"_step": i, "loss": 0.5} for i in range(50)]
+        mock_run = MagicMock()
+        mock_run.name = "beta-run"
+        mock_run.lastHistoryStep = 100
+        mock_run.beta_scan_history.return_value = iter(beta_rows)
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(get_run_history("e", "p", "run1", min_step=0, max_step=100))
+        mock_run.beta_scan_history.assert_called_once()
+        mock_run.scan_history.assert_not_called()
+        assert result["sampled_points"] == 50
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_fallback_to_scan_history_on_beta_error(self, mock_wandb_mod, mock_api_mgr):
+        """If beta_scan_history raises, falls back to scan_history."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        fallback_rows = [{"_step": i, "loss": 0.3} for i in range(20)]
+        mock_run = MagicMock()
+        mock_run.name = "fallback-run"
+        mock_run.lastHistoryStep = 50
+        mock_run.beta_scan_history.side_effect = RuntimeError("wandb-core not available")
+        mock_run.scan_history.return_value = iter(fallback_rows)
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(get_run_history("e", "p", "run1", min_step=0))
+        mock_run.beta_scan_history.assert_called_once()
+        mock_run.scan_history.assert_called_once()
+        assert result["sampled_points"] == 20
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_fallback_to_history_when_both_return_empty(self, mock_wandb_mod, mock_api_mgr):
+        """When beta returns empty and scan returns empty with lastHistoryStep<=0, falls back to history()."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        history_rows = [{"_step": i, "acc": 0.9} for i in range(10)]
+        mock_run = MagicMock()
+        mock_run.name = "broken-step-run"
+        mock_run.lastHistoryStep = -1
+        mock_run.beta_scan_history.return_value = iter([])
+        mock_run.scan_history.return_value = iter([])
+        mock_run.history.return_value = history_rows
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(get_run_history("e", "p", "run1", min_step=0, max_step=100))
+        mock_run.beta_scan_history.assert_called_once()
+        mock_run.scan_history.assert_called_once()
+        mock_run.history.assert_called_once()
+        assert result["sampled_points"] == 10
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_beta_scan_history_passes_keys_and_range(self, mock_wandb_mod, mock_api_mgr):
+        """beta_scan_history receives keys, min_step, max_step."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        mock_run = MagicMock()
+        mock_run.name = "params-run"
+        mock_run.lastHistoryStep = 200
+        mock_run.beta_scan_history.return_value = iter([{"_step": 10, "loss": 0.5}])
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        get_run_history("e", "p", "run1", keys=["loss"], min_step=10, max_step=100)
+        call_kwargs = mock_run.beta_scan_history.call_args[1]
+        assert call_kwargs["keys"] == ["loss"]
+        assert call_kwargs["min_step"] == 10
+        assert call_kwargs["max_step"] == 100
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_no_history_fallback_when_last_step_positive(self, mock_wandb_mod, mock_api_mgr):
+        """When lastHistoryStep > 0 and scan returns empty, do NOT fall back to history()."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        mock_run = MagicMock()
+        mock_run.name = "normal-run"
+        mock_run.lastHistoryStep = 1000
+        mock_run.beta_scan_history.return_value = iter([])
+        mock_run.scan_history.return_value = iter([])
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(get_run_history("e", "p", "run1", min_step=5000, max_step=6000))
+        mock_run.history.assert_not_called()
+        assert result["sampled_points"] == 0

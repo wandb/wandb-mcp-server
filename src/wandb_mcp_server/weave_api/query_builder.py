@@ -19,8 +19,10 @@ from weave.trace_server.interface.query import (
     GetFieldOperator,
     GteOperation,
     GtOperation,
+    InOperation,
     LiteralOperation,
     NotOperation,
+    OrOperation,
     Query,
 )
 
@@ -325,6 +327,31 @@ class QueryBuilder:
                             operations.append(comp_op)
             else:
                 logger.warning(f"Invalid format for 'attributes' filter: {attributes_filters}. Expected a dictionary.")
+
+        # Handle $in filter for multi-value matching (e.g., status $in ["error", "running"])
+        if "$in" in filters:
+            in_filters = filters["$in"]
+            if isinstance(in_filters, dict):
+                for field_name, values in in_filters.items():
+                    if isinstance(values, list) and values:
+                        field_op = GetFieldOperator(**{"$getField": field_name})
+                        literal_ops = [LiteralOperation(**{"$literal": v}) for v in values]
+                        operations.append(InOperation(**{"$in": (field_op, literal_ops)}))
+
+        # Handle $or for combining alternative conditions
+        if "$or" in filters:
+            or_clauses = filters["$or"]
+            if isinstance(or_clauses, list) and or_clauses:
+                sub_queries = []
+                for clause in or_clauses:
+                    if isinstance(clause, dict):
+                        sub_query = cls.build_query_expression(clause)
+                        if sub_query and hasattr(sub_query, "expr_"):
+                            sub_queries.append(sub_query.expr_)
+                if len(sub_queries) == 1:
+                    operations.append(sub_queries[0])
+                elif len(sub_queries) > 1:
+                    operations.append(OrOperation(**{"$or": sub_queries}))
 
         # Handle has_exception filter (checking top-level exception field)
         if "has_exception" in filters:
