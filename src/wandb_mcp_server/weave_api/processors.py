@@ -175,13 +175,10 @@ class TraceProcessor:
         for trace in traces:
             # Handle both dictionary and Pydantic model cases
             if hasattr(trace, "status"):
-                # Pydantic model case
                 status = trace.status or "other"
             elif isinstance(trace, dict):
-                # Dictionary case
-                status = trace.get("status", "other")
+                status = trace.get("status") or "other"
             else:
-                # Unknown case
                 status = "other"
 
             status = status.lower()

@@ -234,8 +234,6 @@ def _build_panel_blocks(
     project_name: str,
 ) -> List:
     """Convert panel dicts to wandb_workspaces report blocks."""
-    import json as _json
-
     blocks = []
     for panel_spec in panels:
         panel_type = panel_spec.get("type", "").lower()
@@ -243,10 +241,12 @@ def _build_panel_blocks(
 
         run_id = panel_spec.get("analysis_run_id")
         if run_id:
+            # Use query= instead of filters= because wandb-workspaces
+            # ast.literal_eval chokes on dict-based JSON filter strings
             runset = wr.Runset(
                 entity=entity_name,
                 project=project_name,
-                filters=_json.dumps({"name": {"$eq": run_id}}),
+                query=run_id,
             )
         else:
             runset = wr.Runset(entity=entity_name, project=project_name)
@@ -290,15 +290,11 @@ def _build_panel_blocks(
                 if not metrics:
                     continue
                 if run_ids and not run_id:
-                    try:
-                        comp_runset = wr.Runset(
-                            entity=entity_name,
-                            project=project_name,
-                            filters=_json.dumps({"$or": [{"name": rid} for rid in run_ids]}),
-                        )
-                    except Exception:
-                        logger.warning("Runset filter failed, falling back to all runs")
-                        comp_runset = runset
+                    comp_runset = wr.Runset(
+                        entity=entity_name,
+                        project=project_name,
+                        query=" ".join(run_ids),
+                    )
                 else:
                     comp_runset = runset
                 pg = wr.PanelGrid(

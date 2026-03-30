@@ -119,6 +119,9 @@ def log_analysis(
     run = api.create_run(entity=entity_name, project=project_name)
 
     try:
+        # wandb SDK bug: create_run() returns a Run missing .group,
+        # which run.update() internally reads. Pre-initialize it.
+        run.group = ""
         run.tags = ["mcp-generated"]
         run.job_type = "mcp-analysis"
         run.display_name = analysis_name

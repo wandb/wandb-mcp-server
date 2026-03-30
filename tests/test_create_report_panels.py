@@ -64,6 +64,34 @@ class TestBuildPanelBlocks:
         mock_wr.LinePlot.assert_called_once()
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_analysis_run_id_uses_query_not_filters(self, mock_wr):
+        """Runset for analysis_run_id must use query= to avoid ast.Dict crash."""
+        mock_wr.PanelGrid = MagicMock()
+        mock_wr.BarPlot = MagicMock()
+        mock_wr.Runset = MagicMock()
+
+        panels = [{"type": "bar", "metrics": ["p50"], "title": "Latency", "analysis_run_id": "abc123"}]
+        _build_panel_blocks(panels, "entity", "project")
+
+        runset_call = mock_wr.Runset.call_args
+        assert runset_call[1].get("query") == "abc123"
+        assert "filters" not in runset_call[1]
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_run_comparison_uses_query_not_filters(self, mock_wr):
+        """run_comparison with run_ids must use query= to avoid ast.Dict crash."""
+        mock_wr.PanelGrid = MagicMock()
+        mock_wr.LinePlot = MagicMock()
+        mock_wr.Runset = MagicMock()
+
+        panels = [{"type": "run_comparison", "metrics": ["loss"], "run_ids": ["r1", "r2"], "title": "Compare"}]
+        _build_panel_blocks(panels, "entity", "project")
+
+        comp_call = mock_wr.Runset.call_args_list[1]
+        assert comp_call[1].get("query") == "r1 r2"
+        assert "filters" not in comp_call[1]
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     def test_empty_panels_list(self, mock_wr):
         blocks = _build_panel_blocks([], "entity", "project")
         assert blocks == []
