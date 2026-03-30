@@ -1,10 +1,15 @@
-"""Log computed analysis data to W&B for interactive visualization in reports.
+"""Log computed analysis data to W&B for visualization in reports.
 
-Creates a lightweight W&B run (job_type='mcp-analysis', tagged 'mcp-generated'),
-logs wandb.Table + wandb.plot charts + scalar metrics, returns run_id for use
-in create_wandb_report_tool panels.
+Creates a lightweight W&B run via the PublicApi (no wandb.init()),
+logs scalar summary metrics via GraphQL UpsertBucket, and returns
+the run_id for use in create_wandb_report_tool panels.
+
+Security: Uses wandb.Api(api_key=...) per-request, same pattern as
+every other tool. No global state, no wandb.init(), no background
+processes, no disk artifacts beyond a temp directory.
 """
 
+import json
 from typing import Any, Dict, List, Optional
 
 import wandb
@@ -17,25 +22,27 @@ from wandb_mcp_server.utils import get_rich_logger
 logger = get_rich_logger(__name__)
 
 
-LOG_ANALYSIS_TOOL_DESCRIPTION = """Log computed analysis data to W&B for interactive visualization in reports.
+LOG_ANALYSIS_TOOL_DESCRIPTION = """Log computed analysis data to W&B for visualization in reports.
 
 <when_to_use>
 Call this BEFORE create_wandb_report_tool when you have computed data
 (latency distributions, error breakdowns, custom aggregations) that
-you want to visualize as interactive charts in a W&B report.
+you want to persist as a W&B run with summary metrics.
 
 Typical workflow:
 1. Query data with query_weave_traces_tool or query_wandb_tool
 2. Compute analysis (percentiles, distributions, aggregations) in code
-3. Call log_analysis_to_wandb with the computed data
+3. Call log_analysis_to_wandb with the computed data and scalar summaries
 4. Call create_wandb_report_tool referencing the returned run_id in panels
 </when_to_use>
 
 The tool creates a lightweight W&B run (tagged 'mcp-generated',
-job_type='mcp-analysis') and logs:
-- A wandb.Table with all your data (sortable/filterable in W&B UI)
-- Interactive charts (histogram, bar, scatter, line) from the table
-- Scalar summary metrics (p50, p95, etc.)
+job_type='mcp-analysis') and logs scalar summary metrics to it.
+Numeric columns in the data are auto-summarized (mean, min, max, median).
+
+For structured tabular data in reports, use the markdown_table panel type
+in create_wandb_report_tool. For custom visualizations, use SVG via the
+plots_html parameter.
 
 Parameters
 ----------
@@ -47,15 +54,11 @@ analysis_name : str
     Display name for the analysis run (e.g., "latency-analysis-2026-03-27").
 data : list of dict
     Rows of computed data. Each dict is a row with consistent keys.
+    Numeric columns are auto-summarized (mean, min, max, median).
     Example: [{"trace_id": "abc", "latency_ms": 1234, "status": "success"}, ...]
-charts : list of dict, optional
-    Chart specifications to create from the data table:
-    - {"type": "histogram", "column": "latency_ms", "title": "Latency Distribution"}
-    - {"type": "bar", "label": "status", "value": "count", "title": "Status Breakdown"}
-    - {"type": "scatter", "x": "latency_ms", "y": "token_count", "title": "Latency vs Tokens"}
-    - {"type": "line", "x": "timestamp", "y": "latency_ms", "title": "Latency Over Time"}
 scalars : dict, optional
-    Scalar summary metrics to log. Example: {"p50_latency_ms": 1.2, "p95_latency_ms": 4.5}
+    Explicit scalar summary metrics to log.
+    Example: {"p50_latency_ms": 1.2, "p95_latency_ms": 4.5, "error_rate": 0.03}
 
 Returns
 -------
@@ -69,11 +72,10 @@ Example
 ...     project_name="my-project",
 ...     analysis_name="latency-analysis",
 ...     data=[{"op": "predict", "latency_ms": 120}, {"op": "predict", "latency_ms": 450}],
-...     charts=[{"type": "histogram", "column": "latency_ms", "title": "Latency"}],
 ...     scalars={"p50_latency_ms": 285, "mean_latency_ms": 285}
 ... )
 >>> # Then in create_wandb_report_tool:
->>> # panels=[{"type": "line", "x": "_step", "y": ["p50_latency_ms"], "analysis_run_id": result["run_id"]}]
+>>> # panels=[{"type": "bar", "metrics": ["p50_latency_ms"], "analysis_run_id": result["run_id"]}]
 """
 
 
@@ -85,7 +87,11 @@ def log_analysis(
     charts: Optional[List[Dict[str, Any]]] = None,
     scalars: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
-    """Log computed analysis data to W&B."""
+    """Log computed analysis data to W&B via the PublicApi.
+
+    Uses wandb.Api(api_key=...) for safe multi-tenant operation.
+    No wandb.init(), no global state, no background processes.
+    """
     api_key = WandBApiManager.get_api_key()
     if not api_key:
         raise Exception("No W&B API key available")
@@ -100,7 +106,6 @@ def log_analysis(
                 "project_name": project_name,
                 "analysis_name": analysis_name,
                 "row_count": len(data),
-                "chart_count": len(charts or []),
                 "scalar_count": len(scalars or {}),
             },
         )
@@ -110,63 +115,51 @@ def log_analysis(
     if not data:
         raise ValueError("data must be a non-empty list of dicts")
 
-    run = wandb.init(
-        entity=entity_name,
-        project=project_name,
-        name=analysis_name,
-        job_type="mcp-analysis",
-        tags=["mcp-generated"],
-        notes="Auto-generated by W&B MCP Server",
-        settings=wandb.Settings(
-            api_key=api_key,
-            base_url=WANDB_BASE_URL,
-            silent=True,
-        ),
-    )
+    api = wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
+    run = api.create_run(entity=entity_name, project=project_name)
 
     try:
-        columns = list(data[0].keys())
-        table = wandb.Table(
-            columns=columns,
-            data=[[row.get(k) for k in columns] for row in data],
-        )
+        run.tags = ["mcp-generated"]
+        run.job_type = "mcp-analysis"
+        run.display_name = analysis_name
+        run.notes = "Auto-generated by W&B MCP Server"
 
-        log_payload: Dict[str, Any] = {"analysis_data": table}
-
+        summary_data: Dict[str, Any] = {}
         if scalars:
-            log_payload.update(scalars)
+            summary_data.update(scalars)
 
-        if charts:
-            for i, spec in enumerate(charts):
-                chart_type = spec.get("type", "")
-                title = spec.get("title", f"Chart {i + 1}")
-                try:
-                    if chart_type == "histogram":
-                        log_payload[f"chart_{i}"] = wandb.plot.histogram(table, spec["column"], title=title)
-                    elif chart_type == "bar":
-                        log_payload[f"chart_{i}"] = wandb.plot.bar(table, spec["label"], spec["value"], title=title)
-                    elif chart_type == "scatter":
-                        log_payload[f"chart_{i}"] = wandb.plot.scatter(table, spec["x"], spec["y"], title=title)
-                    elif chart_type == "line":
-                        log_payload[f"chart_{i}"] = wandb.plot.line(table, spec["x"], spec["y"], title=title)
-                    else:
-                        logger.warning(f"Unknown chart type: {chart_type}")
-                except Exception as e:
-                    logger.warning(f"Failed to create chart '{title}': {e}")
+        columns = list(data[0].keys())
+        summary_data["_mcp_row_count"] = len(data)
+        summary_data["_mcp_columns"] = json.dumps(columns)
 
-        wandb.log(log_payload)
-        run_id = run.id
-        run_url = run.url
+        for key in columns:
+            values = [r.get(key) for r in data if isinstance(r.get(key), (int, float))]
+            if len(values) >= 2:
+                sorted_vals = sorted(values)
+                summary_data[f"{key}_mean"] = sum(values) / len(values)
+                summary_data[f"{key}_min"] = sorted_vals[0]
+                summary_data[f"{key}_max"] = sorted_vals[-1]
+                mid = len(sorted_vals) // 2
+                summary_data[f"{key}_median"] = sorted_vals[mid]
 
-    finally:
-        run.finish()
+        if summary_data:
+            run.summary.update(summary_data)
+
+        run.update()
+
+    except Exception as e:
+        logger.error(f"Failed to update analysis run: {e}", exc_info=True)
+        raise
+
+    run_id = run.id
+    run_url = f"https://wandb.ai/{entity_name}/{project_name}/runs/{run_id}"
 
     logger.info(f"Logged analysis '{analysis_name}' to run {run_id}")
 
     return {
         "run_id": run_id,
         "run_url": run_url,
-        "logged_keys": list(log_payload.keys()),
+        "logged_keys": list(summary_data.keys()),
         "table_columns": columns,
         "row_count": len(data),
     }

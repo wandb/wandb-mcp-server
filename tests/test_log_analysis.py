@@ -1,4 +1,4 @@
-"""Tests for log_analysis_to_wandb tool."""
+"""Tests for log_analysis_to_wandb tool (API-only, no wandb.init)."""
 
 from unittest.mock import MagicMock, patch
 
@@ -6,20 +6,32 @@ import pytest
 
 
 class TestLogAnalysis:
-    """Test the log_analysis function."""
+    """Test the log_analysis function using wandb.Api() pattern."""
+
+    def _make_mock_api(self):
+        mock_run = MagicMock()
+        mock_run.id = "abc123"
+        mock_run.tags = []
+        mock_run.job_type = None
+        mock_run.display_name = None
+        mock_run.notes = None
+        mock_run.summary = MagicMock()
+
+        mock_api = MagicMock()
+        mock_api.create_run.return_value = mock_run
+
+        return mock_api, mock_run
 
     @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
     @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
-    def test_basic_table_logging(self, mock_api_manager, mock_wandb):
+    def test_basic_scalar_logging(self, mock_api_manager, mock_wandb):
         from wandb_mcp_server.mcp_tools.log_analysis import log_analysis
 
         mock_api_manager.get_api_key.return_value = "test-key"
         mock_api_manager.get_api.return_value = MagicMock(viewer={"username": "test"})
 
-        mock_run = MagicMock()
-        mock_run.id = "abc123"
-        mock_run.url = "https://wandb.ai/test/proj/runs/abc123"
-        mock_wandb.init.return_value = mock_run
+        mock_api, mock_run = self._make_mock_api()
+        mock_wandb.Api.return_value = mock_api
 
         result = log_analysis(
             entity_name="test",
@@ -34,48 +46,27 @@ class TestLogAnalysis:
         assert result["run_id"] == "abc123"
         assert result["row_count"] == 2
         assert "latency_ms" in result["table_columns"]
-        mock_wandb.log.assert_called_once()
-        mock_run.finish.assert_called_once()
 
-    @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
-    @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
-    def test_with_charts(self, mock_api_manager, mock_wandb):
-        from wandb_mcp_server.mcp_tools.log_analysis import log_analysis
-
-        mock_api_manager.get_api_key.return_value = "test-key"
-        mock_api_manager.get_api.return_value = MagicMock(viewer={"username": "test"})
-
-        mock_run = MagicMock()
-        mock_run.id = "abc123"
-        mock_run.url = "https://wandb.ai/test/proj/runs/abc123"
-        mock_wandb.init.return_value = mock_run
-        mock_wandb.plot.histogram.return_value = MagicMock()
-
-        result = log_analysis(
-            entity_name="test",
-            project_name="proj",
-            analysis_name="test-analysis",
-            data=[{"latency_ms": 100}, {"latency_ms": 200}],
-            charts=[{"type": "histogram", "column": "latency_ms", "title": "Latency"}],
+        mock_wandb.Api.assert_called_once_with(
+            api_key="test-key",
+            overrides={"base_url": mock_wandb.Api.call_args[1]["overrides"]["base_url"]},
         )
-
-        assert "chart_0" in result["logged_keys"]
-        mock_wandb.plot.histogram.assert_called_once()
+        mock_api.create_run.assert_called_once_with(entity="test", project="proj")
+        mock_run.summary.update.assert_called_once()
+        mock_run.update.assert_called_once()
 
     @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
     @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
-    def test_with_scalars(self, mock_api_manager, mock_wandb):
+    def test_with_explicit_scalars(self, mock_api_manager, mock_wandb):
         from wandb_mcp_server.mcp_tools.log_analysis import log_analysis
 
         mock_api_manager.get_api_key.return_value = "test-key"
         mock_api_manager.get_api.return_value = MagicMock(viewer={"username": "test"})
 
-        mock_run = MagicMock()
-        mock_run.id = "abc123"
-        mock_run.url = "https://wandb.ai/test/proj/runs/abc123"
-        mock_wandb.init.return_value = mock_run
+        mock_api, mock_run = self._make_mock_api()
+        mock_wandb.Api.return_value = mock_api
 
-        result = log_analysis(
+        log_analysis(
             entity_name="test",
             project_name="proj",
             analysis_name="test-analysis",
@@ -83,10 +74,60 @@ class TestLogAnalysis:
             scalars={"p50": 1.2, "p95": 4.5},
         )
 
-        assert result["run_id"] == "abc123"
-        log_call = mock_wandb.log.call_args[0][0]
-        assert "p50" in log_call
-        assert "p95" in log_call
+        summary_call = mock_run.summary.update.call_args[0][0]
+        assert summary_call["p50"] == 1.2
+        assert summary_call["p95"] == 4.5
+
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
+    def test_auto_computes_numeric_stats(self, mock_api_manager, mock_wandb):
+        from wandb_mcp_server.mcp_tools.log_analysis import log_analysis
+
+        mock_api_manager.get_api_key.return_value = "test-key"
+        mock_api_manager.get_api.return_value = MagicMock(viewer={"username": "test"})
+
+        mock_api, mock_run = self._make_mock_api()
+        mock_wandb.Api.return_value = mock_api
+
+        log_analysis(
+            entity_name="test",
+            project_name="proj",
+            analysis_name="test-analysis",
+            data=[
+                {"latency_ms": 100},
+                {"latency_ms": 200},
+                {"latency_ms": 300},
+            ],
+        )
+
+        summary_call = mock_run.summary.update.call_args[0][0]
+        assert summary_call["latency_ms_mean"] == 200.0
+        assert summary_call["latency_ms_min"] == 100
+        assert summary_call["latency_ms_max"] == 300
+        assert "latency_ms_median" in summary_call
+
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
+    def test_sets_run_metadata(self, mock_api_manager, mock_wandb):
+        from wandb_mcp_server.mcp_tools.log_analysis import log_analysis
+
+        mock_api_manager.get_api_key.return_value = "test-key"
+        mock_api_manager.get_api.return_value = MagicMock(viewer={"username": "test"})
+
+        mock_api, mock_run = self._make_mock_api()
+        mock_wandb.Api.return_value = mock_api
+
+        log_analysis(
+            entity_name="test",
+            project_name="proj",
+            analysis_name="my-analysis",
+            data=[{"a": 1}],
+        )
+
+        assert mock_run.tags == ["mcp-generated"]
+        assert mock_run.job_type == "mcp-analysis"
+        assert mock_run.display_name == "my-analysis"
+        assert mock_run.notes == "Auto-generated by W&B MCP Server"
 
     @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
     def test_no_api_key_raises(self, mock_api_manager):
@@ -108,20 +149,41 @@ class TestLogAnalysis:
 
     @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
     @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
-    def test_run_always_finished(self, mock_api_manager, mock_wandb):
-        """Run.finish() should be called even if wandb.log raises."""
+    def test_no_wandb_init_called(self, mock_api_manager, mock_wandb):
+        """Verify wandb.init() is never called -- the critical safety check."""
         from wandb_mcp_server.mcp_tools.log_analysis import log_analysis
 
         mock_api_manager.get_api_key.return_value = "test-key"
         mock_api_manager.get_api.return_value = MagicMock(viewer={"username": "test"})
 
-        mock_run = MagicMock()
-        mock_run.id = "abc"
-        mock_run.url = "url"
-        mock_wandb.init.return_value = mock_run
-        mock_wandb.log.side_effect = RuntimeError("log failed")
+        mock_api, _ = self._make_mock_api()
+        mock_wandb.Api.return_value = mock_api
 
-        with pytest.raises(RuntimeError):
-            log_analysis("e", "p", "name", [{"a": 1}])
+        log_analysis("e", "p", "name", [{"a": 1}])
 
-        mock_run.finish.assert_called_once()
+        mock_wandb.init.assert_not_called()
+        mock_wandb.log.assert_not_called()
+
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
+    def test_charts_param_accepted_but_ignored(self, mock_api_manager, mock_wandb):
+        """Charts param is accepted for API compat but not used in v0.3.0."""
+        from wandb_mcp_server.mcp_tools.log_analysis import log_analysis
+
+        mock_api_manager.get_api_key.return_value = "test-key"
+        mock_api_manager.get_api.return_value = MagicMock(viewer={"username": "test"})
+
+        mock_api, mock_run = self._make_mock_api()
+        mock_wandb.Api.return_value = mock_api
+
+        result = log_analysis(
+            entity_name="e",
+            project_name="p",
+            analysis_name="name",
+            data=[{"latency_ms": 100}],
+            charts=[{"type": "histogram", "column": "latency_ms", "title": "Latency"}],
+        )
+
+        assert result["run_id"] == "abc123"
+        mock_wandb.Table.assert_not_called()
+        mock_wandb.plot.histogram.assert_not_called()
