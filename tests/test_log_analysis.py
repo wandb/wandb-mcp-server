@@ -146,6 +146,34 @@ class TestLogAnalysis:
         assert mock_run.group == ""
         mock_run.update.assert_called_once()
 
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
+    def test_large_payload_100_rows(self, mock_api_manager, mock_wandb):
+        """Verify 100+ row payloads work without errors or truncation."""
+        from wandb_mcp_server.mcp_tools.log_analysis import log_analysis
+
+        mock_api_manager.get_api_key.return_value = "test-key"
+        mock_api_manager.get_api.return_value = MagicMock(viewer={"username": "test"})
+
+        mock_api, mock_run = self._make_mock_api()
+        mock_wandb.Api.return_value = mock_api
+
+        data = [{"trace_id": f"t{i}", "latency_ms": 100 + i, "op": "predict"} for i in range(150)]
+        result = log_analysis(
+            entity_name="e",
+            project_name="p",
+            analysis_name="large",
+            data=data,
+            scalars={"p50": 175.0, "p95": 245.0},
+        )
+
+        assert result["row_count"] == 150
+        summary = mock_run.summary.update.call_args[0][0]
+        assert summary["_mcp_row_count"] == 150
+        assert summary["p50"] == 175.0
+        assert "latency_ms_mean" in summary
+        assert "latency_ms_min" in summary
+
     @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
     def test_no_api_key_raises(self, mock_api_manager):
         from wandb_mcp_server.mcp_tools.log_analysis import log_analysis

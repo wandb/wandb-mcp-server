@@ -140,6 +140,47 @@ class TestBuildPanelBlocks:
         blocks = _build_panel_blocks(panels, "entity", "project")
         assert len(blocks) == 2
 
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_combined_panel_types_all_produce_blocks(self, mock_wr):
+        """E2E multi-tool scenario: markdown_table + analysis_run_id + line in one call."""
+        mock_wr.PanelGrid = MagicMock()
+        mock_wr.LinePlot = MagicMock()
+        mock_wr.BarPlot = MagicMock()
+        mock_wr.MarkdownBlock = MagicMock()
+        mock_wr.Runset = MagicMock()
+
+        panels = [
+            {"type": "markdown_table", "headers": ["Op", "Count"], "rows": [["predict", "42"]], "title": "Ops"},
+            {"type": "bar", "metrics": ["p50_ms"], "title": "Latency", "analysis_run_id": "abc123"},
+            {"type": "line", "x": "_step", "y": ["loss"], "title": "Loss"},
+        ]
+        blocks = _build_panel_blocks(panels, "entity", "project")
+
+        assert len(blocks) == 3
+        mock_wr.MarkdownBlock.assert_called_once()
+        assert mock_wr.PanelGrid.call_count == 2
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_markdown_table_with_unicode_titles(self, mock_wr):
+        """Report panels with unicode characters in titles should not crash."""
+        mock_wr.PanelGrid = MagicMock()
+        mock_wr.MarkdownBlock = MagicMock()
+        mock_wr.Runset = MagicMock()
+
+        panels = [
+            {
+                "type": "markdown_table",
+                "headers": ["Metric", "Value"],
+                "rows": [["p50\u2014latency", "2.8s"], ["accuracy & recall", "95%"]],
+                "title": "Email Agent \u2014 Metrics & Stats",
+            },
+        ]
+        blocks = _build_panel_blocks(panels, "entity", "project")
+        assert len(blocks) == 1
+        call_arg = mock_wr.MarkdownBlock.call_args[0][0]
+        assert "Email Agent" in call_arg
+        assert "p50" in call_arg
+
 
 class TestCreateReportWithPanels:
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
