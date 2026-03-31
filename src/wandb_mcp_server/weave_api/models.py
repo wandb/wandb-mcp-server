@@ -109,10 +109,14 @@ class TraceMetadata(BaseModel):
     """Metadata about a collection of traces."""
 
     total_traces: int = 0
+    total_matching_count: int = 0
     token_counts: Dict[str, Union[int, float]] = Field(default_factory=dict)
     time_range: Dict[str, Optional[datetime]] = Field(default_factory=dict)
     status_summary: Dict[str, int] = Field(default_factory=dict)
     op_distribution: Dict[str, int] = Field(default_factory=dict)
+    truncation_applied: bool = False
+    truncation_dropped_count: int = 0
+    truncation_note: Optional[str] = None
 
 
 class WeaveTrace(BaseModel):

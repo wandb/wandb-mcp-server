@@ -175,13 +175,10 @@ class TraceProcessor:
         for trace in traces:
             # Handle both dictionary and Pydantic model cases
             if hasattr(trace, "status"):
-                # Pydantic model case
                 status = trace.status or "other"
             elif isinstance(trace, dict):
-                # Dictionary case
-                status = trace.get("status", "other")
+                status = trace.get("status") or "other"
             else:
-                # Unknown case
                 status = "other"
 
             status = status.lower()
@@ -272,6 +269,160 @@ class TraceProcessor:
 
         # Sort by count in descending order
         return dict(sorted(op_counts.items(), key=lambda x: x[1], reverse=True))
+
+    HIGH_SIGNAL_FIELDS: set = {
+        "id",
+        "op_name",
+        "display_name",
+        "trace_id",
+        "parent_id",
+        "started_at",
+        "ended_at",
+        "status",
+        "latency_ms",
+        "exception",
+    }
+    MEDIUM_SIGNAL_FIELDS: set = {
+        "attributes",
+        "summary",
+        "costs",
+        "feedback",
+        "wb_run_id",
+        "wb_user_id",
+        "project_id",
+        "deleted_at",
+    }
+    LOW_SIGNAL_FIELDS: set = {"inputs", "output"}
+
+    @classmethod
+    def estimate_tokens(cls, text: str) -> int:
+        """Cheap token estimate (~1 token per 4 chars of JSON)."""
+        return max(1, len(text) // 4)
+
+    @classmethod
+    def _trace_to_dict(cls, trace: Any) -> dict:
+        """Normalise a trace (Pydantic model or dict) to a plain dict."""
+        if hasattr(trace, "model_dump"):
+            return trace.model_dump()
+        if isinstance(trace, dict):
+            return trace.copy()
+        return trace
+
+    @classmethod
+    def enforce_token_budget(
+        cls,
+        result_json: str,
+        traces: List[Any],
+        budget: int,
+    ) -> tuple:
+        """Progressively truncate traces to fit within budget tokens.
+
+        Preserves HIGH_SIGNAL fields (id, op_name, status, timestamps) first,
+        then progressively drops LOW_SIGNAL (inputs, output) and
+        MEDIUM_SIGNAL (attributes, summary, costs) fields.
+
+        Levels:
+          L0 -- Under budget: return as-is.
+          L1 -- Truncate LOW_SIGNAL fields to 100 chars.
+          L2 -- Drop LOW_SIGNAL; truncate MEDIUM_SIGNAL to 200 chars.
+          L3 -- Keep only HIGH_SIGNAL fields.
+          L4 -- Sample every Nth trace, HIGH_SIGNAL only.
+
+        Returns:
+            (truncated_traces, warning_message | None, applied_level)
+        """
+        est = cls.estimate_tokens(result_json)
+        if est <= budget:
+            return traces, None, 0
+
+        dicts = [cls._trace_to_dict(t) for t in traces]
+
+        def _est(data: list) -> int:
+            return cls.estimate_tokens(json.dumps(data, cls=DateTimeEncoder, default=str))
+
+        # L1: truncate LOW_SIGNAL to 100 chars
+        l1 = []
+        for d in dicts:
+            row = {}
+            for k, v in d.items():
+                if k in cls.LOW_SIGNAL_FIELDS:
+                    row[k] = cls.truncate_value(v, 100)
+                else:
+                    row[k] = v
+            l1.append(row)
+        if _est(l1) <= budget:
+            return l1, "L1: inputs/output shortened to 100 chars. Use columns= to avoid truncation.", 1
+
+        # L2: drop LOW_SIGNAL, truncate MEDIUM_SIGNAL to 200 chars
+        l2 = []
+        for row in l1:
+            filtered = {}
+            for k, v in row.items():
+                if k in cls.LOW_SIGNAL_FIELDS:
+                    continue
+                if k in cls.MEDIUM_SIGNAL_FIELDS:
+                    filtered[k] = cls.truncate_value(v, 200)
+                else:
+                    filtered[k] = v
+            l2.append(filtered)
+        if _est(l2) <= budget:
+            return l2, "L2: dropped inputs/output, trimmed metadata. Use metadata_only=True to estimate size first.", 2
+
+        # L3: HIGH_SIGNAL fields only, with bounded string payloads so a single
+        # large exception cannot defeat the budget before L4 sampling.
+        l3 = []
+        for row in l2:
+            filtered = {k: v for k, v in row.items() if k in cls.HIGH_SIGNAL_FIELDS}
+            for k, v in filtered.items():
+                if isinstance(v, str) and len(v) > 500:
+                    filtered[k] = cls.truncate_value(v, 500)
+            l3.append(filtered)
+        if _est(l3) <= budget:
+            return (
+                l3,
+                "L3: kept only diagnostic fields (id, op_name, status, timestamps). Re-query with filters for details.",
+                3,
+            )
+
+        # L4: sample traces, HIGH_SIGNAL only
+        per_trace = max(1, _est(l3[:1]))
+        n = max(2, len(l3) // max(1, budget // per_trace))
+        l4 = l3[::n]
+        warning = f"L4: sampled {len(l4)} of {len(traces)} traces. Add filters to reduce result set."
+
+        # Re-check after sampling. Large HIGH_SIGNAL fields like `exception`
+        # can still exceed the budget even with fewer traces.
+        while len(l4) * per_trace > budget and len(l4) > 1:
+            l4 = l4[::2]
+
+        if _est(l4) > budget:
+            # Final safety valve: bound large string-valued HIGH_SIGNAL fields.
+            tightened = []
+            for row in l4:
+                new_row = {}
+                for k, v in row.items():
+                    if isinstance(v, str):
+                        new_row[k] = cls.truncate_value(v, 200)
+                    else:
+                        new_row[k] = v
+                tightened.append(new_row)
+            l4 = tightened
+
+        if _est(l4) > budget:
+            # Last resort: keep a single compact diagnostic trace.
+            compact = []
+            for row in l4[:1]:
+                compact_row = {}
+                for key in ("id", "op_name", "status", "started_at", "ended_at", "exception"):
+                    if key not in row:
+                        continue
+                    value = row[key]
+                    compact_row[key] = cls.truncate_value(value, 100) if isinstance(value, str) else value
+                compact.append(compact_row)
+            l4 = compact
+            warning += " Final safety valve applied to large exception fields."
+
+        return l4, warning, 4
 
     @classmethod
     def process_traces(
@@ -378,54 +529,11 @@ class TraceProcessor:
             # Log after truncation
             logger.info(f"After truncation: {len(processed_traces)} traces")
 
-        # Convert dictionaries to WeaveTrace objects
-        try:
-            from wandb_mcp_server.weave_api.models import WeaveTrace
-
-            # Ensure all required fields are present in each trace
-            for trace in processed_traces:
-                # Check for required fields and provide default values if missing
-                if "trace_id" not in trace and "id" in trace:
-                    trace["trace_id"] = trace["id"]
-                if "started_at" not in trace:
-                    trace["started_at"] = datetime.now().isoformat()
-
-            # Convert to Pydantic models
-            converted_traces = []
-            for trace in processed_traces:
-                # Handle datetime strings
-                if "started_at" in trace and isinstance(trace["started_at"], str):
-                    try:
-                        # Try to parse ISO format string
-                        trace["started_at"] = datetime.fromisoformat(trace["started_at"].replace("Z", "+00:00"))
-                    except (ValueError, TypeError):
-                        # If parsing fails, use current time
-                        trace["started_at"] = datetime.now()
-
-                if "ended_at" in trace and trace["ended_at"] and isinstance(trace["ended_at"], str):
-                    try:
-                        trace["ended_at"] = datetime.fromisoformat(trace["ended_at"].replace("Z", "+00:00"))
-                    except (ValueError, TypeError):
-                        trace["ended_at"] = None
-
-                # Create WeaveTrace object
-                try:
-                    converted_trace = WeaveTrace(**trace)
-                    converted_traces.append(converted_trace)
-                except Exception as e:
-                    logger.warning(f"Failed to convert trace {trace.get('id')} to WeaveTrace: {e}")
-                    # Keep the original dictionary if conversion fails
-                    converted_traces.append(trace)
-
-            return QueryResult(metadata=metadata, traces=converted_traces)
-        except ImportError:
-            # If WeaveTrace can't be imported for some reason, return dicts
-            logger.warning("Could not import WeaveTrace model, returning dictionaries")
-            return QueryResult(metadata=metadata, traces=processed_traces)
-        except Exception as e:
-            # If there's any other error in conversion, return dictionaries
-            logger.warning(f"Error converting traces to WeaveTrace: {e}")
-            return QueryResult(metadata=metadata, traces=processed_traces)
+        # Return processed dicts directly. The server.py layer normalizes
+        # any remaining Pydantic objects to dicts before serialization.
+        # Skipping WeaveTrace conversion avoids fragile type coercion and
+        # the mixed-type lists that caused JSON serialization failures.
+        return QueryResult(metadata=metadata, traces=processed_traces)
 
     @staticmethod
     def get_cost(trace: Dict[str, Any], which_cost: str) -> float:

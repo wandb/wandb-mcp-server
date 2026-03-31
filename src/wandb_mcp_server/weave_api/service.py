@@ -7,10 +7,11 @@ It orchestrates the client, query builder, and processor components.
 
 from __future__ import annotations
 
+import sys
 from typing import Any, Dict, List, Optional, Set
 
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.config import WF_TRACE_SERVER_URL
+from wandb_mcp_server.config import WF_TRACE_SERVER_URL, MAX_ACCUMULATED_BYTES
 from wandb_mcp_server.weave_api.client import WeaveApiClient
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.weave_api.models import QueryResult
@@ -55,6 +56,8 @@ class TraceService:
 
     # Define cost fields once as a class constant
     COST_FIELDS = {"total_cost", "completion_cost", "prompt_cost"}
+
+    COST_SORT_MAX_FIRST_PASS = 10_000
 
     # Define synthetic columns that shouldn't be passed to the API but can be reconstructed
     SYNTHETIC_COLUMNS = {"costs"}
@@ -430,8 +433,20 @@ class TraceService:
             if col not in synthetic_fields:
                 synthetic_fields.append(col)
 
-        # Execute query
-        all_traces = list(self.client.query_traces(request_body))
+        # Execute query with memory guard
+        all_traces = []
+        accumulated_bytes = 0
+        for trace in self.client.query_traces(request_body):
+            trace_size = sys.getsizeof(str(trace))
+            if accumulated_bytes + trace_size > MAX_ACCUMULATED_BYTES:
+                logger.warning(
+                    f"Memory guard: stopping at {len(all_traces)} traces "
+                    f"({accumulated_bytes / 1024 / 1024:.0f}MB). "
+                    f"Use filters or detail_level='schema' to reduce data."
+                )
+                break
+            all_traces.append(trace)
+            accumulated_bytes += trace_size
 
         # Add synthetic columns and invalid column warnings back to the results
         if rs_columns or inv_columns:  # Use corrected variables
@@ -502,6 +517,8 @@ class TraceService:
         Returns:
             QueryResult object with metadata and optionally traces.
         """
+        self.invalid_columns = set()
+
         # Special handling for cost-based sorting
         client_side_cost_sort = sort_by in self.COST_FIELDS
 
@@ -589,6 +606,14 @@ class TraceService:
 
                 all_traces.extend(traces_from_chunk)
 
+                accumulated = sys.getsizeof(str(all_traces))
+                if accumulated > MAX_ACCUMULATED_BYTES:
+                    logger.warning(
+                        f"Memory guard (paginated): stopping at {len(all_traces)} traces "
+                        f"({accumulated / 1024 / 1024:.0f}MB)."
+                    )
+                    break
+
                 if len(traces_from_chunk) < current_chunk_size or (target_limit and len(all_traces) >= target_limit):
                     break
 
@@ -645,23 +670,28 @@ class TraceService:
         if invalid_columns is None:
             invalid_columns = set()
 
-        # First pass: Fetch all trace IDs and costs
         first_pass_query = {
             "entity_name": entity_name,
             "project_name": project_name,
             "filters": filters or {},
-            "sort_by": "started_at",  # Use a standard sort for the first pass
+            "sort_by": "started_at",
             "sort_direction": "desc",
-            "limit": 1000000,  # Explicitly set a large limit to get all traces
-            "include_costs": True,  # We need costs for sorting
-            "include_feedback": False,  # Don't need feedback for the first pass
-            "columns": ["id", "summary"],  # Need summary for costs data
+            "limit": self.COST_SORT_MAX_FIRST_PASS,
+            "include_costs": True,
+            "include_feedback": False,
+            "columns": ["id", "summary"],
         }
 
         first_pass_request = QueryBuilder.prepare_query_params(first_pass_query)
         first_pass_results = list(self.client.query_traces(first_pass_request))
 
         logger.info(f"First pass of cost sorting request retrieved {len(first_pass_results)} traces")
+        if len(first_pass_results) >= self.COST_SORT_MAX_FIRST_PASS:
+            logger.warning(
+                f"Cost sort first pass hit cap of {self.COST_SORT_MAX_FIRST_PASS} traces. "
+                "Results may not include the most/least expensive traces. "
+                "Add filters to narrow the scope."
+            )
 
         # Filter and sort by cost
         filtered_results = [t for t in first_pass_results if TraceProcessor.get_cost(t, sort_by) is not None]

@@ -16,25 +16,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v4
         with:
-          python-version: ${{ matrix.python-version }}
+          version: "latest"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
+        run: uv sync --frozen --extra test --python ${{ matrix.python-version }}
 
       - name: Lint with ruff
         run: |
-          pip install ruff
-          ruff check src/ tests/
-          ruff format --check src/ tests/
+          uv run --no-sync ruff check src/ tests/
+          uv run --no-sync ruff format --check src/ tests/
 
       - name: Run unit tests
-        run: |
-          pytest tests/ -x -v --tb=short -q
+        run: uv run --no-sync pytest tests/ -x -v --tb=short -q
         env:
           WANDB_SILENT: "True"
           WEAVE_SILENT: "True"

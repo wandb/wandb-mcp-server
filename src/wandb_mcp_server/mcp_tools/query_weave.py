@@ -22,60 +22,13 @@ def get_trace_service():
 
 
 QUERY_WEAVE_TRACES_TOOL_DESCRIPTION = """
-Query Weave traces, trace metadata, and trace costs with filtering and sorting options.
+Query Weave traces with filtering, sorting, and detail_level control.
 
----
-**Cost Calculation and Sorting Enhancements:**
-- For each model in the `costs` dictionary, a new field `total_cost` is computed as the sum of `completion_tokens_total_cost` and `prompt_tokens_total_cost`.
-- You can post-hoc sort traces by any of: `total_cost`, `completion_cost`, or `prompt_cost` (across all models, summed if multiple).
----
+For W&B runs/metrics, use query_wandb_tool instead. This tool is for Weave traces (LLM calls, evaluations, agent traces).
 
-<wandb_vs_weave_product_distinction>
-**IMPORTANT PRODUCT DISTINCTION:**
-W&B offers two distinct products with different purposes:
-
-1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model
-    lifecycle management. Use `query_wandb_tool` for questions about:
-    - Experiment runs, metrics, and performance comparisons
-    - Artifact management and model registry
-    - Hyperparameter optimization and sweeps
-    - Project dashboards and reports
-
-2. W&B Weave: A toolkit for LLM and GenAI application observability and evaluation. Use
-    `query_weave_traces_tool` (this tool) for questions about:
-    - Execution traces and paths of LLM operations
-    - LLM inputs, outputs, and intermediate results
-    - Chain of thought visualization and debugging
-    - LLM evaluation results and feedback
-
-FYI: The Weigths & Biases platform is owned by Coreweave. If there are queries related to W&B, wandb \
-or weave and Coreweave, they might be related to W&B products or features that leverage Coreweave's \
-GPU or compute infrastructure.
-</wandb_vs_weave_product_distinction>
-
-<use_case_selector>
-**USE CASE SELECTOR - READ FIRST:**
-- For runs, metrics, experiments, artifacts, sweeps etc → use query_wandb_tool
-- For traces, LLM calls, chain-of-thought, LLM evaluations, AI agent traces, AI apps etc → use query_weave_traces_tool
-
-=====================================================================
-⚠️ TOOL SELECTION WARNING ⚠️
-This tool is ONLY for WEAVE TRACES (LLM operations), NOT for run metrics or experiments!
-=====================================================================
-
-**KEYWORD GUIDE:**
-If user question contains:
-- "runs", "experiments", "metrics" → Use query_wandb_tool
-- "traces", "LLM calls" etc → Use this tool
-
-**COMMON MISUSE CASES:**
-❌ "Looking at metrics of my latest runs" - Do NOT use this tool, use query_wandb_tool instead
-❌ "Compare performance across experiments" - Do NOT use this tool, use query_wandb_tool instead
-</use_case_selector>
-
-If the users asks for data about "runs" or "experiments" or anything about "experiment tracking"
-then use the `query_wandb_tool` instead.
-</use_case_selector>
+<when_to_use>
+Call for Weave trace data. Use detail_level="schema" to browse, "summary" for analysis, "full" for specific traces only.
+</when_to_use>
 
 <usage_tips>
 query_traces_tool can return a lot of data, below are some usage tips for this function
@@ -120,7 +73,7 @@ trace data is returned either in full or truncated to `truncate_length` characte
 <truncating_trace_data_values>
 
 If `return_full_data = False` the trace data is truncated to `truncate_length` characters,
-default 200 characters. Otherwise the trace data is returned in full.
+default 1000 characters. Otherwise the trace data is returned in full.
 </truncating_trace_data_values>
 
 Remember, LLM context window is precious, only return the minimum amount of data needed to complete an analysis.
@@ -247,17 +200,30 @@ columns : list of str, optional
 expand_columns : list of str, optional
     List of columns to expand in the results. Defaults to None
 truncate_length : int, optional
-    Maximum length for string values in weave traces. Defaults to 200
+    Maximum length for string values in weave traces. Defaults to 1000
 return_full_data : bool, optional
     Whether to include full untruncated trace data. If True, the `truncate_length` parameter is ignored. If  \
 `False` returns truncation_length = 0, no values for the column keys are returned. Defaults to True.
 metadata_only : bool, optional
     Return only metadata without traces. Defaults to False
+detail_level : str, optional
+    Controls how much data is returned per trace. Use this instead of manually tuning
+    truncate_length/return_full_data. Defaults to "summary".
+    - "schema": Structural fields only (op_name, trace_id, started_at, ended_at, status,
+      parent_id, display_name). Fastest option, ideal for browsing and filtering large sets.
+    - "summary": Schema fields plus truncated inputs/outputs (200 chars) and summary/usage
+      data. Good default for understanding what traces contain.
+    - "full": Everything untruncated. Use only when drilling into specific trace_ids, never
+      for bulk queries as it can overwhelm the context window.
 
 Returns
 -------
 str
-    JSON string containing either full trace data or metadata only, depending on parameters
+    JSON string containing either full trace data or metadata only, depending on parameters.
+    The response metadata includes `total_matching_count` -- the total traces matching your
+    current filters before the limit is applied. Note: this reflects whatever filters you
+    used, not the project-wide total. Use `count_weave_traces_tool` if you need a separate
+    unfiltered count.
 
 <examples>
     ```python
@@ -265,7 +231,7 @@ str
     query_traces_tool(
         entity_name="my-team",
         project_name="my-project",
-        filters={"root_traces_only": True},
+        filters={"trace_roots_only": True},
         metadata_only=True,
         return_full_data=False
     )
@@ -285,6 +251,22 @@ str
         project_name="my-project",
         filters={"op_name_contains": "Evaluation.summarize"},
         columns=["id", "op_name", "started_at", "costs"]
+    )
+
+    # Schema-first workflow: browse traces quickly, then drill into specific ones
+    # Step 1: Get structural overview
+    query_traces_tool(
+        entity_name="my-team",
+        project_name="my-project",
+        filters={"trace_roots_only": True},
+        detail_level="schema"
+    )
+    # Step 2: Drill into a specific trace with full data
+    query_traces_tool(
+        entity_name="my-team",
+        project_name="my-project",
+        filters={"call_ids": ["01958ab9-3c68-7c23-8ccd-c135c7037769"]},
+        detail_level="full"
     )
     ```
 </examples>
@@ -346,7 +328,7 @@ def query_traces(
             },
         )
     except Exception:
-        pass
+        logger.debug("analytics emit failed", exc_info=True)
 
     # Query traces
     result = service.query_traces(
@@ -480,7 +462,7 @@ async def query_paginated_weave_traces(
             },
         )
     except Exception:
-        pass
+        logger.debug("analytics emit failed", exc_info=True)
 
     # Query traces with pagination
     result = service.query_paginated_traces(

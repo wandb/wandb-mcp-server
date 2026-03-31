@@ -4,23 +4,17 @@ SAFE VERSION - W&B Report creation with markdown-only output
 This version eliminates the singleton contamination vulnerability and uses only markdown.
 """
 
-from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 import re
 
 import wandb_workspaces.reports.v2 as wr
 import wandb_workspaces.reports.v2.interface as wr_interface
-from dotenv import load_dotenv
 
 import wandb
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.config import WANDB_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
 
-# Load environment variables
-load_dotenv(dotenv_path=Path(__file__).parent.parent.parent / ".env")
-
-# Configure logging
 logger = get_rich_logger(__name__)
 
 
@@ -51,6 +45,13 @@ CREATE_WANDB_REPORT_TOOL_DESCRIPTION = """Create a new Weights & Biases Report t
 
 Only call this tool if the user explicitly asks to create a report or save to wandb/weights & biases.
 Always provide the returned report link to the user.
+
+<when_to_use>
+Call this tool AFTER completing analysis to create a shareable report. Combine
+markdown text (for narrative, tables, and findings) with optional panels (for
+line/bar charts) to produce a polished deliverable. If you have metric data
+from get_run_history_tool, use panels to visualize it in the report.
+</when_to_use>
 
 <markdown_generation_guide>
 When generating the markdown_report_text parameter, structure your content using:
@@ -94,6 +95,15 @@ Args:
     title: str, Title of the W&B Report - required
     description: str, Optional brief description of the report
     markdown_report_text: str, Well-structured markdown content for the report body
+    panels: list of dict, optional - Chart panels to add after the markdown content.
+        Each dict specifies a chart type and configuration:
+        - {"type": "line", "x": "_step", "y": ["loss", "val_loss"], "title": "Training Loss"}
+          Creates a LinePlot tracking metrics over steps.
+        - {"type": "bar", "metrics": ["accuracy", "f1"], "title": "Metrics"}
+          Creates a BarPlot comparing metrics across runs.
+        - {"type": "run_comparison", "metrics": ["loss", "accuracy"], "run_ids": ["abc", "def"], "title": "Compare"}
+          Creates a PanelGrid comparing specific runs on selected metrics.
+        Panels are additive to markdown content. If omitted, report is markdown-only.
 
 Returns:
     The URL to the created report
@@ -138,28 +148,13 @@ def create_report(
     description: Optional[str] = None,
     markdown_report_text: Optional[str] = None,
     plots_html: Optional[Union[Dict[str, str], str]] = None,
+    panels: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, str]:
+    """Create a W&B Report with markdown content and optional chart panels.
+
+    Security: No singleton contamination, reads API key from contextvar.
+    Thread Safety: Each request has its own contextvar value.
     """
-    SAFE VERSION - Create W&B Report with markdown-only content.
-
-    Security improvements:
-    - No singleton contamination (no wandb.login)
-    - No wandb.init() that could use contaminated state
-    - Reads API key from contextvar (concurrent-safe)
-    - Markdown-only output for simplicity and safety
-    - Ignores plots_html parameter (for backwards compatibility)
-
-    Thread Safety:
-    - Uses patched _get_api (set at module import) that reads from contextvar
-    - Each request has its own contextvar value - no cross-contamination
-    - Safe for async/concurrent report creation
-    """
-
-    # Note if plots_html was provided (for backwards compatibility)
-    if plots_html:
-        logger.info("Note: plots_html parameter provided but ignored in safe markdown-only mode")
-
-    # Get the current API key from context
     from wandb_mcp_server.api_client import WandBApiManager
 
     api_key = WandBApiManager.get_api_key()
@@ -168,7 +163,6 @@ def create_report(
         logger.warning("No API key available for W&B")
         raise Exception("No W&B API key available")
 
-    # Obtain viewer once and log tool call after API context is established
     try:
         api = WandBApiManager.get_api()
         log_tool_call(
@@ -179,15 +173,13 @@ def create_report(
                 "project_name": project_name,
                 "title": title,
                 "description": description,
+                "has_panels": bool(panels),
             },
         )
     except Exception:
-        pass
+        logger.debug("analytics emit failed", exc_info=True)
 
     try:
-        # Create the report using wandb_workspaces
-        # The patched _get_api will automatically read API key from contextvar
-        # This is SAFE for concurrent requests - no shared state
         report = wr.Report(
             entity=entity_name,
             project=project_name,
@@ -196,26 +188,151 @@ def create_report(
             width="fluid",
         )
 
-        # Parse markdown to blocks (headers, paragraphs, markdown blocks only)
         blocks = parse_markdown_to_blocks(markdown_report_text or "")
 
-        # Add security notice at the top
-        security_notice = wr.P("*Report created using SAFE markdown-only version (no wandb.init/login)*")
+        if plots_html:
+            import base64 as b64
+
+            if isinstance(plots_html, str):
+                plots_html = {"chart": plots_html}
+            for label, html_content in plots_html.items():
+                content = html_content.strip() if isinstance(html_content, str) else ""
+                if content.startswith("<svg") or content.startswith("data:image/svg"):
+                    if content.startswith("<svg"):
+                        data_uri = f"data:image/svg+xml;base64,{b64.b64encode(content.encode()).decode()}"
+                    else:
+                        data_uri = content
+                    blocks.append(wr.Image(url=data_uri, caption=label))
+                    logger.info(f"Added SVG Image block: {label}")
+                elif content:
+                    blocks.append(wr.MarkdownBlock(content))
+                    logger.info(f"Added HTML MarkdownBlock: {label}")
+
+        security_notice = wr.P("*Report created via W&B MCP Server*")
         report.blocks = [security_notice] + blocks
 
-        logger.info("SAFE: Creating markdown report without wandb.init/login")
+        if panels:
+            panel_blocks = _build_panel_blocks(panels, entity_name, project_name)
+            if panel_blocks:
+                report.blocks.append(wr.H2("Charts"))
+                report.blocks.extend(panel_blocks)
 
-        # Save the report
-        # Uses patched _get_api which reads from contextvar (concurrent-safe)
         report.save()
 
-        logger.info(f"SAFE: Created report: {title}")
+        logger.info(f"Created report: {title} (panels={len(panels or [])})")
 
         return {"url": report.url}
 
     except Exception as e:
-        logger.error(f"Error creating report (safe mode): {e}")
-        raise Exception(f"Error creating report (safe mode): {e}")
+        logger.error(f"Error creating report: {e}")
+        raise Exception(f"Error creating report: {e}")
+
+
+def _build_panel_blocks(
+    panels: List[Dict[str, Any]],
+    entity_name: str,
+    project_name: str,
+) -> List:
+    """Convert panel dicts to wandb_workspaces report blocks."""
+    blocks = []
+    for panel_spec in panels:
+        panel_type = panel_spec.get("type", "").lower()
+        panel_title = panel_spec.get("title", "")
+
+        run_id = panel_spec.get("analysis_run_id")
+        if run_id:
+            # Use query= instead of filters= because wandb-workspaces
+            # ast.literal_eval chokes on dict-based JSON filter strings
+            runset = wr.Runset(
+                entity=entity_name,
+                project=project_name,
+                query=run_id,
+            )
+        else:
+            runset = wr.Runset(entity=entity_name, project=project_name)
+
+        try:
+            if panel_type == "line":
+                x_key = panel_spec.get("x", "_step")
+                y_keys = panel_spec.get("y", [])
+                if not y_keys:
+                    continue
+                pg = wr.PanelGrid(
+                    runsets=[runset],
+                    panels=[wr.LinePlot(x=x_key, y=y_keys, title=panel_title)],
+                )
+                blocks.append(pg)
+
+            elif panel_type == "bar":
+                metrics = panel_spec.get("metrics", [])
+                if not metrics:
+                    continue
+                pg = wr.PanelGrid(
+                    runsets=[runset],
+                    panels=[wr.BarPlot(metrics=metrics, title=panel_title)],
+                )
+                blocks.append(pg)
+
+            elif panel_type == "scatter":
+                x_key = panel_spec.get("x", "")
+                y_key = panel_spec.get("y", "")
+                if not x_key or not y_key:
+                    continue
+                pg = wr.PanelGrid(
+                    runsets=[runset],
+                    panels=[wr.ScatterPlot(x=x_key, y=y_key, title=panel_title)],
+                )
+                blocks.append(pg)
+
+            elif panel_type == "run_comparison":
+                metrics = panel_spec.get("metrics", [])
+                run_ids = panel_spec.get("run_ids", [])
+                if not metrics:
+                    continue
+                if run_ids and not run_id:
+                    comp_runset = wr.Runset(
+                        entity=entity_name,
+                        project=project_name,
+                        query=" ".join(run_ids),
+                    )
+                else:
+                    comp_runset = runset
+                pg = wr.PanelGrid(
+                    runsets=[comp_runset],
+                    panels=[wr.LinePlot(x="_step", y=metrics, title=panel_title)],
+                )
+                blocks.append(pg)
+
+            elif panel_type == "markdown_table":
+                headers = panel_spec.get("headers", [])
+                rows = panel_spec.get("rows", [])
+                if not headers or not rows:
+                    continue
+                md = f"### {panel_title}\n\n" if panel_title else ""
+                md += "| " + " | ".join(str(h) for h in headers) + " |\n"
+                md += "| " + " | ".join(["---"] * len(headers)) + " |\n"
+                for row in rows:
+                    md += "| " + " | ".join(str(v) for v in row) + " |\n"
+                blocks.append(wr.MarkdownBlock(md))
+
+            elif panel_type == "markdown_panel":
+                markdown = panel_spec.get("markdown", "")
+                if not markdown:
+                    continue
+                pg = wr.PanelGrid(
+                    runsets=[runset],
+                    panels=[wr.MarkdownPanel(markdown=markdown)],
+                )
+                blocks.append(pg)
+
+            else:
+                logger.warning(f"Unknown panel type: {panel_type}")
+
+        except Exception as e:
+            logger.warning(f"Failed to build panel '{panel_title}': {e}", exc_info=True)
+            blocks.append(wr.P(f"*Panel '{panel_title}' could not be rendered.*"))
+
+    return blocks
 
 
 def parse_markdown_to_blocks(
@@ -284,20 +401,33 @@ def parse_markdown_to_blocks(
                 # End of code block
                 flush_content()
                 code_content = "\n".join(code_block_content)
-                # Create CodeBlock with language if specified
-                if code_language and code_language in [
-                    "python",
+                # wandb_workspaces only accepts these language tags
+                _WR_SUPPORTED_LANGUAGES = {
                     "javascript",
-                    "typescript",
+                    "python",
                     "css",
                     "json",
                     "html",
                     "markdown",
                     "yaml",
-                    "bash",
-                    "shell",
-                ]:
-                    blocks.append(wr.CodeBlock(code=code_content, language=code_language))
+                }
+                _LANGUAGE_MAP = {
+                    "typescript": "javascript",
+                    "bash": "python",
+                    "shell": "python",
+                    "sh": "python",
+                    "sql": None,
+                    "go": None,
+                    "rust": None,
+                    "java": None,
+                    "c": None,
+                    "cpp": None,
+                }
+                mapped = code_language
+                if code_language and code_language not in _WR_SUPPORTED_LANGUAGES:
+                    mapped = _LANGUAGE_MAP.get(code_language)
+                if mapped and mapped in _WR_SUPPORTED_LANGUAGES:
+                    blocks.append(wr.CodeBlock(code=code_content, language=mapped))
                 else:
                     blocks.append(wr.CodeBlock(code=code_content))
                 code_block_content = []

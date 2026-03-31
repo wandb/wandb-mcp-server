@@ -2,6 +2,13 @@
 
 Query and analyze your Weights & Biases data using natural language through the Model Context Protocol.
 
+[![CI](https://github.com/wandb/wandb-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/wandb/wandb-mcp-server/actions/workflows/ci.yml)
+[![Eval](https://github.com/wandb/wandb-mcp-server/actions/workflows/eval.yml/badge.svg)](https://github.com/wandb/wandb-mcp-server/actions/workflows/eval.yml)
+<!-- BEGIN EVAL BADGES -->
+[![SDK](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wandb/wandb-mcp-server/main/.badges/sdk.json)](https://wandb.ai/wandb/mcp-server-ci/weave)
+[![MCP](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wandb/wandb-mcp-server/main/.badges/mcp.json)](https://wandb.ai/wandb/mcp-server-ci/weave)
+<!-- END EVAL BADGES -->
+
 <div align="center">
   <a href="https://cursor.com/en/install-mcp?name=wandb&config=eyJ0cmFuc3BvcnQiOiJodHRwIiwidXJsIjoiaHR0cHM6Ly9tY3Aud2l0aHdhbmRiLmNvbS9tY3AiLCJoZWFkZXJzIjp7IkF1dGhvcml6YXRpb24iOiJCZWFyZXIge3tXQU5EQl9BUElfS0VZfX0iLCJBY2NlcHQiOiJhcHBsaWNhdGlvbi9qc29uLCB0ZXh0L2V2ZW50LXN0cmVhbSJ9fQ%3D%3D"><img src="https://cursor.com/deeplink/mcp-install-dark.svg" alt="Cursor" height="28"/></a>
   <a href="#claude-desktop"><img src="https://img.shields.io/badge/Claude-6B5CE6?logo=anthropic&logoColor=white" alt="Claude" height="28"/></a>
@@ -22,21 +29,32 @@ Query and analyze your Weights & Biases data using natural language through the 
 |:---|:---|:---|:---|
 | Show me the top 5 runs by eval/accuracy in wandb-smle/hiring-agent-demo-public? | How did the latency of my hiring agent predict traces evolve over the last months? | Generate a wandb report comparing the decisions made by the hiring agent last month | How do I create a leaderboard in Weave - ask SupportBot? |
 
-New tools for auto-clustering coming soon:<br>
 *"Go through the last 100 traces of my last training run in grpo-cuda/axolotl-grpo and tell me why rollout traces of my RL experiment were bad sometimes?"*
 </details>
 
 <details>
-<summary><strong>Available Tools</strong> (6 powerful tools)</summary>
+<summary><strong>Available Tools</strong> (9 tools)</summary>
 
 | Tool | Description | Example Query |
 |------|-------------|---------------|
-| **query_wandb_tool** | Query W&B runs, metrics, and experiments | *"Show me runs with loss < 0.1"* |
-| **query_weave_traces_tool** | Analyze LLM traces and evaluations | *"What's the average latency?"* |
+| **infer_trace_schema_tool** | Discover field names, types, and sample values | *"What fields are in my traces?"* |
+| **query_weave_traces_tool** | Analyze LLM traces with `detail_level` control | *"Show failed traces with full data"* |
 | **count_weave_traces_tool** | Count traces and get storage metrics | *"How many traces failed?"* |
-| **create_wandb_report_tool** | Create W&B reports programmatically | *"Create a performance report"* |
+| **query_wandb_tool** | Query W&B runs, metrics, and experiments | *"Show me runs with loss < 0.1"* |
+| **get_run_history_tool** | Sampled time-series metric data | *"Show loss curve for run abc123"* |
+| **create_wandb_report_tool** | Create reports with markdown and charts | *"Create a report with loss plots"* |
+| **search_wandb_docs_tool** | Search official W&B documentation | *"How do I create a Weave scorer?"* |
 | **query_wandb_entity_projects** | List projects for an entity | *"What projects exist?"* |
-| **query_wandb_support_bot** | Get help from W&B documentation | *"How do I use sweeps?"* |
+| **query_wandb_support_bot** | ~~Get help from W&B support bot~~ (deprecated) | Use `search_wandb_docs_tool` instead |
+
+**Schema-first workflow:** Call `infer_trace_schema_tool` first to discover fields, then `query_weave_traces_tool` with precise columns and `detail_level`:
+- `"schema"` -- structural fields only (fast browsing)
+- `"summary"` -- truncated inputs/outputs (default)
+- `"full"` -- everything untruncated (drill into specific traces)
+
+**Chart panels:** `create_wandb_report_tool` accepts a `panels` parameter for LinePlots, BarPlots, and run comparisons alongside markdown.
+
+**Docs search:** `search_wandb_docs_tool` proxies [docs.wandb.ai](https://docs.wandb.ai) so you get data tools + documentation search from a single MCP connection. Disable with `WANDB_MCP_PROXY_DOCS=false` if you connect the docs MCP separately.
 
 </details>
 
@@ -436,6 +454,8 @@ When running the server locally, you can customize its behavior with command lin
 | `WEAVE_SILENT` | Set to `"False"` to suppress Weave output | No |
 | `WANDB_DEBUG` | Set to `"true"` to enable detailed W&B logging | No |
 | `MCP_AUTH_DISABLED` | Disable HTTP authentication (development only) | No |
+| `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
+| `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |
 
 #### Usage Examples
 

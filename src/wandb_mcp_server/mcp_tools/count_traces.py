@@ -12,55 +12,14 @@ from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
 
 logger = get_rich_logger(__name__)
 
-COUNT_WEAVE_TRACES_TOOL_DESCRIPTION = """count Weave traces and return the total storage \
-size in bytes for the given filters.
+COUNT_WEAVE_TRACES_TOOL_DESCRIPTION = """Count Weave traces matching filters. Returns total count and root trace count.
 
-Use this tool to query data from Weights & Biases Weave, an observability product for
-tracing and evaluating LLMs and GenAI apps.
-
-This tool only provides COUNT information and STORAGE SIZE (bytes) about traces, \
-not actual logged traces data, metrics or run data.
-
-<tool_choice_guidance>
-<wandb_vs_weave_product_distinction>
-**IMPORTANT PRODUCT DISTINCTION:**
-W&B offers two distinct products with different purposes:
-
-1. W&B Models: A system for ML experiment tracking, hyperparameter optimization, and model
-    lifecycle management. Use `query_wandb_tool` for questions about:
-    - Experiment runs, metrics, and performance comparisons
-    - Artifact management and model registry
-    - Hyperparameter optimization and sweeps
-    - Project dashboards and reports
-
-2. W&B Weave: A toolkit for LLM and GenAI application observability and evaluation. Use
-    `query_weave_traces_tool` (this tool) for questions about:
-    - Execution traces and paths of LLM operations
-    - LLM inputs, outputs, and intermediate results
-    - Chain of thought visualization and debugging
-    - LLM evaluation results and feedback
-</wandb_vs_weave_product_distinction>
-
-<use_case_selector>
-**USE CASE SELECTOR - READ FIRST:**
-- For runs, metrics, experiments, artifacts, sweeps etc → use query_wandb_tool
-- For traces, LLM calls, chain-of-thought, LLM evaluations, AI agent traces, AI apps etc → use query_weave_traces_tool
-
-=====================================================================
-⚠️ TOOL SELECTION WARNING ⚠️
-This tool is ONLY for WEAVE TRACES (LLM operations), NOT for run metrics or experiments!
-=====================================================================
-
-**KEYWORD GUIDE:**
-If user question contains:
-- "runs", "experiments", "metrics" → Use query_wandb_tool
-- "traces", "LLM calls" etc → Use this tool
-
-**COMMON MISUSE CASES:**
-❌ "Looking at metrics of my latest runs" - Do NOT use this tool, use query_wandb_tool instead
-❌ "Compare performance across experiments" - Do NOT use this tool, use query_wandb_tool instead
-</use_case_selector>
-</tool_choice_guidance>
+<when_to_use>
+Call for quick aggregate counts ("how many traces?", "how many errors?") without
+fetching trace data. Also useful before large queries to check data volume.
+query_weave_traces_tool responses also include `total_matching_count` in metadata.
+For W&B runs/metrics, use query_wandb_tool instead.
+</when_to_use>
 
 Returns the total number of traces in a project and the number of root
 (i.e. "parent" or top-level) traces.
@@ -183,8 +142,7 @@ def count_traces(
         logger.error("W&B API key not found in context or environment variables.")
         raise ValueError("W&B API key is required to query Weave traces count.")
 
-    # Debug logging to diagnose API key issues
-    logger.debug(f"Using W&B API key: length={len(api_key)}, is_40_chars={len(api_key) == 40}")
+    logger.debug("W&B API key: present")
 
     try:
         api = WandBApiManager.get_api()
@@ -199,7 +157,7 @@ def count_traces(
             },
         )
     except Exception:
-        pass
+        logger.debug("analytics emit failed", exc_info=True)
 
     request_body: Dict[str, Any] = {"project_id": project_id}
     filter_payload: Dict[str, Any] = {}  # For fields that go into the top-level 'filter' object
@@ -310,10 +268,8 @@ def count_traces(
         if response.status_code != 200:
             error_msg = f"Error querying Weave trace count: {response.status_code} - {response.text}"
             logger.error(error_msg)
-            # Log API key info for debugging
-            logger.error(f"API key info: length={len(api_key)}, is_40_chars={len(api_key) == 40}")
             if "40 characters" in response.text:
-                logger.error(f"W&B requires exactly 40 character API keys. Current key has {len(api_key)} characters.")
+                logger.error("W&B API key does not meet length requirements.")
             # Log request body for easier debugging on error
             logger.debug(f"Failed request body: {json.dumps(request_body)}")
             raise Exception(error_msg)

@@ -11,6 +11,7 @@ This server provides tools for:
 - Discovering available entities and projects
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -48,10 +49,8 @@ from wandb_mcp_server.mcp_tools.query_wandb_gql import (
     QUERY_WANDB_GQL_TOOL_DESCRIPTION,
     query_paginated_wandb_gql,
 )
-from wandb_mcp_server.mcp_tools.query_wandbot import (
-    WANDBOT_TOOL_DESCRIPTION,
-    query_wandbot_api,
-)
+
+# wandbot removed -- zero usage across 400+ benchmark runs, superseded by search_wandb_docs_tool
 from wandb_mcp_server.mcp_tools.query_weave import (
     QUERY_WEAVE_TRACES_TOOL_DESCRIPTION,
     query_paginated_weave_traces,
@@ -253,7 +252,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
     - query_wandb_tool: Execute GraphQL queries against W&B experiment data
     - create_wandb_report_tool: Create shareable reports with visualizations
     - query_wandb_entity_projects: List available entities and projects
-    - query_wandb_support_bot: Get help via wandbot RAG-powered support
+    - search_wandb_docs_tool: Search official W&B documentation
 
     Args:
         mcp_instance: The FastMCP instance to register tools on
@@ -266,16 +265,64 @@ def register_tools(mcp_instance: FastMCP) -> None:
         filters: Optional[Dict[str, Any]] = None,
         sort_by: str = "started_at",
         sort_direction: str = "desc",
-        limit: int = 10000000,
+        limit: int = 1000,
         include_costs: bool = True,
         include_feedback: bool = True,
         columns: Optional[List[str]] = None,
         expand_columns: Optional[List[str]] = None,
-        truncate_length: int = 200,
+        truncate_length: int = 1000,
         return_full_data: bool = False,
         metadata_only: bool = False,
+        detail_level: str = "summary",
     ) -> str:
+        """Query traces with optional detail_level control.
+
+        detail_level: "schema" (structural fields only), "summary" (truncated, default),
+        "full" (everything untruncated, same as return_full_data=True).
+        """
+        detail_level = detail_level or "summary"
+        _VALID_DETAIL_LEVELS = {"schema", "summary", "full"}
+        if detail_level not in _VALID_DETAIL_LEVELS:
+            raise ValueError(f"detail_level must be one of {_VALID_DETAIL_LEVELS}, got '{detail_level}'")
+        if detail_level == "full":
+            return_full_data = True
+
+        _SCHEMA_COLUMNS = [
+            "id",
+            "trace_id",
+            "op_name",
+            "started_at",
+            "ended_at",
+            "display_name",
+            "parent_id",
+            "summary",
+        ]
+        effective_columns = columns or []
+        if detail_level == "schema" and not effective_columns:
+            effective_columns = _SCHEMA_COLUMNS
+
         try:
+            if detail_level != "schema" and limit > 100 and not metadata_only:
+                try:
+                    pre_count = count_traces(entity_name, project_name, filters or {})
+                    if pre_count > 500:
+                        return json.dumps(
+                            {
+                                "error": "query_too_large",
+                                "message": f"Found {pre_count} matching traces. Queries over 500 traces "
+                                f"risk server memory limits. Narrow your query.",
+                                "trace_count": pre_count,
+                                "suggestions": [
+                                    "detail_level='schema' (structural fields only, fast)",
+                                    f"limit={min(100, pre_count)} (reduce result count)",
+                                    "metadata_only=True (counts and stats without trace data)",
+                                    "Add filters to narrow results",
+                                ],
+                            }
+                        )
+                except Exception:
+                    pass
+
             result_model: QueryResult = await query_paginated_weave_traces(
                 entity_name=entity_name,
                 project_name=project_name,
@@ -284,39 +331,116 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 sort_by=sort_by,
                 sort_direction=sort_direction,
                 target_limit=limit,
-                include_costs=include_costs,
-                include_feedback=include_feedback,
-                columns=columns or [],
+                include_costs=include_costs if detail_level != "schema" else False,
+                include_feedback=include_feedback if detail_level != "schema" else False,
+                columns=effective_columns,
                 expand_columns=expand_columns or [],
                 truncate_length=truncate_length,
                 return_full_data=return_full_data,
                 metadata_only=metadata_only,
             )
-            return result_model.model_dump_json()
+
+            try:
+                matching_count = count_traces(
+                    entity_name=entity_name,
+                    project_name=project_name,
+                    filters=filters or {},
+                )
+                result_model.metadata.total_matching_count = matching_count
+            except Exception:
+                logger.debug("count_traces for total_matching_count failed", exc_info=True)
+
+            # Normalize traces to plain dicts -- the processor may return
+            # WeaveTrace Pydantic objects which aren't JSON-serializable by
+            # json.dumps and don't support .items() for schema filtering.
+            if result_model.traces:
+                result_model.traces = [
+                    t.model_dump() if hasattr(t, "model_dump") else (t if isinstance(t, dict) else {})
+                    for t in result_model.traces
+                ]
+
+            if detail_level == "schema" and result_model.traces:
+                schema_fields = {
+                    "id",
+                    "trace_id",
+                    "op_name",
+                    "started_at",
+                    "ended_at",
+                    "status",
+                    "parent_id",
+                    "display_name",
+                }
+                result_model.traces = [{k: v for k, v in t.items() if k in schema_fields} for t in result_model.traces]
+
+            from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
+            from wandb_mcp_server.weave_api.processors import TraceProcessor
+
+            response_json = result_model.model_dump_json()
+            if result_model.traces:
+                original_count = len(result_model.traces)
+                metadata_json = result_model.metadata.model_dump_json()
+                metadata_tokens = TraceProcessor.estimate_tokens(metadata_json)
+                trace_budget = max(1, MAX_RESPONSE_TOKENS - metadata_tokens)
+                truncated_traces, warning, level = TraceProcessor.enforce_token_budget(
+                    response_json, result_model.traces, trace_budget
+                )
+                if level > 0:
+                    result_model.traces = truncated_traces
+                    result_model.metadata.truncation_applied = True
+                    result_model.metadata.truncation_dropped_count = original_count - len(truncated_traces)
+                    result_model.metadata.truncation_note = warning
+                    response_json = result_model.model_dump_json()
+
+            return response_json
+        except MemoryError:
+            logger.error("MemoryError in query_weave_traces_tool", exc_info=True)
+            return json.dumps(
+                {
+                    "error": "out_of_memory",
+                    "message": "This query exceeded server memory limits. "
+                    "Try: detail_level='schema', smaller limit, or metadata_only=True.",
+                }
+            )
         except Exception as e:
             logger.error(f"Error in query_weave_traces_tool: {e}", exc_info=True)
-            raise e
+            return json.dumps(
+                {
+                    "error": "query_failed",
+                    "message": str(e)[:500],
+                }
+            )
 
     @mcp_instance.tool(description=COUNT_WEAVE_TRACES_TOOL_DESCRIPTION)
     async def count_weave_traces_tool(
         entity_name: str, project_name: str, filters: Optional[Dict[str, Any]] = None
     ) -> str:
-        try:
-            total_count = count_traces(entity_name=entity_name, project_name=project_name, filters=filters or {})
+        from concurrent.futures import ThreadPoolExecutor
+        from wandb_mcp_server.api_client import WandBApiManager
 
-            # Also count root traces for better understanding of project scope
+        try:
             root_filters = filters.copy() if filters else {}
             root_filters["trace_roots_only"] = True
-            root_traces_count = count_traces(
-                entity_name=entity_name,
-                project_name=project_name,
-                filters=root_filters,
-            )
+
+            api_key = WandBApiManager.get_api_key()
+
+            def _count_with_context(**kwargs):
+                WandBApiManager.set_context_api_key(api_key)
+                return count_traces(**kwargs)
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                total_future = executor.submit(
+                    _count_with_context, entity_name=entity_name, project_name=project_name, filters=filters or {}
+                )
+                root_future = executor.submit(
+                    _count_with_context, entity_name=entity_name, project_name=project_name, filters=root_filters
+                )
+                total_count = total_future.result()
+                root_traces_count = root_future.result()
 
             return json.dumps({"total_count": total_count, "root_traces_count": root_traces_count})
         except Exception as e:
             logger.error(f"Error in count_weave_traces_tool: {e}")
-            return f"Error counting traces: {str(e)}"
+            return json.dumps({"error": f"Error counting traces: {str(e)}"})
 
     @mcp_instance.tool(description=QUERY_WANDB_GQL_TOOL_DESCRIPTION)
     async def query_wandb_tool(
@@ -335,6 +459,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         description: Optional[str] = None,
         markdown_report_text: str = "",
         plots_html: Optional[Union[Dict[str, str], str]] = None,
+        panels: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         try:
             result = create_report(
@@ -343,21 +468,118 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 title=title,
                 description=description,
                 markdown_report_text=markdown_report_text,
-                plots_html=plots_html,  # Kept for backwards compatibility, ignored by safe version
+                plots_html=plots_html,
+                panels=panels,
             )
 
-            # Simple return message
             return f"The report was saved here: {result['url']}"
         except Exception as e:
             raise e
+
+    from wandb_mcp_server.mcp_tools.log_analysis import (
+        LOG_ANALYSIS_TOOL_DESCRIPTION,
+        log_analysis,
+    )
+
+    @mcp_instance.tool(description=LOG_ANALYSIS_TOOL_DESCRIPTION)
+    async def log_analysis_to_wandb(
+        entity_name: str,
+        project_name: str,
+        analysis_name: str,
+        data: List[Dict[str, Any]],
+        charts: Optional[List[Dict[str, Any]]] = None,
+        scalars: Optional[Dict[str, float]] = None,
+    ) -> str:
+        from concurrent.futures import ThreadPoolExecutor
+        from wandb_mcp_server.api_client import WandBApiManager
+
+        try:
+            api_key = WandBApiManager.get_api_key()
+
+            def _log_with_context():
+                WandBApiManager.set_context_api_key(api_key)
+                return log_analysis(
+                    entity_name=entity_name,
+                    project_name=project_name,
+                    analysis_name=analysis_name,
+                    data=data,
+                    charts=charts,
+                    scalars=scalars,
+                )
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                result = await asyncio.get_event_loop().run_in_executor(pool, _log_with_context)
+            return json.dumps(result)
+        except Exception as e:
+            logger.error(f"Error in log_analysis_to_wandb: {e}", exc_info=True)
+            return json.dumps({"error": "log_failed", "message": str(e)[:500]})
 
     @mcp_instance.tool(description=LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION)
     def query_wandb_entity_projects(entity: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
         return list_entity_projects(entity)
 
-    @mcp_instance.tool(description=WANDBOT_TOOL_DESCRIPTION)
-    def query_wandb_support_bot(question: str) -> Dict[str, Any]:
-        return query_wandbot_api(question)
+    from wandb_mcp_server.mcp_tools.infer_schema import (
+        INFER_TRACE_SCHEMA_TOOL_DESCRIPTION,
+        infer_trace_schema,
+    )
+
+    @mcp_instance.tool(description=INFER_TRACE_SCHEMA_TOOL_DESCRIPTION)
+    def infer_trace_schema_tool(
+        entity_name: str,
+        project_name: str,
+        sample_size: int = 20,
+        top_n_values: int = 5,
+    ) -> str:
+        """Discover the schema of Weave traces in a project."""
+        return infer_trace_schema(
+            entity_name=entity_name,
+            project_name=project_name,
+            sample_size=sample_size,
+            top_n_values=top_n_values,
+        )
+
+    from wandb_mcp_server.mcp_tools.docs_search import (
+        SEARCH_WANDB_DOCS_TOOL_DESCRIPTION,
+        is_docs_proxy_enabled,
+        search_wandb_docs,
+    )
+
+    if is_docs_proxy_enabled():
+
+        @mcp_instance.tool(description=SEARCH_WANDB_DOCS_TOOL_DESCRIPTION)
+        async def search_wandb_docs_tool(query: str) -> str:
+            """Search the official W&B documentation."""
+            return await search_wandb_docs(query)
+
+    from wandb_mcp_server.mcp_tools.run_history import (
+        GET_RUN_HISTORY_TOOL_DESCRIPTION,
+        get_run_history,
+    )
+
+    @mcp_instance.tool(description=GET_RUN_HISTORY_TOOL_DESCRIPTION)
+    def get_run_history_tool(
+        entity_name: str,
+        project_name: str,
+        run_id: str,
+        keys: Optional[List[str]] = None,
+        samples: int = 500,
+        min_step: Optional[int] = None,
+        max_step: Optional[int] = None,
+    ) -> str:
+        """Retrieve sampled time-series metric data from a W&B run."""
+        try:
+            return get_run_history(
+                entity_name=entity_name,
+                project_name=project_name,
+                run_id=run_id,
+                keys=keys,
+                samples=samples,
+                min_step=min_step,
+                max_step=max_step,
+            )
+        except Exception as e:
+            logger.error(f"Error in get_run_history_tool: {e}")
+            return json.dumps({"error": str(e)})
 
 
 # ===============================================================================

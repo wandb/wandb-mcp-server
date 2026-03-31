@@ -1,12 +1,20 @@
 """Utility functions for processing Weave traces."""
 
+import functools
 import json
 import re
 from datetime import datetime
 from typing import Any, Dict, List
 
 import tiktoken
+
 from wandb_mcp_server.utils import get_rich_logger
+
+
+@functools.lru_cache(maxsize=1)
+def _get_tiktoken_encoding():
+    """Cached tiktoken encoding to avoid per-call overhead."""
+    return tiktoken.get_encoding("cl100k_base")
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -78,10 +86,8 @@ def truncate_value(value: Any, max_length: int = 200) -> Any:
 def count_tokens(text: str) -> int:
     """Count tokens in a string using tiktoken."""
     try:
-        encoding = tiktoken.get_encoding("cl100k_base")  # Using OpenAI's encoding
-        return len(encoding.encode(text))
+        return len(_get_tiktoken_encoding().encode(text))
     except Exception:
-        # Fallback to approximate token count if tiktoken fails
         return len(text.split())
 
 
@@ -165,13 +171,34 @@ def extract_op_name_distribution(traces: List[Dict]) -> Dict[str, int]:
     return dict(sorted(op_counts.items(), key=lambda x: x[1], reverse=True))
 
 
-def process_traces(traces: List[Dict], truncate_length: int = 200, return_full_data: bool = False) -> Dict[str, Any]:
-    """Process traces and generate metadata."""
-    # Add debug logging
+_SCHEMA_FIELDS = {"id", "trace_id", "op_name", "started_at", "ended_at", "status", "parent_id", "display_name"}
+
+
+def process_traces(
+    traces: List[Dict],
+    truncate_length: int = 200,
+    return_full_data: bool = False,
+    detail_level: str = "summary",
+) -> Dict[str, Any]:
+    """Process traces and generate metadata.
+
+    Args:
+        traces: Raw trace dicts.
+        truncate_length: Max chars for truncated string values.
+        return_full_data: If True, return everything untruncated (overrides detail_level).
+        detail_level: One of "schema", "summary", "full".
+            - "schema": Only structural fields (id, op_name, timestamps, status).
+            - "summary": Structural fields + truncated inputs/outputs/summary.
+            - "full": Everything untruncated (same as return_full_data=True).
+    """
     logger = get_rich_logger(__name__)
 
+    # Normalize Pydantic models to dicts so .items()/.get() work uniformly.
+    traces = [t.model_dump() if hasattr(t, "model_dump") else t for t in traces]
+
     logger.info(
-        f"process_traces called with {len(traces)} traces, truncate_length={truncate_length}, return_full_data={return_full_data}"
+        f"process_traces called with {len(traces)} traces, "
+        f"detail_level={detail_level}, truncate_length={truncate_length}, return_full_data={return_full_data}"
     )
 
     if traces:
@@ -186,16 +213,83 @@ def process_traces(traces: List[Dict], truncate_length: int = 200, return_full_d
         "op_distribution": extract_op_name_distribution(traces),
     }
 
-    if return_full_data:
+    if return_full_data or detail_level == "full":
         logger.info("Returning full trace data")
         return {"metadata": metadata, "traces": traces}
 
-    # Log before truncation
+    if detail_level == "schema":
+        logger.info(f"Returning schema-only for {len(traces)} traces")
+        schema_traces = [{k: v for k, v in t.items() if k in _SCHEMA_FIELDS} for t in traces]
+        return {"metadata": metadata, "traces": schema_traces}
+
     logger.info(f"Truncating {len(traces)} traces to length {truncate_length}")
-
     truncated_traces = [{k: truncate_value(v, truncate_length) for k, v in trace.items()} for trace in traces]
-
-    # Log after truncation
     logger.info(f"After truncation: {len(truncated_traces)} traces")
 
     return {"metadata": metadata, "traces": truncated_traces}
+
+
+_METADATA_TOKEN_RESERVE = 2000
+
+
+def enforce_token_budget(
+    result_json: str,
+    traces: list,
+    max_tokens: int,
+) -> tuple[str, int]:
+    """Drop least-recent traces until the serialized result fits within the token budget.
+
+    Reserves `_METADATA_TOKEN_RESERVE` tokens for the metadata/truncation-note
+    envelope so the final re-serialized response (metadata + traces) stays
+    within budget even though the loop only re-serializes the traces array.
+
+    Works on a copy to avoid mutating the caller's list. The caller should
+    use the returned JSON and dropped count, then slice their own list if
+    needed (e.g. ``traces[:len(traces) - dropped]``).
+
+    Args:
+        result_json: The serialized JSON string of the query result.
+        traces: The list of trace dicts (NOT mutated).
+        max_tokens: Maximum token budget.
+
+    Returns:
+        Tuple of (possibly-truncated JSON string, number of traces dropped).
+        If no truncation was needed, returns (original string, 0).
+    """
+    token_count = count_tokens(result_json)
+    if token_count <= max_tokens:
+        return result_json, 0
+
+    logger = get_rich_logger(__name__)
+    working = list(traces)
+    original_count = len(working)
+    dropped = 0
+    effective_budget = max(1, max_tokens - _METADATA_TOKEN_RESERVE)
+
+    while token_count > effective_budget and len(working) > 1:
+        working.pop()
+        dropped += 1
+        result_json = json.dumps(working, cls=DateTimeEncoder)
+        token_count = count_tokens(result_json)
+
+    logger.info(
+        f"Token budget enforced: dropped {dropped}/{original_count} traces "
+        f"({token_count} tokens, budget {max_tokens}, reserve {_METADATA_TOKEN_RESERVE})"
+    )
+    return result_json, dropped
+
+
+def warn_if_response_large(tool_name: str, response_json: str, max_tokens: int) -> None:
+    """Log a warning if a tool response exceeds the token budget.
+
+    This is informational only -- it does NOT truncate the response.
+    Agents and operators can tune `MAX_RESPONSE_TOKENS` or the tool's
+    sampling parameters if responses are consistently too large.
+    """
+    token_count = count_tokens(response_json)
+    if token_count > max_tokens:
+        logger = get_rich_logger(__name__)
+        logger.warning(
+            f"{tool_name} response is {token_count} tokens (budget {max_tokens}). "
+            "Consider reducing samples/sample_size or increasing MAX_RESPONSE_TOKENS."
+        )
