@@ -11,6 +11,15 @@ from wandb_mcp_server.mcp_tools.query_wandbot import WANDBOT_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.infer_schema import INFER_TRACE_SCHEMA_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.run_history import GET_RUN_HISTORY_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.docs_search import SEARCH_WANDB_DOCS_TOOL_DESCRIPTION
+from wandb_mcp_server.mcp_tools.query_registry import (
+    LIST_REGISTRIES_TOOL_DESCRIPTION,
+    LIST_REGISTRY_COLLECTIONS_TOOL_DESCRIPTION,
+)
+from wandb_mcp_server.mcp_tools.query_artifacts import (
+    LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
+    GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION,
+    COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
+)
 
 
 ALL_DESCRIPTIONS = {
@@ -23,6 +32,11 @@ ALL_DESCRIPTIONS = {
     "infer_trace_schema": INFER_TRACE_SCHEMA_TOOL_DESCRIPTION,
     "get_run_history": GET_RUN_HISTORY_TOOL_DESCRIPTION,
     "search_wandb_docs": SEARCH_WANDB_DOCS_TOOL_DESCRIPTION,
+    "list_registries": LIST_REGISTRIES_TOOL_DESCRIPTION,
+    "list_registry_collections": LIST_REGISTRY_COLLECTIONS_TOOL_DESCRIPTION,
+    "list_artifact_versions": LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
+    "get_artifact_details": GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION,
+    "compare_artifact_versions": COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
 }
 
 
