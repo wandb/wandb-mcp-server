@@ -50,6 +50,21 @@ from wandb_mcp_server.mcp_tools.query_wandb_gql import (
     query_paginated_wandb_gql,
 )
 
+from wandb_mcp_server.mcp_tools.query_registry import (
+    LIST_REGISTRIES_TOOL_DESCRIPTION,
+    list_registries,
+    LIST_REGISTRY_COLLECTIONS_TOOL_DESCRIPTION,
+    list_registry_collections,
+)
+from wandb_mcp_server.mcp_tools.query_artifacts import (
+    LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
+    list_artifact_versions,
+    GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION,
+    get_artifact_details,
+    COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
+    compare_artifact_versions,
+)
+
 # wandbot removed -- zero usage across 400+ benchmark runs, superseded by search_wandb_docs_tool
 from wandb_mcp_server.mcp_tools.query_weave import (
     QUERY_WEAVE_TRACES_TOOL_DESCRIPTION,
@@ -580,6 +595,87 @@ def register_tools(mcp_instance: FastMCP) -> None:
         except Exception as e:
             logger.error(f"Error in get_run_history_tool: {e}")
             return json.dumps({"error": str(e)})
+
+    # --- Registry & Artifact tools ---
+
+    @mcp_instance.tool(description=LIST_REGISTRIES_TOOL_DESCRIPTION)
+    def list_registries_tool(
+        organization: Optional[str] = None,
+        filter: Optional[Dict[str, Any]] = None,
+        max_items: int = 50,
+    ) -> str:
+        """List W&B registries for an organization."""
+        return list_registries(
+            organization=organization,
+            filter=filter,
+            max_items=max_items,
+        )
+
+    @mcp_instance.tool(description=LIST_REGISTRY_COLLECTIONS_TOOL_DESCRIPTION)
+    def list_registry_collections_tool(
+        registry_name: str,
+        organization: Optional[str] = None,
+        filter: Optional[Dict[str, Any]] = None,
+        max_items: int = 50,
+    ) -> str:
+        """List collections within a W&B registry."""
+        return list_registry_collections(
+            registry_name=registry_name,
+            organization=organization,
+            filter=filter,
+            max_items=max_items,
+        )
+
+    @mcp_instance.tool(description=LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION)
+    def list_artifact_versions_tool(
+        collection_name: str,
+        registry_name: Optional[str] = None,
+        organization: Optional[str] = None,
+        type_name: Optional[str] = None,
+        source: str = "project",
+        max_items: int = 50,
+    ) -> str:
+        """List versions of an artifact collection."""
+        return list_artifact_versions(
+            collection_name=collection_name,
+            registry_name=registry_name,
+            organization=organization,
+            type_name=type_name,
+            source=source,
+            max_items=max_items,
+        )
+
+    @mcp_instance.tool(description=GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION)
+    def get_artifact_details_tool(
+        artifact_name: str,
+        type_name: Optional[str] = None,
+        include_files: bool = False,
+        max_files: int = 50,
+    ) -> str:
+        """Get full details for a specific artifact version."""
+        return get_artifact_details(
+            artifact_name=artifact_name,
+            type_name=type_name,
+            include_files=include_files,
+            max_files=max_files,
+        )
+
+    @mcp_instance.tool(description=COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION)
+    def compare_artifact_versions_tool(
+        artifact_name_a: str,
+        artifact_name_b: str,
+        type_name: Optional[str] = None,
+        include_file_diff: bool = True,
+        max_file_diff_entries: int = 50,
+    ) -> str:
+        """Compare two artifact versions side-by-side."""
+        return compare_artifact_versions(
+            artifact_name_a=artifact_name_a,
+            artifact_name_b=artifact_name_b,
+            type_name=type_name,
+            include_file_diff=include_file_diff,
+            max_file_diff_entries=max_file_diff_entries,
+        )
 
 
 # ===============================================================================
