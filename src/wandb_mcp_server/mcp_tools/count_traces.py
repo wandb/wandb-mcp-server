@@ -246,11 +246,17 @@ def count_traces(
     weave_server_url = WF_TRACE_SERVER_URL
     url = f"{weave_server_url}/calls/query_stats"
 
-    auth_token = base64.b64encode(f":{api_key}".encode()).decode()
+    from wandb_mcp_server.api_client import is_wb_access_token
+
+    if is_wb_access_token(api_key):
+        auth_header = f"Bearer {api_key}"
+    else:
+        auth_token = base64.b64encode(f":{api_key}".encode()).decode()
+        auth_header = f"Basic {auth_token}"
     headers = {
         "Content-Type": "application/json",
-        "Accept": "application/json",  # /calls/query_stats returns application/json
-        "Authorization": f"Basic {auth_token}",
+        "Accept": "application/json",
+        "Authorization": auth_header,
     }
 
     session = get_retry_session()
