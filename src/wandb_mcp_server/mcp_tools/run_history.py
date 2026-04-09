@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional
 import wandb
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.config import WANDB_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -109,7 +108,7 @@ def get_run_history(
         raise ValueError("W&B API key is required to fetch run history.")
 
     try:
-        wandb_api = wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
+        wandb_api = WandBApiManager.get_api()
         run_path = f"{entity_name}/{project_name}/{run_id}"
         run = wandb_api.run(run_path)
     except wandb.errors.CommError as e:

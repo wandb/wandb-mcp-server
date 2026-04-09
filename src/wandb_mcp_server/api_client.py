@@ -1,60 +1,74 @@
-"""
-Unified API client management for W&B operations.
+"""Unified API client management for W&B operations.
 
 This module provides a consistent pattern for managing W&B API instances
-with per-request API keys, following the same pattern as WeaveApiClient.
+with per-request credentials.  It supports two credential types:
+
+- **API keys** (default): sent as ``Basic api:<key>`` via the standard
+  ``wandb.Api(api_key=...)`` path.
+- **``wb_at_*`` access tokens** (OAuth exchange path): sent as
+  ``Authorization: Bearer <token>`` by patching the transport after
+  construction, matching how Gorilla's auth handler dispatches them.
 """
 
-from typing import Optional, Any
 from contextvars import ContextVar
+from typing import Any, Optional
+
+import requests.auth
 import wandb
-from wandb_mcp_server.utils import get_rich_logger
+
 from wandb_mcp_server.config import WANDB_BASE_URL
+from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
 
-# Context variable for storing the current request's API key
 api_key_context: ContextVar[Optional[str]] = ContextVar("wandb_api_key", default=None)
+
+_DUMMY_API_KEY = "x" * 40
+
+
+def is_wb_access_token(credential: str) -> bool:
+    """Return True if the credential is a Gorilla-issued ``wb_at_*`` access token."""
+    return credential.startswith("wb_at_")
+
+
+class _BearerTokenAuth(requests.auth.AuthBase):
+    """``requests`` auth handler that sends ``Authorization: Bearer <token>``.
+
+    Gorilla recognises ``wb_at_*`` tokens only in the Bearer header
+    (``auth.go`` line 399-409), not via Basic auth.  This class follows
+    the same pattern the wandb SDK uses for ``_IdentityTokenAuth``.
+    """
+
+    def __init__(self, token: str) -> None:
+        self._token = token
+
+    def __call__(self, r: requests.PreparedRequest) -> requests.PreparedRequest:
+        r.headers["Authorization"] = f"Bearer {self._token}"
+        return r
 
 
 class WandBApiManager:
-    """
-    Manages W&B API instances with per-request API keys.
-
-    This class follows the same pattern as WeaveApiClient, providing
-    a consistent interface for all W&B operations that need API access.
-    """
+    """Manages W&B API instances with per-request credentials."""
 
     @staticmethod
     def get_api_key() -> Optional[str]:
-        """
-        Get the API key for the current request context.
-
-        For HTTP mode: API key comes from auth middleware via contextvar.
-        For STDIO mode: API key should be set via set_context_api_key() at startup.
-
-        Returns:
-            The API key from context only, no fallbacks.
-        """
-        # Get from context variable only - no fallbacks!
-        # HTTP: Set by auth middleware
-        # STDIO: Set at startup from CLI/netrc/env
-        api_key = api_key_context.get()
-        return api_key
+        """Get the credential for the current request context."""
+        return api_key_context.get()
 
     @staticmethod
     def get_api(api_key: Optional[str] = None) -> wandb.Api:
-        """
-        Get a W&B API instance with the specified or current API key.
+        """Get a ``wandb.Api`` instance with the appropriate auth transport.
+
+        For regular API keys the standard ``wandb.Api(api_key=...)``
+        path is used (HTTP Basic).  For ``wb_at_*`` access tokens the
+        API is constructed with a dummy key, then the transport is
+        patched to send ``Authorization: Bearer <token>`` instead.
 
         Args:
-            api_key: Optional API key to use. If not provided, uses context or environment.
+            api_key: Credential to use.  Falls back to the context var.
 
         Returns:
-            A configured wandb.Api instance.
-
-        Raises:
-            ValueError: If no API key is available.
+            A configured ``wandb.Api`` ready for GQL calls.
         """
         if api_key is None:
             api_key = WandBApiManager.get_api_key()
@@ -66,45 +80,36 @@ class WandBApiManager:
                 "For STDIO: Ensure API key is set at server startup."
             )
 
-        # Create API instance with the specific key
-        # According to docs: https://docs.wandb.ai/ref/python/public-api/
+        if is_wb_access_token(api_key):
+            return _build_bearer_api(api_key)
+
         return wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
 
     @staticmethod
     def set_context_api_key(api_key: str) -> Any:
-        """
-        Set the API key in the current context.
-
-        Args:
-            api_key: The API key to set.
-
-        Returns:
-            A token that can be used to reset the context.
-        """
+        """Set the credential in the current async context."""
         return api_key_context.set(api_key)
 
     @staticmethod
     def reset_context_api_key(token: Any) -> None:
-        """
-        Reset the API key context.
-
-        Args:
-            token: The token returned from set_context_api_key.
-        """
+        """Restore the previous credential context."""
         api_key_context.reset(token)
 
 
+def _build_bearer_api(wb_at_token: str) -> wandb.Api:
+    """Construct a ``wandb.Api`` that authenticates with Bearer.
+
+    ``wandb.Api(api_key=...)`` rejects ``wb_at_*`` tokens because the
+    dot separator fails ``check_api_key()``'s regex.  We work around
+    this by constructing with a dummy key that passes validation, then
+    immediately replacing the session auth with a Bearer handler.
+    """
+    api = wandb.Api(api_key=_DUMMY_API_KEY, overrides={"base_url": WANDB_BASE_URL})
+    api._base_client.transport.session.auth = _BearerTokenAuth(wb_at_token)
+    api.api_key = wb_at_token
+    return api
+
+
 def get_wandb_api(api_key: Optional[str] = None) -> wandb.Api:
-    """
-    Convenience function to get a W&B API instance.
-
-    This is the primary function that should be used throughout the codebase
-    to get a W&B API instance with proper API key handling.
-
-    Args:
-        api_key: Optional API key. If not provided, uses context or environment.
-
-    Returns:
-        A configured wandb.Api instance.
-    """
+    """Convenience wrapper around ``WandBApiManager.get_api``."""
     return WandBApiManager.get_api(api_key)

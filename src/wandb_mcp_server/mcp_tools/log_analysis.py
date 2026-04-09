@@ -4,18 +4,16 @@ Creates a lightweight W&B run via the PublicApi (no wandb.init()),
 logs scalar summary metrics via GraphQL UpsertBucket, and returns
 the run_id for use in create_wandb_report_tool panels.
 
-Security: Uses wandb.Api(api_key=...) per-request, same pattern as
-every other tool. No global state, no wandb.init(), no background
-processes, no disk artifacts beyond a temp directory.
+Security: Uses WandBApiManager.get_api() per-request with Bearer
+transport for OAuth tokens. No global state, no wandb.init(), no
+background processes, no disk artifacts beyond a temp directory.
 """
 
 import json
 from typing import Any, Dict, List, Optional
 
-import wandb
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.config import WANDB_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -89,7 +87,7 @@ def log_analysis(
 ) -> Dict[str, Any]:
     """Log computed analysis data to W&B via the PublicApi.
 
-    Uses wandb.Api(api_key=...) for safe multi-tenant operation.
+    Uses WandBApiManager.get_api() for safe multi-tenant operation.
     No wandb.init(), no global state, no background processes.
     """
     api_key = WandBApiManager.get_api_key()
@@ -115,7 +113,7 @@ def log_analysis(
     if not data:
         raise ValueError("data must be a non-empty list of dicts")
 
-    api = wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
+    api = WandBApiManager.get_api()
     run = api.create_run(entity=entity_name, project=project_name)
 
     try:

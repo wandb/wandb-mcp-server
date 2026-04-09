@@ -4,8 +4,14 @@ Authentication middleware for W&B MCP Server.
 Implements Bearer token validation for HTTP transport as per
 MCP specification: https://modelcontextprotocol.io/specification/draft/basic/authorization
 
-Clients send their W&B API keys as Bearer tokens, which the server
-then uses for all W&B operations on behalf of that client.
+Supports two credential types at the edge:
+
+- **API key** (``MCP_AUTH_MODE=api-key``, current default): Bearer token
+  is a raw W&B API key passed through to downstream services.
+- **OAuth** (``MCP_AUTH_MODE=oauth``): Bearer token is a JWT validated
+  against the issuer's JWKS, then **exchanged** at ``/oidc/token`` for
+  a W&B-native ``wb_at_*`` access token used for downstream calls.
+  Non-JWT tokens are still accepted as API keys for backward compatibility.
 
 Session management follows MCP Streamable HTTP transport: the server
 issues an ``Mcp-Session-Id`` on the first authenticated request.
@@ -27,19 +33,24 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 logger = logging.getLogger(__name__)
 
-# Bearer token security scheme
 bearer_scheme = HTTPBearer(auto_error=False)
+
+MCP_AUTH_MODE = os.environ.get("MCP_AUTH_MODE", "oauth")
 
 
 class MCPAuthConfig:
-    """
-    Configuration for MCP authentication.
+    """Configuration for MCP authentication.
 
-    For HTTP transport: Accepts any W&B API key as a Bearer token.
-    The server uses the client's token for all W&B operations.
+    Supports two modes controlled by ``MCP_AUTH_MODE``:
+
+    - ``api-key`` (default): Bearer token is a raw W&B API key.
+    - ``oauth``: Bearer token is a JWT exchanged for a ``wb_at_*``
+      W&B access token via Gorilla ``/oidc/token`` (RFC 7523
+      JWT-bearer grant).  Non-JWT tokens fall back to API key
+      validation for backward compatibility.
     """
 
-    pass  # Simple config, no OAuth metadata needed
+    pass
 
 
 def is_valid_wandb_api_key(token: str) -> bool:
@@ -66,17 +77,22 @@ def is_valid_wandb_api_key(token: str) -> bool:
 
 
 async def validate_bearer_token(credentials: Optional[HTTPAuthorizationCredentials], config: MCPAuthConfig) -> str:
-    """
-    Validate Bearer token (W&B API key) for MCP access.
+    """Validate a Bearer token for MCP access.
 
-    Accepts any valid-looking W&B API key. The actual validation
-    happens when the key is used to call W&B APIs.
+    Behavior depends on ``MCP_AUTH_MODE``:
+
+    - ``api-key``: token is a raw W&B API key (validated by format).
+    - ``oauth``: if the token is a JWT it is validated via JWKS then
+      **exchanged** at ``/oidc/token`` for a ``wb_at_*`` W&B access
+      token.  Non-JWT tokens fall back to API key validation so
+      existing users are not broken.
 
     Returns:
-        The W&B API key to use for operations
+        A W&B-native credential string suitable for ``wandb.Api``
+        and Weave trace-server calls.
 
     Raises:
-        HTTPException: 401 Unauthorized with WWW-Authenticate header
+        HTTPException: 401 Unauthorized with WWW-Authenticate header.
     """
     if not credentials or not credentials.credentials:
         raise HTTPException(
@@ -85,9 +101,42 @@ async def validate_bearer_token(credentials: Optional[HTTPAuthorizationCredentia
             headers={"WWW-Authenticate": 'Bearer realm="W&B MCP"'},
         )
 
-    token = credentials.credentials.strip()  # Strip any whitespace
+    token = credentials.credentials.strip()
 
-    # Basic format validation
+    if MCP_AUTH_MODE == "oauth":
+        from wandb_mcp_server.oauth import get_oauth_config, is_jwt, validate_oauth_token
+
+        if is_jwt(token):
+            try:
+                oauth_config = get_oauth_config()
+                claims = validate_oauth_token(token, oauth_config)
+                sub_hash = hashlib.sha256(claims.get("sub", "").encode()).hexdigest()[:12]
+                logger.info(f"OAuth token validated: sub_hash={sub_hash}")
+            except Exception as e:
+                logger.warning(f"OAuth token validation failed: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or expired token",
+                    headers={"WWW-Authenticate": 'Bearer realm="W&B MCP", error="invalid_token"'},
+                )
+
+            from wandb_mcp_server.config import WANDB_BASE_URL
+            from wandb_mcp_server.oauth_exchange import OAuthExchangeError, exchange_jwt_for_wb_token
+
+            try:
+                wb_token = exchange_jwt_for_wb_token(token, WANDB_BASE_URL)
+                logger.debug("Using exchanged W&B access token for downstream calls")
+                return wb_token.token
+            except OAuthExchangeError as exc:
+                logger.warning(f"Token exchange failed: {exc}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token exchange failed -- unable to obtain W&B credentials",
+                    headers={"WWW-Authenticate": 'Bearer realm="W&B MCP", error="invalid_token"'},
+                )
+        else:
+            logger.debug("Token is not a JWT; falling back to API key validation")
+
     if not is_valid_wandb_api_key(token):
         logger.debug(f"Rejected API key: length={len(token)}")
         raise HTTPException(
@@ -266,6 +315,3 @@ def _track_request_event(
         )
     except Exception:
         pass
-
-
-# OAuth-related functions removed - see AUTH_README.md for details

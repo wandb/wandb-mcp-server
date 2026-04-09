@@ -12,7 +12,6 @@ import wandb_workspaces.reports.v2.interface as wr_interface
 
 import wandb
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.config import WANDB_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
 
 logger = get_rich_logger(__name__)
@@ -24,15 +23,10 @@ def _get_api_from_context():
     """Patched _get_api that reads API key from request context."""
     from wandb_mcp_server.api_client import WandBApiManager
 
-    api_key = WandBApiManager.get_api_key()
-
-    if not api_key:
-        raise Exception("No W&B API key available in context")
-
     try:
-        # Uses explicit api_key from contextvar, not singleton
-        # and points to the configured base URL
-        return wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
+        return WandBApiManager.get_api()
+    except ValueError as e:
+        raise Exception("No W&B API key available in context") from e
     except wandb.errors.UsageError as e:
         raise Exception("Not logged in to W&B, check API key") from e
 

@@ -73,9 +73,18 @@ class WeaveApiClient:
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get authentication headers for the Weave API.
 
-        Returns:
-            Dictionary of authentication headers.
+        Uses Bearer for ``wb_at_*`` access tokens (Gorilla's trace
+        proxy only recognises them in the Bearer path) and Basic for
+        regular API keys.
         """
+        from wandb_mcp_server.api_client import is_wb_access_token
+
+        if is_wb_access_token(self.api_key):
+            return {
+                "Content-Type": "application/json",
+                "Accept": "application/jsonl",
+                "Authorization": f"Bearer {self.api_key}",
+            }
         auth_token = base64.b64encode(f":{self.api_key}".encode()).decode()
         return {
             "Content-Type": "application/json",
