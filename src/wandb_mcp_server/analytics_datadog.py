@@ -193,12 +193,35 @@ def _build_message(event: Dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+_DD_SECRET_NAME = "mcp-server-datadog-api-key"
+
+
+def _resolve_dd_api_key() -> str:
+    """Resolve DD_API_KEY: env var first, then SecretsResolver (GCP Secret Manager)."""
+    from_env = os.environ.get("DD_API_KEY", "")
+    if from_env:
+        return from_env
+    try:
+        from wandb_mcp_server.secrets_resolver import get_secrets_resolver_from_env
+
+        resolver = get_secrets_resolver_from_env()
+        if resolver is not None:
+            key_bytes = resolver.fetch_secret(_DD_SECRET_NAME)
+            if key_bytes:
+                return key_bytes.decode("utf-8").strip()
+    except Exception as exc:
+        logger.debug(f"SecretsResolver failed for {_DD_SECRET_NAME}: {exc}")
+    return ""
+
+
 class DatadogForwarder:
     """Gated forwarder that sends analytics events to the Datadog HTTP Logs API.
 
     Controlled by env vars:
     - ``MCP_DATADOG_FORWARD=true``: enable forwarding (off by default).
-    - ``DD_API_KEY``: Datadog API key (32-char hex, NOT an Application Key).
+    - ``DD_API_KEY``: Datadog API key -- or fetched from GCP Secret Manager
+      via ``SecretsResolver`` when ``MCP_SERVER_SECRETS_PROVIDER=gcp`` is set
+      (same pattern as the HMAC session key).
     - ``DD_SITE``: Datadog site (default ``datadoghq.com``).
     - ``DD_ENV``: environment tag (default ``production``).
     - ``DD_VERSION``: version tag (default ``0.0.0``).
@@ -209,7 +232,7 @@ class DatadogForwarder:
 
     def __init__(self) -> None:
         self.live = os.environ.get("MCP_DATADOG_FORWARD", "false").lower() == "true"
-        self._api_key = os.environ.get("DD_API_KEY", "")
+        self._api_key = _resolve_dd_api_key() if self.live else ""
         self._site = os.environ.get("DD_SITE", "datadoghq.com")
         self._env = os.environ.get("DD_ENV", "production")
         self._version = os.environ.get("DD_VERSION", "0.0.0")
