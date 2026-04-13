@@ -231,8 +231,8 @@ class AnalyticsTracker:
             dd_forwarder = get_datadog_forwarder()
             if dd_forwarder.enabled:
                 dd_forwarder.forward(event)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"Datadog forwarding failed (non-fatal): {exc}")
 
     def track_user_session(
         self,

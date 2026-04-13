@@ -13,7 +13,7 @@ import wandb_workspaces.reports.v2.interface as wr_interface
 import wandb
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.config import WANDB_BASE_URL
-from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
+from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 
 logger = get_rich_logger(__name__)
 
@@ -163,69 +163,65 @@ def create_report(
         logger.warning("No API key available for W&B")
         raise Exception("No W&B API key available")
 
-    try:
-        api = WandBApiManager.get_api()
-        log_tool_call(
-            "create_report",
-            api.viewer,
-            {
-                "entity_name": entity_name,
-                "project_name": project_name,
-                "title": title,
-                "description": description,
-                "has_panels": bool(panels),
-            },
-        )
-    except Exception:
-        logger.debug("analytics emit failed", exc_info=True)
+    api = WandBApiManager.get_api()
+    with track_tool_execution(
+        "create_report",
+        api.viewer,
+        {
+            "entity_name": entity_name,
+            "project_name": project_name,
+            "title": title,
+            "description": description,
+            "has_panels": bool(panels),
+        },
+    ):
+        try:
+            report = wr.Report(
+                entity=entity_name,
+                project=project_name,
+                title=title,
+                description=description or "",
+                width="fluid",
+            )
 
-    try:
-        report = wr.Report(
-            entity=entity_name,
-            project=project_name,
-            title=title,
-            description=description or "",
-            width="fluid",
-        )
+            blocks = parse_markdown_to_blocks(markdown_report_text or "")
 
-        blocks = parse_markdown_to_blocks(markdown_report_text or "")
+            if plots_html:
+                import base64 as b64
 
-        if plots_html:
-            import base64 as b64
+                if isinstance(plots_html, str):
+                    plots_html = {"chart": plots_html}
+                for label, html_content in plots_html.items():
+                    content = html_content.strip() if isinstance(html_content, str) else ""
+                    if content.startswith("<svg") or content.startswith("data:image/svg"):
+                        if content.startswith("<svg"):
+                            data_uri = f"data:image/svg+xml;base64,{b64.b64encode(content.encode()).decode()}"
+                        else:
+                            data_uri = content
+                        blocks.append(wr.Image(url=data_uri, caption=label))
+                        logger.info(f"Added SVG Image block: {label}")
+                    elif content:
+                        blocks.append(wr.MarkdownBlock(content))
+                        logger.info(f"Added HTML MarkdownBlock: {label}")
 
-            if isinstance(plots_html, str):
-                plots_html = {"chart": plots_html}
-            for label, html_content in plots_html.items():
-                content = html_content.strip() if isinstance(html_content, str) else ""
-                if content.startswith("<svg") or content.startswith("data:image/svg"):
-                    if content.startswith("<svg"):
-                        data_uri = f"data:image/svg+xml;base64,{b64.b64encode(content.encode()).decode()}"
-                    else:
-                        data_uri = content
-                    blocks.append(wr.Image(url=data_uri, caption=label))
-                    logger.info(f"Added SVG Image block: {label}")
-                elif content:
-                    blocks.append(wr.MarkdownBlock(content))
-                    logger.info(f"Added HTML MarkdownBlock: {label}")
+            security_notice = wr.P("*Report created via W&B MCP Server*")
+            report.blocks = [security_notice] + blocks
 
-        security_notice = wr.P("*Report created via W&B MCP Server*")
-        report.blocks = [security_notice] + blocks
+            if panels:
+                panel_blocks = _build_panel_blocks(panels, entity_name, project_name)
+                if panel_blocks:
+                    report.blocks.append(wr.H2("Charts"))
+                    report.blocks.extend(panel_blocks)
 
-        if panels:
-            panel_blocks = _build_panel_blocks(panels, entity_name, project_name)
-            if panel_blocks:
-                report.blocks.append(wr.H2("Charts"))
-                report.blocks.extend(panel_blocks)
+            report.save()
 
-        report.save()
+            logger.info(f"Created report: {title} (panels={len(panels or [])})")
 
-        logger.info(f"Created report: {title} (panels={len(panels or [])})")
+            return {"url": report.url}
 
-        return {"url": report.url}
-
-    except Exception as e:
-        logger.error(f"Error creating report: {e}")
-        raise Exception(f"Error creating report: {e}")
+        except Exception as e:
+            logger.error(f"Error creating report: {e}")
+            raise Exception(f"Error creating report: {e}")
 
 
 def _build_panel_blocks(

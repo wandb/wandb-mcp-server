@@ -15,7 +15,7 @@ import wandb
 
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.config import WANDB_BASE_URL
-from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
+from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -88,87 +88,83 @@ def get_run_history(
 ) -> str:
     """Fetch sampled metric history for a W&B run."""
 
-    try:
-        api = WandBApiManager.get_api()
-        log_tool_call(
-            "get_run_history",
-            api.viewer,
-            {
-                "entity_name": entity_name,
-                "project_name": project_name,
-                "run_id": run_id,
-                "keys": keys,
-                "samples": samples,
-            },
-        )
-    except Exception:
-        logger.debug("analytics emit failed", exc_info=True)
+    api = WandBApiManager.get_api()
+    with track_tool_execution(
+        "get_run_history",
+        api.viewer,
+        {
+            "entity_name": entity_name,
+            "project_name": project_name,
+            "run_id": run_id,
+            "keys": keys,
+            "samples": samples,
+        },
+    ):
+        api_key = WandBApiManager.get_api_key()
+        if not api_key:
+            raise ValueError("W&B API key is required to fetch run history.")
 
-    api_key = WandBApiManager.get_api_key()
-    if not api_key:
-        raise ValueError("W&B API key is required to fetch run history.")
+        try:
+            wandb_api = wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
+            run_path = f"{entity_name}/{project_name}/{run_id}"
+            run = wandb_api.run(run_path)
+        except wandb.errors.CommError as e:
+            raise ValueError(f"Run not found: {run_path}. Error: {e}")
+        except Exception as e:
+            raise ValueError(f"Failed to access run {entity_name}/{project_name}/{run_id}: {type(e).__name__}")
 
-    try:
-        wandb_api = wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
-        run_path = f"{entity_name}/{project_name}/{run_id}"
-        run = wandb_api.run(run_path)
-    except wandb.errors.CommError as e:
-        raise ValueError(f"Run not found: {run_path}. Error: {e}")
-    except Exception as e:
-        raise ValueError(f"Failed to access run {entity_name}/{project_name}/{run_id}: {type(e).__name__}")
+        clamped_samples = min(samples, MAX_HISTORY_ROWS)
 
-    clamped_samples = min(samples, MAX_HISTORY_ROWS)
+        try:
+            if min_step is not None or max_step is not None:
+                rows = _fetch_step_range(run, clamped_samples, keys, min_step, max_step)
+            else:
+                history_kwargs: Dict[str, Any] = {"samples": clamped_samples, "pandas": False}
+                if keys:
+                    history_kwargs["keys"] = keys
+                rows = list(run.history(**history_kwargs))
+        except Exception as e:
+            raise ValueError(f"Failed to fetch history for run {run_id}: {e}")
 
-    try:
-        if min_step is not None or max_step is not None:
-            rows = _fetch_step_range(run, clamped_samples, keys, min_step, max_step)
-        else:
-            history_kwargs: Dict[str, Any] = {"samples": clamped_samples, "pandas": False}
-            if keys:
-                history_kwargs["keys"] = keys
-            rows = list(run.history(**history_kwargs))
-    except Exception as e:
-        raise ValueError(f"Failed to fetch history for run {run_id}: {e}")
+        clean_rows = []
+        for row in rows:
+            clean_row = {}
+            for k, v in row.items():
+                if k.startswith("_") and k not in ("_step", "_timestamp", "_runtime"):
+                    continue
+                if v is None or (isinstance(v, float) and v != v):
+                    continue
+                clean_row[k] = v
+            clean_rows.append(clean_row)
 
-    clean_rows = []
-    for row in rows:
-        clean_row = {}
-        for k, v in row.items():
-            if k.startswith("_") and k not in ("_step", "_timestamp", "_runtime"):
-                continue
-            if v is None or (isinstance(v, float) and v != v):
-                continue
-            clean_row[k] = v
-        clean_rows.append(clean_row)
+        keys_in_response = set()
+        for row in clean_rows:
+            keys_in_response.update(row.keys())
+        keys_in_response.discard("_step")
 
-    keys_in_response = set()
-    for row in clean_rows:
-        keys_in_response.update(row.keys())
-    keys_in_response.discard("_step")
+        from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
 
-    from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
+        total_steps = getattr(run, "lastHistoryStep", len(clean_rows))
+        original_count = len(clean_rows)
 
-    total_steps = getattr(run, "lastHistoryStep", len(clean_rows))
-    original_count = len(clean_rows)
+        budget_chars = MAX_RESPONSE_TOKENS * 4
+        clean_rows = _enforce_row_budget(clean_rows, budget_chars)
+        truncated = len(clean_rows) < original_count
 
-    budget_chars = MAX_RESPONSE_TOKENS * 4
-    clean_rows = _enforce_row_budget(clean_rows, budget_chars)
-    truncated = len(clean_rows) < original_count
-
-    result_dict: Dict[str, Any] = {
-        "rows": clean_rows,
-        "run_id": run_id,
-        "run_name": run.name,
-        "total_steps": total_steps,
-        "sampled_points": len(clean_rows),
-        "keys_returned": sorted(keys_in_response),
-    }
-    if truncated:
-        result_dict["truncation_note"] = (
-            f"Downsampled from {original_count} to {len(clean_rows)} rows to fit token budget. "
-            "Use keys= to select fewer metrics or reduce samples."
-        )
-    return json.dumps(result_dict)
+        result_dict: Dict[str, Any] = {
+            "rows": clean_rows,
+            "run_id": run_id,
+            "run_name": run.name,
+            "total_steps": total_steps,
+            "sampled_points": len(clean_rows),
+            "keys_returned": sorted(keys_in_response),
+        }
+        if truncated:
+            result_dict["truncation_note"] = (
+                f"Downsampled from {original_count} to {len(clean_rows)} rows to fit token budget. "
+                "Use keys= to select fewer metrics or reduce samples."
+            )
+        return json.dumps(result_dict)
 
 
 def _fetch_step_range(

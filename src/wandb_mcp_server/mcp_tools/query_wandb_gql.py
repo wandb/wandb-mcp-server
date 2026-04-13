@@ -11,7 +11,7 @@ from graphql.language import printer as gql_printer
 from graphql.language import visitor as gql_visitor
 from wandb_gql import gql  # This must be imported after wandb
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
+from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 
 logger = get_rich_logger(__name__)
 
@@ -547,285 +547,255 @@ def query_paginated_wandb_gql(
     Returns:
         The aggregated GraphQL response dictionary.
     """
+    from wandb_mcp_server.api_client import get_wandb_api
+
+    api = get_wandb_api()
     result_dict = {}
-    api = None
     limit_key = None
-    try:
-        # Use API key from environment (set by auth middleware for HTTP, or by user for STDIO)
-        # Get API instance with proper key handling
-        from wandb_mcp_server.api_client import get_wandb_api
-
-        api = get_wandb_api()
+    with track_tool_execution(
+        "query_paginated_wandb_gql",
+        api.viewer,
+        {
+            "query": query,
+            "variables": variables,
+            "max_items": max_items,
+            "items_per_page": items_per_page,
+        },
+    ):
         try:
-            log_tool_call(
-                "query_paginated_wandb_gql",
-                api.viewer,
-                {
-                    "query": query,
-                    "variables": variables,
-                    "max_items": max_items,
-                    "items_per_page": items_per_page,
-                },
-            )
-        except Exception:
-            logger.debug("analytics emit failed", exc_info=True)
-        logger.info("--- Inside query_paginated_wandb_gql: Step 0: Execute Initial Query ---")
+            logger.info("--- Inside query_paginated_wandb_gql: Step 0: Execute Initial Query ---")
 
-        # Determine limit key and set initial page vars
-        page1_vars_func = variables.copy() if variables is not None else {}
-        limit_key = None
-        for k in page1_vars_func:
-            if k.lower() in ["limit", "first", "count"]:
-                limit_key = k
-                break
-        if limit_key:
-            # Ensure first page uses items_per_page if limit is too high or missing
-            page1_vars_func[limit_key] = min(items_per_page, page1_vars_func.get(limit_key) or items_per_page)
-        else:
-            limit_key = "limit"
-            page1_vars_func[limit_key] = items_per_page
-            logger.debug(f"No limit variable found in input, adding '{limit_key}={items_per_page}'")
-
-        # Parse for execution
-        try:
-            parsed_initial_query = gql(query.strip())
-        except Exception as e:
-            logger.error(f"Failed to parse initial query with wandb_gql: {e}")
-            return {"errors": [{"message": f"Failed to parse initial query: {e}"}]}
-
-        # Execute initial query
-        try:
-            result1 = api.client.execute(parsed_initial_query, variable_values=page1_vars_func)
-            result_dict = copy.deepcopy(result1)  # Work on a copy
-            if "errors" in result_dict:
-                logger.error(f"GraphQL errors in initial response: {result_dict['errors']}")
-                return result_dict  # Return errors if found
-        except Exception as e:
-            logger.error(f"Failed to execute initial GraphQL query: {e}", exc_info=True)
-            return {"errors": [{"message": f"Failed to execute initial query: {e}"}]}
-
-        # Find Collections
-        detected_paths = find_paginated_collections(result_dict)
-        if not detected_paths:
-            logger.info("No paginated paths detected. Returning initial result.")
-            return result_dict
-
-        # --- Use the first detected path ---
-        # TODO: Enhance to handle multiple paths if necessary
-        path_to_paginate = detected_paths[0]
-        logger.info(f"Using path for pagination: {'/'.join(path_to_paginate)}")
-
-        # Extract page 1 data
-        runs_data1 = get_nested_value(result_dict, path_to_paginate)
-        if runs_data1 is None:
-            logger.warning(
-                f"Could not extract data for pagination path {'/'.join(path_to_paginate)}. Returning initial result."
-            )
-            return result_dict
-        page_info1 = get_nested_value(runs_data1, ["pageInfo"])
-        if page_info1 is None:
-            logger.warning(
-                f"Could not extract pageInfo for pagination path {'/'.join(path_to_paginate)}. Returning initial result."
-            )
-            return result_dict
-
-        cursor = page_info1.get("endCursor")
-        has_next = page_info1.get("hasNextPage")
-        initial_edges = runs_data1.get("edges", [])
-        logging.info(f"Page 1 Results: {len(initial_edges)} runs.")
-        logging.info(f"Page 1 PageInfo: {page_info1}")
-
-        # Deduplicate initial edges and update result_dict
-        seen_ids = set()
-        current_edge_count = 0
-        temp_initial_edges = []
-        if initial_edges:
-            for edge in initial_edges:
-                try:
-                    # Check max items even on page 1 relative to the limit
-                    if current_edge_count >= max_items:
-                        break
-                    node_id = edge["node"]["id"]
-                    if node_id not in seen_ids:
-                        seen_ids.add(node_id)
-                        temp_initial_edges.append(edge)
-                        current_edge_count += 1
-                except (KeyError, TypeError):
-                    if current_edge_count < max_items:
-                        temp_initial_edges.append(edge)
-                        current_edge_count += 1
-            # Update the edges in the result_dict
-            target_collection_dict = get_nested_value(result_dict, path_to_paginate)
-            if target_collection_dict:
-                target_collection_dict["edges"] = temp_initial_edges[
-                    :max_items
-                ]  # Ensure initial list respects max_items
-                current_edge_count = len(target_collection_dict["edges"])
-            logging.info(f"Stored {current_edge_count} unique edges after page 1 (max: {max_items}).")
-
-        if not has_next or not cursor or current_edge_count >= max_items:
-            logger.info("No further pages needed based on page 1 info or max_items reached.")
-            # Ensure final pageInfo reflects reality
-            target_pi_dict = get_nested_value(result_dict, path_to_paginate + ["pageInfo"])
-            if target_pi_dict:
-                target_pi_dict["hasNextPage"] = False
-            return result_dict
-
-        # Generate Paginated Query String
-        logging.info("\n--- Generating Paginated Query String --- ")
-        generated_paginated_query_string = None
-        after_variable_name = "after"  # Standard name
-        try:
-            initial_ast = parse(query.strip())
-            visitor = AddPaginationArgsVisitor(
-                field_paths=detected_paths,
-                first_variable_name=limit_key,
-                after_variable_name=after_variable_name,
-            )
-            modified_ast = gql_visitor.visit(copy.deepcopy(initial_ast), visitor)
-            generated_paginated_query_string = gql_printer.print_ast(modified_ast)
-            logger.info("AST modification and printing successful.")
-        except Exception as e:
-            logger.error(f"Failed to generate query string via AST: {e}", exc_info=True)
-            return result_dict  # Return what we have if generation fails
-
-        if generated_paginated_query_string is None:
-            return result_dict
-
-        logging.info("\n--- Loop: Execute, Deduplicate, Aggregate In-Place, Check Limit ---")
-        page_num = 1
-        current_cursor = cursor
-        current_has_next = has_next
-        final_page_info = page_info1
-
-        while current_has_next:
-            if current_edge_count >= max_items:
-                logging.info(f"Reached max_items ({max_items}). Stopping loop.")
-                final_page_info = {**final_page_info, "hasNextPage": False}
-                break
-
-            page_num += 1
-            logging.info(f"\nFetching Page {page_num}...")
-            page_vars = variables.copy() if variables is not None else {}  # Start with original vars
-            page_vars[limit_key] = items_per_page  # Set correct page size
-            page_vars[after_variable_name] = current_cursor  # Set cursor
+            page1_vars_func = variables.copy() if variables is not None else {}
+            limit_key = None
+            for k in page1_vars_func:
+                if k.lower() in ["limit", "first", "count"]:
+                    limit_key = k
+                    break
+            if limit_key:
+                page1_vars_func[limit_key] = min(items_per_page, page1_vars_func.get(limit_key) or items_per_page)
+            else:
+                limit_key = "limit"
+                page1_vars_func[limit_key] = items_per_page
+                logger.debug(f"No limit variable found in input, adding '{limit_key}={items_per_page}'")
 
             try:
-                # Parse and execute for the current page
-                parsed_generated = gql(generated_paginated_query_string)
-                logging.info(f"Executing generated query for page {page_num} with vars: {page_vars}")
-                result_page = api.client.execute(parsed_generated, variable_values=page_vars)
-
-                if "errors" in result_page:
-                    logger.error(f"GraphQL errors on page {page_num}: {result_page['errors']}. Stopping pagination.")
-                    current_has_next = False
-                    final_page_info = {
-                        **final_page_info,
-                        "hasNextPage": False,
-                    }  # Update page info on error
-                    continue  # Go to end of loop
-
-                runs_data = get_nested_value(result_page, path_to_paginate)
-                if runs_data is None:
-                    logging.warning(
-                        f"Could not get data for path {'/'.join(path_to_paginate)} on page {page_num}. Stopping."
-                    )
-                    current_has_next = False
-                    continue
-                else:
-                    edges_this_page = get_nested_value(runs_data, ["edges"]) or []
-                    page_info = get_nested_value(runs_data, ["pageInfo"]) or {}
-                    final_page_info = page_info  # Store latest page info
-
-                logging.info(f"Result (Page {page_num}): {len(edges_this_page)} runs returned.")
-                logging.info(f"Page Info (Page {page_num}): {page_info}")
-
-                # Deduplicate & Find edges to append
-                new_edges_for_aggregation = []
-                duplicates_skipped = 0
-                if edges_this_page:
-                    for edge in edges_this_page:
-                        if current_edge_count + len(new_edges_for_aggregation) >= max_items:
-                            logging.info(f"Max items ({max_items}) reached mid-page {page_num}.")
-                            final_page_info = {**final_page_info, "hasNextPage": False}
-                            current_has_next = False
-                            break
-
-                        try:
-                            node_id = edge["node"]["id"]
-                            if node_id not in seen_ids:
-                                seen_ids.add(node_id)
-                                new_edges_for_aggregation.append(edge)
-                            else:
-                                duplicates_skipped += 1
-                        except (KeyError, TypeError):
-                            new_edges_for_aggregation.append(edge)
-
-                    if duplicates_skipped > 0:
-                        logging.info(f"Skipped {duplicates_skipped} duplicate edges on page {page_num}.")
-
-                    # Append new unique edges IN-PLACE
-                    if new_edges_for_aggregation:
-                        target_collection_dict_inplace = get_nested_value(result_dict, path_to_paginate)
-                        if target_collection_dict_inplace and isinstance(
-                            target_collection_dict_inplace.get("edges"), list
-                        ):
-                            target_collection_dict_inplace["edges"].extend(new_edges_for_aggregation)
-                            current_edge_count = len(target_collection_dict_inplace["edges"])
-                            logging.info(
-                                f"Appended {len(new_edges_for_aggregation)} new edges. Total unique edges: {current_edge_count}"
-                            )
-                        else:
-                            logging.error("Could not find target edges list in result_dict to append in-place.")
-                            current_has_next = False
-                    else:
-                        if len(edges_this_page) > 0:
-                            logging.info("No new unique edges found on page {page_num} after deduplication.")
-                        else:
-                            logging.info("No edges returned on page {page_num} to aggregate.")
-                else:
-                    logging.info("No edges returned on page {page_num} to aggregate.")
-
-                # Update cursor and has_next for next loop iteration (or final state)
-                current_cursor = final_page_info.get("endCursor")
-                # Respect hasNextPage from API unless loop was broken early by max_items or errors
-                if current_has_next:  # Only update if loop didn't break mid-page
-                    current_has_next = final_page_info.get("hasNextPage", False)
-
-                # Safety checks
-                if current_has_next and not current_cursor:
-                    logging.warning("hasNextPage is true but no endCursor received. Stopping loop.")
-                    current_has_next = False
-                if not edges_this_page:
-                    logging.warning(f"No edges received for page {page_num}. Stopping loop.")
-                    current_has_next = False
-
+                parsed_initial_query = gql(query.strip())
             except Exception as e:
-                logging.error(f"Execution failed for page {page_num}: {e}", exc_info=True)
-                current_has_next = False  # Stop loop on error
+                logger.error(f"Failed to parse initial query with wandb_gql: {e}")
+                return {"errors": [{"message": f"Failed to parse initial query: {e}"}]}
 
-        logging.info(f"\n--- Pagination Loop Finished after page {page_num} ---")
-        logging.info(f"Final aggregated edge count: {current_edge_count}")
+            try:
+                result1 = api.client.execute(parsed_initial_query, variable_values=page1_vars_func)
+                result_dict = copy.deepcopy(result1)
+                if "errors" in result_dict:
+                    logger.error(f"GraphQL errors in initial response: {result_dict['errors']}")
+                    return result_dict
+            except Exception as e:
+                logger.error(f"Failed to execute initial GraphQL query: {e}", exc_info=True)
+                return {"errors": [{"message": f"Failed to execute initial query: {e}"}]}
 
-        # Update the final pageInfo in the result dictionary
-        target_collection_dict_final = get_nested_value(result_dict, path_to_paginate)
-        if target_collection_dict_final:
-            target_collection_dict_final["pageInfo"] = final_page_info
-            logging.info(f"Updated final pageInfo: {final_page_info}")
+            detected_paths = find_paginated_collections(result_dict)
+            if not detected_paths:
+                logger.info("No paginated paths detected. Returning initial result.")
+                return result_dict
 
-        return result_dict  # Return the modified dictionary
+            path_to_paginate = detected_paths[0]
+            logger.info(f"Using path for pagination: {'/'.join(path_to_paginate)}")
 
-    except Exception as e:
-        error_message = f"Critical error in paginated GraphQL query function: {str(e)}\n{traceback.format_exc()}"
-        logger.error(error_message)
-        # Return original dict if possible, else error structure
-        if result_dict:
-            if "errors" not in result_dict:
-                result_dict["errors"] = []
-            result_dict["errors"].append({"message": "Pagination failed", "details": str(e)})
+            runs_data1 = get_nested_value(result_dict, path_to_paginate)
+            if runs_data1 is None:
+                logger.warning(
+                    f"Could not extract data for pagination path {'/'.join(path_to_paginate)}. Returning initial result."
+                )
+                return result_dict
+            page_info1 = get_nested_value(runs_data1, ["pageInfo"])
+            if page_info1 is None:
+                logger.warning(
+                    f"Could not extract pageInfo for pagination path {'/'.join(path_to_paginate)}. Returning initial result."
+                )
+                return result_dict
+
+            cursor = page_info1.get("endCursor")
+            has_next = page_info1.get("hasNextPage")
+            initial_edges = runs_data1.get("edges", [])
+            logging.info(f"Page 1 Results: {len(initial_edges)} runs.")
+            logging.info(f"Page 1 PageInfo: {page_info1}")
+
+            seen_ids = set()
+            current_edge_count = 0
+            temp_initial_edges = []
+            if initial_edges:
+                for edge in initial_edges:
+                    try:
+                        if current_edge_count >= max_items:
+                            break
+                        node_id = edge["node"]["id"]
+                        if node_id not in seen_ids:
+                            seen_ids.add(node_id)
+                            temp_initial_edges.append(edge)
+                            current_edge_count += 1
+                    except (KeyError, TypeError):
+                        if current_edge_count < max_items:
+                            temp_initial_edges.append(edge)
+                            current_edge_count += 1
+                target_collection_dict = get_nested_value(result_dict, path_to_paginate)
+                if target_collection_dict:
+                    target_collection_dict["edges"] = temp_initial_edges[:max_items]
+                    current_edge_count = len(target_collection_dict["edges"])
+                logging.info(f"Stored {current_edge_count} unique edges after page 1 (max: {max_items}).")
+
+            if not has_next or not cursor or current_edge_count >= max_items:
+                logger.info("No further pages needed based on page 1 info or max_items reached.")
+                target_pi_dict = get_nested_value(result_dict, path_to_paginate + ["pageInfo"])
+                if target_pi_dict:
+                    target_pi_dict["hasNextPage"] = False
+                return result_dict
+
+            logging.info("\n--- Generating Paginated Query String --- ")
+            generated_paginated_query_string = None
+            after_variable_name = "after"
+            try:
+                initial_ast = parse(query.strip())
+                visitor = AddPaginationArgsVisitor(
+                    field_paths=detected_paths,
+                    first_variable_name=limit_key,
+                    after_variable_name=after_variable_name,
+                )
+                modified_ast = gql_visitor.visit(copy.deepcopy(initial_ast), visitor)
+                generated_paginated_query_string = gql_printer.print_ast(modified_ast)
+                logger.info("AST modification and printing successful.")
+            except Exception as e:
+                logger.error(f"Failed to generate query string via AST: {e}", exc_info=True)
+                return result_dict
+
+            if generated_paginated_query_string is None:
+                return result_dict
+
+            logging.info("\n--- Loop: Execute, Deduplicate, Aggregate In-Place, Check Limit ---")
+            page_num = 1
+            current_cursor = cursor
+            current_has_next = has_next
+            final_page_info = page_info1
+
+            while current_has_next:
+                if current_edge_count >= max_items:
+                    logging.info(f"Reached max_items ({max_items}). Stopping loop.")
+                    final_page_info = {**final_page_info, "hasNextPage": False}
+                    break
+
+                page_num += 1
+                logging.info(f"\nFetching Page {page_num}...")
+                page_vars = variables.copy() if variables is not None else {}
+                page_vars[limit_key] = items_per_page
+                page_vars[after_variable_name] = current_cursor
+
+                try:
+                    parsed_generated = gql(generated_paginated_query_string)
+                    logging.info(f"Executing generated query for page {page_num} with vars: {page_vars}")
+                    result_page = api.client.execute(parsed_generated, variable_values=page_vars)
+
+                    if "errors" in result_page:
+                        logger.error(
+                            f"GraphQL errors on page {page_num}: {result_page['errors']}. Stopping pagination."
+                        )
+                        current_has_next = False
+                        final_page_info = {**final_page_info, "hasNextPage": False}
+                        continue
+
+                    runs_data = get_nested_value(result_page, path_to_paginate)
+                    if runs_data is None:
+                        logging.warning(
+                            f"Could not get data for path {'/'.join(path_to_paginate)} on page {page_num}. Stopping."
+                        )
+                        current_has_next = False
+                        continue
+                    else:
+                        edges_this_page = get_nested_value(runs_data, ["edges"]) or []
+                        page_info = get_nested_value(runs_data, ["pageInfo"]) or {}
+                        final_page_info = page_info
+
+                    logging.info(f"Result (Page {page_num}): {len(edges_this_page)} runs returned.")
+                    logging.info(f"Page Info (Page {page_num}): {page_info}")
+
+                    new_edges_for_aggregation = []
+                    duplicates_skipped = 0
+                    if edges_this_page:
+                        for edge in edges_this_page:
+                            if current_edge_count + len(new_edges_for_aggregation) >= max_items:
+                                logging.info(f"Max items ({max_items}) reached mid-page {page_num}.")
+                                final_page_info = {**final_page_info, "hasNextPage": False}
+                                current_has_next = False
+                                break
+
+                            try:
+                                node_id = edge["node"]["id"]
+                                if node_id not in seen_ids:
+                                    seen_ids.add(node_id)
+                                    new_edges_for_aggregation.append(edge)
+                                else:
+                                    duplicates_skipped += 1
+                            except (KeyError, TypeError):
+                                new_edges_for_aggregation.append(edge)
+
+                        if duplicates_skipped > 0:
+                            logging.info(f"Skipped {duplicates_skipped} duplicate edges on page {page_num}.")
+
+                        if new_edges_for_aggregation:
+                            target_collection_dict_inplace = get_nested_value(result_dict, path_to_paginate)
+                            if target_collection_dict_inplace and isinstance(
+                                target_collection_dict_inplace.get("edges"), list
+                            ):
+                                target_collection_dict_inplace["edges"].extend(new_edges_for_aggregation)
+                                current_edge_count = len(target_collection_dict_inplace["edges"])
+                                logging.info(
+                                    f"Appended {len(new_edges_for_aggregation)} new edges. Total unique edges: {current_edge_count}"
+                                )
+                            else:
+                                logging.error("Could not find target edges list in result_dict to append in-place.")
+                                current_has_next = False
+                        else:
+                            if len(edges_this_page) > 0:
+                                logging.info("No new unique edges found on page {page_num} after deduplication.")
+                            else:
+                                logging.info("No edges returned on page {page_num} to aggregate.")
+                    else:
+                        logging.info("No edges returned on page {page_num} to aggregate.")
+
+                    current_cursor = final_page_info.get("endCursor")
+                    if current_has_next:
+                        current_has_next = final_page_info.get("hasNextPage", False)
+
+                    if current_has_next and not current_cursor:
+                        logging.warning("hasNextPage is true but no endCursor received. Stopping loop.")
+                        current_has_next = False
+                    if not edges_this_page:
+                        logging.warning(f"No edges received for page {page_num}. Stopping loop.")
+                        current_has_next = False
+
+                except Exception as e:
+                    logging.error(f"Execution failed for page {page_num}: {e}", exc_info=True)
+                    current_has_next = False
+
+            logging.info(f"\n--- Pagination Loop Finished after page {page_num} ---")
+            logging.info(f"Final aggregated edge count: {current_edge_count}")
+
+            target_collection_dict_final = get_nested_value(result_dict, path_to_paginate)
+            if target_collection_dict_final:
+                target_collection_dict_final["pageInfo"] = final_page_info
+                logging.info(f"Updated final pageInfo: {final_page_info}")
+
             return result_dict
-        else:
-            return {"errors": [{"message": "Pagination failed catastrophically", "details": str(e)}]}
+
+        except Exception as e:
+            error_message = f"Critical error in paginated GraphQL query function: {str(e)}\n{traceback.format_exc()}"
+            logger.error(error_message)
+            if result_dict:
+                if "errors" not in result_dict:
+                    result_dict["errors"] = []
+                result_dict["errors"].append({"message": "Pagination failed", "details": str(e)})
+                return result_dict
+            else:
+                return {"errors": [{"message": "Pagination failed catastrophically", "details": str(e)}]}
 
 
 class AddPaginationArgsVisitor(gql_visitor.Visitor):

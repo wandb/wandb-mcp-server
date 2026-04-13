@@ -10,7 +10,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
+from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -85,78 +85,73 @@ def list_artifact_versions(
 ) -> str:
     """List versions of an artifact collection."""
 
-    try:
-        api = WandBApiManager.get_api()
-        log_tool_call(
-            "list_artifact_versions",
-            api.viewer,
-            {
-                "collection_name": collection_name,
-                "registry_name": registry_name,
-                "type_name": type_name,
-                "source": source,
-                "max_items": max_items,
-            },
-        )
-    except Exception:
-        logger.debug("analytics emit failed", exc_info=True)
+    api = WandBApiManager.get_api()
+    with track_tool_execution(
+        "list_artifact_versions",
+        api.viewer,
+        {
+            "collection_name": collection_name,
+            "registry_name": registry_name,
+            "type_name": type_name,
+            "source": source,
+            "max_items": max_items,
+        },
+    ) as ctx:
+        max_items = min(max_items, MAX_ITEMS_CEILING)
 
-    max_items = min(max_items, MAX_ITEMS_CEILING)
-
-    try:
-        api = WandBApiManager.get_api()
-
-        if source == "registry":
-            if not registry_name:
-                return json.dumps(
-                    {
-                        "error": "invalid_input",
-                        "message": "registry_name is required when source='registry'",
-                    }
+        try:
+            if source == "registry":
+                if not registry_name:
+                    return json.dumps(
+                        {
+                            "error": "invalid_input",
+                            "message": "registry_name is required when source='registry'",
+                        }
+                    )
+                reg_kwargs: Dict[str, Any] = {}
+                if organization is not None:
+                    reg_kwargs["organization"] = organization
+                registry = api.registry(registry_name, **reg_kwargs)
+                versions_iter = registry.collections(
+                    filter={"name": collection_name},
+                    per_page=min(max_items, 100),
+                ).versions()
+            else:
+                if not type_name:
+                    return json.dumps(
+                        {
+                            "error": "invalid_input",
+                            "message": "type_name is required when source='project'",
+                        }
+                    )
+                versions_iter = api.artifacts(
+                    type_name=type_name,
+                    name=collection_name,
+                    per_page=min(max_items, 100),
                 )
-            reg_kwargs: Dict[str, Any] = {}
-            if organization is not None:
-                reg_kwargs["organization"] = organization
-            registry = api.registry(registry_name, **reg_kwargs)
-            versions_iter = registry.collections(
-                filter={"name": collection_name},
-                per_page=min(max_items, 100),
-            ).versions()
-        else:
-            if not type_name:
-                return json.dumps(
-                    {
-                        "error": "invalid_input",
-                        "message": "type_name is required when source='project'",
-                    }
-                )
-            versions_iter = api.artifacts(
-                type_name=type_name,
-                name=collection_name,
-                per_page=min(max_items, 100),
+
+            versions: List[Dict[str, Any]] = []
+            truncated = False
+            for art in versions_iter:
+                if len(versions) >= max_items:
+                    truncated = True
+                    break
+                versions.append(_serialize_artifact_summary(art))
+
+            return json.dumps(
+                {
+                    "collection": collection_name,
+                    "source": source,
+                    "versions": versions,
+                    "count": len(versions),
+                    "truncated": truncated,
+                }
             )
 
-        versions: List[Dict[str, Any]] = []
-        truncated = False
-        for art in versions_iter:
-            if len(versions) >= max_items:
-                truncated = True
-                break
-            versions.append(_serialize_artifact_summary(art))
-
-        return json.dumps(
-            {
-                "collection": collection_name,
-                "source": source,
-                "versions": versions,
-                "count": len(versions),
-                "truncated": truncated,
-            }
-        )
-
-    except Exception as e:
-        logger.error(f"Error in list_artifact_versions: {e}", exc_info=True)
-        return json.dumps({"error": "api_error", "message": str(e)[:500]})
+        except Exception as e:
+            logger.error(f"Error in list_artifact_versions: {e}", exc_info=True)
+            ctx.mark_error(f"{type(e).__name__}: {e}")
+            return json.dumps({"error": "api_error", "message": str(e)[:500]})
 
 
 # ---------------------------------------------------------------------------
@@ -213,52 +208,48 @@ def get_artifact_details(
 ) -> str:
     """Get full details for a specific artifact version."""
 
-    try:
-        api = WandBApiManager.get_api()
-        log_tool_call(
-            "get_artifact_details",
-            api.viewer,
-            {
-                "artifact_name": artifact_name,
-                "type_name": type_name,
-                "include_files": include_files,
-            },
-        )
-    except Exception:
-        logger.debug("analytics emit failed", exc_info=True)
+    api = WandBApiManager.get_api()
+    with track_tool_execution(
+        "get_artifact_details",
+        api.viewer,
+        {
+            "artifact_name": artifact_name,
+            "type_name": type_name,
+            "include_files": include_files,
+        },
+    ) as ctx:
+        try:
+            artifact = api.artifact(artifact_name, type=type_name)
 
-    try:
-        api = WandBApiManager.get_api()
-        artifact = api.artifact(artifact_name, type=type_name)
+            result: Dict[str, Any] = {
+                "artifact": {
+                    "id": getattr(artifact, "id", None),
+                    "name": getattr(artifact, "name", None),
+                    "type": getattr(artifact, "type", None),
+                    "version": getattr(artifact, "version", None),
+                    "state": getattr(artifact, "state", None),
+                    "description": getattr(artifact, "description", None),
+                    "size": getattr(artifact, "size", None),
+                    "file_count": getattr(artifact, "file_count", None),
+                    "tags": getattr(artifact, "tags", []),
+                    "aliases": getattr(artifact, "aliases", []),
+                    "metadata": getattr(artifact, "metadata", {}),
+                    "created_at": str(getattr(artifact, "created_at", "")),
+                    "digest": getattr(artifact, "digest", None),
+                    "commit_hash": getattr(artifact, "commit_hash", None),
+                },
+                "lineage": _build_lineage(artifact),
+            }
 
-        result: Dict[str, Any] = {
-            "artifact": {
-                "id": getattr(artifact, "id", None),
-                "name": getattr(artifact, "name", None),
-                "type": getattr(artifact, "type", None),
-                "version": getattr(artifact, "version", None),
-                "state": getattr(artifact, "state", None),
-                "description": getattr(artifact, "description", None),
-                "size": getattr(artifact, "size", None),
-                "file_count": getattr(artifact, "file_count", None),
-                "tags": getattr(artifact, "tags", []),
-                "aliases": getattr(artifact, "aliases", []),
-                "metadata": getattr(artifact, "metadata", {}),
-                "created_at": str(getattr(artifact, "created_at", "")),
-                "digest": getattr(artifact, "digest", None),
-                "commit_hash": getattr(artifact, "commit_hash", None),
-            },
-            "lineage": _build_lineage(artifact),
-        }
+            if include_files:
+                result["files"] = _list_files(artifact, max_files)
 
-        if include_files:
-            result["files"] = _list_files(artifact, max_files)
+            return json.dumps(result)
 
-        return json.dumps(result)
-
-    except Exception as e:
-        logger.error(f"Error in get_artifact_details: {e}", exc_info=True)
-        return json.dumps({"error": "api_error", "message": str(e)[:500]})
+        except Exception as e:
+            logger.error(f"Error in get_artifact_details: {e}", exc_info=True)
+            ctx.mark_error(f"{type(e).__name__}: {e}")
+            return json.dumps({"error": "api_error", "message": str(e)[:500]})
 
 
 # ---------------------------------------------------------------------------
@@ -321,84 +312,80 @@ def compare_artifact_versions(
 ) -> str:
     """Compare two artifact versions side-by-side."""
 
-    try:
-        api = WandBApiManager.get_api()
-        log_tool_call(
-            "compare_artifact_versions",
-            api.viewer,
-            {
-                "artifact_name_a": artifact_name_a,
-                "artifact_name_b": artifact_name_b,
-                "type_name": type_name,
-            },
-        )
-    except Exception:
-        logger.debug("analytics emit failed", exc_info=True)
+    api = WandBApiManager.get_api()
+    with track_tool_execution(
+        "compare_artifact_versions",
+        api.viewer,
+        {
+            "artifact_name_a": artifact_name_a,
+            "artifact_name_b": artifact_name_b,
+            "type_name": type_name,
+        },
+    ) as ctx:
+        try:
+            art_a = api.artifact(artifact_name_a, type=type_name)
+            art_b = api.artifact(artifact_name_b, type=type_name)
 
-    try:
-        api = WandBApiManager.get_api()
-        art_a = api.artifact(artifact_name_a, type=type_name)
-        art_b = api.artifact(artifact_name_b, type=type_name)
+            meta_a = getattr(art_a, "metadata", {}) or {}
+            meta_b = getattr(art_b, "metadata", {}) or {}
 
-        meta_a = getattr(art_a, "metadata", {}) or {}
-        meta_b = getattr(art_b, "metadata", {}) or {}
+            tags_a = set(getattr(art_a, "tags", []) or [])
+            tags_b = set(getattr(art_b, "tags", []) or [])
 
-        tags_a = set(getattr(art_a, "tags", []) or [])
-        tags_b = set(getattr(art_b, "tags", []) or [])
+            aliases_a = set(getattr(art_a, "aliases", []) or [])
+            aliases_b = set(getattr(art_b, "aliases", []) or [])
 
-        aliases_a = set(getattr(art_a, "aliases", []) or [])
-        aliases_b = set(getattr(art_b, "aliases", []) or [])
+            size_a = getattr(art_a, "size", 0) or 0
+            size_b = getattr(art_b, "size", 0) or 0
 
-        size_a = getattr(art_a, "size", 0) or 0
-        size_b = getattr(art_b, "size", 0) or 0
+            fc_a = getattr(art_a, "file_count", 0) or 0
+            fc_b = getattr(art_b, "file_count", 0) or 0
 
-        fc_a = getattr(art_a, "file_count", 0) or 0
-        fc_b = getattr(art_b, "file_count", 0) or 0
+            logged_by_a = _get_logged_by(art_a)
+            logged_by_b = _get_logged_by(art_b)
 
-        logged_by_a = _get_logged_by(art_a)
-        logged_by_b = _get_logged_by(art_b)
+            result: Dict[str, Any] = {
+                "artifact_a": artifact_name_a,
+                "artifact_b": artifact_name_b,
+                "metadata_diff": _compute_metadata_diff(meta_a, meta_b),
+                "tags_diff": {
+                    "added": sorted(tags_b - tags_a),
+                    "removed": sorted(tags_a - tags_b),
+                },
+                "aliases_diff": {
+                    "added": sorted(aliases_b - aliases_a),
+                    "removed": sorted(aliases_a - aliases_b),
+                },
+                "size_diff": {
+                    "a": size_a,
+                    "b": size_b,
+                    "delta": size_b - size_a,
+                    "percent_change": round((size_b - size_a) / size_a * 100, 2) if size_a else None,
+                },
+                "file_count_diff": {
+                    "a": fc_a,
+                    "b": fc_b,
+                    "delta": fc_b - fc_a,
+                },
+                "lineage_diff": {
+                    "logged_by_a": logged_by_a,
+                    "logged_by_b": logged_by_b,
+                    "same_source_run": logged_by_a is not None
+                    and logged_by_b is not None
+                    and (logged_by_a or {}).get("run_id") == (logged_by_b or {}).get("run_id"),
+                },
+                "digest_match": getattr(art_a, "digest", None) == getattr(art_b, "digest", None),
+            }
 
-        result: Dict[str, Any] = {
-            "artifact_a": artifact_name_a,
-            "artifact_b": artifact_name_b,
-            "metadata_diff": _compute_metadata_diff(meta_a, meta_b),
-            "tags_diff": {
-                "added": sorted(tags_b - tags_a),
-                "removed": sorted(tags_a - tags_b),
-            },
-            "aliases_diff": {
-                "added": sorted(aliases_b - aliases_a),
-                "removed": sorted(aliases_a - aliases_b),
-            },
-            "size_diff": {
-                "a": size_a,
-                "b": size_b,
-                "delta": size_b - size_a,
-                "percent_change": round((size_b - size_a) / size_a * 100, 2) if size_a else None,
-            },
-            "file_count_diff": {
-                "a": fc_a,
-                "b": fc_b,
-                "delta": fc_b - fc_a,
-            },
-            "lineage_diff": {
-                "logged_by_a": logged_by_a,
-                "logged_by_b": logged_by_b,
-                "same_source_run": logged_by_a is not None
-                and logged_by_b is not None
-                and (logged_by_a or {}).get("run_id") == (logged_by_b or {}).get("run_id"),
-            },
-            "digest_match": getattr(art_a, "digest", None) == getattr(art_b, "digest", None),
-        }
+            if include_file_diff:
+                result["file_diff"] = _compute_file_diff(art_a, art_b, max_file_diff_entries)
 
-        if include_file_diff:
-            result["file_diff"] = _compute_file_diff(art_a, art_b, max_file_diff_entries)
+            return json.dumps(result)
 
-        return json.dumps(result)
-
-    except Exception as e:
-        logger.error(f"Error in compare_artifact_versions: {e}", exc_info=True)
-        return json.dumps({"error": "api_error", "message": str(e)[:500]})
+        except Exception as e:
+            logger.error(f"Error in compare_artifact_versions: {e}", exc_info=True)
+            ctx.mark_error(f"{type(e).__name__}: {e}")
+            return json.dumps({"error": "api_error", "message": str(e)[:500]})
 
 
 # ---------------------------------------------------------------------------

@@ -1,18 +1,22 @@
 """Datadog HTTP Logs Intake forwarder.
 
-Sends MCP analytics events directly to the Datadog Logs API via HTTP POST.
-No Datadog Agent or sidecar required -- works on any platform including
-serverless (Cloud Run, Lambda).
+Sends MCP analytics events to the Datadog Logs API via HTTP POST.
+No Datadog Agent or sidecar required -- works on serverless (Cloud Run, Lambda).
 
 Enable with ``MCP_DATADOG_FORWARD=true`` + ``DD_API_KEY`` (from Secret Manager
 on Cloud Run, or env var locally).
 
 The forwarder POSTs to ``https://http-intake.logs.{DD_SITE}/api/v2/logs``
-using the ``DD-API-KEY`` header. Each analytics event becomes one log entry
-with structured JSON in the message field.
+using the ``DD-API-KEY`` header.  Each event is mapped to a Datadog log entry
+with structured attributes (``@duration``, ``@http.status_code``,
+``@error.kind``, ``@usr.id``) for automatic faceting, dashboards, and SLOs.
+
+Segment receives *product analytics* (adoption, cohorts).
+Datadog receives *operational observability* (errors, latency, alerting).
+The mapper intentionally excludes ``params`` and ``api_key_hash`` to avoid
+PII leakage into ops logs.
 """
 
-import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -25,6 +29,8 @@ from urllib3.util.retry import Retry
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
+
+_DATADOG_EVENT_PREFIX = "mcp"
 
 
 def _build_retry_session() -> requests.Session:
@@ -41,8 +47,22 @@ def _build_retry_session() -> requests.Session:
     return session
 
 
-def _build_log_entry(event: Dict[str, Any], *, dd_env: str, dd_version: str, dd_service: str) -> Dict[str, Any]:
-    """Convert an internal analytics event to a Datadog log entry.
+def map_to_datadog_log(
+    event: Dict[str, Any],
+    *,
+    dd_env: str,
+    dd_version: str,
+    dd_service: str,
+) -> Dict[str, Any]:
+    """Map an internal analytics event to a Datadog log entry with reserved attributes.
+
+    Produces structured top-level attributes that Datadog auto-extracts for
+    dashboards, monitors, and SLO definitions without custom Log Pipelines.
+
+    PII policy: ``params``, ``api_key_hash``, ``metadata``, and ``email_domain``
+    are intentionally excluded from the Datadog payload.  Only ``user_id``
+    (which is already a non-PII identifier: username or domain) is forwarded
+    as ``@usr.id``.
 
     Args:
         event: Internal analytics event dict (as emitted by AnalyticsTracker).
@@ -54,35 +74,123 @@ def _build_log_entry(event: Dict[str, Any], *, dd_env: str, dd_version: str, dd_
         Dict suitable for the Datadog HTTP Logs Intake API.
     """
     event_type = event.get("event_type", "unknown")
-    tool_name = event.get("tool_name", "")
-    user_id = event.get("user_id", "anonymous")
-    success = event.get("success")
 
-    tags = [f"env:{dd_env}", f"service:{dd_service}", f"version:{dd_version}"]
-    tags.append(f"event_type:{event_type}")
+    status = _resolve_severity(event)
+
+    tags = [
+        f"env:{dd_env}",
+        f"service:{dd_service}",
+        f"version:{dd_version}",
+        f"event_type:{event_type}",
+    ]
+    tool_name = event.get("tool_name")
     if tool_name:
         tags.append(f"tool_name:{tool_name}")
+    success = event.get("success")
     if success is not None:
-        tags.append(f"success:{success}")
+        tags.append(f"success:{str(success).lower()}")
 
-    status = "info"
-    if event.get("error"):
-        status = "error"
+    attributes: Dict[str, Any] = {"event_type": event_type}
 
-    summary = f"mcp.{event_type}"
-    if tool_name:
-        summary += f": {tool_name}"
-    if user_id and user_id != "anonymous":
-        summary += f" by {user_id}"
+    duration_ms = event.get("duration_ms")
+    if duration_ms is not None:
+        attributes["duration"] = int(duration_ms * 1_000_000)
+
+    if event_type == "request":
+        http_attrs: Dict[str, Any] = {}
+        if event.get("status_code") is not None:
+            http_attrs["status_code"] = event["status_code"]
+        if event.get("method"):
+            http_attrs["method"] = event["method"]
+        if event.get("path"):
+            http_attrs["url_details"] = {"path": event["path"]}
+        if http_attrs:
+            attributes["http"] = http_attrs
+
+    error_str = event.get("error")
+    if error_str:
+        parts = str(error_str).split(": ", 1)
+        attributes["error"] = {
+            "kind": parts[0] if len(parts) > 1 else "Error",
+            "message": parts[-1][:1000],
+        }
+
+    user_id = event.get("user_id")
+    if user_id:
+        attributes["usr"] = {"id": user_id}
+
+    if event_type == "tool_call":
+        tool_attrs: Dict[str, Any] = {}
+        if tool_name:
+            tool_attrs["name"] = tool_name
+        if success is not None:
+            tool_attrs["success"] = success
+        if tool_attrs:
+            attributes["tool"] = tool_attrs
+
+    if event.get("session_id"):
+        attributes["session_id"] = event["session_id"]
+
+    message = _build_message(event)
 
     return {
-        "ddsource": "python",
+        "ddsource": "wandb-mcp-server",
         "ddtags": ",".join(tags),
         "hostname": os.environ.get("K_REVISION", os.environ.get("HOSTNAME", "unknown")),
         "service": dd_service,
-        "message": json.dumps(event, default=str),
         "status": status,
+        "message": message,
+        "attributes": attributes,
     }
+
+
+def _resolve_severity(event: Dict[str, Any]) -> str:
+    """Map event content to a Datadog log severity level."""
+    if event.get("error"):
+        return "error"
+    event_type = event.get("event_type")
+    if event_type == "tool_call" and event.get("success") is False:
+        return "error"
+    if event_type == "request":
+        sc = event.get("status_code", 200)
+        if isinstance(sc, int):
+            if sc >= 500:
+                return "error"
+            if sc >= 400:
+                return "warn"
+    return "info"
+
+
+def _build_message(event: Dict[str, Any]) -> str:
+    """Build a human-readable summary line for the Datadog log message."""
+    event_type = event.get("event_type", "unknown")
+    parts = [f"{_DATADOG_EVENT_PREFIX}.{event_type}"]
+
+    if event_type == "tool_call":
+        tool_name = event.get("tool_name")
+        if tool_name:
+            parts[0] += f".{tool_name}"
+        if event.get("error"):
+            parts.append(f"ERROR: {event['error'][:200]}")
+        elif event.get("success") is False:
+            parts.append("FAILED")
+        duration = event.get("duration_ms")
+        if duration is not None:
+            parts.append(f"({duration:.0f}ms)")
+    elif event_type == "request":
+        method = event.get("method", "")
+        path = event.get("path", "")
+        sc = event.get("status_code", "?")
+        parts.append(f"{method} {path} -> {sc}")
+        duration = event.get("duration_ms")
+        if duration is not None:
+            parts.append(f"({duration:.0f}ms)")
+    elif event_type == "user_session":
+        user_id = event.get("user_id")
+        if user_id and user_id != "anonymous":
+            parts.append(f"user={user_id}")
+
+    return " ".join(parts)
 
 
 class DatadogForwarder:
@@ -91,7 +199,7 @@ class DatadogForwarder:
     Controlled by env vars:
     - ``MCP_DATADOG_FORWARD=true``: enable forwarding (off by default).
     - ``DD_API_KEY``: Datadog API key (32-char hex, NOT an Application Key).
-    - ``DD_SITE``: Datadog site (default ``datadoghq.com``; use ``us5.datadoghq.com`` for US5).
+    - ``DD_SITE``: Datadog site (default ``datadoghq.com``).
     - ``DD_ENV``: environment tag (default ``production``).
     - ``DD_VERSION``: version tag (default ``0.0.0``).
     - ``DD_SERVICE``: service name tag (default ``wandb-mcp-server``).
@@ -99,7 +207,7 @@ class DatadogForwarder:
     Live POSTs run in a daemon thread so they never block the MCP request path.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.live = os.environ.get("MCP_DATADOG_FORWARD", "false").lower() == "true"
         self._api_key = os.environ.get("DD_API_KEY", "")
         self._site = os.environ.get("DD_SITE", "datadoghq.com")
@@ -129,7 +237,7 @@ class DatadogForwarder:
         if not self.enabled:
             return None
 
-        entry = _build_log_entry(
+        entry = map_to_datadog_log(
             event,
             dd_env=self._env,
             dd_version=self._version,

@@ -10,7 +10,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
+from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -72,51 +72,47 @@ def list_registries(
 ) -> str:
     """List W&B registries for an organization."""
 
-    try:
-        api = WandBApiManager.get_api()
-        log_tool_call(
-            "list_registries",
-            api.viewer,
-            {"organization": organization, "filter": filter, "max_items": max_items},
-        )
-    except Exception:
-        logger.debug("analytics emit failed", exc_info=True)
+    api = WandBApiManager.get_api()
+    with track_tool_execution(
+        "list_registries",
+        api.viewer,
+        {"organization": organization, "filter": filter, "max_items": max_items},
+    ) as ctx:
+        max_items = min(max_items, MAX_ITEMS_CEILING)
 
-    max_items = min(max_items, MAX_ITEMS_CEILING)
+        try:
+            kwargs: Dict[str, Any] = {"per_page": min(max_items, 100)}
+            if organization is not None:
+                kwargs["organization"] = organization
+            if filter is not None:
+                kwargs["filter"] = filter
 
-    try:
-        api = WandBApiManager.get_api()
-        kwargs: Dict[str, Any] = {"per_page": min(max_items, 100)}
-        if organization is not None:
-            kwargs["organization"] = organization
-        if filter is not None:
-            kwargs["filter"] = filter
+            registries: List[Dict[str, Any]] = []
+            truncated = False
+            for reg in api.registries(**kwargs):
+                if len(registries) >= max_items:
+                    truncated = True
+                    break
+                registries.append(
+                    {
+                        "name": getattr(reg, "name", None),
+                        "full_name": getattr(reg, "full_name", None),
+                        "organization": getattr(reg, "organization", None),
+                        "entity": getattr(reg, "entity", None),
+                        "description": getattr(reg, "description", None),
+                        "visibility": getattr(reg, "visibility", None),
+                        "artifact_types": list(getattr(reg, "artifact_types", [])),
+                        "created_at": str(getattr(reg, "created_at", "")),
+                        "updated_at": str(getattr(reg, "updated_at", "")),
+                    }
+                )
 
-        registries: List[Dict[str, Any]] = []
-        truncated = False
-        for reg in api.registries(**kwargs):
-            if len(registries) >= max_items:
-                truncated = True
-                break
-            registries.append(
-                {
-                    "name": getattr(reg, "name", None),
-                    "full_name": getattr(reg, "full_name", None),
-                    "organization": getattr(reg, "organization", None),
-                    "entity": getattr(reg, "entity", None),
-                    "description": getattr(reg, "description", None),
-                    "visibility": getattr(reg, "visibility", None),
-                    "artifact_types": list(getattr(reg, "artifact_types", [])),
-                    "created_at": str(getattr(reg, "created_at", "")),
-                    "updated_at": str(getattr(reg, "updated_at", "")),
-                }
-            )
+            return json.dumps({"registries": registries, "count": len(registries), "truncated": truncated})
 
-        return json.dumps({"registries": registries, "count": len(registries), "truncated": truncated})
-
-    except Exception as e:
-        logger.error(f"Error in list_registries: {e}", exc_info=True)
-        return json.dumps({"error": "api_error", "message": str(e)[:500]})
+        except Exception as e:
+            logger.error(f"Error in list_registries: {e}", exc_info=True)
+            ctx.mark_error(f"{type(e).__name__}: {e}")
+            return json.dumps({"error": "api_error", "message": str(e)[:500]})
 
 
 # ---------------------------------------------------------------------------
@@ -168,62 +164,58 @@ def list_registry_collections(
 ) -> str:
     """List collections within a W&B registry."""
 
-    try:
-        api = WandBApiManager.get_api()
-        log_tool_call(
-            "list_registry_collections",
-            api.viewer,
-            {
-                "registry_name": registry_name,
-                "organization": organization,
-                "filter": filter,
-                "max_items": max_items,
-            },
-        )
-    except Exception:
-        logger.debug("analytics emit failed", exc_info=True)
+    api = WandBApiManager.get_api()
+    with track_tool_execution(
+        "list_registry_collections",
+        api.viewer,
+        {
+            "registry_name": registry_name,
+            "organization": organization,
+            "filter": filter,
+            "max_items": max_items,
+        },
+    ) as ctx:
+        max_items = min(max_items, MAX_ITEMS_CEILING)
 
-    max_items = min(max_items, MAX_ITEMS_CEILING)
+        try:
+            reg_kwargs: Dict[str, Any] = {}
+            if organization is not None:
+                reg_kwargs["organization"] = organization
+            registry = api.registry(registry_name, **reg_kwargs)
 
-    try:
-        api = WandBApiManager.get_api()
-        reg_kwargs: Dict[str, Any] = {}
-        if organization is not None:
-            reg_kwargs["organization"] = organization
-        registry = api.registry(registry_name, **reg_kwargs)
+            coll_kwargs: Dict[str, Any] = {"per_page": min(max_items, 100)}
+            if filter is not None:
+                coll_kwargs["filter"] = filter
 
-        coll_kwargs: Dict[str, Any] = {"per_page": min(max_items, 100)}
-        if filter is not None:
-            coll_kwargs["filter"] = filter
+            collections: List[Dict[str, Any]] = []
+            truncated = False
+            for coll in registry.collections(**coll_kwargs):
+                if len(collections) >= max_items:
+                    truncated = True
+                    break
+                collections.append(
+                    {
+                        "name": getattr(coll, "name", None),
+                        "type": getattr(coll, "type", None),
+                        "description": getattr(coll, "description", None),
+                        "tags": getattr(coll, "tags", []),
+                        "aliases": getattr(coll, "aliases", []),
+                        "created_at": str(getattr(coll, "created_at", "")),
+                        "updated_at": str(getattr(coll, "updated_at", "")),
+                        "is_sequence": coll.is_sequence() if hasattr(coll, "is_sequence") else None,
+                    }
+                )
 
-        collections: List[Dict[str, Any]] = []
-        truncated = False
-        for coll in registry.collections(**coll_kwargs):
-            if len(collections) >= max_items:
-                truncated = True
-                break
-            collections.append(
+            return json.dumps(
                 {
-                    "name": getattr(coll, "name", None),
-                    "type": getattr(coll, "type", None),
-                    "description": getattr(coll, "description", None),
-                    "tags": getattr(coll, "tags", []),
-                    "aliases": getattr(coll, "aliases", []),
-                    "created_at": str(getattr(coll, "created_at", "")),
-                    "updated_at": str(getattr(coll, "updated_at", "")),
-                    "is_sequence": coll.is_sequence() if hasattr(coll, "is_sequence") else None,
+                    "registry": registry_name,
+                    "collections": collections,
+                    "count": len(collections),
+                    "truncated": truncated,
                 }
             )
 
-        return json.dumps(
-            {
-                "registry": registry_name,
-                "collections": collections,
-                "count": len(collections),
-                "truncated": truncated,
-            }
-        )
-
-    except Exception as e:
-        logger.error(f"Error in list_registry_collections: {e}", exc_info=True)
-        return json.dumps({"error": "api_error", "message": str(e)[:500]})
+        except Exception as e:
+            logger.error(f"Error in list_registry_collections: {e}", exc_info=True)
+            ctx.mark_error(f"{type(e).__name__}: {e}")
+            return json.dumps({"error": "api_error", "message": str(e)[:500]})
