@@ -33,7 +33,7 @@ Query and analyze your Weights & Biases data using natural language through the 
 </details>
 
 <details>
-<summary><strong>Available Tools</strong> (9 tools)</summary>
+<summary><strong>Available Tools</strong> (14 tools)</summary>
 
 | Tool | Description | Example Query |
 |------|-------------|---------------|
@@ -42,10 +42,15 @@ Query and analyze your Weights & Biases data using natural language through the 
 | **count_weave_traces_tool** | Count traces and get storage metrics | *"How many traces failed?"* |
 | **query_wandb_tool** | Query W&B runs, metrics, and experiments | *"Show me runs with loss < 0.1"* |
 | **get_run_history_tool** | Sampled time-series metric data | *"Show loss curve for run abc123"* |
-| **create_wandb_report_tool** | Create reports with markdown and charts | *"Create a report with loss plots"* |
+| **create_wandb_report_tool** | Create reports with markdown, charts, and panels | *"Create a report with loss plots"* |
+| **log_analysis_to_wandb** | Log analysis metrics to W&B as a run | *"Log these latency stats to W&B"* |
 | **search_wandb_docs_tool** | Search official W&B documentation | *"How do I create a Weave scorer?"* |
 | **query_wandb_entity_projects** | List projects for an entity | *"What projects exist?"* |
-| **query_wandb_support_bot** | ~~Get help from W&B support bot~~ (deprecated) | Use `search_wandb_docs_tool` instead |
+| **list_registries_tool** | List model registries in an organization | *"What registries are available?"* |
+| **list_registry_collections_tool** | List collections within a registry | *"What models are in the prod registry?"* |
+| **list_artifact_versions_tool** | List versions of an artifact collection | *"Show versions of my model artifact"* |
+| **get_artifact_details_tool** | Get full details of an artifact version | *"What's in model-v2 artifact?"* |
+| **compare_artifact_versions_tool** | Diff two artifact versions | *"Compare model v1 vs v2"* |
 
 **Schema-first workflow:** Call `infer_trace_schema_tool` first to discover fields, then `query_weave_traces_tool` with precise columns and `detail_level`:
 - `"schema"` -- structural fields only (fast browsing)
@@ -422,6 +427,41 @@ uvx wandb_mcp_server \
 **Note**: Clients must continue to provide their own W&B API key via Bearer token per the MCP spec.
 </details>
 
+<details>
+<summary><strong>Option 4: Dedicated / On-Prem Deployment</strong></summary>
+
+For W&B Dedicated and On-Prem customers, the MCP server is available as an optional subchart in the `operator-wandb` Helm chart. Enable it with one line in your `WeightsAndBiases` CR:
+
+```yaml
+mcp-server:
+  install: true
+```
+
+The server becomes accessible at `https://<your-instance>/mcp`. It automatically connects to your in-cluster Weave trace server and W&B API.
+
+**Requirements:**
+- `weave-trace` must be installed (`weave-trace.install: true`)
+- Operator chart version >= 0.42.0
+- Image `wandb/mcp-server:0.3.0` or later
+
+**Client configuration** for dedicated instances:
+
+```json
+{
+  "mcpServers": {
+    "wandb": {
+      "url": "https://your-instance.wandb.io/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_WANDB_API_KEY"
+      }
+    }
+  }
+}
+```
+
+Contact your W&B account team to enable MCP on your dedicated deployment.
+</details>
+
 ---
 
 ## More Information
@@ -491,6 +531,11 @@ uvx wandb_mcp_server \
 ```bash
 uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server --help
 ```
+
+### Contributing & Releasing
+
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** -- Development setup, testing, PR process, architecture overview
+- **[RELEASING.md](RELEASING.md)** -- Version bumping, release checklist, deployment pipeline
 
 ### Key Resources
 
