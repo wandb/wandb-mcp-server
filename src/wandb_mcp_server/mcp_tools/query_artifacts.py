@@ -42,17 +42,24 @@ Typical workflow:
 </when_to_use>
 
 <critical_info>
-The collection_name format depends on the source parameter:
-- source="project": fully qualified as "entity/project/artifact-name", requires type_name
-- source="registry": just the collection name (e.g., "sentiment-classifier"),
-  the registry is specified separately via registry_name
+For source="project", the W&B SDK requires a fully qualified artifact path.
+You can EITHER pass collection_name as "entity/project/artifact-name" OR pass
+entity_name + project_name separately and a bare collection_name.
+For source="registry", just pass the unqualified collection name.
 </critical_info>
 
 Parameters
 ----------
 collection_name : str
-    For project source: fully qualified "entity/project/artifact-name".
+    For project source: "entity/project/artifact-name" (fully qualified) or
+    just "artifact-name" if entity_name and project_name are also provided.
     For registry source: unqualified collection name (e.g., "sentiment-classifier").
+entity_name : str, optional
+    W&B entity. Used to qualify collection_name when source="project" and
+    collection_name is not already fully qualified.
+project_name : str, optional
+    W&B project. Used to qualify collection_name when source="project" and
+    collection_name is not already fully qualified.
 registry_name : str, optional
     Registry name. Required when source="registry".
 organization : str, optional
@@ -77,6 +84,8 @@ JSON with:
 
 def list_artifact_versions(
     collection_name: str,
+    entity_name: Optional[str] = None,
+    project_name: Optional[str] = None,
     registry_name: Optional[str] = None,
     organization: Optional[str] = None,
     type_name: Optional[str] = None,
@@ -91,6 +100,8 @@ def list_artifact_versions(
         api.viewer,
         {
             "collection_name": collection_name,
+            "entity_name": entity_name,
+            "project_name": project_name,
             "registry_name": registry_name,
             "type_name": type_name,
             "source": source,
@@ -124,9 +135,12 @@ def list_artifact_versions(
                             "message": "type_name is required when source='project'",
                         }
                     )
+                qualified_name = collection_name
+                if "/" not in collection_name and entity_name and project_name:
+                    qualified_name = f"{entity_name}/{project_name}/{collection_name}"
                 versions_iter = api.artifacts(
                     type_name=type_name,
-                    name=collection_name,
+                    name=qualified_name,
                     per_page=min(max_items, 100),
                 )
 
