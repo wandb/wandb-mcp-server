@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from typing import Any, Dict
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
+from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -108,104 +108,101 @@ def infer_trace_schema(
     if sample_size > 500:
         logger.warning(f"Large sample_size={sample_size} for schema inference; consider using a smaller value")
 
-    try:
-        api = WandBApiManager.get_api()
-        log_tool_call(
-            "infer_trace_schema",
-            api.viewer,
+    api = WandBApiManager.get_api()
+    with track_tool_execution(
+        "infer_trace_schema",
+        api.viewer,
+        {
+            "entity_name": entity_name,
+            "project_name": project_name,
+            "sample_size": sample_size,
+        },
+    ) as ctx:
+        try:
+            total_traces = count_traces(entity_name, project_name)
+            root_traces = count_traces(entity_name, project_name, filters={"trace_roots_only": True})
+
+            service = get_trace_service()
+            result = service.query_traces(
+                entity_name=entity_name,
+                project_name=project_name,
+                filters={},
+                sort_by="started_at",
+                sort_direction="desc",
+                limit=sample_size,
+                include_costs=False,
+                include_feedback=False,
+                columns=[],
+                expand_columns=[],
+                truncate_length=100,
+                return_full_data=False,
+                metadata_only=False,
+            )
+        except Exception as e:
+            logger.error(f"Failed to query traces for schema inference: {e}")
+            ctx.mark_error(f"{type(e).__name__}: {e}")
+            return json.dumps({"error": f"Failed to infer schema for {entity_name}/{project_name}: {type(e).__name__}"})
+
+        traces = result.traces if hasattr(result, "traces") else []
+        if not traces:
+            return json.dumps(
+                {
+                    "fields": [],
+                    "total_traces": total_traces,
+                    "root_traces": root_traces,
+                    "sample_size": 0,
+                    "note": "No traces found in this project.",
+                }
+            )
+
+        field_types: Dict[str, Counter] = defaultdict(Counter)
+        field_values: Dict[str, Counter] = defaultdict(Counter)
+        field_non_null: Dict[str, int] = defaultdict(int)
+
+        for trace in traces:
+            if isinstance(trace, dict):
+                trace_dict = trace
+            elif hasattr(trace, "model_dump"):
+                trace_dict = trace.model_dump()
+            else:
+                trace_dict = {}
+            flat = _flatten_dict(trace_dict)
+            for path, value in flat.items():
+                inferred = _infer_type(value)
+                field_types[path][inferred] += 1
+                if value is not None:
+                    field_non_null[path] += 1
+                    try:
+                        val_str = str(value)[:100]
+                        field_values[path][val_str] += 1
+                    except Exception:
+                        pass
+
+        fields = []
+        for path in sorted(field_types.keys()):
+            type_counts = field_types[path]
+            dominant_type = type_counts.most_common(1)[0][0]
+            top_vals = [v for v, _ in field_values[path].most_common(top_n_values)]
+            fields.append(
+                {
+                    "path": path,
+                    "type": dominant_type,
+                    "top_values": top_vals,
+                    "non_null_count": field_non_null.get(path, 0),
+                }
+            )
+
+        schema_result = json.dumps(
             {
-                "entity_name": entity_name,
-                "project_name": project_name,
-                "sample_size": sample_size,
-            },
-        )
-    except Exception:
-        logger.debug("analytics emit failed", exc_info=True)
-
-    try:
-        total_traces = count_traces(entity_name, project_name)
-        root_traces = count_traces(entity_name, project_name, filters={"trace_roots_only": True})
-
-        service = get_trace_service()
-        result = service.query_traces(
-            entity_name=entity_name,
-            project_name=project_name,
-            filters={},
-            sort_by="started_at",
-            sort_direction="desc",
-            limit=sample_size,
-            include_costs=False,
-            include_feedback=False,
-            columns=[],
-            expand_columns=[],
-            truncate_length=100,
-            return_full_data=False,
-            metadata_only=False,
-        )
-    except Exception as e:
-        logger.error(f"Failed to query traces for schema inference: {e}")
-        return json.dumps({"error": f"Failed to infer schema for {entity_name}/{project_name}: {type(e).__name__}"})
-
-    traces = result.traces if hasattr(result, "traces") else []
-    if not traces:
-        return json.dumps(
-            {
-                "fields": [],
+                "fields": fields,
                 "total_traces": total_traces,
                 "root_traces": root_traces,
-                "sample_size": 0,
-                "note": "No traces found in this project.",
+                "sample_size": len(traces),
             }
         )
 
-    field_types: Dict[str, Counter] = defaultdict(Counter)
-    field_values: Dict[str, Counter] = defaultdict(Counter)
-    field_non_null: Dict[str, int] = defaultdict(int)
+        from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
+        from wandb_mcp_server.trace_utils import warn_if_response_large
 
-    for trace in traces:
-        if isinstance(trace, dict):
-            trace_dict = trace
-        elif hasattr(trace, "model_dump"):
-            trace_dict = trace.model_dump()
-        else:
-            trace_dict = {}
-        flat = _flatten_dict(trace_dict)
-        for path, value in flat.items():
-            inferred = _infer_type(value)
-            field_types[path][inferred] += 1
-            if value is not None:
-                field_non_null[path] += 1
-                try:
-                    val_str = str(value)[:100]
-                    field_values[path][val_str] += 1
-                except Exception:
-                    pass
-
-    fields = []
-    for path in sorted(field_types.keys()):
-        type_counts = field_types[path]
-        dominant_type = type_counts.most_common(1)[0][0]
-        top_vals = [v for v, _ in field_values[path].most_common(top_n_values)]
-        fields.append(
-            {
-                "path": path,
-                "type": dominant_type,
-                "top_values": top_vals,
-                "non_null_count": field_non_null.get(path, 0),
-            }
-        )
-
-    result = json.dumps(
-        {
-            "fields": fields,
-            "total_traces": total_traces,
-            "root_traces": root_traces,
-            "sample_size": len(traces),
-        }
-    )
-
-    from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
-    from wandb_mcp_server.trace_utils import warn_if_response_large
-
-    warn_if_response_large("infer_trace_schema", result, MAX_RESPONSE_TOKENS)
-    return result
+        warn_if_response_large("infer_trace_schema", schema_result, MAX_RESPONSE_TOKENS)
+        return schema_result

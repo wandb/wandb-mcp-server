@@ -8,7 +8,7 @@ from wandb_mcp_server.weave_api.query_builder import QueryBuilder
 from wandb_mcp_server.mcp_tools.tools_utils import get_retry_session
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
+from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 
 logger = get_rich_logger(__name__)
 
@@ -144,149 +144,133 @@ def count_traces(
 
     logger.debug("W&B API key: present")
 
-    try:
-        api = WandBApiManager.get_api()
-        log_tool_call(
-            "count_traces",
-            api.viewer,
-            {
-                "entity_name": entity_name,
-                "project_name": project_name,
-                "filters": filters,
-                "request_timeout": request_timeout,
-            },
-        )
-    except Exception:
-        logger.debug("analytics emit failed", exc_info=True)
+    api = WandBApiManager.get_api()
+    with track_tool_execution(
+        "count_traces",
+        api.viewer,
+        {
+            "entity_name": entity_name,
+            "project_name": project_name,
+            "filters": filters,
+            "request_timeout": request_timeout,
+        },
+    ):
+        request_body: Dict[str, Any] = {"project_id": project_id}
+        filter_payload: Dict[str, Any] = {}
+        complex_filters_for_query_expr: Dict[str, Any] = {}
 
-    request_body: Dict[str, Any] = {"project_id": project_id}
-    filter_payload: Dict[str, Any] = {}  # For fields that go into the top-level 'filter' object
-    complex_filters_for_query_expr: Dict[str, Any] = {}  # For fields that go into query.$expr
+        if filters:
+            direct_filter_keys = {
+                "op_names",
+                "op_name",
+                "input_refs",
+                "output_refs",
+                "parent_ids",
+                "trace_ids",
+                "trace_id",
+                "call_ids",
+                "trace_roots_only",
+                "wb_user_ids",
+                "wb_run_ids",
+            }
 
-    if filters:
-        # Keys that belong inside the 'filter' object in the request body
-        # as per https://weave-docs.wandb.ai/reference/service-api/calls-query-stats-calls-query_stats-post
-        direct_filter_keys = {
-            "op_names",
-            "op_name",  # op_name will be converted to op_names list
-            "input_refs",
-            "output_refs",
-            "parent_ids",
-            "trace_ids",
-            "trace_id",  # trace_id will be converted to trace_ids list
-            "call_ids",
-            "trace_roots_only",
-            "wb_user_ids",
-            "wb_run_ids",
+            temp_op_names = []
+            if "op_name" in filters:
+                temp_op_names.append(filters["op_name"])
+            if "op_names" in filters:
+                val = filters["op_names"]
+                if isinstance(val, list):
+                    temp_op_names.extend(val)
+                else:
+                    temp_op_names.append(val)
+            if temp_op_names:
+                filter_payload["op_names"] = list(set(temp_op_names))
+
+            temp_trace_ids = []
+            if "trace_id" in filters:
+                temp_trace_ids.append(filters["trace_id"])
+            if "trace_ids" in filters:
+                val = filters["trace_ids"]
+                if isinstance(val, list):
+                    temp_trace_ids.extend(val)
+                else:
+                    temp_trace_ids.append(val)
+            if temp_trace_ids:
+                filter_payload["trace_ids"] = list(set(temp_trace_ids))
+
+            for key in [
+                "input_refs",
+                "output_refs",
+                "parent_ids",
+                "call_ids",
+                "wb_user_ids",
+                "wb_run_ids",
+            ]:
+                if key in filters:
+                    value = filters[key]
+                    filter_payload[key] = [value] if not isinstance(value, list) else value
+
+            if "trace_roots_only" in filters:
+                filter_payload["trace_roots_only"] = filters["trace_roots_only"]
+
+            for key, value in filters.items():
+                if key not in direct_filter_keys and key not in ["op_name", "trace_id"]:
+                    complex_filters_for_query_expr[key] = value
+
+        if filter_payload:
+            request_body["filter"] = filter_payload
+
+        if complex_filters_for_query_expr:
+            query_expr_obj = QueryBuilder.build_query_expression(complex_filters_for_query_expr)
+            if query_expr_obj:
+                dumped_query = query_expr_obj.model_dump(by_alias=True, exclude_none=True)
+                if dumped_query and dumped_query.get("$expr"):
+                    request_body["query"] = dumped_query
+
+        from wandb_mcp_server.config import WF_TRACE_SERVER_URL
+
+        weave_server_url = WF_TRACE_SERVER_URL
+        url = f"{weave_server_url}/calls/query_stats"
+
+        auth_token = base64.b64encode(f":{api_key}".encode()).decode()
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Basic {auth_token}",
         }
 
-        temp_op_names = []
-        if "op_name" in filters:
-            temp_op_names.append(filters["op_name"])
-        if "op_names" in filters:
-            val = filters["op_names"]
-            if isinstance(val, list):
-                temp_op_names.extend(val)
-            else:
-                temp_op_names.append(val)
-        if temp_op_names:
-            filter_payload["op_names"] = list(set(temp_op_names))
+        session = get_retry_session()
 
-        temp_trace_ids = []
-        if "trace_id" in filters:
-            temp_trace_ids.append(filters["trace_id"])
-        if "trace_ids" in filters:
-            val = filters["trace_ids"]
-            if isinstance(val, list):
-                temp_trace_ids.extend(val)
-            else:
-                temp_trace_ids.append(val)
-        if temp_trace_ids:
-            filter_payload["trace_ids"] = list(set(temp_trace_ids))
+        logger.debug(f"Posting to {url} with body: {json.dumps(request_body)}")
 
-        # Handle other direct filter keys
-        for key in [
-            "input_refs",
-            "output_refs",
-            "parent_ids",
-            "call_ids",
-            "wb_user_ids",
-            "wb_run_ids",
-        ]:
-            if key in filters:
-                value = filters[key]
-                filter_payload[key] = [value] if not isinstance(value, list) else value
+        try:
+            response = session.post(
+                url,
+                headers=headers,
+                data=json.dumps(request_body),
+                timeout=request_timeout,
+            )
 
-        if "trace_roots_only" in filters:
-            filter_payload["trace_roots_only"] = filters["trace_roots_only"]
-        # Per docs, trace_roots_only is a boolean, not a list.
-        # If not in filters, it's omitted, API default (false) should apply.
+            if response.status_code != 200:
+                error_msg = f"Error querying Weave trace count: {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                if "40 characters" in response.text:
+                    logger.error("W&B API key does not meet length requirements.")
+                logger.debug(f"Failed request body: {json.dumps(request_body)}")
+                raise Exception(error_msg)
 
-        # Populate complex_filters_for_query_expr for remaining keys
-        for key, value in filters.items():
-            # Skip keys already handled in direct_filter_keys or their singular versions
-            if key not in direct_filter_keys and key not in ["op_name", "trace_id"]:
-                complex_filters_for_query_expr[key] = value
+            response_json = response.json()
+            return response_json.get("count", 0)
 
-    # Add the constructed filter_payload to the main request_body if it's not empty
-    if filter_payload:
-        request_body["filter"] = filter_payload
-
-    # Build the query expression from remaining complex filters
-    if complex_filters_for_query_expr:
-        query_expr_obj = QueryBuilder.build_query_expression(complex_filters_for_query_expr)
-        if query_expr_obj:
-            dumped_query = query_expr_obj.model_dump(by_alias=True, exclude_none=True)
-            if dumped_query and dumped_query.get("$expr"):
-                request_body["query"] = dumped_query
-
-    # Execute the HTTP query
-    from wandb_mcp_server.config import WF_TRACE_SERVER_URL
-
-    weave_server_url = WF_TRACE_SERVER_URL
-    url = f"{weave_server_url}/calls/query_stats"
-
-    auth_token = base64.b64encode(f":{api_key}".encode()).decode()
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",  # /calls/query_stats returns application/json
-        "Authorization": f"Basic {auth_token}",
-    }
-
-    session = get_retry_session()
-
-    logger.debug(f"Posting to {url} with body: {json.dumps(request_body)}")
-
-    try:
-        response = session.post(
-            url,
-            headers=headers,
-            data=json.dumps(request_body),  # Ensure complex objects are serialized
-            timeout=request_timeout,
-        )
-
-        if response.status_code != 200:
-            error_msg = f"Error querying Weave trace count: {response.status_code} - {response.text}"
-            logger.error(error_msg)
-            if "40 characters" in response.text:
-                logger.error("W&B API key does not meet length requirements.")
-            # Log request body for easier debugging on error
-            logger.debug(f"Failed request body: {json.dumps(request_body)}")
-            raise Exception(error_msg)
-
-        response_json = response.json()
-        return response_json.get("count", 0)  # Default to 0 if count is not in response
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"HTTP Request failed for project {project_id}: {e}")
-        if isinstance(e, requests.exceptions.RetryError):
-            if e.__cause__ and hasattr(e.__cause__, "reason") and e.__cause__.reason:
-                logger.error(f"Specific reason for retry exhaustion: {e.__cause__.reason}")
-        logger.debug(f"Failed request body during exception for {project_id}: {json.dumps(request_body)}")
-        # traceback.print_exc() # Uncomment for detailed traceback during development
-        raise Exception(f"Failed to query Weave trace count for {project_id} due to network error: {e}")
-    except json.JSONDecodeError as e:
-        logger.error(
-            f"Failed to decode JSON response for {project_id}: {e}. Response text: {response.text if 'response' in locals() else 'N/A'}"
-        )
-        raise Exception(f"Failed to parse Weave API response for {project_id}: {e}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"HTTP Request failed for project {project_id}: {e}")
+            if isinstance(e, requests.exceptions.RetryError):
+                if e.__cause__ and hasattr(e.__cause__, "reason") and e.__cause__.reason:
+                    logger.error(f"Specific reason for retry exhaustion: {e.__cause__.reason}")
+            logger.debug(f"Failed request body during exception for {project_id}: {json.dumps(request_body)}")
+            raise Exception(f"Failed to query Weave trace count for {project_id} due to network error: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(
+                f"Failed to decode JSON response for {project_id}: {e}. Response text: {response.text if 'response' in locals() else 'N/A'}"
+            )
+            raise Exception(f"Failed to parse Weave API response for {project_id}: {e}")

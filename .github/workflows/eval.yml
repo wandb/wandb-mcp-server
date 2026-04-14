@@ -73,7 +73,7 @@ jobs:
           AGENT="claude-code-${{ matrix.variant }}"
           echo "Agent: $AGENT, parallelism: $PARALLELISM"
           uv run python -W ignore -m core.run_eval \
-            evals/mcp-v030-staging.yaml \
+            data/evals/mcp-ci.yaml \
             --agent "$AGENT" \
             --weave-parallelism "$PARALLELISM" \
             2>&1 | tee eval-output.log

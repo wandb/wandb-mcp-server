@@ -629,6 +629,8 @@ def register_tools(mcp_instance: FastMCP) -> None:
     @mcp_instance.tool(description=LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION)
     def list_artifact_versions_tool(
         collection_name: str,
+        entity_name: Optional[str] = None,
+        project_name: Optional[str] = None,
         registry_name: Optional[str] = None,
         organization: Optional[str] = None,
         type_name: Optional[str] = None,
@@ -638,6 +640,8 @@ def register_tools(mcp_instance: FastMCP) -> None:
         """List versions of an artifact collection."""
         return list_artifact_versions(
             collection_name=collection_name,
+            entity_name=entity_name,
+            project_name=project_name,
             registry_name=registry_name,
             organization=organization,
             type_name=type_name,

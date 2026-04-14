@@ -1,7 +1,7 @@
 from typing import Any
 
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
+from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 
 
 LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION = """
@@ -79,51 +79,39 @@ def list_entity_projects(entity: str | None = None) -> dict[str, list[dict[str, 
             - updated_at: Last update timestamp
             - tags: List of project tags
     """
-    # Initialize wandb API
-    # Will use WANDB_API_KEY from environment (set by auth middleware or user)
-    # Get API instance with proper key handling
     from wandb_mcp_server.api_client import get_wandb_api
 
     api = get_wandb_api()
 
     viewer = None
-    # Merge entity and teams into a single list
     if entity is None:
         viewer = api.viewer
         entities = [viewer.entity] + viewer.teams
     else:
         entities = [entity]
 
-    # Single logging invocation after computing entities, passing viewer or None
-    try:
-        log_tool_call(
-            "list_entity_projects",
-            viewer,
-            {"entity": entity},
-        )
-    except Exception:
-        pass
+    with track_tool_execution(
+        "list_entity_projects",
+        viewer,
+        {"entity": entity},
+    ):
+        entities_projects = {}
+        for entity in entities:
+            projects = api.projects(entity)
 
-    # Get all projects for the entity
+            projects_data = []
+            for project in projects:
+                project_dict = {
+                    "name": project.name,
+                    "entity": project.entity,
+                    "description": getattr(project, "description", None),
+                    "visibility": getattr(project, "visibility", None),
+                    "created_at": getattr(project, "created_at", None),
+                    "updated_at": getattr(project, "updated_at", None),
+                    "tags": getattr(project, "tags", []),
+                }
+                projects_data.append(project_dict)
 
-    entities_projects = {}
-    for entity in entities:
-        projects = api.projects(entity)
+            entities_projects[entity] = projects_data
 
-        # Convert projects to a list of dictionaries
-        projects_data = []
-        for project in projects:
-            project_dict = {
-                "name": project.name,
-                "entity": project.entity,
-                "description": getattr(project, "description", None),
-                "visibility": getattr(project, "visibility", None),
-                "created_at": getattr(project, "created_at", None),
-                "updated_at": getattr(project, "updated_at", None),
-                "tags": getattr(project, "tags", []),
-            }
-            projects_data.append(project_dict)
-
-        entities_projects[entity] = projects_data
-
-    return entities_projects
+        return entities_projects

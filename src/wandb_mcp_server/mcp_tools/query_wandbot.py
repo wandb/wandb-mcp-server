@@ -2,7 +2,7 @@ import requests
 import os
 from typing import Any, Dict
 
-from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
+from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 
 WANDBOT_TOOL_DESCRIPTION = """[DEPRECATED] Query the Weights & Biases support bot for help.
 
@@ -36,106 +36,96 @@ str
 
 
 def query_wandbot_api(question: str) -> Dict[str, Any]:
-    try:
-        log_tool_call(
-            "query_wandb_support_bot",
-            "n/a",
-            {"question": question},
+    with track_tool_execution(
+        "query_wandb_support_bot",
+        "n/a",
+        {"question": question},
+    ):
+        wandbot_base_url = os.getenv(
+            "WANDBOT_BASE_URL", "https://weightsandbiases-wandbot--wandbot-api-wandbotapi-serve.modal.run"
         )
-    except Exception:
-        pass
-    wandbot_base_url = os.getenv(
-        "WANDBOT_BASE_URL", "https://weightsandbiases-wandbot--wandbot-api-wandbotapi-serve.modal.run"
-    )
-    QUERY_ENDPOINT = f"{wandbot_base_url}/chat/query"
-    STATUS_ENDPOINT = f"{wandbot_base_url}/status"
-    QUERY_TIMEOUT_SECONDS = 40
-    STATUS_TIMEOUT_SECONDS = 20
+        QUERY_ENDPOINT = f"{wandbot_base_url}/chat/query"
+        STATUS_ENDPOINT = f"{wandbot_base_url}/status"
+        QUERY_TIMEOUT_SECONDS = 40
+        STATUS_TIMEOUT_SECONDS = 20
 
-    try:
-        status_response = requests.get(
-            STATUS_ENDPOINT,
-            headers={"Accept": "application/json"},
-            timeout=STATUS_TIMEOUT_SECONDS,
-        )
-
-        # Check HTTP status code
-        status_response.raise_for_status()
-
-        # Try to parse JSON, handle potential parsing errors
         try:
-            status_result = status_response.json()
-        except ValueError:
-            return {
-                "answer": "Error: Unable to parse response from support bot.",
-                "sources": [],
-            }
+            status_response = requests.get(
+                STATUS_ENDPOINT,
+                headers={"Accept": "application/json"},
+                timeout=STATUS_TIMEOUT_SECONDS,
+            )
 
-        # Validate expected response structure
-        if "initialized" not in status_result:
-            return {
-                "answer": "Error: Received unexpected response format from support bot.",
-                "sources": [],
-            }
+            status_response.raise_for_status()
 
-        if status_result["initialized"]:
             try:
-                response = requests.post(
-                    QUERY_ENDPOINT,
-                    headers={"Content-Type": "application/json"},
-                    json={
-                        "question": question,
-                        "application": "wandb_mcp_server",
-                    },
-                    timeout=QUERY_TIMEOUT_SECONDS,
-                )
+                status_result = status_response.json()
+            except ValueError:
+                return {
+                    "answer": "Error: Unable to parse response from support bot.",
+                    "sources": [],
+                }
 
-                # Check HTTP status code
-                response.raise_for_status()
+            if "initialized" not in status_result:
+                return {
+                    "answer": "Error: Received unexpected response format from support bot.",
+                    "sources": [],
+                }
 
-                # Try to parse JSON, handle potential parsing errors
+            if status_result["initialized"]:
                 try:
-                    result = response.json()
-                except ValueError:
+                    response = requests.post(
+                        QUERY_ENDPOINT,
+                        headers={"Content-Type": "application/json"},
+                        json={
+                            "question": question,
+                            "application": "wandb_mcp_server",
+                        },
+                        timeout=QUERY_TIMEOUT_SECONDS,
+                    )
+
+                    response.raise_for_status()
+
+                    try:
+                        result = response.json()
+                    except ValueError:
+                        return {
+                            "answer": "Error: Unable to parse response data from support bot.",
+                            "sources": [],
+                        }
+
+                    if "answer" not in result or "sources" not in result:
+                        return {
+                            "answer": "Error: Received incomplete response from support bot.",
+                            "sources": [],
+                        }
+
+                    sources = result["sources"] if isinstance(result["sources"], list) else [result["sources"]]
+                    return {"answer": result["answer"], "sources": sources}
+
+                except requests.Timeout:
                     return {
-                        "answer": "Error: Unable to parse response data from support bot.",
+                        "answer": "Error: Support bot request timed out. Please try again later.",
                         "sources": [],
                     }
-
-                # Validate expected response structure
-                if "answer" not in result or "sources" not in result:
+                except requests.RequestException as e:
                     return {
-                        "answer": "Error: Received incomplete response from support bot.",
+                        "answer": f"Error connecting to support bot: {str(e)}",
                         "sources": [],
                     }
-
-                # Ensure sources is a list
-                sources = result["sources"] if isinstance(result["sources"], list) else [result["sources"]]
-                return {"answer": result["answer"], "sources": sources}
-
-            except requests.Timeout:
+            else:
                 return {
-                    "answer": "Error: Support bot request timed out. Please try again later.",
+                    "answer": "The support bot is appears to be offline. Please try again later.",
                     "sources": [],
                 }
-            except requests.RequestException as e:
-                return {
-                    "answer": f"Error connecting to support bot: {str(e)}",
-                    "sources": [],
-                }
-        else:
+
+        except requests.Timeout:
             return {
-                "answer": "The support bot is appears to be offline. Please try again later.",
+                "answer": "Error: Support bot status check timed out. Please try again later.",
                 "sources": [],
             }
-
-    except requests.Timeout:
-        return {
-            "answer": "Error: Support bot status check timed out. Please try again later.",
-            "sources": [],
-        }
-    except requests.RequestException as e:
-        return {
-            "answer": f"Error connecting to support bot: {str(e)}",
-            "sources": [],
-        }
+        except requests.RequestException as e:
+            return {
+                "answer": f"Error connecting to support bot: {str(e)}",
+                "sources": [],
+            }

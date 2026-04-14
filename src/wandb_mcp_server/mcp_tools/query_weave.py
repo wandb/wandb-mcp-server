@@ -4,7 +4,7 @@ from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.weave_api.service import TraceService
 from wandb_mcp_server.weave_api.models import QueryResult
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.mcp_tools.tools_utils import log_tool_call
+from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 
 logger = get_rich_logger(__name__)
 
@@ -295,7 +295,6 @@ def query_traces(
     This maintains the original signature of query_traces from query_weave.py,
     but delegates to our new implementation.
     """
-    # If api_key was provided, create a new service with that key
     service = get_trace_service()
     if api_key:
         service = TraceService(
@@ -304,70 +303,58 @@ def query_traces(
             timeout=request_timeout,
         )
 
-    try:
-        api = WandBApiManager.get_api()
-        # Do not log api_key here
-        log_tool_call(
-            "query_traces",
-            api.viewer,
-            {
-                "entity_name": entity_name,
-                "project_name": project_name,
-                "filters": filters,
-                "sort_by": sort_by,
-                "sort_direction": sort_direction,
-                "limit": limit,
-                "offset": offset,
-                "include_costs": include_costs,
-                "include_feedback": include_feedback,
-                "columns": columns,
-                "expand_columns": expand_columns,
-                "return_full_data": return_full_data,
-                "request_timeout": request_timeout,
-                "retries": retries,
-            },
+    api = WandBApiManager.get_api()
+    with track_tool_execution(
+        "query_traces",
+        api.viewer,
+        {
+            "entity_name": entity_name,
+            "project_name": project_name,
+            "filters": filters,
+            "sort_by": sort_by,
+            "sort_direction": sort_direction,
+            "limit": limit,
+            "offset": offset,
+            "include_costs": include_costs,
+            "include_feedback": include_feedback,
+            "columns": columns,
+            "expand_columns": expand_columns,
+            "return_full_data": return_full_data,
+            "request_timeout": request_timeout,
+            "retries": retries,
+        },
+    ):
+        result = service.query_traces(
+            entity_name=entity_name,
+            project_name=project_name,
+            filters=filters,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+            limit=limit,
+            offset=offset,
+            include_costs=include_costs,
+            include_feedback=include_feedback,
+            columns=columns,
+            expand_columns=expand_columns,
+            return_full_data=return_full_data,
+            metadata_only=False,
         )
-    except Exception:
-        logger.debug("analytics emit failed", exc_info=True)
 
-    # Query traces
-    result = service.query_traces(
-        entity_name=entity_name,
-        project_name=project_name,
-        filters=filters,
-        sort_by=sort_by,
-        sort_direction=sort_direction,
-        limit=limit,
-        offset=offset,
-        include_costs=include_costs,
-        include_feedback=include_feedback,
-        columns=columns,
-        expand_columns=expand_columns,
-        return_full_data=return_full_data,  # Match original behavior
-        metadata_only=False,
-    )
-
-    # Match the return type of the original function (List[Dict])
-    if result.traces:
-        # Convert WeaveTrace objects to dictionaries if needed
-        traces_as_dicts = []
-        for trace in result.traces:
-            if hasattr(trace, "model_dump"):
-                # Pydantic model - convert to dict
-                traces_as_dicts.append(trace.model_dump())
-            elif isinstance(trace, dict):
-                # Already a dict
-                traces_as_dicts.append(trace)
-            else:
-                # Unknown type, try to convert to dict
-                try:
-                    traces_as_dicts.append(dict(trace))
-                except Exception:
-                    # If all else fails, convert to string
-                    traces_as_dicts.append({"error": f"Could not convert {type(trace)} to dict"})
-        return traces_as_dicts
-    else:
-        return []
+        if result.traces:
+            traces_as_dicts = []
+            for trace in result.traces:
+                if hasattr(trace, "model_dump"):
+                    traces_as_dicts.append(trace.model_dump())
+                elif isinstance(trace, dict):
+                    traces_as_dicts.append(trace)
+                else:
+                    try:
+                        traces_as_dicts.append(dict(trace))
+                    except Exception:
+                        traces_as_dicts.append({"error": f"Could not convert {type(trace)} to dict"})
+            return traces_as_dicts
+        else:
+            return []
 
 
 async def query_paginated_weave_traces(
@@ -428,7 +415,6 @@ async def query_paginated_weave_traces(
     Returns:
         QueryResult: A Pydantic model containing the query results
     """
-    # If api_key was provided, create a new service with that key
     service = get_trace_service()
     if api_key:
         service = TraceService(
@@ -436,59 +422,50 @@ async def query_paginated_weave_traces(
             retries=retries,
         )
 
-    # Log tool call after service is obtained, with viewer from WandBApiManager
-    try:
-        api = WandBApiManager.get_api()
-        log_tool_call(
-            "query_paginated_weave_traces",
-            api.viewer,
-            {
-                "entity_name": entity_name,
-                "project_name": project_name,
-                "chunk_size": chunk_size,
-                "filters": filters,
-                "sort_by": sort_by,
-                "sort_direction": sort_direction,
-                "target_limit": target_limit,
-                "include_costs": include_costs,
-                "include_feedback": include_feedback,
-                "columns": columns,
-                "expand_columns": expand_columns,
-                "truncate_length": truncate_length,
-                "return_full_data": return_full_data,
-                "metadata_only": metadata_only,
-                "retries": retries,
-                "debug_raw_traces": debug_raw_traces,
-            },
+    api = WandBApiManager.get_api()
+    with track_tool_execution(
+        "query_paginated_weave_traces",
+        api.viewer,
+        {
+            "entity_name": entity_name,
+            "project_name": project_name,
+            "chunk_size": chunk_size,
+            "filters": filters,
+            "sort_by": sort_by,
+            "sort_direction": sort_direction,
+            "target_limit": target_limit,
+            "include_costs": include_costs,
+            "include_feedback": include_feedback,
+            "columns": columns,
+            "expand_columns": expand_columns,
+            "truncate_length": truncate_length,
+            "return_full_data": return_full_data,
+            "metadata_only": metadata_only,
+            "retries": retries,
+            "debug_raw_traces": debug_raw_traces,
+        },
+    ):
+        result = service.query_paginated_traces(
+            entity_name=entity_name,
+            project_name=project_name,
+            chunk_size=chunk_size,
+            filters=filters,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+            target_limit=target_limit,
+            include_costs=include_costs,
+            include_feedback=include_feedback,
+            columns=columns,
+            expand_columns=expand_columns,
+            truncate_length=truncate_length,
+            return_full_data=return_full_data,
+            metadata_only=metadata_only,
         )
-    except Exception:
-        logger.debug("analytics emit failed", exc_info=True)
 
-    # Query traces with pagination
-    result = service.query_paginated_traces(
-        entity_name=entity_name,
-        project_name=project_name,
-        chunk_size=chunk_size,
-        filters=filters,
-        sort_by=sort_by,
-        sort_direction=sort_direction,
-        target_limit=target_limit,
-        include_costs=include_costs,
-        include_feedback=include_feedback,
-        columns=columns,
-        expand_columns=expand_columns,
-        truncate_length=truncate_length,
-        return_full_data=return_full_data,
-        metadata_only=metadata_only,
-    )
+        if debug_raw_traces and result.traces:
+            result_dict = result.model_dump()
+            result_dict["raw_traces"] = result.traces
+            result = QueryResult.model_validate(result_dict)
 
-    # Add raw traces for debugging if requested
-    if debug_raw_traces and result.traces:
-        # Create a copy to avoid modifying the original result
-        result_dict = result.model_dump()
-        result_dict["raw_traces"] = result.traces
-        # Convert back to QueryResult
-        result = QueryResult.model_validate(result_dict)
-
-    assert isinstance(result, QueryResult), f"Result type must be a QueryResult, found: {type(result)}"
-    return result
+        assert isinstance(result, QueryResult), f"Result type must be a QueryResult, found: {type(result)}"
+        return result

@@ -1,10 +1,14 @@
 import inspect
 import re
+import time
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, Optional, Tuple, Type, Union
-from wandb_mcp_server.utils import get_rich_logger
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from wandb_mcp_server.utils import get_rich_logger
 
 
 # _map_python_type_to_json_schema remains the same...
@@ -304,38 +308,69 @@ def get_retry_session(
     return session
 
 
-def log_tool_call(
+class _ToolExecutionContext:
+    """Mutable context yielded by ``track_tool_execution``.
+
+    Tools that catch exceptions and return error dicts (instead of raising)
+    should call ``mark_error`` so the analytics event records the failure.
+    """
+
+    __slots__ = ("success", "error")
+
+    def __init__(self) -> None:
+        self.success: bool = True
+        self.error: Optional[str] = None
+
+    def mark_error(self, error: str) -> None:
+        """Record a non-exception error (e.g. returning a JSON error dict)."""
+        self.success = False
+        self.error = error[:500] if error else None
+
+
+_tools_logger = get_rich_logger("mcp_tools")
+
+
+@contextmanager
+def track_tool_execution(
     tool_name: str,
     viewer: Any,
     params: Dict[str, Any],
-    session_id: Optional[str] = None,
-) -> None:
-    """Log tool calls and emit analytics events.
+):
+    """Context manager that wraps MCP tool execution with timing and error capture.
 
-    Both the debug log and the analytics pipeline sanitise params to
-    avoid leaking API keys or other credentials into logs.
+    Measures wall-clock duration, captures exceptions, and emits a
+    ``track_tool_call`` analytics event in ``finally`` so every invocation --
+    success or failure -- is recorded with real ``success``, ``error``, and
+    ``duration_ms`` values.
 
-    ``session_id`` is resolved automatically from the contextvar set by
-    auth middleware; the explicit parameter is kept for backward compat
-    and STDIO transport where no middleware runs.
+    Yields a ``_ToolExecutionContext`` so tools that return error dicts
+    instead of raising can call ``ctx.mark_error(...)`` explicitly.
     """
-    logger = get_rich_logger("mcp_tools")
-    try:
-        from wandb_mcp_server.analytics import AnalyticsTracker, get_analytics_tracker
-        from wandb_mcp_server.session_manager import current_session_id
+    from wandb_mcp_server.analytics import AnalyticsTracker, get_analytics_tracker
+    from wandb_mcp_server.session_manager import current_session_id
 
-        resolved_session = session_id or current_session_id.get()
-        safe_params = AnalyticsTracker._sanitise_params(params)
-        logger.info(f"ToolCall name={tool_name} params={safe_params}")
+    safe_params = AnalyticsTracker._sanitise_params(params)
+    _tools_logger.info(f"ToolCall name={tool_name} params={safe_params}")
+
+    ctx = _ToolExecutionContext()
+    start = time.monotonic()
+    try:
+        yield ctx
+    except Exception as exc:
+        ctx.success = False
+        ctx.error = f"{type(exc).__name__}: {str(exc)[:500]}"
+        raise
+    finally:
+        duration_ms = round((time.monotonic() - start) * 1000, 2)
         try:
             get_analytics_tracker().track_tool_call(
                 tool_name=tool_name,
-                session_id=resolved_session,
+                session_id=current_session_id.get(),
                 viewer_info=viewer,
                 params=params,
-                success=True,
+                success=ctx.success,
+                error=ctx.error,
+                duration_ms=duration_ms,
             )
         except Exception:
-            pass
-    except Exception:
-        pass
+            _tools_logger.debug(f"Analytics tracking failed for {tool_name}")
