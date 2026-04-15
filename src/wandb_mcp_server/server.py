@@ -694,6 +694,96 @@ def register_tools(mcp_instance: FastMCP) -> None:
             max_file_diff_entries=max_file_diff_entries,
         )
 
+    # ----- wb_agent-inspired analysis tools (v0.3.2) -----
+
+    from wandb_mcp_server.mcp_tools.compare_runs import (
+        COMPARE_RUNS_TOOL_DESCRIPTION,
+        compare_runs,
+    )
+
+    @mcp_instance.tool(description=COMPARE_RUNS_TOOL_DESCRIPTION)
+    def compare_runs_tool(
+        entity_name: str,
+        project_name: str,
+        run_id_a: str,
+        run_id_b: str,
+        include_history_overlap: bool = False,
+        history_keys: Optional[List[str]] = None,
+        history_samples: int = 50,
+    ) -> str:
+        """Compare two W&B runs side-by-side."""
+        return compare_runs(
+            entity_name=entity_name,
+            project_name=project_name,
+            run_id_a=run_id_a,
+            run_id_b=run_id_b,
+            include_history_overlap=include_history_overlap,
+            history_keys=history_keys,
+            history_samples=history_samples,
+        )
+
+    from wandb_mcp_server.mcp_tools.summarize_evaluation import (
+        SUMMARIZE_EVALUATION_TOOL_DESCRIPTION,
+        summarize_evaluation,
+    )
+
+    @mcp_instance.tool(description=SUMMARIZE_EVALUATION_TOOL_DESCRIPTION)
+    def summarize_evaluation_tool(
+        entity_name: str,
+        project_name: str,
+        eval_name: Optional[str] = None,
+        max_evals: int = 5,
+        include_per_task: bool = False,
+    ) -> str:
+        """Summarize Weave evaluation results."""
+        return summarize_evaluation(
+            entity_name=entity_name,
+            project_name=project_name,
+            eval_name=eval_name,
+            max_evals=max_evals,
+            include_per_task=include_per_task,
+        )
+
+    from wandb_mcp_server.mcp_tools.diagnose_run import (
+        DIAGNOSE_RUN_TOOL_DESCRIPTION,
+        diagnose_run,
+    )
+
+    @mcp_instance.tool(description=DIAGNOSE_RUN_TOOL_DESCRIPTION)
+    def diagnose_run_tool(
+        entity_name: str,
+        project_name: str,
+        run_id: str,
+        loss_key: Optional[str] = None,
+        val_loss_key: Optional[str] = None,
+    ) -> str:
+        """Diagnose a W&B run's training health."""
+        return diagnose_run(
+            entity_name=entity_name,
+            project_name=project_name,
+            run_id=run_id,
+            loss_key=loss_key,
+            val_loss_key=val_loss_key,
+        )
+
+    from wandb_mcp_server.mcp_tools.probe_project import (
+        PROBE_PROJECT_TOOL_DESCRIPTION,
+        probe_project,
+    )
+
+    @mcp_instance.tool(description=PROBE_PROJECT_TOOL_DESCRIPTION)
+    def probe_project_tool(
+        entity_name: str,
+        project_name: str,
+        sample_runs: int = 5,
+    ) -> str:
+        """Probe a W&B project to discover its structure."""
+        return probe_project(
+            entity_name=entity_name,
+            project_name=project_name,
+            sample_runs=sample_runs,
+        )
+
 
 # ===============================================================================
 # SECTION 4: MCP SERVER SETUP (STDIO & HTTP)
