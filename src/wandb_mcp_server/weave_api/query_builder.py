@@ -328,6 +328,61 @@ class QueryBuilder:
             else:
                 logger.warning(f"Invalid format for 'attributes' filter: {attributes_filters}. Expected a dictionary.")
 
+        # Handle inputs filter (substring search on trace inputs via $contains)
+        if "inputs" in filters:
+            inputs_filters = filters["inputs"]
+            if isinstance(inputs_filters, dict):
+                for input_path, input_condition in inputs_filters.items():
+                    full_path = f"inputs.{input_path}"
+                    if isinstance(input_condition, dict) and "$contains" in input_condition:
+                        if isinstance(input_condition["$contains"], str):
+                            operations.append(cls.create_contains_operation(full_path, input_condition["$contains"]))
+                        else:
+                            logger.warning(f"Invalid $contains value for {full_path}: expected string.")
+                    elif isinstance(input_condition, dict):
+                        for op_key, value in input_condition.items():
+                            try:
+                                op = FilterOperator(op_key)
+                                comp_op = cls.create_comparison_operation(full_path, op, value)
+                                if comp_op:
+                                    operations.append(comp_op)
+                            except (ValueError, KeyError):
+                                logger.warning(f"Invalid operator for inputs filter: {op_key}")
+                    else:
+                        comp_op = cls.create_comparison_operation(full_path, FilterOperator.EQUALS, input_condition)
+                        if comp_op:
+                            operations.append(comp_op)
+
+        # Handle output filter (substring search on trace output via $contains)
+        if "output" in filters:
+            output_filter = filters["output"]
+            if isinstance(output_filter, dict) and "$contains" in output_filter:
+                if isinstance(output_filter["$contains"], str):
+                    operations.append(cls.create_contains_operation("output", output_filter["$contains"]))
+                else:
+                    logger.warning("Invalid $contains value for output: expected string.")
+            elif isinstance(output_filter, dict):
+                for output_path, output_condition in output_filter.items():
+                    full_path = f"output.{output_path}"
+                    if isinstance(output_condition, dict) and "$contains" in output_condition:
+                        if isinstance(output_condition["$contains"], str):
+                            operations.append(cls.create_contains_operation(full_path, output_condition["$contains"]))
+                        else:
+                            logger.warning(f"Invalid $contains value for {full_path}: expected string.")
+                    elif isinstance(output_condition, dict):
+                        for op_key, value in output_condition.items():
+                            try:
+                                op = FilterOperator(op_key)
+                                comp_op = cls.create_comparison_operation(full_path, op, value)
+                                if comp_op:
+                                    operations.append(comp_op)
+                            except (ValueError, KeyError):
+                                logger.warning(f"Invalid operator for output filter: {op_key}")
+                    else:
+                        comp_op = cls.create_comparison_operation(full_path, FilterOperator.EQUALS, output_condition)
+                        if comp_op:
+                            operations.append(comp_op)
+
         # Handle $in filter for multi-value matching (e.g., status $in ["error", "running"])
         if "$in" in filters:
             in_filters = filters["$in"]

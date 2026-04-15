@@ -33,6 +33,10 @@ except ImportError:
     weave = None
     WEAVE_AVAILABLE = False
 
+from wandb_mcp_server.mcp_tools.list_entities import (
+    LIST_ENTITIES_TOOL_DESCRIPTION,
+    list_entities,
+)
 from wandb_mcp_server.mcp_tools.list_wandb_entities_projects import (
     LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION,
     list_entity_projects,
@@ -529,9 +533,18 @@ def register_tools(mcp_instance: FastMCP) -> None:
             logger.error(f"Error in log_analysis_to_wandb: {e}", exc_info=True)
             return json.dumps({"error": "log_failed", "message": str(e)[:500]})
 
+    @mcp_instance.tool(description=LIST_ENTITIES_TOOL_DESCRIPTION)
+    def list_entities_tool() -> str:
+        """List W&B entities (user + teams) accessible with the current API key."""
+        return list_entities()
+
     @mcp_instance.tool(description=LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION)
-    def query_wandb_entity_projects(entity: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
-        return list_entity_projects(entity)
+    def query_wandb_entity_projects(
+        entity: Optional[str] = None,
+        max_projects: int = 50,
+    ) -> str:
+        """List projects for a W&B entity."""
+        return list_entity_projects(entity=entity, max_projects=max_projects)
 
     from wandb_mcp_server.mcp_tools.infer_schema import (
         INFER_TRACE_SCHEMA_TOOL_DESCRIPTION,

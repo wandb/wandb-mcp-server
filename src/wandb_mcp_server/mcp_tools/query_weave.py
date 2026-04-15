@@ -160,6 +160,21 @@ if given an evaluation trace id or name.
         *   A dictionary with a comparison operator: `$gt`, `$lt`, `$eq`, `$gte`, `$lte` (e.g., `{"token_count": {"$gt": 100}}`)
         *   A dictionary with the `$contains` operator for substring matching on string attributes (e.g., `{"model_name": {"$contains": "gpt-3"}}`)
         **Warning:** The `$contains` operator performs simple substring matching only, full regular expression matching (e.g., via `$regex`) is **not supported** for attributes. Do not attempt to use `$regex`.
+    - inputs : dict, optional
+        Filter on trace input fields using dot-path keys. Supports `$contains` for
+        substring search and comparison operators.
+        Examples:
+        *   `"inputs": {"message": {"$contains": "search phrase"}}` -- find traces where input.message contains text
+        *   `"inputs": {"model": "gpt-4"}` -- find traces where input.model equals "gpt-4"
+        **PERFORMANCE WARNING:** Content search on inputs scans trace data server-side.
+        For projects with >10k traces, ALWAYS combine with other filters (time_range,
+        op_name, trace_roots_only) to narrow the scan.
+    - output : dict, optional
+        Filter on trace output fields. Supports the same operators as inputs.
+        Examples:
+        *   `"output": {"$contains": "error message"}` -- search the full output for a substring
+        *   `"output": {"result": {"$contains": "success"}}` -- search output.result for a substring
+        **PERFORMANCE WARNING:** Same as inputs -- combine with other filters for large projects.
     - has_exception : bool, optional
         Optional[bool] to filter traces by exception status:
         - None (or key not present): Show all traces regardless of exception status
