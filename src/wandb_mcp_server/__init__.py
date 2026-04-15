@@ -4,7 +4,7 @@ Weave MCP Server
 A Model Context Protocol server for Weave traces.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.3.2"
 
 # Import the functions we want to expose
 from .server import cli
