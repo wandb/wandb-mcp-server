@@ -160,6 +160,21 @@ if given an evaluation trace id or name.
         *   A dictionary with a comparison operator: `$gt`, `$lt`, `$eq`, `$gte`, `$lte` (e.g., `{"token_count": {"$gt": 100}}`)
         *   A dictionary with the `$contains` operator for substring matching on string attributes (e.g., `{"model_name": {"$contains": "gpt-3"}}`)
         **Warning:** The `$contains` operator performs simple substring matching only, full regular expression matching (e.g., via `$regex`) is **not supported** for attributes. Do not attempt to use `$regex`.
+    - inputs : dict, optional
+        Filter on trace input fields using dot-path keys. Supports `$contains` for
+        substring search and comparison operators.
+        Examples:
+        *   `"inputs": {"message": {"$contains": "search phrase"}}` -- find traces where input.message contains text
+        *   `"inputs": {"model": "gpt-4"}` -- find traces where input.model equals "gpt-4"
+        **PERFORMANCE WARNING:** Content search on inputs scans trace data server-side.
+        For projects with >10k traces, ALWAYS combine with other filters (time_range,
+        op_name, trace_roots_only) to narrow the scan.
+    - output : dict, optional
+        Filter on trace output fields. Supports the same operators as inputs.
+        Examples:
+        *   `"output": {"$contains": "error message"}` -- search the full output for a substring
+        *   `"output": {"result": {"$contains": "success"}}` -- search output.result for a substring
+        **PERFORMANCE WARNING:** Same as inputs -- combine with other filters for large projects.
     - has_exception : bool, optional
         Optional[bool] to filter traces by exception status:
         - None (or key not present): Show all traces regardless of exception status
@@ -216,6 +231,16 @@ detail_level : str, optional
     - "full": Everything untruncated. Use only when drilling into specific trace_ids, never
       for bulk queries as it can overwhelm the context window.
 
+<root_span_resolution>
+If you find child traces and need to know which root session they belong to,
+use resolve_trace_roots_tool with the trace_ids from the results.
+This resolves all roots in a single batched call (O(1), not N separate lookups).
+
+Typical workflow:
+1. query_weave_traces_tool(filters={...}) -> find child traces
+2. resolve_trace_roots_tool(entity_name, project_name, trace_ids=[...]) -> get root context
+</root_span_resolution>
+
 Returns
 -------
 str
@@ -267,6 +292,21 @@ str
         project_name="my-project",
         filters={"call_ids": ["01958ab9-3c68-7c23-8ccd-c135c7037769"]},
         detail_level="full"
+    )
+
+    # Content search + root resolution (two-step workflow):
+    # Step 1: Find child traces matching content
+    results = query_traces_tool(
+        entity_name="my-team",
+        project_name="my-project",
+        filters={"inputs": {"message": {"$contains": "restaurant rush"}}},
+        detail_level="schema"
+    )
+    # Step 2: Resolve root spans for the found traces
+    resolve_trace_roots_tool(
+        entity_name="my-team",
+        project_name="my-project",
+        trace_ids=["<unique trace_ids from step 1>"]
     )
     ```
 </examples>

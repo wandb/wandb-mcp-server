@@ -479,6 +479,47 @@ class TraceService:
 
         return result
 
+    def resolve_trace_roots(
+        self,
+        entity_name: str,
+        project_name: str,
+        trace_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Batch-resolve root spans for a list of trace_ids in a single query.
+
+        Uses ``trace_ids + trace_roots_only`` to fetch root spans in one
+        API call, eliminating the N+1 problem when child trace searches
+        need parent context.
+
+        Args:
+            entity_name: W&B entity.
+            project_name: W&B project.
+            trace_ids: List of trace_id values to resolve.
+
+        Returns:
+            Dict mapping trace_id -> root span dict. Missing trace_ids
+            (no root found) are omitted.
+        """
+        if not trace_ids:
+            return {}
+
+        unique_ids = list(set(trace_ids))
+
+        result = self.query_traces(
+            entity_name=entity_name,
+            project_name=project_name,
+            filters={
+                "trace_ids": unique_ids,
+                "trace_roots_only": True,
+            },
+            columns=["id", "trace_id", "op_name", "display_name", "started_at", "parent_id"],
+            limit=len(unique_ids),
+            return_full_data=True,
+            metadata_only=False,
+        )
+
+        return {trace.get("trace_id"): trace for trace in (result.traces or []) if trace.get("trace_id")}
+
     def query_paginated_traces(
         self,
         entity_name: str,
