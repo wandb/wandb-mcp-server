@@ -108,13 +108,12 @@ class TestAggregateEval:
 
 class TestSummarizeEvaluation:
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.WandBApiManager")
-    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.TraceService")
-    def test_no_evals_found(self, mock_trace_svc_cls, mock_api_mgr):
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
+    def test_no_evals_found(self, mock_get_svc, mock_api_mgr):
         mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-        mock_api_mgr.get_api_key.return_value = "fake-key"
 
         mock_service = MagicMock()
-        mock_trace_svc_cls.return_value = mock_service
+        mock_get_svc.return_value = mock_service
 
         mock_query_result = MagicMock()
         mock_query_result.traces = []
@@ -126,13 +125,12 @@ class TestSummarizeEvaluation:
         assert "No Evaluation.evaluate" in result["message"]
 
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.WandBApiManager")
-    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.TraceService")
-    def test_with_eval_traces(self, mock_trace_svc_cls, mock_api_mgr):
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
+    def test_with_eval_traces(self, mock_get_svc, mock_api_mgr):
         mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-        mock_api_mgr.get_api_key.return_value = "fake-key"
 
         mock_service = MagicMock()
-        mock_trace_svc_cls.return_value = mock_service
+        mock_get_svc.return_value = mock_service
 
         eval_trace = {
             "id": "eval-abc",
@@ -163,13 +161,12 @@ class TestSummarizeEvaluation:
         assert ev["scores"]["correctness"]["true_fraction"] == 0.9
 
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.WandBApiManager")
-    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.TraceService")
-    def test_query_failure_returns_error(self, mock_trace_svc_cls, mock_api_mgr):
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
+    def test_query_failure_returns_error(self, mock_get_svc, mock_api_mgr):
         mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-        mock_api_mgr.get_api_key.return_value = "fake-key"
 
         mock_service = MagicMock()
-        mock_trace_svc_cls.return_value = mock_service
+        mock_get_svc.return_value = mock_service
         mock_service.query_traces.side_effect = Exception("Connection refused")
 
         result = json.loads(summarize_evaluation("ent", "proj"))
@@ -178,13 +175,12 @@ class TestSummarizeEvaluation:
         assert "Connection refused" in result["message"]
 
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.WandBApiManager")
-    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.TraceService")
-    def test_project_path_in_response(self, mock_trace_svc_cls, mock_api_mgr):
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
+    def test_project_path_in_response(self, mock_get_svc, mock_api_mgr):
         mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-        mock_api_mgr.get_api_key.return_value = "fake-key"
 
         mock_service = MagicMock()
-        mock_trace_svc_cls.return_value = mock_service
+        mock_get_svc.return_value = mock_service
 
         eval_trace = {
             "id": "e1",

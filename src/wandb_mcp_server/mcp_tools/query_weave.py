@@ -231,6 +231,16 @@ detail_level : str, optional
     - "full": Everything untruncated. Use only when drilling into specific trace_ids, never
       for bulk queries as it can overwhelm the context window.
 
+<root_span_resolution>
+If you find child traces and need to know which root session they belong to,
+use resolve_trace_roots_tool with the trace_ids from the results.
+This resolves all roots in a single batched call (O(1), not N separate lookups).
+
+Typical workflow:
+1. query_weave_traces_tool(filters={...}) -> find child traces
+2. resolve_trace_roots_tool(entity_name, project_name, trace_ids=[...]) -> get root context
+</root_span_resolution>
+
 Returns
 -------
 str
@@ -282,6 +292,21 @@ str
         project_name="my-project",
         filters={"call_ids": ["01958ab9-3c68-7c23-8ccd-c135c7037769"]},
         detail_level="full"
+    )
+
+    # Content search + root resolution (two-step workflow):
+    # Step 1: Find child traces matching content
+    results = query_traces_tool(
+        entity_name="my-team",
+        project_name="my-project",
+        filters={"inputs": {"message": {"$contains": "restaurant rush"}}},
+        detail_level="schema"
+    )
+    # Step 2: Resolve root spans for the found traces
+    resolve_trace_roots_tool(
+        entity_name="my-team",
+        project_name="my-project",
+        trace_ids=["<unique trace_ids from step 1>"]
     )
     ```
 </examples>

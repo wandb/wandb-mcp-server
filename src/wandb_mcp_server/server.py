@@ -265,13 +265,27 @@ def register_tools(mcp_instance: FastMCP) -> None:
     """
     Register all W&B MCP tools on the given FastMCP instance.
 
-    Available tools:
+    Available tools (20):
     - query_weave_traces_tool: Query LLM traces with filtering and pagination
     - count_weave_traces_tool: Efficiently count traces without returning data
+    - resolve_trace_roots_tool: Batch-resolve root spans for child trace_ids
     - query_wandb_tool: Execute GraphQL queries against W&B experiment data
     - create_wandb_report_tool: Create shareable reports with visualizations
-    - query_wandb_entity_projects: List available entities and projects
+    - log_analysis_to_wandb: Log analysis results as W&B runs
+    - list_entities_tool: List W&B entities (user + teams)
+    - query_wandb_entity_projects: List projects for an entity
+    - infer_trace_schema_tool: Discover trace field schema by sampling
     - search_wandb_docs_tool: Search official W&B documentation
+    - get_run_history_tool: Fetch run metric history with sampling
+    - list_registries_tool: List W&B model registries
+    - list_registry_collections_tool: List collections in a registry
+    - list_artifact_versions_tool: List artifact versions
+    - get_artifact_details_tool: Get artifact metadata and files
+    - compare_artifact_versions_tool: Diff two artifact versions
+    - compare_runs_tool: Structured diff between two runs
+    - summarize_evaluation_tool: Aggregate Weave evaluation results
+    - diagnose_run_tool: Automatic training health check
+    - probe_project_tool: Run-side schema and structure discovery
 
     Args:
         mcp_instance: The FastMCP instance to register tools on
@@ -460,6 +474,24 @@ def register_tools(mcp_instance: FastMCP) -> None:
         except Exception as e:
             logger.error(f"Error in count_weave_traces_tool: {e}")
             return json.dumps({"error": f"Error counting traces: {str(e)}"})
+
+    from wandb_mcp_server.mcp_tools.resolve_trace_roots import (
+        RESOLVE_TRACE_ROOTS_TOOL_DESCRIPTION,
+        resolve_trace_roots,
+    )
+
+    @mcp_instance.tool(description=RESOLVE_TRACE_ROOTS_TOOL_DESCRIPTION)
+    def resolve_trace_roots_tool(
+        entity_name: str,
+        project_name: str,
+        trace_ids: List[str],
+    ) -> str:
+        """Batch-resolve root spans for child trace_ids."""
+        return resolve_trace_roots(
+            entity_name=entity_name,
+            project_name=project_name,
+            trace_ids=trace_ids,
+        )
 
     @mcp_instance.tool(description=QUERY_WANDB_GQL_TOOL_DESCRIPTION)
     async def query_wandb_tool(

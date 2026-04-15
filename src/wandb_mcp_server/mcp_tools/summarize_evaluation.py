@@ -4,10 +4,9 @@ import json
 from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.mcp_tools.query_weave import get_trace_service
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.weave_api.service import TraceService
-from wandb_mcp_server.config import WF_TRACE_SERVER_URL
 
 logger = get_rich_logger(__name__)
 
@@ -106,10 +105,7 @@ def summarize_evaluation(
         },
     ) as ctx:
         try:
-            service = TraceService(
-                api_key=WandBApiManager.get_api_key(),
-                server_url=WF_TRACE_SERVER_URL,
-            )
+            service = get_trace_service()
 
             filters: Dict[str, Any] = {"op_name_contains": "Evaluation.evaluate"}
             if eval_name:
