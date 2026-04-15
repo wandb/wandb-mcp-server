@@ -1,8 +1,7 @@
 name: Eval
 
-# Nightly + manual eval benchmark against staging.
-# Runs both SDK-only (baseline) and MCP agents via WandBAgentFactory,
-# then updates README badges with pass rates.
+# Nightly MCP server evaluation against staging via WandBAgentFactory.
+# Results are uploaded as artifacts for review.
 
 on:
   schedule:
@@ -12,9 +11,14 @@ on:
   workflow_dispatch:
     inputs:
       agents:
-        description: 'JSON array of agent variants, e.g. ["wandb-primary","mcp-v3-lazy"]'
+        description: 'JSON array of agent configs, e.g. ["claude-mcp","claude-mcp-qa"]'
         required: false
         default: ""
+        type: string
+      eval_config:
+        description: "Eval config file in WandBAgentFactory (e.g. data/evals/mcp-nightly.yaml)"
+        required: false
+        default: "data/evals/mcp-nightly.yaml"
         type: string
       parallelism:
         description: "Weave parallelism (concurrent tasks)"
@@ -30,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: ${{ fromJson(inputs.agents || '["wandb-primary", "mcp-v3-lazy"]') }}
+        variant: ${{ fromJson(inputs.agents || '["claude-mcp"]') }}
 
     env:
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
@@ -70,10 +74,13 @@ jobs:
         working-directory: wbaf
         run: |
           PARALLELISM="${{ inputs.parallelism || '15' }}"
-          AGENT="claude-code-${{ matrix.variant }}"
-          echo "Agent: $AGENT, parallelism: $PARALLELISM"
-          uv run python -W ignore -m core.run_eval \
-            data/evals/mcp-ci.yaml \
+          AGENT="${{ matrix.variant }}"
+          EVAL_CONFIG="${{ inputs.eval_config || 'data/evals/mcp-nightly.yaml' }}"
+          echo "Agent: $AGENT"
+          echo "Config: $EVAL_CONFIG"
+          echo "Parallelism: $PARALLELISM"
+          uv run python -W ignore -m factory.run_eval \
+            "$EVAL_CONFIG" \
             --agent "$AGENT" \
             --weave-parallelism "$PARALLELISM" \
             2>&1 | tee eval-output.log
@@ -124,104 +131,3 @@ jobs:
           name: results-${{ matrix.variant }}
           path: wbaf/results-summary.json
           retention-days: 90
-
-  update-badges:
-    name: Update README & Badges
-    needs: eval
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.WBAF_PAT }}
-
-      - name: Download all result summaries
-        uses: actions/download-artifact@v4
-        with:
-          pattern: results-*
-          path: results/
-
-      - name: Update badges and README
-        run: |
-          python3 -c "
-          import json, re
-          from pathlib import Path
-
-          agents = {}
-          for result_dir in sorted(Path('results').iterdir()):
-              if not result_dir.is_dir():
-                  continue
-              variant = result_dir.name.replace('results-', '')
-              summary_file = result_dir / 'results-summary.json'
-              if summary_file.exists():
-                  agents[variant] = json.loads(summary_file.read_text())
-
-          badge_names = {
-              'wandb-primary': 'sdk',
-              'mcp-v3-lazy': 'mcp',
-          }
-
-          badges_dir = Path('.badges')
-          badges_dir.mkdir(exist_ok=True)
-
-          for variant, data in agents.items():
-              passed = data.get('passed', 0)
-              total = data.get('total', 0)
-              badge_key = badge_names.get(variant, variant)
-
-              if total > 0:
-                  pct = passed / total
-                  label = f'{passed}/{total} ({pct:.0%})'
-                  color = 'brightgreen' if pct >= 0.8 else 'yellow' if pct >= 0.5 else 'red'
-              else:
-                  label = 'no data'
-                  color = 'lightgrey'
-
-              badge = {
-                  'schemaVersion': 1,
-                  'label': badge_key.upper(),
-                  'message': label,
-                  'color': color,
-              }
-              (badges_dir / f'{badge_key}.json').write_text(
-                  json.dumps(badge, indent=2) + '\n'
-              )
-              print(f'{badge_key}: {label} ({color})')
-
-          readme = Path('README.md')
-          content = readme.read_text()
-
-          parts = []
-          for variant, data in sorted(agents.items()):
-              passed = data.get('passed', 0)
-              total = data.get('total', 0)
-              badge_key = badge_names.get(variant, variant)
-              if total > 0:
-                  parts.append(f'{badge_key.upper()}: {passed}/{total} ({passed/total:.0%})')
-          status = ' | '.join(parts) if parts else 'pending'
-
-          pattern = r'<!-- BEGIN EVAL BADGES -->.*?<!-- END EVAL BADGES -->'
-          if re.search(pattern, content, re.DOTALL):
-              sdk_badge = '[![SDK](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wandb/wandb-mcp-server/main/.badges/sdk.json)](https://wandb.ai/wandb/mcp-server-ci/weave)'
-              mcp_badge = '[![MCP](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wandb/wandb-mcp-server/main/.badges/mcp.json)](https://wandb.ai/wandb/mcp-server-ci/weave)'
-              replacement = f'<!-- BEGIN EVAL BADGES -->\n{sdk_badge}\n{mcp_badge}\n<!-- END EVAL BADGES -->'
-              content = re.sub(pattern, replacement, content, flags=re.DOTALL)
-              readme.write_text(content)
-              print(f'Updated README badges: {status}')
-          else:
-              print('No badge markers found in README, skipping update')
-          "
-
-      - name: Commit results
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md .badges/
-          if git diff --cached --quiet; then
-            echo "No changes"
-          else
-            git commit -m "chore: update eval badges [skip ci]"
-            git push
-          fi
