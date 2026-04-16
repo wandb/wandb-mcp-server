@@ -39,7 +39,7 @@ class MCPAuthConfig:
     The server uses the client's token for all W&B operations.
     """
 
-    pass  # Simple config, no OAuth metadata needed
+    pass
 
 
 def is_valid_wandb_api_key(token: str) -> bool:
@@ -76,13 +76,12 @@ async def validate_bearer_token(credentials: Optional[HTTPAuthorizationCredentia
         The W&B API key to use for operations
 
     Raises:
-        HTTPException: 401 Unauthorized with WWW-Authenticate header
+        HTTPException: 401 Unauthorized
     """
     if not credentials or not credentials.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authorization required - please provide your W&B API key as a Bearer token",
-            headers={"WWW-Authenticate": 'Bearer realm="W&B MCP"'},
         )
 
     token = credentials.credentials.strip()  # Strip any whitespace
@@ -93,7 +92,6 @@ async def validate_bearer_token(credentials: Optional[HTTPAuthorizationCredentia
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid W&B API key format. Get your key at: https://wandb.ai/authorize",
-            headers={"WWW-Authenticate": 'Bearer realm="W&B MCP", error="invalid_token"'},
         )
 
     logger.debug(f"Bearer token validated successfully (length: {len(token)})")
@@ -149,7 +147,6 @@ async def mcp_auth_middleware(request: Request, call_next):
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"error": "Authentication failed"},
-            headers={"WWW-Authenticate": 'Bearer realm="W&B MCP"'},
         )
 
     # --- Set up request context (API key, viewer, session) ----------------
@@ -266,6 +263,3 @@ def _track_request_event(
         )
     except Exception:
         pass
-
-
-# OAuth-related functions removed - see AUTH_README.md for details
