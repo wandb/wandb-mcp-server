@@ -97,6 +97,49 @@ def _build_log_handler() -> logging.Handler:
     )
 
 
+# Third-party loggers we explicitly reconfigure in JSON mode so every line emitted by
+# the process reaches Datadog (or any other container-log backend) as structured JSON,
+# not just ones from wandb_mcp_server.* modules that go through get_rich_logger().
+#
+# Excludes wandb_mcp_server.analytics: it has its own GCP-Logging-friendly formatter
+# (_StructuredJsonFormatter in analytics.py) that downstream BigQuery pipelines depend
+# on. Reconfiguring it would silently break analytics ingestion.
+_JSON_MODE_THIRD_PARTY_LOGGERS = (
+    "",  # root
+    "uvicorn",
+    "uvicorn.access",
+    "uvicorn.error",
+    "mcp",  # MCP SDK; covers mcp.server.streamable_http etc.
+)
+
+
+def configure_process_logging() -> None:
+    """Idempotent: install the JSON handler on root + third-party loggers when enabled.
+
+    Called once from the CLI entrypoint. No-op when MCP_LOG_FORMAT=rich (default) so
+    local dev and Cloud Run keep today's behavior. When MCP_LOG_FORMAT=json, replaces
+    handlers on root + uvicorn.* + mcp so access logs and SDK logs also emit
+    structured JSON lines -- closes the gap where get_rich_logger() only covers our
+    own modules.
+
+    Skips wandb_mcp_server.analytics intentionally: it owns its own formatter contract
+    with downstream BigQuery pipelines and must not be reconfigured here.
+    """
+    if os.environ.get("MCP_LOG_FORMAT", "rich").strip().lower() != "json":
+        return
+
+    for name in _JSON_MODE_THIRD_PARTY_LOGGERS:
+        lg = logging.getLogger(name)
+        for h in list(lg.handlers):
+            lg.removeHandler(h)
+        lg.addHandler(_build_log_handler())
+        # Third-party loggers should not propagate up to root -- we already installed
+        # the JSON handler on each, and propagation would duplicate every record.
+        # The root logger itself keeps propagate=True (it's the root, nothing above).
+        if name != "":
+            lg.propagate = False
+
+
 # Moved get_rich_logger here
 def get_rich_logger(
     name: str,

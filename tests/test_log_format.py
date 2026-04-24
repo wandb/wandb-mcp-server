@@ -151,3 +151,75 @@ def test_unknown_log_format_falls_back_to_rich(_isolate_logger_between_tests):
         utils = _reload_utils()
         logger = utils.get_rich_logger(name)
     assert isinstance(logger.handlers[0], RichHandler)
+
+
+# ---------------------------------------------------------------------------
+# configure_process_logging: root + uvicorn + mcp coverage
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _snapshot_third_party_handlers():
+    """Capture handlers on third-party loggers so each test can restore them."""
+    names = ("", "uvicorn", "uvicorn.access", "uvicorn.error", "mcp")
+    before: dict = {n: (list(logging.getLogger(n).handlers), logging.getLogger(n).propagate) for n in names}
+    yield before
+    for n, (handlers, propagate) in before.items():
+        lg = logging.getLogger(n)
+        lg.handlers.clear()
+        for h in handlers:
+            lg.addHandler(h)
+        lg.propagate = propagate
+
+
+def test_configure_process_logging_noop_in_rich_mode(_snapshot_third_party_handlers):
+    """MCP_LOG_FORMAT unset -> no third-party loggers are reconfigured (Cloud Run path)."""
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("MCP_LOG_FORMAT", None)
+        utils = _reload_utils()
+        utils.configure_process_logging()
+
+    for name in ("uvicorn", "uvicorn.access", "uvicorn.error", "mcp"):
+        handlers = logging.getLogger(name).handlers
+        # Must match the snapshot taken before the call
+        assert handlers == _snapshot_third_party_handlers[name][0]
+
+
+def test_configure_process_logging_installs_json_on_third_party_in_json_mode(
+    _snapshot_third_party_handlers,
+):
+    """MCP_LOG_FORMAT=json -> root + uvicorn.{access,error} + mcp all get a JSON handler."""
+    with mock.patch.dict(os.environ, {"MCP_LOG_FORMAT": "json"}, clear=False):
+        utils = _reload_utils()
+        utils.configure_process_logging()
+
+        for name in ("", "uvicorn", "uvicorn.access", "uvicorn.error", "mcp"):
+            handlers = logging.getLogger(name).handlers
+            assert len(handlers) == 1, f"{name!r} should have exactly one handler after configure"
+            assert isinstance(handlers[0].formatter, utils._JsonLogFormatter), (
+                f"{name!r} handler must use _JsonLogFormatter, got {type(handlers[0].formatter).__name__}"
+            )
+
+        # Third-party loggers don't propagate (prevents duplicate records via root)
+        assert logging.getLogger("uvicorn").propagate is False
+        assert logging.getLogger("uvicorn.access").propagate is False
+        assert logging.getLogger("uvicorn.error").propagate is False
+        assert logging.getLogger("mcp").propagate is False
+        # Root logger keeps its default propagate (True; there's nothing above root)
+        assert logging.getLogger().propagate is True
+
+
+def test_configure_process_logging_does_not_touch_analytics_logger(_snapshot_third_party_handlers):
+    """wandb_mcp_server.analytics owns its own formatter for BigQuery; must not be reconfigured."""
+    from wandb_mcp_server import analytics as _analytics_mod
+
+    analytics_before = list(_analytics_mod.analytics_logger.handlers)
+
+    with mock.patch.dict(os.environ, {"MCP_LOG_FORMAT": "json"}, clear=False):
+        utils = _reload_utils()
+        utils.configure_process_logging()
+
+    analytics_after = list(_analytics_mod.analytics_logger.handlers)
+    assert analytics_before == analytics_after, (
+        "configure_process_logging must leave wandb_mcp_server.analytics handlers untouched"
+    )

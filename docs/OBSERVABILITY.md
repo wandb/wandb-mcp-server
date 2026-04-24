@@ -104,6 +104,25 @@ rich formatter's ANSI codes and level placement. Setting `MCP_LOG_FORMAT=json` e
 Datadog extracts the `level`, `timestamp`, `logger`, and `message` fields automatically;
 `status:error` misclassification disappears.
 
+### Scope of JSON mode: root + third-party loggers
+
+When `MCP_LOG_FORMAT=json` is set, the server calls `configure_process_logging()` at
+startup. This installs the JSON handler on:
+
+- the Python **root logger**,
+- `uvicorn`, `uvicorn.access`, `uvicorn.error`,
+- `mcp` (the MCP SDK; covers `mcp.server.streamable_http.*`).
+
+As a result, **every log line emitted by the process is structured JSON**, not just
+the ones from `wandb_mcp_server.*` modules that go through `get_rich_logger()`. This
+is what makes uvicorn's `GET /mcp/health 200` access lines parse cleanly in Datadog
+instead of being auto-classified as `status:error` due to rich-formatter text shape.
+
+One explicit exclusion: `wandb_mcp_server.analytics` is intentionally NOT reconfigured.
+It already uses its own `_StructuredJsonFormatter` ([`src/wandb_mcp_server/analytics.py`](../src/wandb_mcp_server/analytics.py))
+whose schema downstream GCP Cloud Logging -> BigQuery pipelines depend on. Touching
+it would silently break analytics ingestion.
+
 ## What about Cloud Run today?
 
 Cloud Run production (see [`deploy.sh`](https://github.com/wandb/wandb-mcp-server-test/blob/main/deploy.sh))
