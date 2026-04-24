@@ -113,18 +113,29 @@ _JSON_MODE_THIRD_PARTY_LOGGERS = (
 )
 
 
+_process_logging_configured = False
+
+
 def configure_process_logging() -> None:
     """Idempotent: install the JSON handler on root + third-party loggers when enabled.
 
-    Called once from the CLI entrypoint. No-op when MCP_LOG_FORMAT=rich (default) so
-    local dev and Cloud Run keep today's behavior. When MCP_LOG_FORMAT=json, replaces
-    handlers on root + uvicorn.* + mcp so access logs and SDK logs also emit
-    structured JSON lines -- closes the gap where get_rich_logger() only covers our
-    own modules.
+    Called automatically on the first get_rich_logger() invocation (so it fires from
+    any entrypoint -- `wandb_mcp_server` CLI, Cloud Run `uvicorn app:app`, tests).
+    Can also be called explicitly; running twice is a no-op.
+
+    No-op when MCP_LOG_FORMAT=rich (default) so local dev and Cloud Run keep today's
+    behavior. When MCP_LOG_FORMAT=json, replaces handlers on root + uvicorn.* + mcp
+    so access logs and SDK logs also emit structured JSON lines -- closes the gap
+    where get_rich_logger() only covers our own modules.
 
     Skips wandb_mcp_server.analytics intentionally: it owns its own formatter contract
     with downstream BigQuery pipelines and must not be reconfigured here.
     """
+    global _process_logging_configured
+    if _process_logging_configured:
+        return
+    _process_logging_configured = True
+
     if os.environ.get("MCP_LOG_FORMAT", "rich").strip().lower() != "json":
         return
 
@@ -155,6 +166,12 @@ def get_rich_logger(
     The log level can be set via an environment variable if `env_var_name` is provided.
     Otherwise, it defaults to `default_level_str`.
     """
+    # Auto-configure process-wide logging on first call so root + uvicorn.* + mcp
+    # also get the JSON handler when MCP_LOG_FORMAT=json. Runs once per process;
+    # subsequent invocations are no-ops via the _process_logging_configured guard.
+    # This covers every entrypoint (CLI, uvicorn app:app on Cloud Run, tests).
+    configure_process_logging()
+
     logger = logging.getLogger(name)
     _log_handler = _build_log_handler()
 
