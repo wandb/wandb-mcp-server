@@ -243,7 +243,19 @@ class DatadogForwarder:
         self._thread_local = threading.local()
 
         if self.live and not self._api_key:
-            logger.warning("MCP_DATADOG_FORWARD=true but DD_API_KEY is empty -- forwarding disabled")
+            # In managed K8s, the DD Agent DaemonSet (on the node at DD_AGENT_HOST:8126)
+            # already collects stdout logs and APM traces using its own API key. A pod
+            # with MCP_DATADOG_FORWARD=true and no DD_API_KEY would legitimately happen
+            # if a chart pre-0.42.2 toggled the forwarder flag without seeding a secret.
+            # That's a misconfiguration in serverless, but the correct state in K8s --
+            # demote to debug there so we don't log spam in every production pod.
+            if os.environ.get("DD_AGENT_HOST"):
+                logger.debug(
+                    "MCP_DATADOG_FORWARD=true but DD_API_KEY empty; DD_AGENT_HOST is set, "
+                    "assuming a local Datadog Agent is collecting logs/APM. Forwarder disabled."
+                )
+            else:
+                logger.warning("MCP_DATADOG_FORWARD=true but DD_API_KEY is empty -- forwarding disabled")
             self.live = False
 
     @property

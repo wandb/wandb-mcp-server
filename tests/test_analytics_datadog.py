@@ -264,6 +264,34 @@ class TestDatadogForwarder:
         fwd = DatadogForwarder()
         assert not fwd.enabled
 
+    @patch.dict(
+        "os.environ",
+        {"MCP_DATADOG_FORWARD": "true", "DD_API_KEY": "", "DD_AGENT_HOST": ""},
+        clear=False,
+    )
+    def test_forwarder_without_key_warns_on_serverless(self):
+        """Serverless / Cloud Run misconfig: no DD_AGENT_HOST -> WARN (loud, needs action)."""
+        reset_datadog_forwarder()
+        with patch("wandb_mcp_server.analytics_datadog.logger") as mock_logger:
+            fwd = DatadogForwarder()
+            assert not fwd.enabled
+            mock_logger.warning.assert_called_once()
+            mock_logger.debug.assert_not_called()
+
+    @patch.dict(
+        "os.environ",
+        {"MCP_DATADOG_FORWARD": "true", "DD_API_KEY": "", "DD_AGENT_HOST": "10.0.0.1"},
+        clear=False,
+    )
+    def test_forwarder_without_key_debugs_in_agent_mode(self):
+        """K8s agent-mode: DD_AGENT_HOST set -> DEBUG (agent handles it, not a misconfig)."""
+        reset_datadog_forwarder()
+        with patch("wandb_mcp_server.analytics_datadog.logger") as mock_logger:
+            fwd = DatadogForwarder()
+            assert not fwd.enabled
+            mock_logger.debug.assert_called_once()
+            mock_logger.warning.assert_not_called()
+
     @patch.dict("os.environ", {"MCP_DATADOG_FORWARD": "false"}, clear=False)
     def test_forward_returns_none_when_disabled(self):
         reset_datadog_forwarder()
