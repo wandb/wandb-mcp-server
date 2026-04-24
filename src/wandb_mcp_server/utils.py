@@ -150,6 +150,15 @@ def configure_process_logging() -> None:
         if name != "":
             lg.propagate = False
 
+    # Defensive: re-assert that the analytics logger does not propagate to the root
+    # handler. analytics.py sets this at import time, but uvicorn's dictConfig can
+    # reset propagation on existing loggers when the server boots -- resulting in
+    # every analytics event emitting twice (once via the analytics _StructuredJsonFormatter
+    # on stdout, and a minimal duplicate via the root _JsonLogFormatter on stderr).
+    # Runs only in json mode (rich mode returned early above), so Cloud Run today
+    # is unaffected. Observed live on staging revision 00084-p8s; this prevents it.
+    logging.getLogger("wandb_mcp_server.analytics").propagate = False
+
 
 # Moved get_rich_logger here
 def get_rich_logger(

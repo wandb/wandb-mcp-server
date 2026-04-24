@@ -123,6 +123,22 @@ It already uses its own `_StructuredJsonFormatter` ([`src/wandb_mcp_server/analy
 whose schema downstream GCP Cloud Logging -> BigQuery pipelines depend on. Touching
 it would silently break analytics ingestion.
 
+### Defensive analytics propagation lock
+
+`analytics.py` sets `analytics_logger.propagate = False` at module import time so that
+the analytics record is emitted only by its own `_StructuredJsonFormatter` handler
+(stdout) and never reaches the root logger. However, when the server boots under
+`uvicorn`, `logging.config.dictConfig` can reset propagation on existing loggers,
+silently re-enabling propagation. In that case every analytics event is emitted
+twice: once via the rich `_StructuredJsonFormatter` payload on stdout, and a
+minimal duplicate via the root `_JsonLogFormatter` on stderr.
+
+To prevent this, `configure_process_logging()` re-asserts
+`logging.getLogger("wandb_mcp_server.analytics").propagate = False` after the
+third-party logger reconfiguration loop. This guard runs only in JSON mode (rich
+mode returns early), so Cloud Run today is unaffected. Behavior was observed live
+on Cloud Run staging revision `wandb-mcp-server-staging-00084-p8s`.
+
 ## What about Cloud Run today?
 
 Cloud Run production (see [`deploy.sh`](https://github.com/wandb/wandb-mcp-server-test/blob/main/deploy.sh))

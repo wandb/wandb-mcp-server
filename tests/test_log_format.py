@@ -223,3 +223,45 @@ def test_configure_process_logging_does_not_touch_analytics_logger(_snapshot_thi
     assert analytics_before == analytics_after, (
         "configure_process_logging must leave wandb_mcp_server.analytics handlers untouched"
     )
+
+
+def test_configure_process_logging_locks_analytics_propagate_false(_snapshot_third_party_handlers):
+    """Defensive: analytics_logger.propagate must be False after configure in json mode.
+
+    analytics.py sets this at import time, but uvicorn's dictConfig (called during
+    server boot) can reset propagation on existing loggers, leading to every analytics
+    event emitting twice (rich payload via the analytics _StructuredJsonFormatter on
+    stdout, plus a minimal duplicate via the root _JsonLogFormatter on stderr).
+    Observed live on staging revision 00084-p8s; this guard prevents it.
+    """
+    from wandb_mcp_server import analytics as _analytics_mod
+
+    # Simulate uvicorn (or any other library) flipping propagation back to True
+    # after analytics.py has been imported but before configure_process_logging runs.
+    _analytics_mod.analytics_logger.propagate = True
+
+    with mock.patch.dict(os.environ, {"MCP_LOG_FORMAT": "json"}, clear=False):
+        utils = _reload_utils()
+        utils.configure_process_logging()
+
+    assert _analytics_mod.analytics_logger.propagate is False, (
+        "configure_process_logging must re-assert propagate=False on analytics_logger "
+        "to prevent duplicate emission via the root JSON handler"
+    )
+
+
+def test_configure_process_logging_leaves_analytics_propagate_alone_in_rich_mode(
+    _snapshot_third_party_handlers,
+):
+    """Rich mode is a strict no-op (Cloud Run today): analytics propagate must not be touched."""
+    from wandb_mcp_server import analytics as _analytics_mod
+
+    # Pre-set to True so we can detect any unwanted reset
+    _analytics_mod.analytics_logger.propagate = True
+
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("MCP_LOG_FORMAT", None)
+        utils = _reload_utils()
+        utils.configure_process_logging()
+
+    assert _analytics_mod.analytics_logger.propagate is True, "rich mode (default) must not touch analytics propagation"
