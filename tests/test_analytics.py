@@ -447,6 +447,42 @@ class TestPrivacyLevel:
 
         assert _resolve_privacy_level() == "off"
 
+    def test_invalid_level_warns_once(self, monkeypatch):
+        """Typos must surface as a WARNING, not silently downgrade to off.
+
+        Attaches a dedicated handler to the analytics logger because that logger
+        has propagate=False (BigQuery contract), so pytest's root-attached caplog
+        cannot see it.
+        """
+        import wandb_mcp_server.analytics as a
+
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "stict")
+        a._warned_invalid_privacy_level = False  # reset the latch
+
+        captured: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                captured.append(record)
+
+        handler = _Capture(level=logging.WARNING)
+        a.logger.addHandler(handler)
+        try:
+            assert a._resolve_privacy_level() == "off"
+            # Second call must not double-log (latch active)
+            assert a._resolve_privacy_level() == "off"
+        finally:
+            a.logger.removeHandler(handler)
+
+        warnings = [r for r in captured if r.levelname == "WARNING" and "MCP_LOG_PRIVACY_LEVEL" in r.getMessage()]
+        assert len(warnings) == 1, f"expected exactly one warning for invalid level, got {len(warnings)}"
+        assert "stict" in warnings[0].getMessage()
+
+    def test_organization_hashed_at_strict(self):
+        """organization is a customer identifier (query_registry tool param); hash at strict."""
+        result = AnalyticsTracker._sanitise_params({"organization": "acme-corp"}, level="strict")
+        assert result["organization"].startswith("<h:")
+
     # ---- _sanitise_params: off mode is byte-identical to pre-amend ---------
 
     def test_off_preserves_free_text_values(self):

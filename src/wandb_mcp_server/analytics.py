@@ -92,6 +92,7 @@ _IDENTIFIER_KEYS_FOR_HASHING: frozenset = frozenset(
         "project_name",
         "entity",
         "project",
+        "organization",
         "registry_name",
         "collection_name",
         "artifact_name",
@@ -103,17 +104,35 @@ _IDENTIFIER_KEYS_FOR_HASHING: frozenset = frozenset(
     }
 )
 
+# Once-per-process latch so an invalid MCP_LOG_PRIVACY_LEVEL doesn't spam logs
+# on every analytics emit. Operators see one WARNING in their first scrape.
+_warned_invalid_privacy_level = False
+
 
 def _resolve_privacy_level() -> str:
     """Return the active privacy level, defaulting to ``off``.
 
     Read lazily (not cached) so tests and runtime env-var toggles work
     without reloading the module.
+
+    Invalid values fall back to ``off`` (most permissive -- preserves
+    availability) but emit a single WARNING so a typo like ``stict`` is
+    visible to operators rather than silently downgrading their privacy
+    posture.
     """
     raw = os.environ.get("MCP_LOG_PRIVACY_LEVEL", _PRIVACY_LEVEL_OFF).strip().lower()
-    if raw not in _VALID_PRIVACY_LEVELS:
+    if raw and raw not in _VALID_PRIVACY_LEVELS:
+        global _warned_invalid_privacy_level
+        if not _warned_invalid_privacy_level:
+            _warned_invalid_privacy_level = True
+            logger.warning(
+                "MCP_LOG_PRIVACY_LEVEL=%r is not one of %s; falling back to 'off'. "
+                "Set a valid level to silence this warning.",
+                raw,
+                sorted(_VALID_PRIVACY_LEVELS),
+            )
         return _PRIVACY_LEVEL_OFF
-    return raw
+    return raw or _PRIVACY_LEVEL_OFF
 
 
 def _hash_identifier(value: Any) -> str:
@@ -167,6 +186,12 @@ _handler.setFormatter(_StructuredJsonFormatter())
 analytics_logger.addHandler(_handler)
 
 _REQUIRED_BASE_FIELDS = frozenset({"schema_version", "event_type", "timestamp"})
+
+# Surface the active privacy level once at module import so operators can
+# verify their config by grepping pod logs (instead of needing kubectl describe).
+# Triggers _resolve_privacy_level()'s WARNING for invalid values, so an env-var
+# typo also lights up here at startup.
+logger.info("Analytics ready: MCP_LOG_PRIVACY_LEVEL=%s", _resolve_privacy_level())
 
 
 def _utcnow_iso() -> str:
