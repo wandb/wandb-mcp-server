@@ -98,7 +98,16 @@ class WeaveApiClient:
         url = f"{self.server_url}/calls/stream_query"
         headers = self._get_auth_headers()
 
-        logger.info(f"Sending request to Weave server:\n{json.dumps(query_params, indent=2)[:1000]}...\n")
+        # Demote the raw-body log to DEBUG at standard+ privacy levels. The body
+        # is a customer-supplied Weave filter expression that may contain PII-ish
+        # run/project identifiers or inline values; BigQuery/Segment get a
+        # sanitised view via the analytics tool_call event emitted upstream.
+        from wandb_mcp_server.analytics import is_verbose_log_site_gated
+
+        if is_verbose_log_site_gated():
+            logger.debug(f"Sending request to Weave server:\n{json.dumps(query_params, indent=2)[:1000]}...\n")
+        else:
+            logger.info(f"Sending request to Weave server:\n{json.dumps(query_params, indent=2)[:1000]}...\n")
         logger.debug(f"Full query parameters:\n{json.dumps(query_params, indent=2)}\n")
 
         try:

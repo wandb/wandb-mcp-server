@@ -139,6 +139,56 @@ third-party logger reconfiguration loop. This guard runs only in JSON mode (rich
 mode returns early), so Cloud Run today is unaffected. Behavior was observed live
 on Cloud Run staging revision `wandb-mcp-server-staging-00084-p8s`.
 
+## Privacy levels: `MCP_LOG_PRIVACY_LEVEL`
+
+`MCP_LOG_PRIVACY_LEVEL` controls how aggressively customer-supplied content
+is redacted before it reaches any log sink (Cloud Logging, Segment, Datadog
+forwarder). Applied uniformly by `AnalyticsTracker._sanitise_params`, by the
+identity-hashing helper in `analytics.py`, and by verbose-log-site gates in
+`tools_utils.py` and `weave_api/client.py`.
+
+| Level | Free-text params (`query`, `prompt`, `description`, ...) | Identifiers (`entity_name`, `project_name`, `run_id`, `user_id`, `email_domain`) | Verbose `ToolCall` / raw-body logs |
+|---|---|---|---|
+| `off` (default) | pass-through | pass-through | INFO |
+| `standard` | redacted -> `<redacted: text len=N>` | pass-through | demoted to DEBUG |
+| `strict` | redacted -> `<redacted: text len=N>` | hashed -> `<h:sha256_prefix>` | demoted to DEBUG |
+
+Sensitive key-name redaction (`api_key`, `token`, `secret`, `password`,
+`credential`, `auth`) runs at every level. Truncation of strings >200 chars
+runs at every level.
+
+### Recommended defaults per deployment target
+
+| Deployment | Recommended level | How it's set |
+|---|---|---|
+| Local dev | `off` (unset) | env-var default |
+| Cloud Run (W&B-managed, feeds BigQuery analytics) | `off` explicit | `deploy.sh` passes `MCP_LOG_PRIVACY_LEVEL=off` |
+| Customer K8s via helm chart | `standard` | chart injects from `mcp-server.privacy.logLevel` (default `standard`) |
+| Regulated / privacy-sensitive K8s | `strict` | override chart value to `strict` |
+
+### Why the split
+
+Cloud Run's analytics logger emits directly to GCP Cloud Logging, which pipes
+to BigQuery for product analytics. That pipeline depends on plaintext
+`user_id`, `email_domain`, and `params` fields for cohort analysis. `off`
+preserves this byte-for-byte.
+
+Customer K8s installs do NOT feed W&B's BigQuery; their analytics logger goes
+to stdout for the local Datadog Agent to collect into the customer's own
+Datadog tenant. There's no business need to retain plaintext free-text
+params there, and redaction reduces legal exposure if customer logs are
+subpoenaed, exported, or retained longer than needed. `standard` is the safe
+default. `strict` goes one step further for regulated customers.
+
+### Identifier hashing at `strict`
+
+`<h:sha256_prefix>` uses the first 12 hex chars of `sha256(value)`.
+Deterministic (the same entity name always hashes to the same digest), so
+cohort analytics (tool adoption by entity, error rates by project) still
+work. Not reversible without a rainbow table over known W&B entity names,
+which is out of scope for legal defensibility (the retained data is no
+longer plaintext customer identifiers).
+
 ## What about Cloud Run today?
 
 Cloud Run production (see [`deploy.sh`](https://github.com/wandb/wandb-mcp-server-test/blob/main/deploy.sh))

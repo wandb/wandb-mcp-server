@@ -265,3 +265,30 @@ def test_configure_process_logging_leaves_analytics_propagate_alone_in_rich_mode
         utils.configure_process_logging()
 
     assert _analytics_mod.analytics_logger.propagate is True, "rich mode (default) must not touch analytics propagation"
+
+
+# -- Privacy-level gating of verbose log sites -------------------------------
+
+
+def test_toolcall_log_is_info_at_privacy_off(caplog, monkeypatch):
+    """With MCP_LOG_PRIVACY_LEVEL=off (Cloud Run default), ToolCall log stays INFO."""
+    monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "off")
+    # Use the helper directly so we avoid the context-manager's analytics finaliser
+    from wandb_mcp_server.analytics import is_verbose_log_site_gated
+
+    assert is_verbose_log_site_gated() is False
+
+
+def test_toolcall_log_gated_at_privacy_standard(caplog, monkeypatch):
+    """At standard+ privacy, ToolCall log demotes to DEBUG (analytics event still captures it)."""
+    monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "standard")
+    from wandb_mcp_server.analytics import is_verbose_log_site_gated
+
+    assert is_verbose_log_site_gated() is True
+
+
+def test_toolcall_log_gated_at_privacy_strict(caplog, monkeypatch):
+    monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "strict")
+    from wandb_mcp_server.analytics import is_verbose_log_site_gated
+
+    assert is_verbose_log_site_gated() is True

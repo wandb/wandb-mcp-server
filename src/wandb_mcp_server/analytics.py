@@ -13,6 +13,7 @@ Based on prior art by @NiWaRe (PR #2), rewritten for improved
 datetime handling, cleaner auth integration, and structured event schema.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -36,6 +37,105 @@ _SENSITIVE_PARAM_PATTERNS: List[str] = [
 ]
 
 _MAX_PARAM_VALUE_LENGTH = 200
+
+# ---------------------------------------------------------------------------
+# Privacy levels
+#
+# MCP_LOG_PRIVACY_LEVEL controls how aggressively we redact customer-supplied
+# content before it lands in any log sink (Cloud Logging, Segment, Datadog
+# forwarder). Consumed here by _sanitise_params and the identifier-hashing
+# helpers; also consumed by tools_utils/weave_api to demote verbose log sites
+# at standard+ levels.
+#
+#   off       -- today's behavior. Redact sensitive-looking keys, truncate long
+#                strings. Free-text values pass through. Cloud Run uses this
+#                to preserve the BigQuery analytics contract.
+#   standard  -- additionally redact free-text value keys (query, prompt,
+#                description, etc). Customer K8s chart default.
+#   strict    -- additionally hash entity/project/user identifiers. For
+#                regulated / privacy-sensitive deployments.
+#
+# Default is "off" so the image behaves identically when run outside the chart.
+# Customer K8s installs flip to "standard" via the helm chart's env injection.
+# ---------------------------------------------------------------------------
+
+_PRIVACY_LEVEL_OFF = "off"
+_PRIVACY_LEVEL_STANDARD = "standard"
+_PRIVACY_LEVEL_STRICT = "strict"
+_VALID_PRIVACY_LEVELS = frozenset({_PRIVACY_LEVEL_OFF, _PRIVACY_LEVEL_STANDARD, _PRIVACY_LEVEL_STRICT})
+
+# Keys whose values are free-form customer text. At standard+ levels the
+# value is replaced with "<redacted: text len=N>" so we can still analyse
+# call-volume / length distributions without logging the content itself.
+_FREE_TEXT_KEYS: frozenset = frozenset(
+    {
+        "query",
+        "question",
+        "prompt",
+        "description",
+        "title",
+        "text",
+        "content",
+        "body",
+        "eval_name",
+        "analysis_name",
+        "message",
+    }
+)
+
+# Keys whose values identify a specific customer entity/project/artifact.
+# At strict level we hash these to a 12-char sha256 prefix so cardinality
+# for cohort analytics is preserved while plaintext is not retained.
+_IDENTIFIER_KEYS_FOR_HASHING: frozenset = frozenset(
+    {
+        "entity_name",
+        "project_name",
+        "entity",
+        "project",
+        "registry_name",
+        "collection_name",
+        "artifact_name",
+        "artifact_name_a",
+        "artifact_name_b",
+        "run_id",
+        "run_id_a",
+        "run_id_b",
+    }
+)
+
+
+def _resolve_privacy_level() -> str:
+    """Return the active privacy level, defaulting to ``off``.
+
+    Read lazily (not cached) so tests and runtime env-var toggles work
+    without reloading the module.
+    """
+    raw = os.environ.get("MCP_LOG_PRIVACY_LEVEL", _PRIVACY_LEVEL_OFF).strip().lower()
+    if raw not in _VALID_PRIVACY_LEVELS:
+        return _PRIVACY_LEVEL_OFF
+    return raw
+
+
+def _hash_identifier(value: Any) -> str:
+    """Hash an identifier to a short sha256 prefix for strict-mode analytics.
+
+    Non-string inputs are coerced via ``str()``. Empty/None values return
+    ``"<empty>"`` so downstream consumers can distinguish "no value" from
+    "hashed value".
+    """
+    if value is None or value == "":
+        return "<empty>"
+    digest = hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
+    return f"<h:{digest[:12]}>"
+
+
+def is_verbose_log_site_gated() -> bool:
+    """True when standard+ privacy levels demote verbose log sites to DEBUG.
+
+    Exported so external emit sites (tools_utils, weave_api/client) can gate
+    their INFO-level logs without importing the private level constants.
+    """
+    return _resolve_privacy_level() in (_PRIVACY_LEVEL_STANDARD, _PRIVACY_LEVEL_STRICT)
 
 
 class _StructuredJsonFormatter(logging.Formatter):
@@ -141,21 +241,44 @@ class AnalyticsTracker:
     # ------------------------------------------------------------------
 
     @classmethod
-    def _sanitise_params(cls, params: Optional[Dict[str, Any]], *, _depth: int = 0) -> Dict[str, Any]:
+    def _sanitise_params(
+        cls,
+        params: Optional[Dict[str, Any]],
+        *,
+        _depth: int = 0,
+        level: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Strip sensitive keys and truncate large values.
 
         Recursively sanitises nested dicts and lists up to 3 levels deep.
+        When ``level`` is ``standard`` or ``strict``, also redacts free-text
+        value keys (query, prompt, description, etc). When ``level`` is
+        ``strict``, additionally hashes identifier keys (entity_name,
+        project_name, run_id, etc).
+
+        ``level`` defaults to the value of ``MCP_LOG_PRIVACY_LEVEL`` at call
+        time. Explicit ``level`` arg is used by tests and by the emit sites
+        that need deterministic behavior across a single call tree.
         """
         if not params:
             return {}
+        if level is None:
+            level = _resolve_privacy_level()
+        redact_free_text = level in (_PRIVACY_LEVEL_STANDARD, _PRIVACY_LEVEL_STRICT)
+        hash_identifiers = level == _PRIVACY_LEVEL_STRICT
         safe: Dict[str, Any] = {}
         for key, value in params.items():
-            if any(p in key.lower() for p in _SENSITIVE_PARAM_PATTERNS):
+            key_lower = key.lower()
+            if any(p in key_lower for p in _SENSITIVE_PARAM_PATTERNS):
                 safe[key] = "<redacted>"
+            elif redact_free_text and key_lower in _FREE_TEXT_KEYS and isinstance(value, str):
+                safe[key] = f"<redacted: text len={len(value)}>"
+            elif hash_identifiers and key_lower in _IDENTIFIER_KEYS_FOR_HASHING:
+                safe[key] = _hash_identifier(value)
             elif isinstance(value, dict) and _depth < 3:
-                safe[key] = cls._sanitise_params(value, _depth=_depth + 1)
+                safe[key] = cls._sanitise_params(value, _depth=_depth + 1, level=level)
             elif isinstance(value, list) and _depth < 3:
-                safe[key] = cls._sanitise_list(value, _depth=_depth + 1)
+                safe[key] = cls._sanitise_list(value, _depth=_depth + 1, level=level)
             elif isinstance(value, str) and len(value) > _MAX_PARAM_VALUE_LENGTH:
                 safe[key] = f"<truncated:{len(value)} chars>"
             else:
@@ -163,14 +286,22 @@ class AnalyticsTracker:
         return safe
 
     @classmethod
-    def _sanitise_list(cls, items: list, *, _depth: int = 0) -> list:
+    def _sanitise_list(
+        cls,
+        items: list,
+        *,
+        _depth: int = 0,
+        level: Optional[str] = None,
+    ) -> list:
         """Sanitise each element in a list, recursing into dicts and nested lists."""
+        if level is None:
+            level = _resolve_privacy_level()
         result = []
         for item in items:
             if isinstance(item, dict) and _depth < 3:
-                result.append(cls._sanitise_params(item, _depth=_depth))
+                result.append(cls._sanitise_params(item, _depth=_depth, level=level))
             elif isinstance(item, list) and _depth < 3:
-                result.append(cls._sanitise_list(item, _depth=_depth + 1))
+                result.append(cls._sanitise_list(item, _depth=_depth + 1, level=level))
             else:
                 result.append(item)
         return result
@@ -234,6 +365,29 @@ class AnalyticsTracker:
         except Exception as exc:
             logger.debug(f"Datadog forwarding failed (non-fatal): {exc}")
 
+    @staticmethod
+    def _apply_identity_privacy(
+        user_id: Optional[str],
+        email_domain: Optional[str],
+        *,
+        level: Optional[str] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Transform identity fields according to the active privacy level.
+
+        - ``off`` / ``standard``: return values unchanged.
+        - ``strict``: hash both to opaque sha256 prefixes so cardinality
+          is preserved for cohort analytics without retaining plaintext.
+
+        Returns ``(user_id, email_domain)`` tuple.
+        """
+        if level is None:
+            level = _resolve_privacy_level()
+        if level != _PRIVACY_LEVEL_STRICT:
+            return user_id, email_domain
+        hashed_user = _hash_identifier(user_id) if user_id else user_id
+        hashed_domain = _hash_identifier(email_domain) if email_domain else email_domain
+        return hashed_user, hashed_domain
+
     def track_user_session(
         self,
         session_id: str,
@@ -245,11 +399,14 @@ class AnalyticsTracker:
         if not self.enabled:
             return
         try:
+            level = _resolve_privacy_level()
+            user_id = self._extract_user_id(viewer_info)
             email_domain = self._extract_email_domain(viewer_info)
+            user_id, email_domain = self._apply_identity_privacy(user_id, email_domain, level=level)
             event = {
                 **self._base_event("user_session"),
                 "session_id": session_id,
-                "user_id": self._extract_user_id(viewer_info),
+                "user_id": user_id,
                 "email_domain": email_domain,
                 "api_key_hash": api_key_hash[:16] if api_key_hash else None,
                 "metadata": metadata or {},
@@ -272,14 +429,17 @@ class AnalyticsTracker:
         if not self.enabled:
             return
         try:
+            level = _resolve_privacy_level()
+            user_id = self._extract_user_id(viewer_info)
             email_domain = self._extract_email_domain(viewer_info)
+            user_id, email_domain = self._apply_identity_privacy(user_id, email_domain, level=level)
             event = {
                 **self._base_event("tool_call"),
                 "session_id": session_id,
-                "user_id": self._extract_user_id(viewer_info),
+                "user_id": user_id,
                 "email_domain": email_domain,
                 "tool_name": tool_name,
-                "params": self._sanitise_params(params),
+                "params": self._sanitise_params(params, level=level),
                 "success": success,
                 "error": error,
                 "duration_ms": duration_ms,
@@ -311,6 +471,7 @@ class AnalyticsTracker:
         if not self.enabled:
             return
         try:
+            user_id, email_domain = self._apply_identity_privacy(user_id, email_domain)
             event = {
                 **self._base_event("request"),
                 "request_id": request_id,

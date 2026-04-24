@@ -346,11 +346,21 @@ def track_tool_execution(
     Yields a ``_ToolExecutionContext`` so tools that return error dicts
     instead of raising can call ``ctx.mark_error(...)`` explicitly.
     """
-    from wandb_mcp_server.analytics import AnalyticsTracker, get_analytics_tracker
+    from wandb_mcp_server.analytics import (
+        AnalyticsTracker,
+        get_analytics_tracker,
+        is_verbose_log_site_gated,
+    )
     from wandb_mcp_server.session_manager import current_session_id
 
     safe_params = AnalyticsTracker._sanitise_params(params)
-    _tools_logger.info(f"ToolCall name={tool_name} params={safe_params}")
+    # Demote to DEBUG at standard+ privacy levels. The analytics event emitted in
+    # the finally-block below still captures tool_name/params/success structurally,
+    # so BigQuery / DD / Segment pipelines see the same information regardless.
+    if is_verbose_log_site_gated():
+        _tools_logger.debug(f"ToolCall name={tool_name} params={safe_params}")
+    else:
+        _tools_logger.info(f"ToolCall name={tool_name} params={safe_params}")
 
     ctx = _ToolExecutionContext()
     start = time.monotonic()
