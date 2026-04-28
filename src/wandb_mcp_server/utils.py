@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json as _json
 import logging
 import netrc
 import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -43,6 +45,121 @@ class RedirectLoggerHandler(logging.Handler):
             self.handleError(record)
 
 
+# JSON formatter for structured logs (e.g. when running behind a Datadog Agent that
+# parses JSON log payloads). Keeps a stable set of top-level fields so downstream
+# log backends (Datadog, GCP Cloud Logging) extract `level`, `timestamp`, `logger`,
+# `message` automatically without custom pipelines.
+class _JsonLogFormatter(logging.Formatter):
+    """One JSON object per record. stdlib-only, no extra deps."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: Dict[str, object] = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        # Preserve session prefix context for correlation across request chains
+        session_prefix = getattr(record, "session_id_prefix", "")
+        if session_prefix:
+            payload["session_id_prefix"] = session_prefix
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        # stack_info is separate from exc_info; include if present
+        if record.stack_info:
+            payload["stack_info"] = self.formatStack(record.stack_info)
+        return _json.dumps(payload, default=str)
+
+
+def _build_log_handler() -> logging.Handler:
+    """Build the log handler based on MCP_LOG_FORMAT.
+
+    - "rich" (default): RichHandler for pretty local dev output. Also the Cloud Run
+      production default today -- do NOT change without validating DD dashboards.
+    - "json": Structured JSON lines on stderr. Recommended when running under a DD Agent
+      (agent auto-parses level/timestamp) or in any container where downstream parsers
+      expect structured logs. Opt-in via env var; chart 0.42.2+ sets this when
+      mcp-server.datadog.enabled=true.
+    """
+    log_format = os.environ.get("MCP_LOG_FORMAT", "rich").strip().lower()
+    if log_format == "json":
+        handler: logging.Handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(_JsonLogFormatter())
+        return handler
+    # Default: rich output, preserves today's behavior for local dev + Cloud Run.
+    stderr_console = Console(stderr=True)
+    return RichHandler(
+        console=stderr_console,
+        show_time=True,
+        show_level=True,
+        show_path=False,
+        markup=True,
+    )
+
+
+# Third-party loggers we explicitly reconfigure in JSON mode so every line emitted by
+# the process reaches Datadog (or any other container-log backend) as structured JSON,
+# not just ones from wandb_mcp_server.* modules that go through get_rich_logger().
+#
+# Excludes wandb_mcp_server.analytics: it has its own GCP-Logging-friendly formatter
+# (_StructuredJsonFormatter in analytics.py) that downstream BigQuery pipelines depend
+# on. Reconfiguring it would silently break analytics ingestion.
+_JSON_MODE_THIRD_PARTY_LOGGERS = (
+    "",  # root
+    "uvicorn",
+    "uvicorn.access",
+    "uvicorn.error",
+    "mcp",  # MCP SDK; covers mcp.server.streamable_http etc.
+)
+
+
+_process_logging_configured = False
+
+
+def configure_process_logging() -> None:
+    """Idempotent: install the JSON handler on root + third-party loggers when enabled.
+
+    Called automatically on the first get_rich_logger() invocation (so it fires from
+    any entrypoint -- `wandb_mcp_server` CLI, Cloud Run `uvicorn app:app`, tests).
+    Can also be called explicitly; running twice is a no-op.
+
+    No-op when MCP_LOG_FORMAT=rich (default) so local dev and Cloud Run keep today's
+    behavior. When MCP_LOG_FORMAT=json, replaces handlers on root + uvicorn.* + mcp
+    so access logs and SDK logs also emit structured JSON lines -- closes the gap
+    where get_rich_logger() only covers our own modules.
+
+    Skips wandb_mcp_server.analytics intentionally: it owns its own formatter contract
+    with downstream BigQuery pipelines and must not be reconfigured here.
+    """
+    global _process_logging_configured
+    if _process_logging_configured:
+        return
+    _process_logging_configured = True
+
+    if os.environ.get("MCP_LOG_FORMAT", "rich").strip().lower() != "json":
+        return
+
+    for name in _JSON_MODE_THIRD_PARTY_LOGGERS:
+        lg = logging.getLogger(name)
+        for h in list(lg.handlers):
+            lg.removeHandler(h)
+        lg.addHandler(_build_log_handler())
+        # Third-party loggers should not propagate up to root -- we already installed
+        # the JSON handler on each, and propagation would duplicate every record.
+        # The root logger itself keeps propagate=True (it's the root, nothing above).
+        if name != "":
+            lg.propagate = False
+
+    # Defensive: re-assert that the analytics logger does not propagate to the root
+    # handler. analytics.py sets this at import time, but uvicorn's dictConfig can
+    # reset propagation on existing loggers when the server boots -- resulting in
+    # every analytics event emitting twice (once via the analytics _StructuredJsonFormatter
+    # on stdout, and a minimal duplicate via the root _JsonLogFormatter on stderr).
+    # Runs only in json mode (rich mode returned early above), so Cloud Run today
+    # is unaffected. Observed live on staging revision 00084-p8s; this prevents it.
+    logging.getLogger("wandb_mcp_server.analytics").propagate = False
+
+
 # Moved get_rich_logger here
 def get_rich_logger(
     name: str,
@@ -51,19 +168,21 @@ def get_rich_logger(
     env_var_name: Optional[str] = None,
 ) -> logging.Logger:
     """
-    Configure and return a logger with RichHandler.
+    Configure and return a logger. Output format is controlled by MCP_LOG_FORMAT
+    (values: "rich" default, or "json" for structured one-line-per-record output
+    suitable for containerized deployments behind a Datadog Agent).
+
     The log level can be set via an environment variable if `env_var_name` is provided.
     Otherwise, it defaults to `default_level_str`.
     """
+    # Auto-configure process-wide logging on first call so root + uvicorn.* + mcp
+    # also get the JSON handler when MCP_LOG_FORMAT=json. Runs once per process;
+    # subsequent invocations are no-ops via the _process_logging_configured guard.
+    # This covers every entrypoint (CLI, uvicorn app:app on Cloud Run, tests).
+    configure_process_logging()
+
     logger = logging.getLogger(name)
-    stderr_console = Console(stderr=True)
-    _rich_handler = RichHandler(
-        console=stderr_console,
-        show_time=True,
-        show_level=True,
-        show_path=False,
-        markup=True,
-    )
+    _log_handler = _build_log_handler()
 
     # Inject session prefix into message if provided via LoggerAdapter extra
     class _SessionPrefixInjectFilter(logging.Filter):
@@ -82,7 +201,7 @@ def get_rich_logger(
     logger.addFilter(_SessionPrefixInjectFilter())
     if logger.hasHandlers():
         logger.handlers.clear()
-    logger.addHandler(_rich_handler)
+    logger.addHandler(_log_handler)
 
     # Determine the effective log level string
     # Start with the function's default_level_str (e.g., "INFO")

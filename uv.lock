@@ -2144,7 +2144,7 @@ wheels = [
 
 [[package]]
 name = "wandb-mcp-server"
-version = "0.3.0"
+version = "0.3.3"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

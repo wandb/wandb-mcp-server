@@ -897,6 +897,15 @@ def cli():
     # Load .env only when running as CLI, not on import
     load_dotenv(dotenv_path=Path(__file__).parent.parent.parent / ".env")
 
+    # Normalize process-wide logging BEFORE any logger.info call fires. When
+    # MCP_LOG_FORMAT=json this installs our JSON handler on root + uvicorn.* + mcp,
+    # so access logs and MCP SDK logs are structured too (not just wandb_mcp_server.*
+    # loggers that go through get_rich_logger). No-op when MCP_LOG_FORMAT is unset
+    # or set to "rich" -- preserves today's Cloud Run behavior verbatim.
+    from wandb_mcp_server.utils import configure_process_logging
+
+    configure_process_logging()
+
     # Parse command line arguments
     import simple_parsing
 

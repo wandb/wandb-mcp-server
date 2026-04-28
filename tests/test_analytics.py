@@ -403,3 +403,238 @@ class TestGlobalTracker:
     def test_singleton_respects_env(self):
         t = get_analytics_tracker()
         assert t.enabled is False
+
+
+# -- Privacy levels ------------------------------------------------------------
+
+
+class TestPrivacyLevel:
+    """MCP_LOG_PRIVACY_LEVEL gates how much customer content is redacted.
+
+    Three levels: off (today's behavior, Cloud Run default), standard (free-text
+    redaction, customer K8s default), strict (also hash identifiers).
+    """
+
+    # ---- _resolve_privacy_level --------------------------------------------
+
+    def test_default_is_off(self, monkeypatch):
+        monkeypatch.delenv("MCP_LOG_PRIVACY_LEVEL", raising=False)
+        from wandb_mcp_server.analytics import _resolve_privacy_level
+
+        assert _resolve_privacy_level() == "off"
+
+    def test_standard_recognised(self, monkeypatch):
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "standard")
+        from wandb_mcp_server.analytics import _resolve_privacy_level
+
+        assert _resolve_privacy_level() == "standard"
+
+    def test_strict_recognised(self, monkeypatch):
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "strict")
+        from wandb_mcp_server.analytics import _resolve_privacy_level
+
+        assert _resolve_privacy_level() == "strict"
+
+    def test_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "STANDARD")
+        from wandb_mcp_server.analytics import _resolve_privacy_level
+
+        assert _resolve_privacy_level() == "standard"
+
+    def test_unknown_falls_back_to_off(self, monkeypatch):
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "paranoid")
+        from wandb_mcp_server.analytics import _resolve_privacy_level
+
+        assert _resolve_privacy_level() == "off"
+
+    def test_invalid_level_warns_once(self, monkeypatch):
+        """Typos must surface as a WARNING, not silently downgrade to off.
+
+        Attaches a dedicated handler to the analytics logger because that logger
+        has propagate=False (BigQuery contract), so pytest's root-attached caplog
+        cannot see it.
+        """
+        import wandb_mcp_server.analytics as a
+
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "stict")
+        a._warned_invalid_privacy_level = False  # reset the latch
+
+        captured: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                captured.append(record)
+
+        handler = _Capture(level=logging.WARNING)
+        a.logger.addHandler(handler)
+        try:
+            assert a._resolve_privacy_level() == "off"
+            # Second call must not double-log (latch active)
+            assert a._resolve_privacy_level() == "off"
+        finally:
+            a.logger.removeHandler(handler)
+
+        warnings = [r for r in captured if r.levelname == "WARNING" and "MCP_LOG_PRIVACY_LEVEL" in r.getMessage()]
+        assert len(warnings) == 1, f"expected exactly one warning for invalid level, got {len(warnings)}"
+        assert "stict" in warnings[0].getMessage()
+
+    def test_organization_hashed_at_strict(self):
+        """organization is a customer identifier (query_registry tool param); hash at strict."""
+        result = AnalyticsTracker._sanitise_params({"organization": "acme-corp"}, level="strict")
+        assert result["organization"].startswith("<h:")
+
+    # ---- _sanitise_params: off mode is byte-identical to pre-amend ---------
+
+    def test_off_preserves_free_text_values(self):
+        """BigQuery contract: off-mode must pass free-text values through unchanged."""
+        params = {"query": "SELECT * FROM runs", "description": "my analysis"}
+        result = AnalyticsTracker._sanitise_params(params, level="off")
+        assert result["query"] == "SELECT * FROM runs"
+        assert result["description"] == "my analysis"
+
+    def test_off_preserves_identifiers(self):
+        params = {"entity_name": "acme-corp", "project_name": "llm-eval"}
+        result = AnalyticsTracker._sanitise_params(params, level="off")
+        assert result["entity_name"] == "acme-corp"
+        assert result["project_name"] == "llm-eval"
+
+    def test_off_still_redacts_sensitive_keys(self):
+        """The existing api_key/token redaction must still fire at off level."""
+        result = AnalyticsTracker._sanitise_params({"api_key": "leak"}, level="off")
+        assert result["api_key"] == "<redacted>"
+
+    # ---- _sanitise_params: standard mode redacts free-text values ----------
+
+    def test_standard_redacts_free_text_values(self):
+        params = {
+            "query": "SELECT * FROM runs",
+            "question": "How does W&B work?",
+            "description": "my private analysis",
+            "title": "Internal eval",
+        }
+        result = AnalyticsTracker._sanitise_params(params, level="standard")
+        assert result["query"] == f"<redacted: text len={len(params['query'])}>"
+        assert result["question"] == f"<redacted: text len={len(params['question'])}>"
+        assert result["description"] == f"<redacted: text len={len(params['description'])}>"
+        assert result["title"] == f"<redacted: text len={len(params['title'])}>"
+
+    def test_standard_preserves_identifiers(self):
+        """standard should leave entity/project plaintext -- only strict hashes."""
+        params = {"entity_name": "acme-corp", "project_name": "llm-eval"}
+        result = AnalyticsTracker._sanitise_params(params, level="standard")
+        assert result["entity_name"] == "acme-corp"
+        assert result["project_name"] == "llm-eval"
+
+    def test_standard_still_redacts_sensitive_keys(self):
+        result = AnalyticsTracker._sanitise_params({"api_key": "leak"}, level="standard")
+        assert result["api_key"] == "<redacted>"
+
+    def test_standard_preserves_non_string_free_text_values(self):
+        """Redaction only applies to string values; dict/list/int pass through."""
+        params = {"title": {"nested": "data"}, "body": 42}
+        result = AnalyticsTracker._sanitise_params(params, level="standard")
+        # Non-string values still go through the dict/list/primitive branches
+        assert result["title"] == {"nested": "data"}
+        assert result["body"] == 42
+
+    # ---- _sanitise_params: strict mode hashes identifiers ------------------
+
+    def test_strict_hashes_identifier_keys(self):
+        params = {
+            "entity_name": "acme-corp",
+            "project_name": "llm-eval",
+            "run_id": "abc123",
+        }
+        result = AnalyticsTracker._sanitise_params(params, level="strict")
+        for key in ("entity_name", "project_name", "run_id"):
+            assert result[key].startswith("<h:")
+            assert result[key].endswith(">")
+            assert len(result[key]) == len("<h:>") + 12
+
+    def test_strict_hash_is_deterministic_per_value(self):
+        """Same input must hash to the same digest so cohort analytics still work."""
+        r1 = AnalyticsTracker._sanitise_params({"entity_name": "acme"}, level="strict")
+        r2 = AnalyticsTracker._sanitise_params({"entity_name": "acme"}, level="strict")
+        assert r1["entity_name"] == r2["entity_name"]
+
+    def test_strict_different_values_produce_different_hashes(self):
+        r1 = AnalyticsTracker._sanitise_params({"entity_name": "acme"}, level="strict")
+        r2 = AnalyticsTracker._sanitise_params({"entity_name": "beta"}, level="strict")
+        assert r1["entity_name"] != r2["entity_name"]
+
+    def test_strict_also_redacts_free_text(self):
+        """Strict is additive on top of standard."""
+        result = AnalyticsTracker._sanitise_params({"query": "SELECT *", "entity_name": "acme"}, level="strict")
+        assert result["query"] == "<redacted: text len=8>"
+        assert result["entity_name"].startswith("<h:")
+
+    # ---- Nested structures propagate level --------------------------------
+
+    def test_level_propagates_through_nested_dicts(self):
+        result = AnalyticsTracker._sanitise_params({"filters": {"query": "private text"}}, level="standard")
+        assert result["filters"]["query"] == "<redacted: text len=12>"
+
+    def test_level_propagates_through_nested_lists(self):
+        result = AnalyticsTracker._sanitise_params({"filters": [{"query": "private text"}]}, level="standard")
+        assert result["filters"][0]["query"] == "<redacted: text len=12>"
+
+    # ---- Integration through track_tool_call ------------------------------
+
+    def test_track_tool_call_redacts_at_standard(self, capture, monkeypatch):
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "standard")
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_gql",
+            session_id="s",
+            viewer_info="alice",
+            params={"query": "{ viewer { id } }", "entity_name": "acme"},
+        )
+        assert capture.event["params"]["query"].startswith("<redacted: text len=")
+        # entity_name is an identifier, not free-text -> plaintext at standard
+        assert capture.event["params"]["entity_name"] == "acme"
+
+    def test_track_tool_call_hashes_identifiers_at_strict(self, capture, monkeypatch):
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "strict")
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="count_traces",
+            session_id="s",
+            viewer_info=SimpleNamespace(username="alice", email="a@co.com"),
+            params={"entity_name": "acme", "project_name": "eval"},
+        )
+        assert capture.event["params"]["entity_name"].startswith("<h:")
+        assert capture.event["params"]["project_name"].startswith("<h:")
+        # Strict also hashes user_id and email_domain
+        assert capture.event["user_id"].startswith("<h:")
+        assert capture.event["email_domain"].startswith("<h:")
+
+    def test_track_tool_call_off_mode_preserves_identity(self, capture, monkeypatch):
+        """BigQuery contract: off-mode must emit user_id/email_domain plaintext."""
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "off")
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="count_traces",
+            session_id="s",
+            viewer_info=SimpleNamespace(username="alice", email="a@co.com"),
+            params={"entity_name": "acme"},
+        )
+        assert capture.event["user_id"] == "alice"
+        assert capture.event["email_domain"] == "co.com"
+        assert capture.event["params"]["entity_name"] == "acme"
+
+    # ---- is_verbose_log_site_gated ----------------------------------------
+
+    def test_verbose_gated_is_false_at_off(self, monkeypatch):
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "off")
+        from wandb_mcp_server.analytics import is_verbose_log_site_gated
+
+        assert is_verbose_log_site_gated() is False
+
+    def test_verbose_gated_is_true_at_standard(self, monkeypatch):
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "standard")
+        from wandb_mcp_server.analytics import is_verbose_log_site_gated
+
+        assert is_verbose_log_site_gated() is True
+
+    def test_verbose_gated_is_true_at_strict(self, monkeypatch):
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "strict")
+        from wandb_mcp_server.analytics import is_verbose_log_site_gated
+
+        assert is_verbose_log_site_gated() is True
