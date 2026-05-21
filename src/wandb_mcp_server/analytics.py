@@ -14,6 +14,7 @@ datetime handling, cleaner auth integration, and structured event schema.
 """
 
 import hashlib
+import importlib.metadata
 import json
 import logging
 import os
@@ -194,6 +195,19 @@ _REQUIRED_BASE_FIELDS = frozenset({"schema_version", "event_type", "timestamp"})
 logger.info("Analytics ready: MCP_LOG_PRIVACY_LEVEL=%s", _resolve_privacy_level())
 
 
+def _resolve_release_version() -> str:
+    """Return release version for Datadog, Segment, BigQuery, and Hex joins."""
+    explicit = os.environ.get("MCP_RELEASE_VERSION") or os.environ.get("DD_VERSION")
+    if explicit:
+        return explicit.strip()
+    for package_name in ("wandb_mcp_server", "wandb-mcp-server"):
+        try:
+            return importlib.metadata.version(package_name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+    return "0.0.0"
+
+
 def _utcnow_iso() -> str:
     """Return current UTC time in ISO-8601 format."""
     return datetime.now(UTC).isoformat()
@@ -342,6 +356,7 @@ class AnalyticsTracker:
             "schema_version": SCHEMA_VERSION,
             "event_type": event_type,
             "timestamp": _utcnow_iso(),
+            "release_version": _resolve_release_version(),
         }
         deployment_id = os.environ.get("MCP_DEPLOYMENT_ID")
         if deployment_id:
