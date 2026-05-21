@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 import wandb
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.config import WANDB_BASE_URL
+from wandb_mcp_server.config import MCP_HOSTED_MODE, MCP_MAX_HISTORY_SAMPLES, WANDB_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -113,7 +113,10 @@ def get_run_history(
         except Exception as e:
             raise ValueError(f"Failed to access run {entity_name}/{project_name}/{run_id}: {type(e).__name__}")
 
-        clamped_samples = min(samples, MAX_HISTORY_ROWS)
+        hosted_limit_applied = MCP_HOSTED_MODE and samples > MCP_MAX_HISTORY_SAMPLES
+        clamped_samples = min(
+            samples, MAX_HISTORY_ROWS, MCP_MAX_HISTORY_SAMPLES if MCP_HOSTED_MODE else MAX_HISTORY_ROWS
+        )
 
         try:
             if min_step is not None or max_step is not None:
@@ -163,6 +166,11 @@ def get_run_history(
             result_dict["truncation_note"] = (
                 f"Downsampled from {original_count} to {len(clean_rows)} rows to fit token budget. "
                 "Use keys= to select fewer metrics or reduce samples."
+            )
+        if hosted_limit_applied:
+            result_dict["hosted_limit_note"] = (
+                f"Hosted MCP limits history responses to {MCP_MAX_HISTORY_SAMPLES} sampled rows. "
+                "Reduce samples or use keys= to select fewer metrics."
             )
         return json.dumps(result_dict)
 

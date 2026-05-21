@@ -90,3 +90,37 @@ class TestErrorPayloads:
         assert parsed["error"] == "query_too_large"
         assert parsed["trace_count"] == 1000
         assert len(parsed["suggestions"]) == 4
+
+    def test_structured_error_helper(self):
+        from wandb_mcp_server.config import structured_error
+
+        payload = structured_error("timeout", "Tool timed out", timeout_seconds=30)
+
+        assert payload == {"error": "timeout", "message": "Tool timed out", "timeout_seconds": 30}
+
+
+class TestHostedLimitConfig:
+    """Test hosted-mode limit configuration."""
+
+    def test_hosted_mode_uses_stricter_defaults(self):
+        import importlib
+        import os
+        import wandb_mcp_server.config as cfg
+
+        with patch.dict(os.environ, {"MCP_HOSTED_MODE": "true"}, clear=False):
+            importlib.reload(cfg)
+            assert cfg.MCP_HOSTED_MODE is True
+            assert cfg.MCP_MAX_QUERY_LIMIT == 100
+            assert cfg.MCP_MAX_FULL_TRACE_LIMIT == 25
+            assert cfg.MCP_MAX_HISTORY_SAMPLES == 500
+        importlib.reload(cfg)
+
+    def test_hosted_limits_are_configurable(self):
+        import importlib
+        import os
+        import wandb_mcp_server.config as cfg
+
+        with patch.dict(os.environ, {"MCP_HOSTED_MODE": "true", "MCP_MAX_QUERY_LIMIT": "42"}, clear=False):
+            importlib.reload(cfg)
+            assert cfg.MCP_MAX_QUERY_LIMIT == 42
+        importlib.reload(cfg)

@@ -398,6 +398,30 @@ class TestHistoryTruncation:
 
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_hosted_history_samples_clamped(self, mock_wandb_mod, mock_api_mgr):
+        """Hosted mode clamps requested samples to the configured hosted limit."""
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        mock_run = MagicMock()
+        mock_run.name = "hosted-run"
+        mock_run.lastHistoryStep = 2000
+        mock_run.history.return_value = [{"_step": i, "loss": 0.5} for i in range(5)]
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        with (
+            patch("wandb_mcp_server.mcp_tools.run_history.MCP_HOSTED_MODE", True),
+            patch("wandb_mcp_server.mcp_tools.run_history.MCP_MAX_HISTORY_SAMPLES", 5),
+        ):
+            result = json.loads(get_run_history("e", "p", "run1", samples=100))
+
+        mock_run.history.assert_called_once()
+        assert mock_run.history.call_args.kwargs["samples"] == 5
+        assert "hosted_limit_note" in result
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
     def test_truncation_preserves_step_ordering(self, mock_wandb_mod, mock_api_mgr):
         """Truncated rows must remain sorted by _step."""
         mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")

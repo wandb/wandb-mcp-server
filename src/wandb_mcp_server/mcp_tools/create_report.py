@@ -49,8 +49,10 @@ Always provide the returned report link to the user.
 <when_to_use>
 Call this tool AFTER completing analysis to create a shareable report. Combine
 markdown text (for narrative, tables, and findings) with optional panels (for
-line/bar charts) to produce a polished deliverable. If you have metric data
-from get_run_history_tool, use panels to visualize it in the report.
+native charts, custom Vega charts, and W&B Table-backed charts) to produce a
+polished deliverable. If you have metric data from get_run_history_tool, use
+native panels to visualize it in the report. If chart data already exists in a
+W&B Table or summary table, use custom_chart_table.
 </when_to_use>
 
 <markdown_generation_guide>
@@ -103,7 +105,59 @@ Args:
           Creates a BarPlot comparing metrics across runs.
         - {"type": "run_comparison", "metrics": ["loss", "accuracy"], "run_ids": ["abc", "def"], "title": "Compare"}
           Creates a PanelGrid comparing specific runs on selected metrics.
+        - {"type": "custom_chart", "title": "PR Curve", "query": {"summaryTable": {"tableKey": "pr_curve_table"}},
+           "chart_name": "wandb/line/v0", "chart_fields": {"x": "recall", "y": "precision"},
+           "chart_strings": {"title": "PR Curve"}, "run_ids": ["abc123"], "hide_run_sets": true}
+          Creates a CustomChart from an explicit wandb-workspaces query.
+        - {"type": "custom_chart_table", "title": "PR Curve", "table_name": "pr_curve_table",
+           "chart_name": "wandb/line/v0", "chart_fields": {"x": "recall", "y": "precision"},
+           "chart_strings": {"title": "PR Curve"}, "hide_run_sets": true}
+          Creates a CustomChart from a W&B Table or summary table key via CustomChart.from_table().
+        Use custom_chart_table for PR curves, ROC curves, confusion matrices, and other table-backed Vega charts.
         Panels are additive to markdown content. If omitted, report is markdown-only.
+
+<custom_chart_panel_guide>
+Use native panel types for ordinary run metrics:
+- line: metric history over _step
+- bar: summary metric comparisons
+- scatter: two summary/config fields
+
+Use custom_chart_table when the source data already exists as a W&B Table or
+summary table key. This is the preferred path for precision/recall curves,
+ROC curves, confusion matrices, and table-backed customer visualizations:
+{
+  "type": "custom_chart_table",
+  "title": "Precision-Recall Curve",
+  "table_name": "pr_curve_table",
+  "chart_name": "wandb/line/v0",
+  "chart_fields": {"x": "recall", "y": "precision"},
+  "chart_strings": {"title": "Precision-Recall Curve"},
+  "hide_run_sets": true
+}
+
+Use custom_chart only when you know the exact wandb-workspaces query shape:
+{
+  "type": "custom_chart",
+  "query": {"summaryTable": {"tableKey": "pr_curve_table"}},
+  "chart_name": "wandb/line/v0",
+  "chart_fields": {"x": "recall", "y": "precision"},
+  "chart_strings": {"title": "Precision-Recall Curve"},
+  "run_ids": ["abc123"],
+  "hide_run_sets": true
+}
+
+If the chart data is computed inside MCP rather than already stored as a W&B
+Table, call log_analysis_to_wandb first, then reference the logged run/table
+from this report tool.
+</custom_chart_panel_guide>
+
+<manual_validation_recipe>
+To validate a table-backed custom chart manually:
+1. Pick a run that has a logged W&B Table or summary table key, such as a PR or ROC curve table.
+2. Call create_wandb_report_tool with a custom_chart_table panel using that table_name.
+3. Open the returned report URL and confirm the custom Vega chart renders.
+4. If the chart does not render, verify the table_name and chart_fields match the table columns and UI chart config.
+</manual_validation_recipe>
 
 Returns:
     The URL to the created report
@@ -235,93 +289,11 @@ def _build_panel_blocks(
         panel_type = panel_spec.get("type", "").lower()
         panel_title = panel_spec.get("title", "")
 
-        run_id = panel_spec.get("analysis_run_id")
-        if run_id:
-            # Use query= instead of filters= because wandb-workspaces
-            # ast.literal_eval chokes on dict-based JSON filter strings
-            runset = wr.Runset(
-                entity=entity_name,
-                project=project_name,
-                query=run_id,
-            )
-        else:
-            runset = wr.Runset(entity=entity_name, project=project_name)
-
         try:
-            if panel_type == "line":
-                x_key = panel_spec.get("x", "_step")
-                y_keys = panel_spec.get("y", [])
-                if not y_keys:
-                    continue
-                pg = wr.PanelGrid(
-                    runsets=[runset],
-                    panels=[wr.LinePlot(x=x_key, y=y_keys, title=panel_title)],
-                )
-                blocks.append(pg)
-
-            elif panel_type == "bar":
-                metrics = panel_spec.get("metrics", [])
-                if not metrics:
-                    continue
-                pg = wr.PanelGrid(
-                    runsets=[runset],
-                    panels=[wr.BarPlot(metrics=metrics, title=panel_title)],
-                )
-                blocks.append(pg)
-
-            elif panel_type == "scatter":
-                x_key = panel_spec.get("x", "")
-                y_key = panel_spec.get("y", "")
-                if not x_key or not y_key:
-                    continue
-                pg = wr.PanelGrid(
-                    runsets=[runset],
-                    panels=[wr.ScatterPlot(x=x_key, y=y_key, title=panel_title)],
-                )
-                blocks.append(pg)
-
-            elif panel_type == "run_comparison":
-                metrics = panel_spec.get("metrics", [])
-                run_ids = panel_spec.get("run_ids", [])
-                if not metrics:
-                    continue
-                if run_ids and not run_id:
-                    comp_runset = wr.Runset(
-                        entity=entity_name,
-                        project=project_name,
-                        query=" ".join(run_ids),
-                    )
-                else:
-                    comp_runset = runset
-                pg = wr.PanelGrid(
-                    runsets=[comp_runset],
-                    panels=[wr.LinePlot(x="_step", y=metrics, title=panel_title)],
-                )
-                blocks.append(pg)
-
-            elif panel_type == "markdown_table":
-                headers = panel_spec.get("headers", [])
-                rows = panel_spec.get("rows", [])
-                if not headers or not rows:
-                    continue
-                md = f"### {panel_title}\n\n" if panel_title else ""
-                md += "| " + " | ".join(str(h) for h in headers) + " |\n"
-                md += "| " + " | ".join(["---"] * len(headers)) + " |\n"
-                for row in rows:
-                    md += "| " + " | ".join(str(v) for v in row) + " |\n"
-                blocks.append(wr.MarkdownBlock(md))
-
-            elif panel_type == "markdown_panel":
-                markdown = panel_spec.get("markdown", "")
-                if not markdown:
-                    continue
-                pg = wr.PanelGrid(
-                    runsets=[runset],
-                    panels=[wr.MarkdownPanel(markdown=markdown)],
-                )
-                blocks.append(pg)
-
-            else:
+            block = _build_panel_block(panel_spec, entity_name, project_name)
+            if block is not None:
+                blocks.append(block)
+            elif panel_type not in _KNOWN_PANEL_TYPES:
                 logger.warning(f"Unknown panel type: {panel_type}")
 
         except Exception as e:
@@ -329,6 +301,190 @@ def _build_panel_blocks(
             blocks.append(wr.P(f"*Panel '{panel_title}' could not be rendered.*"))
 
     return blocks
+
+
+_KNOWN_PANEL_TYPES = {
+    "line",
+    "bar",
+    "scatter",
+    "run_comparison",
+    "markdown_table",
+    "markdown_panel",
+    "custom_chart",
+    "custom_chart_table",
+}
+
+
+def _build_panel_block(
+    panel_spec: Dict[str, Any],
+    entity_name: str,
+    project_name: str,
+):
+    """Build one report block for a panel spec."""
+    panel_type = panel_spec.get("type", "").lower()
+    if panel_type in {"line", "bar", "scatter", "run_comparison", "markdown_table", "markdown_panel"}:
+        return _build_native_panel(panel_spec, entity_name, project_name)
+    if panel_type == "custom_chart":
+        return _build_custom_chart_panel(panel_spec, entity_name, project_name)
+    if panel_type == "custom_chart_table":
+        return _build_custom_chart_from_table_panel(panel_spec, entity_name, project_name)
+    return None
+
+
+def _build_runset(
+    panel_spec: Dict[str, Any],
+    entity_name: str,
+    project_name: str,
+    *,
+    include_run_ids: bool = False,
+):
+    """Build a Runset, preserving the query= workaround used by current panels."""
+    run_id = panel_spec.get("analysis_run_id")
+    if run_id:
+        # Use query= instead of filters= because wandb-workspaces
+        # ast.literal_eval chokes on dict-based JSON filter strings.
+        return wr.Runset(entity=entity_name, project=project_name, query=run_id)
+
+    run_ids = panel_spec.get("run_ids", [])
+    if include_run_ids and run_ids:
+        return wr.Runset(entity=entity_name, project=project_name, query=" ".join(run_ids))
+
+    return wr.Runset(entity=entity_name, project=project_name)
+
+
+def _build_panel_grid(panel_spec: Dict[str, Any], runset, panel):
+    """Wrap one panel in a PanelGrid."""
+    return wr.PanelGrid(
+        runsets=[runset],
+        hide_run_sets=bool(panel_spec.get("hide_run_sets", False)),
+        panels=[panel],
+    )
+
+
+def _build_native_panel(
+    panel_spec: Dict[str, Any],
+    entity_name: str,
+    project_name: str,
+):
+    """Build existing native/markdown panel types."""
+    panel_type = panel_spec.get("type", "").lower()
+    panel_title = panel_spec.get("title", "")
+    runset = _build_runset(panel_spec, entity_name, project_name)
+
+    if panel_type == "line":
+        x_key = panel_spec.get("x", "_step")
+        y_keys = panel_spec.get("y", [])
+        if not y_keys:
+            return None
+        return _build_panel_grid(panel_spec, runset, wr.LinePlot(x=x_key, y=y_keys, title=panel_title))
+
+    if panel_type == "bar":
+        metrics = panel_spec.get("metrics", [])
+        if not metrics:
+            return None
+        return _build_panel_grid(panel_spec, runset, wr.BarPlot(metrics=metrics, title=panel_title))
+
+    if panel_type == "scatter":
+        x_key = panel_spec.get("x", "")
+        y_key = panel_spec.get("y", "")
+        if not x_key or not y_key:
+            return None
+        return _build_panel_grid(panel_spec, runset, wr.ScatterPlot(x=x_key, y=y_key, title=panel_title))
+
+    if panel_type == "run_comparison":
+        metrics = panel_spec.get("metrics", [])
+        run_ids = panel_spec.get("run_ids", [])
+        if not metrics:
+            return None
+        if run_ids and not panel_spec.get("analysis_run_id"):
+            comp_runset = wr.Runset(entity=entity_name, project=project_name, query=" ".join(run_ids))
+        else:
+            comp_runset = runset
+        return _build_panel_grid(panel_spec, comp_runset, wr.LinePlot(x="_step", y=metrics, title=panel_title))
+
+    if panel_type == "markdown_table":
+        headers = panel_spec.get("headers", [])
+        rows = panel_spec.get("rows", [])
+        if not headers or not rows:
+            return None
+        md = f"### {panel_title}\n\n" if panel_title else ""
+        md += "| " + " | ".join(str(h) for h in headers) + " |\n"
+        md += "| " + " | ".join(["---"] * len(headers)) + " |\n"
+        for row in rows:
+            md += "| " + " | ".join(str(v) for v in row) + " |\n"
+        return wr.MarkdownBlock(md)
+
+    if panel_type == "markdown_panel":
+        markdown = panel_spec.get("markdown", "")
+        if not markdown:
+            return None
+        return _build_panel_grid(panel_spec, runset, wr.MarkdownPanel(markdown=markdown))
+
+    return None
+
+
+def _build_custom_chart_panel(
+    panel_spec: Dict[str, Any],
+    entity_name: str,
+    project_name: str,
+):
+    """Build a CustomChart from an explicit workspaces query."""
+    query = _required_dict(panel_spec, "query")
+    chart_fields = _required_dict(panel_spec, "chart_fields")
+    chart_strings = _optional_dict(panel_spec, "chart_strings")
+    chart_name = _required_string(panel_spec, "chart_name")
+    runset = _build_runset(panel_spec, entity_name, project_name, include_run_ids=True)
+    chart = wr.CustomChart(
+        query=query,
+        chart_name=chart_name,
+        chart_fields=chart_fields,
+        chart_strings=chart_strings,
+    )
+    return _build_panel_grid(panel_spec, runset, chart)
+
+
+def _build_custom_chart_from_table_panel(
+    panel_spec: Dict[str, Any],
+    entity_name: str,
+    project_name: str,
+):
+    """Build a CustomChart backed by a W&B Table or summary table key."""
+    table_name = _required_string(panel_spec, "table_name")
+    chart_fields = _required_dict(panel_spec, "chart_fields")
+    chart_strings = _optional_dict(panel_spec, "chart_strings")
+    chart_name = panel_spec.get("chart_name") or panel_spec.get("title") or ""
+    runset = _build_runset(panel_spec, entity_name, project_name, include_run_ids=True)
+    chart = wr.CustomChart.from_table(
+        table_name,
+        chart_fields=chart_fields,
+        chart_strings=chart_strings,
+    )
+    if chart_name:
+        chart.chart_name = chart_name
+    return _build_panel_grid(panel_spec, runset, chart)
+
+
+def _required_string(panel_spec: Dict[str, Any], key: str) -> str:
+    value = panel_spec.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} must be a non-empty string")
+    return value
+
+
+def _required_dict(panel_spec: Dict[str, Any], key: str) -> Dict[str, Any]:
+    value = panel_spec.get(key)
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"{key} must be a non-empty object")
+    return value
+
+
+def _optional_dict(panel_spec: Dict[str, Any], key: str) -> Dict[str, Any]:
+    value = panel_spec.get(key, {})
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be an object")
+    return value
 
 
 def parse_markdown_to_blocks(
