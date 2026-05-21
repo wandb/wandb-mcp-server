@@ -161,6 +161,99 @@ class TestBuildPanelBlocks:
         assert mock_wr.PanelGrid.call_count == 2
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_custom_chart_panel(self, mock_wr):
+        mock_wr.PanelGrid = MagicMock()
+        mock_wr.CustomChart = MagicMock(return_value="CustomChart")
+        mock_wr.Runset = MagicMock(return_value="Runset")
+
+        panels = [
+            {
+                "type": "custom_chart",
+                "title": "PR Curve",
+                "query": {"summaryTable": {"tableKey": "pr_curve_table"}},
+                "chart_name": "wandb/line/v0",
+                "chart_fields": {"x": "recall", "y": "precision"},
+                "chart_strings": {"title": "PR Curve"},
+                "run_ids": ["abc123"],
+                "hide_run_sets": True,
+            }
+        ]
+
+        blocks = _build_panel_blocks(panels, "entity", "project")
+
+        assert len(blocks) == 1
+        mock_wr.Runset.assert_called_once_with(entity="entity", project="project", query="abc123")
+        mock_wr.CustomChart.assert_called_once_with(
+            query={"summaryTable": {"tableKey": "pr_curve_table"}},
+            chart_name="wandb/line/v0",
+            chart_fields={"x": "recall", "y": "precision"},
+            chart_strings={"title": "PR Curve"},
+        )
+        mock_wr.PanelGrid.assert_called_once_with(runsets=["Runset"], hide_run_sets=True, panels=["CustomChart"])
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_custom_chart_table_panel(self, mock_wr):
+        chart = MagicMock()
+        mock_wr.PanelGrid = MagicMock()
+        mock_wr.CustomChart.from_table = MagicMock(return_value=chart)
+        mock_wr.Runset = MagicMock(return_value="Runset")
+
+        panels = [
+            {
+                "type": "custom_chart_table",
+                "title": "PR Curve",
+                "table_name": "pr_curve_table",
+                "chart_name": "wandb/line/v0",
+                "chart_fields": {"x": "recall", "y": "precision"},
+                "chart_strings": {"title": "PR Curve"},
+            }
+        ]
+
+        blocks = _build_panel_blocks(panels, "entity", "project")
+
+        assert len(blocks) == 1
+        mock_wr.CustomChart.from_table.assert_called_once_with(
+            "pr_curve_table",
+            chart_fields={"x": "recall", "y": "precision"},
+            chart_strings={"title": "PR Curve"},
+        )
+        assert chart.chart_name == "wandb/line/v0"
+        mock_wr.PanelGrid.assert_called_once_with(runsets=["Runset"], hide_run_sets=False, panels=[chart])
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_custom_chart_invalid_spec_falls_back(self, mock_wr):
+        mock_wr.P = MagicMock(return_value="fallback")
+        panels = [{"type": "custom_chart", "title": "Broken", "chart_name": "wandb/line/v0"}]
+
+        blocks = _build_panel_blocks(panels, "entity", "project")
+
+        assert blocks == ["fallback"]
+        mock_wr.P.assert_called_once_with("*Panel 'Broken' could not be rendered.*")
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_mixed_native_markdown_and_custom_chart_panels(self, mock_wr):
+        mock_wr.PanelGrid = MagicMock(side_effect=lambda **kw: f"grid:{kw['panels'][0]}")
+        mock_wr.LinePlot = MagicMock(return_value="line")
+        mock_wr.CustomChart = MagicMock(return_value="custom")
+        mock_wr.MarkdownBlock = MagicMock(return_value="markdown")
+        mock_wr.Runset = MagicMock(return_value="Runset")
+
+        panels = [
+            {"type": "markdown_table", "headers": ["Metric", "Value"], "rows": [["p50", "1s"]]},
+            {"type": "line", "x": "_step", "y": ["loss"], "title": "Loss"},
+            {
+                "type": "custom_chart",
+                "query": {"summaryTable": {"tableKey": "curve"}},
+                "chart_name": "wandb/line/v0",
+                "chart_fields": {"x": "recall", "y": "precision"},
+            },
+        ]
+
+        blocks = _build_panel_blocks(panels, "entity", "project")
+
+        assert blocks == ["markdown", "grid:line", "grid:custom"]
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     def test_markdown_table_with_unicode_titles(self, mock_wr):
         """Report panels with unicode characters in titles should not crash."""
         mock_wr.PanelGrid = MagicMock()
@@ -243,3 +336,40 @@ class TestCreateReportWithPanels:
         assert len(blocks) >= 3
         # First block is security notice
         assert "MCP Server" in str(blocks[0])
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    @patch("wandb_mcp_server.api_client.WandBApiManager")
+    def test_create_report_with_custom_chart_table_block_order(self, mock_api_mgr, mock_wr):
+        """Custom chart table panels keep the report block ordering contract."""
+        mock_api_mgr.get_api_key.return_value = "fake_key"
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+
+        mock_report = MagicMock()
+        mock_report.url = "https://wandb.ai/report/789"
+        mock_wr.Report.return_value = mock_report
+        mock_wr.P = MagicMock(side_effect=lambda text: f"P:{text}")
+        mock_wr.H2 = MagicMock(side_effect=lambda text: f"H2:{text}")
+        mock_wr.PanelGrid = MagicMock(side_effect=lambda **kw: "PanelGrid")
+        mock_wr.CustomChart.from_table = MagicMock(return_value=MagicMock())
+        mock_wr.Runset = MagicMock()
+
+        result = create_report(
+            "entity",
+            "project",
+            "Custom Chart Report",
+            markdown_report_text="Hello world",
+            panels=[
+                {
+                    "type": "custom_chart_table",
+                    "table_name": "pr_curve_table",
+                    "chart_name": "wandb/line/v0",
+                    "chart_fields": {"x": "recall", "y": "precision"},
+                }
+            ],
+        )
+
+        assert result["url"] == "https://wandb.ai/report/789"
+        blocks = mock_report.blocks
+        assert "MCP Server" in str(blocks[0])
+        assert "H2:Charts" in blocks
+        assert blocks[-1] == "PanelGrid"
