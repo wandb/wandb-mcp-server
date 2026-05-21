@@ -76,6 +76,7 @@ class TestSuccessfulToolCall:
         seg = seg_payloads[0]
         assert seg["event"] == "mcp_server.tool_call"
         assert seg["properties"]["release_version"] == "0.3.1"
+        assert seg["properties"]["local_version"] == "0.3.1"
         assert seg["properties"]["tool_name"] == "query_traces"
         assert seg["properties"]["success"] is True
         assert seg["properties"]["error"] is None
