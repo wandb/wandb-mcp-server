@@ -100,10 +100,6 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
     if event.get("release_version"):
         properties["release_version"] = event["release_version"]
-        # Existing Hex MCP analytics tables expose `local_version`, not
-        # `release_version`. Populate both so 0.4.4 is queryable immediately
-        # without waiting for downstream Segment schema changes.
-        properties["local_version"] = event["release_version"]
     for key in property_keys:
         if key in event:
             properties[key] = event[key]
