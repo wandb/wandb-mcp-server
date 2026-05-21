@@ -320,6 +320,30 @@ def register_tools(mcp_instance: FastMCP) -> None:
         if detail_level == "full":
             return_full_data = True
 
+        from wandb_mcp_server.config import (
+            MCP_HOSTED_MODE,
+            MCP_MAX_FULL_TRACE_LIMIT,
+            MCP_MAX_QUERY_LIMIT,
+            structured_error,
+        )
+
+        hosted_limit = MCP_MAX_FULL_TRACE_LIMIT if return_full_data else MCP_MAX_QUERY_LIMIT
+        if MCP_HOSTED_MODE and limit > hosted_limit and not metadata_only:
+            return json.dumps(
+                structured_error(
+                    "quota_exceeded",
+                    f"Hosted MCP trace queries are limited to {hosted_limit} traces for detail_level='{detail_level}'.",
+                    limit=limit,
+                    max_limit=hosted_limit,
+                    suggestions=[
+                        "Use detail_level='schema' for broad discovery.",
+                        f"Set limit={hosted_limit} or lower.",
+                        "Use metadata_only=True for counts and stats without trace payloads.",
+                        "Add filters to narrow the result set.",
+                    ],
+                )
+            )
+
         _SCHEMA_COLUMNS = [
             "id",
             "trace_id",
@@ -447,8 +471,9 @@ def register_tools(mcp_instance: FastMCP) -> None:
     async def count_weave_traces_tool(
         entity_name: str, project_name: str, filters: Optional[Dict[str, Any]] = None
     ) -> str:
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
         from wandb_mcp_server.api_client import WandBApiManager
+        from wandb_mcp_server.config import MCP_TOOL_TIMEOUT_SECONDS, structured_error
 
         try:
             root_filters = filters.copy() if filters else {}
@@ -467,10 +492,19 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 root_future = executor.submit(
                     _count_with_context, entity_name=entity_name, project_name=project_name, filters=root_filters
                 )
-                total_count = total_future.result()
-                root_traces_count = root_future.result()
+                total_count = total_future.result(timeout=MCP_TOOL_TIMEOUT_SECONDS)
+                root_traces_count = root_future.result(timeout=MCP_TOOL_TIMEOUT_SECONDS)
 
             return json.dumps({"total_count": total_count, "root_traces_count": root_traces_count})
+        except TimeoutError:
+            logger.error("Timed out in count_weave_traces_tool")
+            return json.dumps(
+                structured_error(
+                    "timeout",
+                    f"Counting traces exceeded the {MCP_TOOL_TIMEOUT_SECONDS}s hosted timeout.",
+                    timeout_seconds=MCP_TOOL_TIMEOUT_SECONDS,
+                )
+            )
         except Exception as e:
             logger.error(f"Error in count_weave_traces_tool: {e}")
             return json.dumps({"error": f"Error counting traces: {str(e)}"})

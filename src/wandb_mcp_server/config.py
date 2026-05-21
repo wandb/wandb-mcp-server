@@ -1,5 +1,22 @@
 import os
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean environment variable."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an integer environment variable."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
 # Centralized configuration for base URLs used across the project.
 # Values are read from environment variables with production defaults.
 
@@ -24,3 +41,20 @@ try:
     MAX_ACCUMULATED_BYTES: int = int(os.getenv("MAX_ACCUMULATED_BYTES", str(1024 * 1024 * 1024)))
 except (ValueError, TypeError):
     MAX_ACCUMULATED_BYTES: int = 1024 * 1024 * 1024  # 1GB
+
+# Hosted-mode limits let Cloud Run deployments use stricter guardrails without
+# changing local/stdio defaults for users running the package themselves.
+MCP_HOSTED_MODE: bool = _env_bool("MCP_HOSTED_MODE", False)
+MCP_TOOL_TIMEOUT_SECONDS: int = _env_int("MCP_TOOL_TIMEOUT_SECONDS", 30)
+MCP_MAX_QUERY_LIMIT: int = _env_int("MCP_MAX_QUERY_LIMIT", 100 if MCP_HOSTED_MODE else 1000)
+MCP_MAX_FULL_TRACE_LIMIT: int = _env_int("MCP_MAX_FULL_TRACE_LIMIT", 25 if MCP_HOSTED_MODE else 1000)
+MCP_MAX_HISTORY_SAMPLES: int = _env_int("MCP_MAX_HISTORY_SAMPLES", 500 if MCP_HOSTED_MODE else 2000)
+MCP_MAX_GQL_ITEMS: int = _env_int("MCP_MAX_GQL_ITEMS", 100 if MCP_HOSTED_MODE else 1000)
+MCP_MAX_GQL_ITEMS_PER_PAGE: int = _env_int("MCP_MAX_GQL_ITEMS_PER_PAGE", 50 if MCP_HOSTED_MODE else 200)
+
+
+def structured_error(error: str, message: str, **extra: object) -> dict[str, object]:
+    """Build a standard MCP JSON error payload."""
+    payload: dict[str, object] = {"error": error, "message": message}
+    payload.update(extra)
+    return payload

@@ -561,8 +561,26 @@ def query_paginated_wandb_gql(
             "max_items": max_items,
             "items_per_page": items_per_page,
         },
-    ):
+    ) as ctx:
         try:
+            from wandb_mcp_server.config import (
+                MCP_HOSTED_MODE,
+                MCP_MAX_GQL_ITEMS,
+                MCP_MAX_GQL_ITEMS_PER_PAGE,
+            )
+
+            if MCP_HOSTED_MODE:
+                if max_items > MCP_MAX_GQL_ITEMS:
+                    logger.warning("Clamping hosted GraphQL max_items from %s to %s", max_items, MCP_MAX_GQL_ITEMS)
+                    max_items = MCP_MAX_GQL_ITEMS
+                if items_per_page > MCP_MAX_GQL_ITEMS_PER_PAGE:
+                    logger.warning(
+                        "Clamping hosted GraphQL items_per_page from %s to %s",
+                        items_per_page,
+                        MCP_MAX_GQL_ITEMS_PER_PAGE,
+                    )
+                    items_per_page = MCP_MAX_GQL_ITEMS_PER_PAGE
+
             logger.info("--- Inside query_paginated_wandb_gql: Step 0: Execute Initial Query ---")
 
             page1_vars_func = variables.copy() if variables is not None else {}
@@ -582,6 +600,7 @@ def query_paginated_wandb_gql(
                 parsed_initial_query = gql(query.strip())
             except Exception as e:
                 logger.error(f"Failed to parse initial query with wandb_gql: {e}")
+                ctx.mark_error(f"invalid_input: {e}")
                 return {"errors": [{"message": f"Failed to parse initial query: {e}"}]}
 
             try:
@@ -589,9 +608,11 @@ def query_paginated_wandb_gql(
                 result_dict = copy.deepcopy(result1)
                 if "errors" in result_dict:
                     logger.error(f"GraphQL errors in initial response: {result_dict['errors']}")
+                    ctx.mark_error("upstream_error: GraphQL errors in initial response")
                     return result_dict
             except Exception as e:
                 logger.error(f"Failed to execute initial GraphQL query: {e}", exc_info=True)
+                ctx.mark_error(f"upstream_error: {e}")
                 return {"errors": [{"message": f"Failed to execute initial query: {e}"}]}
 
             detected_paths = find_paginated_collections(result_dict)
@@ -789,6 +810,7 @@ def query_paginated_wandb_gql(
         except Exception as e:
             error_message = f"Critical error in paginated GraphQL query function: {str(e)}\n{traceback.format_exc()}"
             logger.error(error_message)
+            ctx.mark_error(f"query_failed: {e}")
             if result_dict:
                 if "errors" not in result_dict:
                     result_dict["errors"] = []
