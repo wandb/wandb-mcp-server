@@ -12,6 +12,8 @@ This server provides tools for:
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import json
 import logging
 import os
@@ -92,6 +94,83 @@ from wandb_mcp_server.weave_api.models import QueryResult
 # Configure logging (no side effects beyond logger setup)
 logging.basicConfig(level=logging.INFO)
 logger = get_rich_logger("weave-mcp-server", default_level_str="WARNING", env_var_name="MCP_SERVER_LOG_LEVEL")
+
+_COUNT_EXECUTOR = ThreadPoolExecutor(
+    max_workers=int(os.environ.get("MCP_COUNT_TOOL_WORKERS", "8")),
+    thread_name_prefix="mcp-count",
+)
+
+
+def _count_traces_with_context(
+    api_key: Optional[str],
+    entity_name: str,
+    project_name: str,
+    filters: Dict[str, Any],
+    request_timeout: int,
+) -> int:
+    """Run count_traces inside a worker while preserving the request API key."""
+    from wandb_mcp_server.api_client import WandBApiManager
+
+    token = WandBApiManager.set_context_api_key(api_key) if api_key else None
+    try:
+        return count_traces(
+            entity_name=entity_name,
+            project_name=project_name,
+            filters=filters,
+            request_timeout=request_timeout,
+        )
+    finally:
+        if token is not None:
+            WandBApiManager.reset_context_api_key(token)
+
+
+async def _count_traces_with_deadline(
+    api_key: Optional[str],
+    entity_name: str,
+    project_name: str,
+    filters: Dict[str, Any],
+    deadline_seconds: int,
+) -> int:
+    """Run count_traces without letting executor shutdown extend wall time."""
+    request_timeout = max(1, deadline_seconds - 2)
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(
+        _COUNT_EXECUTOR,
+        partial(
+            _count_traces_with_context,
+            api_key,
+            entity_name,
+            project_name,
+            filters,
+            request_timeout,
+        ),
+    )
+    try:
+        return await asyncio.wait_for(future, timeout=deadline_seconds)
+    except asyncio.TimeoutError:
+        future.cancel()
+        raise
+
+
+async def _count_traces_or_none(
+    api_key: Optional[str],
+    entity_name: str,
+    project_name: str,
+    filters: Dict[str, Any],
+    deadline_seconds: int,
+) -> int | None:
+    """Best-effort count for preflight/enrichment paths."""
+    try:
+        return await _count_traces_with_deadline(
+            api_key,
+            entity_name,
+            project_name,
+            filters,
+            deadline_seconds,
+        )
+    except Exception:
+        logger.info("count_traces skipped after timeout or error", exc_info=True)
+        return None
 
 
 # ===============================================================================
@@ -298,7 +377,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         filters: Optional[Dict[str, Any]] = None,
         sort_by: str = "started_at",
         sort_direction: str = "desc",
-        limit: int = 1000,
+        limit: Optional[int] = None,
         include_costs: bool = True,
         include_feedback: bool = True,
         columns: Optional[List[str]] = None,
@@ -324,22 +403,38 @@ def register_tools(mcp_instance: FastMCP) -> None:
             MCP_HOSTED_MODE,
             MCP_MAX_FULL_TRACE_LIMIT,
             MCP_MAX_QUERY_LIMIT,
+            COST_SORT_FIELDS,
             structured_error,
         )
+        from wandb_mcp_server.api_client import WandBApiManager
 
         hosted_limit = MCP_MAX_FULL_TRACE_LIMIT if return_full_data else MCP_MAX_QUERY_LIMIT
-        if MCP_HOSTED_MODE and limit > hosted_limit and not metadata_only:
+        effective_limit = hosted_limit if MCP_HOSTED_MODE and limit is None else (1000 if limit is None else limit)
+        if MCP_HOSTED_MODE and effective_limit > hosted_limit:
             return json.dumps(
                 structured_error(
                     "quota_exceeded",
                     f"Hosted MCP trace queries are limited to {hosted_limit} traces for detail_level='{detail_level}'.",
-                    limit=limit,
+                    limit=effective_limit,
                     max_limit=hosted_limit,
                     suggestions=[
                         "Use detail_level='schema' for broad discovery.",
                         f"Set limit={hosted_limit} or lower.",
-                        "Use metadata_only=True for counts and stats without trace payloads.",
+                        "Use count_weave_traces_tool for aggregate counts without trace payloads.",
                         "Add filters to narrow the result set.",
+                    ],
+                )
+            )
+        if MCP_HOSTED_MODE and sort_by in COST_SORT_FIELDS:
+            return json.dumps(
+                structured_error(
+                    "quota_exceeded",
+                    f"Hosted MCP does not support sort_by='{sort_by}' because it requires a large first-pass scan.",
+                    sort_by=sort_by,
+                    suggestions=[
+                        "Add time_range or op_name_contains filters.",
+                        "Sort by started_at, then inspect costs in the bounded result set.",
+                        "Use count_weave_traces_tool to size the query first.",
                     ],
                 )
             )
@@ -359,26 +454,33 @@ def register_tools(mcp_instance: FastMCP) -> None:
             effective_columns = _SCHEMA_COLUMNS
 
         try:
-            if detail_level != "schema" and limit > 100 and not metadata_only:
-                try:
-                    pre_count = count_traces(entity_name, project_name, filters or {})
-                    if pre_count > 500:
-                        return json.dumps(
-                            {
-                                "error": "query_too_large",
-                                "message": f"Found {pre_count} matching traces. Queries over 500 traces "
-                                f"risk server memory limits. Narrow your query.",
-                                "trace_count": pre_count,
-                                "suggestions": [
-                                    "detail_level='schema' (structural fields only, fast)",
-                                    f"limit={min(100, pre_count)} (reduce result count)",
-                                    "metadata_only=True (counts and stats without trace data)",
-                                    "Add filters to narrow results",
-                                ],
-                            }
-                        )
-                except Exception:
-                    pass
+            api_key = WandBApiManager.get_api_key()
+            from wandb_mcp_server.config import MCP_TOOL_TIMEOUT_SECONDS
+
+            count_deadline = min(10, MCP_TOOL_TIMEOUT_SECONDS)
+            if detail_level != "schema" and effective_limit > 100 and not metadata_only:
+                pre_count = await _count_traces_or_none(
+                    api_key,
+                    entity_name,
+                    project_name,
+                    filters or {},
+                    count_deadline,
+                )
+                if pre_count and pre_count > 500:
+                    return json.dumps(
+                        {
+                            "error": "query_too_large",
+                            "message": f"Found {pre_count} matching traces. Queries over 500 traces "
+                            f"risk server memory limits. Narrow your query.",
+                            "trace_count": pre_count,
+                            "suggestions": [
+                                "detail_level='schema' (structural fields only, fast)",
+                                f"limit={min(100, pre_count)} (reduce result count)",
+                                "count_weave_traces_tool (counts and stats without trace data)",
+                                "Add filters to narrow results",
+                            ],
+                        }
+                    )
 
             result_model: QueryResult = await query_paginated_weave_traces(
                 entity_name=entity_name,
@@ -387,7 +489,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 filters=filters or {},
                 sort_by=sort_by,
                 sort_direction=sort_direction,
-                target_limit=limit,
+                target_limit=effective_limit,
                 include_costs=include_costs if detail_level != "schema" else False,
                 include_feedback=include_feedback if detail_level != "schema" else False,
                 columns=effective_columns,
@@ -398,12 +500,15 @@ def register_tools(mcp_instance: FastMCP) -> None:
             )
 
             try:
-                matching_count = count_traces(
+                matching_count = await _count_traces_or_none(
+                    api_key,
                     entity_name=entity_name,
                     project_name=project_name,
                     filters=filters or {},
+                    deadline_seconds=count_deadline,
                 )
-                result_model.metadata.total_matching_count = matching_count
+                if matching_count is not None:
+                    result_model.metadata.total_matching_count = matching_count
             except Exception:
                 logger.debug("count_traces for total_matching_count failed", exc_info=True)
 
@@ -459,6 +564,10 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 }
             )
         except Exception as e:
+            from wandb_mcp_server.config import HostedLimitExceeded
+
+            if isinstance(e, HostedLimitExceeded):
+                return json.dumps(structured_error(e.error, str(e), **e.details))
             logger.error(f"Error in query_weave_traces_tool: {e}", exc_info=True)
             return json.dumps(
                 {
@@ -471,7 +580,6 @@ def register_tools(mcp_instance: FastMCP) -> None:
     async def count_weave_traces_tool(
         entity_name: str, project_name: str, filters: Optional[Dict[str, Any]] = None
     ) -> str:
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError
         from wandb_mcp_server.api_client import WandBApiManager
         from wandb_mcp_server.config import MCP_TOOL_TIMEOUT_SECONDS, structured_error
 
@@ -480,23 +588,28 @@ def register_tools(mcp_instance: FastMCP) -> None:
             root_filters["trace_roots_only"] = True
 
             api_key = WandBApiManager.get_api_key()
-
-            def _count_with_context(**kwargs):
-                WandBApiManager.set_context_api_key(api_key)
-                return count_traces(**kwargs)
-
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                total_future = executor.submit(
-                    _count_with_context, entity_name=entity_name, project_name=project_name, filters=filters or {}
-                )
-                root_future = executor.submit(
-                    _count_with_context, entity_name=entity_name, project_name=project_name, filters=root_filters
-                )
-                total_count = total_future.result(timeout=MCP_TOOL_TIMEOUT_SECONDS)
-                root_traces_count = root_future.result(timeout=MCP_TOOL_TIMEOUT_SECONDS)
+            total_count, root_traces_count = await asyncio.wait_for(
+                asyncio.gather(
+                    _count_traces_with_deadline(
+                        api_key,
+                        entity_name,
+                        project_name,
+                        filters or {},
+                        MCP_TOOL_TIMEOUT_SECONDS,
+                    ),
+                    _count_traces_with_deadline(
+                        api_key,
+                        entity_name,
+                        project_name,
+                        root_filters,
+                        MCP_TOOL_TIMEOUT_SECONDS,
+                    ),
+                ),
+                timeout=MCP_TOOL_TIMEOUT_SECONDS,
+            )
 
             return json.dumps({"total_count": total_count, "root_traces_count": root_traces_count})
-        except TimeoutError:
+        except asyncio.TimeoutError:
             logger.error("Timed out in count_weave_traces_tool")
             return json.dumps(
                 structured_error(
