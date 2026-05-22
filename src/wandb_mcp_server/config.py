@@ -51,6 +51,7 @@ MCP_MAX_FULL_TRACE_LIMIT: int = _env_int("MCP_MAX_FULL_TRACE_LIMIT", 25 if MCP_H
 MCP_MAX_HISTORY_SAMPLES: int = _env_int("MCP_MAX_HISTORY_SAMPLES", 500 if MCP_HOSTED_MODE else 2000)
 MCP_MAX_GQL_ITEMS: int = _env_int("MCP_MAX_GQL_ITEMS", 100 if MCP_HOSTED_MODE else 1000)
 MCP_MAX_GQL_ITEMS_PER_PAGE: int = _env_int("MCP_MAX_GQL_ITEMS_PER_PAGE", 50 if MCP_HOSTED_MODE else 200)
+WANDB_MCP_ENABLE_WEAVE_TOOLS: bool = _env_bool("WANDB_MCP_ENABLE_WEAVE_TOOLS", True)
 
 
 def structured_error(error: str, message: str, **extra: object) -> dict[str, object]:

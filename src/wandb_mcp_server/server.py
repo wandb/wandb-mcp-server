@@ -93,6 +93,25 @@ from wandb_mcp_server.weave_api.models import QueryResult
 logging.basicConfig(level=logging.INFO)
 logger = get_rich_logger("weave-mcp-server", default_level_str="WARNING", env_var_name="MCP_SERVER_LOG_LEVEL")
 
+_WEAVE_TOOL_NAMES = {
+    "query_weave_traces_tool",
+    "count_weave_traces_tool",
+    "resolve_trace_roots_tool",
+    "infer_trace_schema_tool",
+    "summarize_evaluation_tool",
+}
+
+
+def _remove_registered_tools(mcp_instance: FastMCP, tool_names: set[str]) -> None:
+    """Remove tools from FastMCP's registry after decorator registration."""
+    tool_manager = getattr(mcp_instance, "_tool_manager", None)
+    tools = getattr(tool_manager, "_tools", None)
+    if not isinstance(tools, dict):
+        logger.warning("Could not remove disabled MCP tools; FastMCP internals changed")
+        return
+    for tool_name in tool_names:
+        tools.pop(tool_name, None)
+
 
 # ===============================================================================
 # SECTION 1: W&B AUTHENTICATION & API KEY SETUP
@@ -849,6 +868,12 @@ def register_tools(mcp_instance: FastMCP) -> None:
             project_name=project_name,
             sample_runs=sample_runs,
         )
+
+    from wandb_mcp_server.config import WANDB_MCP_ENABLE_WEAVE_TOOLS
+
+    if not WANDB_MCP_ENABLE_WEAVE_TOOLS:
+        logger.info("Weave MCP tools disabled by WANDB_MCP_ENABLE_WEAVE_TOOLS=false")
+        _remove_registered_tools(mcp_instance, _WEAVE_TOOL_NAMES)
 
 
 # ===============================================================================
