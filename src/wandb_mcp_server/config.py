@@ -52,6 +52,16 @@ MCP_MAX_HISTORY_SAMPLES: int = _env_int("MCP_MAX_HISTORY_SAMPLES", 500 if MCP_HO
 MCP_MAX_GQL_ITEMS: int = _env_int("MCP_MAX_GQL_ITEMS", 100 if MCP_HOSTED_MODE else 1000)
 MCP_MAX_GQL_ITEMS_PER_PAGE: int = _env_int("MCP_MAX_GQL_ITEMS_PER_PAGE", 50 if MCP_HOSTED_MODE else 200)
 WANDB_MCP_ENABLE_WEAVE_TOOLS: bool = _env_bool("WANDB_MCP_ENABLE_WEAVE_TOOLS", True)
+COST_SORT_FIELDS: frozenset[str] = frozenset({"total_cost", "completion_cost", "prompt_cost"})
+
+
+class HostedLimitExceeded(ValueError):
+    """Raised when a hosted-mode request exceeds configured safety limits."""
+
+    def __init__(self, message: str, *, error: str = "quota_exceeded", **details: object) -> None:
+        super().__init__(message)
+        self.error = error
+        self.details = details
 
 
 def structured_error(error: str, message: str, **extra: object) -> dict[str, object]:
