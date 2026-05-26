@@ -1084,6 +1084,10 @@ def cli():
 
     args = simple_parsing.parse(ServerMCPArgs)
 
+    from wandb_mcp_server.analytics import configure_analytics_logging_for_transport
+
+    configure_analytics_logging_for_transport(args.transport)
+
     # Configure W&B logging behavior
     configure_wandb_logging()
 

@@ -123,15 +123,23 @@ It already uses its own `_StructuredJsonFormatter` ([`src/wandb_mcp_server/analy
 whose schema downstream GCP Cloud Logging -> BigQuery pipelines depend on. Touching
 it would silently break analytics ingestion.
 
+For MCP stdio transport, stdout is the JSON-RPC wire. The CLI reconfigures
+`wandb_mcp_server.analytics` to write structured analytics to stderr in stdio
+mode, while HTTP/container deployments keep stdout for Cloud Logging ingestion.
+If an older stdio build writes analytics JSON to stdout, set
+`MCP_ANALYTICS_DISABLED=true` to suppress analytics as a workaround.
+
 ### Defensive analytics propagation lock
 
 `analytics.py` sets `analytics_logger.propagate = False` at module import time so that
 the analytics record is emitted only by its own `_StructuredJsonFormatter` handler
-(stdout) and never reaches the root logger. However, when the server boots under
+and never reaches the root logger. In HTTP/container deployments this handler
+writes to stdout for Cloud Logging; in stdio deployments it writes to stderr so
+stdout remains pure MCP JSON-RPC. However, when the server boots under
 `uvicorn`, `logging.config.dictConfig` can reset propagation on existing loggers,
 silently re-enabling propagation. In that case every analytics event is emitted
-twice: once via the rich `_StructuredJsonFormatter` payload on stdout, and a
-minimal duplicate via the root `_JsonLogFormatter` on stderr.
+twice: once via the rich `_StructuredJsonFormatter` payload on the analytics
+stream, and a minimal duplicate via the root `_JsonLogFormatter` on stderr.
 
 To prevent this, `configure_process_logging()` re-asserts
 `logging.getLogger("wandb_mcp_server.analytics").propagate = False` after the
@@ -174,7 +182,7 @@ to BigQuery for product analytics. That pipeline depends on plaintext
 preserves this byte-for-byte.
 
 Customer K8s installs do NOT feed W&B's BigQuery; their analytics logger goes
-to stdout for the local Datadog Agent to collect into the customer's own
+to the container log stream for the local Datadog Agent to collect into the customer's own
 Datadog tenant. There's no business need to retain plaintext free-text
 params there, and redaction reduces legal exposure if customer logs are
 subpoenaed, exported, or retained longer than needed. `standard` is the safe
