@@ -557,6 +557,21 @@ class HostedGraphQLPreflightVisitor(gql_visitor.Visitor):
         self.rewrites: list[str] = []
         self.rejections: list[str] = []
 
+    def enter_variable_definition(self, node, key, parent, path, ancestors):
+        if not isinstance(node, gql_ast.VariableDefinitionNode):
+            return
+        if not _HOSTED_LIMIT_VARIABLE_RE.match(node.variable.name.value):
+            return
+        if not isinstance(node.default_value, gql_ast.IntValueNode):
+            return
+
+        requested = int(node.default_value.value)
+        if requested <= self.max_first:
+            return
+
+        node.default_value = gql_ast.IntValueNode(value=str(self.max_first))
+        self.rewrites.append(f"Clamped ${node.variable.name.value} default from {requested} to {self.max_first}")
+
     def enter_field(self, node, key, parent, path, ancestors):
         if not isinstance(node, gql_ast.FieldNode):
             return
@@ -597,13 +612,10 @@ class HostedGraphQLPreflightVisitor(gql_visitor.Visitor):
                     self.rewrites.append(f"Clamped {'/'.join(current_path)} first from {requested} to {self.max_first}")
 
         if not has_first:
-            existing_args.append(
-                gql_ast.ArgumentNode(
-                    name=gql_ast.NameNode(value="first"),
-                    value=gql_ast.IntValueNode(value=str(self.max_first)),
-                )
+            self.rejections.append(
+                "Hosted GraphQL paginated collections must include a first argument so the initial request "
+                f"can be bounded: {'/'.join(current_path)}"
             )
-            self.rewrites.append(f"Added first={self.max_first} to {'/'.join(current_path)}")
 
         node.arguments = tuple(existing_args)
         self.connection_depth += 1
