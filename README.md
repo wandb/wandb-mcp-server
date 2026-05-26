@@ -194,8 +194,20 @@ For local installation, see [Option 2](#general-installation-guide) below.
 ### Mistral Chat
 <details>
 <summary>Configuration setup</summary>
-  Mistral is currently the best supported Chat assistant based on API-key based authentication. 
-  Simply navigate to "[Connectors](https://mistral.ai/news/le-chat-mcp-connectors-memories)" and 1) paste in the URL `https://mcp.withwandb.com/mcp` and 2) select API Key Authentication and paste WANDB API key. 
+
+Mistral Le Chat is currently the best supported chat assistant for API-key based MCP authentication.
+
+Use the **Custom MCP Connector** flow:
+
+1. Open Le Chat and go to **Connectors**.
+2. Add a custom MCP connector.
+3. Set the server URL to `https://mcp.withwandb.com/mcp`.
+4. Select HTTP Bearer Token or API Key authentication.
+5. Paste your W&B API key from [wandb.ai/authorize](https://wandb.ai/authorize).
+
+If the UI asks for a token value, paste the raw W&B API key. If it asks for the full `Authorization` header value, use `Bearer <your-wandb-api-key>`.
+
+If adding the W&B connector from the Le Chat connector directory returns an `integrations.addIntegrationFromStore` 500 error, use the Custom MCP Connector flow above. That error happens in Mistral's connector-store add flow before Le Chat reaches the W&B MCP endpoint.
 </details>
 
 ### Claude Desktop
@@ -495,6 +507,7 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_DEBUG` | Set to `"true"` to enable detailed W&B logging | No |
 | `MCP_AUTH_DISABLED` | Disable HTTP authentication (development only) | No |
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
+| `WANDB_MCP_ENABLE_WEAVE_TOOLS` | Enable Weave trace tools (default: `true`; set `false` for installs without a trace backend) | No |
 | `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |
 
 #### Usage Examples

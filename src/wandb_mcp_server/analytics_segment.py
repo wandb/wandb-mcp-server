@@ -98,6 +98,8 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "schema_version": event.get("schema_version", "1.0"),
         "source": "wandb-mcp-server",
     }
+    if event.get("release_version"):
+        properties["release_version"] = event["release_version"]
     for key in property_keys:
         if key in event:
             properties[key] = event[key]
