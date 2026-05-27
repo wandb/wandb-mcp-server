@@ -182,9 +182,62 @@ analytics_logger = logging.getLogger("wandb_mcp_server.analytics")
 analytics_logger.setLevel(logging.INFO)
 analytics_logger.propagate = False
 
-_handler = logging.StreamHandler(sys.stdout)
-_handler.setFormatter(_StructuredJsonFormatter())
-analytics_logger.addHandler(_handler)
+_ANALYTICS_STREAM_STDOUT = "stdout"
+_ANALYTICS_STREAM_STDERR = "stderr"
+_VALID_ANALYTICS_STREAMS = frozenset({_ANALYTICS_STREAM_STDOUT, _ANALYTICS_STREAM_STDERR})
+
+
+def _resolve_analytics_stream_name(stream: Optional[str] = None) -> str:
+    """Resolve the structured analytics log stream name."""
+    raw = stream or os.environ.get("MCP_ANALYTICS_LOG_STREAM", _ANALYTICS_STREAM_STDOUT)
+    stream_name = raw.strip().lower()
+    if stream_name in _VALID_ANALYTICS_STREAMS:
+        return stream_name
+
+    logger.warning(
+        "MCP_ANALYTICS_LOG_STREAM=%r is not one of %s; falling back to stdout.",
+        raw,
+        sorted(_VALID_ANALYTICS_STREAMS),
+    )
+    return _ANALYTICS_STREAM_STDOUT
+
+
+def configure_analytics_logging(stream: Optional[str] = None) -> str:
+    """Configure the structured analytics logger stream.
+
+    HTTP/container deployments keep stdout so Cloud Logging can parse analytics
+    JSON. Stdio transport must use stderr because stdout is the MCP JSON-RPC
+    wire and any non-protocol line corrupts clients like Claude Desktop.
+
+    Args:
+        stream: Optional explicit stream name, "stdout" or "stderr". If omitted,
+            MCP_ANALYTICS_LOG_STREAM is honored, then stdout is used.
+
+    Returns:
+        The resolved stream name.
+    """
+    stream_name = _resolve_analytics_stream_name(stream)
+    target_stream = sys.stderr if stream_name == _ANALYTICS_STREAM_STDERR else sys.stdout
+
+    analytics_logger.handlers.clear()
+    handler = logging.StreamHandler(target_stream)
+    handler.setFormatter(_StructuredJsonFormatter())
+    analytics_logger.addHandler(handler)
+    analytics_logger.setLevel(logging.INFO)
+    analytics_logger.propagate = False
+    return stream_name
+
+
+def configure_analytics_logging_for_transport(transport: str) -> str:
+    """Configure analytics output for an MCP transport."""
+    if os.environ.get("MCP_ANALYTICS_LOG_STREAM"):
+        return configure_analytics_logging()
+    if transport == "stdio":
+        return configure_analytics_logging(_ANALYTICS_STREAM_STDERR)
+    return configure_analytics_logging(_ANALYTICS_STREAM_STDOUT)
+
+
+configure_analytics_logging()
 
 _REQUIRED_BASE_FIELDS = frozenset({"schema_version", "event_type", "timestamp"})
 
