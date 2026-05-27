@@ -143,11 +143,33 @@ class TestDatadogAttributes:
         assert "usr" not in entry["attributes"]
 
     def test_tool_attributes(self):
-        event = _make_event("tool_call", tool_name="count_traces", success=True)
+        event = _make_event(
+            "tool_call",
+            tool_name="count_traces",
+            mcp_tool_name="count_weave_traces_tool",
+            runtime_surface="cloud_run",
+            transport="http",
+            deployment_type="hosted",
+            environment="production",
+            hosted_mode=True,
+            success=True,
+        )
         entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
         tool = entry["attributes"]["tool"]
         assert tool["name"] == "count_traces"
+        assert tool["mcp_name"] == "count_weave_traces_tool"
         assert tool["success"] is True
+        assert entry["attributes"]["tool_name"] == "count_traces"
+        assert entry["attributes"]["mcp_tool_name"] == "count_weave_traces_tool"
+        assert entry["attributes"]["runtime_surface"] == "cloud_run"
+        assert entry["attributes"]["transport"] == "http"
+        assert entry["attributes"]["deployment_type"] == "hosted"
+        assert entry["attributes"]["environment"] == "production"
+        assert entry["attributes"]["hosted_mode"] is True
+        assert "runtime_surface:cloud_run" in entry["ddtags"]
+        assert "transport:http" in entry["ddtags"]
+        assert "deployment_type:hosted" in entry["ddtags"]
+        assert "mcp_tool_name:count_weave_traces_tool" in entry["ddtags"]
 
     def test_session_id_forwarded(self):
         event = _make_event("tool_call", tool_name="x", success=True, session_id="sess_abc")

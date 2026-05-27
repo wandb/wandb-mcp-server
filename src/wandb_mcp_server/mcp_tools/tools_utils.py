@@ -335,6 +335,7 @@ def track_tool_execution(
     tool_name: str,
     viewer: Any,
     params: Dict[str, Any],
+    mcp_tool_name: Optional[str] = None,
 ):
     """Context manager that wraps MCP tool execution with timing and error capture.
 
@@ -381,6 +382,7 @@ def track_tool_execution(
                 success=ctx.success,
                 error=ctx.error,
                 duration_ms=duration_ms,
+                mcp_tool_name=mcp_tool_name,
             )
         except Exception:
             _tools_logger.debug(f"Analytics tracking failed for {tool_name}")
