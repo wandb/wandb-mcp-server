@@ -19,11 +19,12 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import wandb
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
 from wandb_mcp_server.config import WANDB_BASE_URL
 
 # Import Weave for tracing MCP tool calls
@@ -35,6 +36,20 @@ except ImportError:
     weave = None
     WEAVE_AVAILABLE = False
 
+from wandb_mcp_server.mcp_tools.automations import (
+    LIST_AUTOMATIONS_TOOL_DESCRIPTION,
+    LIST_INTEGRATIONS_TOOL_DESCRIPTION,
+    list_automations,
+    list_integrations,
+)
+from wandb_mcp_server.mcp_tools.count_traces import (
+    COUNT_WEAVE_TRACES_TOOL_DESCRIPTION,
+    count_traces,
+)
+from wandb_mcp_server.mcp_tools.create_report import (
+    CREATE_WANDB_REPORT_TOOL_DESCRIPTION,
+    create_report,
+)
 from wandb_mcp_server.mcp_tools.list_entities import (
     LIST_ENTITIES_TOOL_DESCRIPTION,
     list_entities,
@@ -43,38 +58,23 @@ from wandb_mcp_server.mcp_tools.list_wandb_entities_projects import (
     LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION,
     list_entity_projects,
 )
-from wandb_mcp_server.mcp_tools.create_report import (
-    CREATE_WANDB_REPORT_TOOL_DESCRIPTION,
-    create_report,
+from wandb_mcp_server.mcp_tools.query_artifacts import (
+    COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
+    GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION,
+    LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
+    compare_artifact_versions,
+    get_artifact_details,
+    list_artifact_versions,
 )
-from wandb_mcp_server.mcp_tools.count_traces import (
-    COUNT_WEAVE_TRACES_TOOL_DESCRIPTION,
-    count_traces,
+from wandb_mcp_server.mcp_tools.query_registry import (
+    LIST_REGISTRIES_TOOL_DESCRIPTION,
+    LIST_REGISTRY_COLLECTIONS_TOOL_DESCRIPTION,
+    list_registries,
+    list_registry_collections,
 )
 from wandb_mcp_server.mcp_tools.query_wandb_gql import (
     QUERY_WANDB_GQL_TOOL_DESCRIPTION,
     query_paginated_wandb_gql,
-)
-
-from wandb_mcp_server.mcp_tools.query_registry import (
-    LIST_REGISTRIES_TOOL_DESCRIPTION,
-    list_registries,
-    LIST_REGISTRY_COLLECTIONS_TOOL_DESCRIPTION,
-    list_registry_collections,
-)
-from wandb_mcp_server.mcp_tools.query_artifacts import (
-    LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
-    list_artifact_versions,
-    GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION,
-    get_artifact_details,
-    COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
-    compare_artifact_versions,
-)
-from wandb_mcp_server.mcp_tools.automations import (
-    LIST_AUTOMATIONS_TOOL_DESCRIPTION,
-    list_automations,
-    LIST_INTEGRATIONS_TOOL_DESCRIPTION,
-    list_integrations,
 )
 
 # wandbot removed -- zero usage across 400+ benchmark runs, superseded by search_wandb_docs_tool
@@ -82,7 +82,10 @@ from wandb_mcp_server.mcp_tools.query_weave import (
     QUERY_WEAVE_TRACES_TOOL_DESCRIPTION,
     query_paginated_weave_traces,
 )
-from wandb_mcp_server.utils import get_rich_logger, get_server_args, ServerMCPArgs
+from wandb_mcp_server.utils import ServerMCPArgs, get_rich_logger, get_server_args
+
+if TYPE_CHECKING:
+    from pydantic import PositiveInt
 
 # Export key functions for HF Spaces app
 __all__ = [
@@ -738,6 +741,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         scalars: Optional[Dict[str, float]] = None,
     ) -> str:
         from concurrent.futures import ThreadPoolExecutor
+
         from wandb_mcp_server.api_client import WandBApiManager
 
         try:
@@ -785,12 +789,12 @@ def register_tools(mcp_instance: FastMCP) -> None:
 
     @mcp_instance.tool(description=LIST_INTEGRATIONS_TOOL_DESCRIPTION)
     def list_wandb_integrations_tool(
-        entity: Optional[str] = None,
-        integration_type: Optional[str] = None,
-        max_items: int = 50,
+        entity: str | None = None,
+        kind: str | None = None,
+        max_items: PositiveInt = 50,
     ) -> str:
         """List Slack and webhook integrations for a W&B entity."""
-        return list_integrations(entity=entity, integration_type=integration_type, max_items=max_items)
+        return list_integrations(entity=entity, kind=kind, max_items=max_items)
 
     from wandb_mcp_server.mcp_tools.infer_schema import (
         INFER_TRACE_SCHEMA_TOOL_DESCRIPTION,
