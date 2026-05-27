@@ -1,13 +1,17 @@
 """Tests for the panels parameter on create_wandb_report_tool."""
 
+import importlib
 from unittest.mock import MagicMock, patch
 
 
 from wandb_mcp_server.mcp_tools.create_report import (
     CREATE_WANDB_REPORT_TOOL_DESCRIPTION,
+    _build_layout_blocks,
     _build_panel_blocks,
     create_report,
 )
+
+create_report_module = importlib.import_module("wandb_mcp_server.mcp_tools.create_report")
 
 
 class TestCreateReportPanelsDescription:
@@ -60,12 +64,12 @@ class TestBuildPanelBlocks:
         blocks = _build_panel_blocks(panels, "entity", "project")
 
         assert len(blocks) == 1
-        assert mock_wr.Runset.call_count == 2
+        mock_wr.Runset.assert_called_once_with(entity="entity", project="project", filters='name in ["r1", "r2"]')
         mock_wr.LinePlot.assert_called_once()
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
-    def test_analysis_run_id_uses_query_not_filters(self, mock_wr):
-        """Runset for analysis_run_id must use query= to avoid ast.Dict crash."""
+    def test_analysis_run_id_uses_deterministic_filter(self, mock_wr):
+        """Runset for analysis_run_id uses persisted Reports v2 filters."""
         mock_wr.PanelGrid = MagicMock()
         mock_wr.BarPlot = MagicMock()
         mock_wr.Runset = MagicMock()
@@ -74,12 +78,12 @@ class TestBuildPanelBlocks:
         _build_panel_blocks(panels, "entity", "project")
 
         runset_call = mock_wr.Runset.call_args
-        assert runset_call[1].get("query") == "abc123"
-        assert "filters" not in runset_call[1]
+        assert runset_call[1].get("filters") == 'name == "abc123"'
+        assert "query" not in runset_call[1]
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
-    def test_run_comparison_uses_query_not_filters(self, mock_wr):
-        """run_comparison with run_ids must use query= to avoid ast.Dict crash."""
+    def test_run_comparison_uses_deterministic_filter(self, mock_wr):
+        """run_comparison with run_ids uses a deterministic Reports v2 filter."""
         mock_wr.PanelGrid = MagicMock()
         mock_wr.LinePlot = MagicMock()
         mock_wr.Runset = MagicMock()
@@ -87,9 +91,9 @@ class TestBuildPanelBlocks:
         panels = [{"type": "run_comparison", "metrics": ["loss"], "run_ids": ["r1", "r2"], "title": "Compare"}]
         _build_panel_blocks(panels, "entity", "project")
 
-        comp_call = mock_wr.Runset.call_args_list[1]
-        assert comp_call[1].get("query") == "r1 r2"
-        assert "filters" not in comp_call[1]
+        comp_call = mock_wr.Runset.call_args
+        assert comp_call[1].get("filters") == 'name in ["r1", "r2"]'
+        assert "query" not in comp_call[1]
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     def test_empty_panels_list(self, mock_wr):
@@ -182,7 +186,7 @@ class TestBuildPanelBlocks:
         blocks = _build_panel_blocks(panels, "entity", "project")
 
         assert len(blocks) == 1
-        mock_wr.Runset.assert_called_once_with(entity="entity", project="project", query="abc123")
+        mock_wr.Runset.assert_called_once_with(entity="entity", project="project", filters='name == "abc123"')
         mock_wr.CustomChart.assert_called_once_with(
             query={"summaryTable": {"tableKey": "pr_curve_table"}},
             chart_name="wandb/line/v0",
@@ -252,6 +256,100 @@ class TestBuildPanelBlocks:
         blocks = _build_panel_blocks(panels, "entity", "project")
 
         assert blocks == ["markdown", "grid:line", "grid:custom"]
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_explicit_filters_win_over_run_ids(self, mock_wr):
+        mock_wr.PanelGrid = MagicMock()
+        mock_wr.LinePlot = MagicMock()
+        mock_wr.Runset = MagicMock(return_value="Runset")
+
+        panels = [
+            {
+                "type": "line",
+                "x": "_step",
+                "y": ["loss"],
+                "title": "Loss",
+                "run_ids": ["ignored"],
+                "filters": 'displayName == "Customer Run"',
+            }
+        ]
+
+        _build_panel_blocks(panels, "entity", "project")
+
+        mock_wr.Runset.assert_called_once_with(
+            entity="entity",
+            project="project",
+            filters='displayName == "Customer Run"',
+        )
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_explicit_runset_query_is_search_passthrough(self, mock_wr):
+        mock_wr.PanelGrid = MagicMock()
+        mock_wr.LinePlot = MagicMock()
+        mock_wr.Runset = MagicMock(return_value="Runset")
+
+        panels = [{"type": "line", "x": "_step", "y": ["loss"], "runset_query": "baseline"}]
+
+        _build_panel_blocks(panels, "entity", "project")
+
+        mock_wr.Runset.assert_called_once_with(entity="entity", project="project", query="baseline")
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_panel_grid_groups_multiple_custom_charts(self, mock_wr):
+        mock_wr.H2 = MagicMock(side_effect=lambda text: f"H2:{text}")
+        mock_wr.P = MagicMock(side_effect=lambda text: f"P:{text}")
+        mock_wr.MarkdownBlock = MagicMock(side_effect=lambda text: f"Markdown:{text}")
+        mock_wr.PanelGrid = MagicMock(return_value="PanelGrid")
+        mock_wr.CustomChart = MagicMock(side_effect=lambda **kw: f"Custom:{kw['chart_strings']['title']}")
+        mock_wr.Runset = MagicMock(return_value="Runset")
+
+        blocks = _build_layout_blocks(
+            [
+                {"type": "heading", "level": 2, "text": "Average precision by class"},
+                {"type": "markdown", "text": "These panels share the same filtered runset."},
+                {
+                    "type": "panel_grid",
+                    "run_ids": ["run_a", "run_b"],
+                    "panels": [
+                        {
+                            "type": "custom_chart",
+                            "query": {"summaryTable": {"tableKey": "car_ap"}},
+                            "chart_name": "cruise/bar_chart/v2",
+                            "chart_fields": {"x": "threshold", "y": "ap"},
+                            "chart_strings": {"title": "CAR AP"},
+                        },
+                        {
+                            "type": "custom_chart",
+                            "query": {"summaryTable": {"tableKey": "truck_ap"}},
+                            "chart_name": "cruise/bar_chart/v2",
+                            "chart_fields": {"x": "threshold", "y": "ap"},
+                            "chart_strings": {"title": "TRUCK AP"},
+                        },
+                        {
+                            "type": "custom_chart",
+                            "query": {"summaryTable": {"tableKey": "motorcycle_ap"}},
+                            "chart_name": "cruise/bar_chart/v2",
+                            "chart_fields": {"x": "threshold", "y": "ap"},
+                            "chart_strings": {"title": "MOTORCYCLE AP"},
+                        },
+                    ],
+                },
+            ],
+            "entity",
+            "project",
+        )
+
+        assert blocks == [
+            "H2:Average precision by class",
+            "P:These panels share the same filtered runset.",
+            "PanelGrid",
+        ]
+        mock_wr.Runset.assert_called_once_with(entity="entity", project="project", filters='name in ["run_a", "run_b"]')
+        mock_wr.PanelGrid.assert_called_once_with(
+            runsets=["Runset"],
+            hide_run_sets=False,
+            panels=["Custom:CAR AP", "Custom:TRUCK AP", "Custom:MOTORCYCLE AP"],
+        )
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     def test_markdown_table_with_unicode_titles(self, mock_wr):
@@ -373,3 +471,110 @@ class TestCreateReportWithPanels:
         assert "MCP Server" in str(blocks[0])
         assert "H2:Charts" in blocks
         assert blocks[-1] == "PanelGrid"
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    @patch("wandb_mcp_server.api_client.WandBApiManager")
+    def test_create_report_with_ordered_layout_does_not_add_charts_heading(self, mock_api_mgr, mock_wr):
+        mock_api_mgr.get_api_key.return_value = "fake_key"
+        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+
+        mock_report = MagicMock()
+        mock_report.url = "https://wandb.ai/report/layout"
+        mock_wr.Report.return_value = mock_report
+        mock_wr.P = MagicMock(side_effect=lambda text: f"P:{text}")
+        mock_wr.H2 = MagicMock(side_effect=lambda text: f"H2:{text}")
+        mock_wr.MarkdownBlock = MagicMock(side_effect=lambda text: f"Markdown:{text}")
+        mock_wr.PanelGrid = MagicMock(side_effect=lambda **kw: "PanelGrid")
+        mock_wr.LinePlot = MagicMock(return_value="LinePlot")
+        mock_wr.Runset = MagicMock(return_value="Runset")
+
+        create_report(
+            "entity",
+            "project",
+            "Layout Report",
+            markdown_report_text="Hello world",
+            panels=[
+                {"type": "heading", "level": 2, "text": "Section"},
+                {"type": "markdown", "text": "Section intro"},
+                {"type": "panel_grid", "run_ids": ["run_a"], "panels": [{"type": "line", "y": ["loss"]}]},
+            ],
+        )
+
+        blocks = mock_report.blocks
+        assert "H2:Charts" not in blocks
+        assert blocks[-3:] == ["H2:Section", "P:Section intro", "PanelGrid"]
+
+
+class TestRealWorkspacesReportObjects:
+    @patch("wandb_mcp_server.api_client.WandBApiManager")
+    def test_agent_style_layout_serializes_panel_grid_and_runset_filter(self, mock_api_mgr):
+        """Build the same report shape an agent should send and inspect Reports v2 objects."""
+        mock_api_mgr.get_api_key.return_value = "fake_key"
+        mock_api_mgr.get_api.return_value = MagicMock(viewer={"username": "test-user"})
+
+        fake_api = MagicMock()
+        fake_api.client.app_url = "https://wandb.ai"
+        fake_api.client.execute.return_value = {"project": {"internalId": "project-internal-id"}}
+        captured_reports = []
+
+        def fake_save(report, *args, **kwargs):
+            captured_reports.append(report)
+            report.id = "report-id"
+
+        with (
+            patch.object(create_report_module.wr.Report, "save", fake_save),
+            patch("wandb_workspaces.reports.v2.interface._get_api", return_value=fake_api),
+        ):
+            result = create_report(
+                "entity",
+                "project",
+                "Agent Report",
+                markdown_report_text="# Agent Report\n\n[TOC]",
+                panels=[
+                    {"type": "heading", "level": 2, "text": "Average precision by class"},
+                    {"type": "markdown", "text": "These panels share the same filtered runset."},
+                    {
+                        "type": "panel_grid",
+                        "run_ids": ["run_a", "run_b"],
+                        "hide_run_sets": False,
+                        "panels": [
+                            {
+                                "type": "custom_chart",
+                                "query": {"summaryTable": {"tableKey": "car_ap"}},
+                                "chart_name": "cruise/bar_chart/v2",
+                                "chart_fields": {"x": "threshold", "y": "ap"},
+                                "chart_strings": {"title": "CAR AP"},
+                            },
+                            {
+                                "type": "custom_chart",
+                                "query": {"summaryTable": {"tableKey": "truck_ap"}},
+                                "chart_name": "cruise/bar_chart/v2",
+                                "chart_fields": {"x": "threshold", "y": "ap"},
+                                "chart_strings": {"title": "TRUCK AP"},
+                            },
+                        ],
+                    },
+                ],
+            )
+            report_model = captured_reports[0]._to_model()
+
+        assert result["url"] == "https://wandb.ai/entity/project/reports/Agent-Report--report-id"
+        panel_grids = [block for block in report_model.spec.blocks if getattr(block, "type", None) == "panel-grid"]
+        assert len(panel_grids) == 1
+
+        panel_grid = panel_grids[0]
+        runset = panel_grid.metadata.run_sets[0]
+        assert runset.search.query == ""
+        filters = runset.filters.filters[0].filters
+        assert len(filters) == 1
+        assert filters[0].key.name == "name"
+        assert filters[0].op == "IN"
+        assert filters[0].value == ["run_a", "run_b"]
+
+        panels = panel_grid.metadata.panel_bank_section_config.panels
+        assert len(panels) == 2
+        assert [panel.config.panel_def_id for panel in panels] == [
+            "cruise/bar_chart/v2",
+            "cruise/bar_chart/v2",
+        ]
+        assert [panel.config.string_settings["title"] for panel in panels] == ["CAR AP", "TRUCK AP"]
