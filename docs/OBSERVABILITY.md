@@ -188,6 +188,23 @@ params there, and redaction reduces legal exposure if customer logs are
 subpoenaed, exported, or retained longer than needed. `standard` is the safe
 default. `strict` goes one step further for regulated customers.
 
+### Datadog params privacy
+
+Cloud Run uses `MCP_LOG_PRIVACY_LEVEL=off` so the W&B-managed BigQuery product
+analytics sink keeps its historical cohort fields. The Datadog HTTP forwarder is
+an operational sink, so it applies a separate params privacy level:
+`MCP_DATADOG_PARAM_PRIVACY_LEVEL`, defaulting to `standard`.
+
+This gives Cloud Run Datadog logs semantic parity with Helm/agent-ingested
+`ANALYTICS_EVENT` logs without forwarding raw free text. Cloud Run Datadog
+payloads include sanitized fields under `attributes.params.*`, corresponding to
+Helm's `custom.params.*` fields. Free-text values such as GraphQL queries,
+prompts, descriptions, report text, and messages are redacted to
+`<redacted: text len=N>` by default; secret-like keys are always redacted.
+
+Only use `MCP_DATADOG_PARAM_PRIVACY_LEVEL=off` for short-lived debugging in a
+controlled environment. Do not set it as a production default.
+
 ### Identifier hashing at `strict`
 
 `<h:sha256_prefix>` uses the first 12 hex chars of `sha256(value)`.

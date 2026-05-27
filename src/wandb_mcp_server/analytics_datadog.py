@@ -31,6 +31,7 @@ from wandb_mcp_server.utils import get_rich_logger
 logger = get_rich_logger(__name__)
 
 _DATADOG_EVENT_PREFIX = "mcp"
+_DATADOG_PARAM_PRIVACY_LEVEL_DEFAULT = "standard"
 
 
 def _build_retry_session() -> requests.Session:
@@ -45,6 +46,36 @@ def _build_retry_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
     return session
+
+
+def _datadog_safe_params(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Return Datadog-safe analytics params.
+
+    Cloud Run keeps MCP_LOG_PRIVACY_LEVEL=off for product analytics, but Datadog
+    is an operational sink. Use standard redaction by default so free text is
+    summarized, secrets are redacted, and structured dimensions remain useful.
+    """
+    params = event.get("params")
+    if not params:
+        return {}
+
+    from wandb_mcp_server.analytics import AnalyticsTracker
+
+    privacy_level = os.environ.get(
+        "MCP_DATADOG_PARAM_PRIVACY_LEVEL",
+        _DATADOG_PARAM_PRIVACY_LEVEL_DEFAULT,
+    )
+    return AnalyticsTracker._sanitise_params(params, level=privacy_level)
+
+
+def _datadog_safe_labels(event: Dict[str, Any]) -> Dict[str, str]:
+    """Return low-cardinality labels safe for Datadog attributes."""
+    labels: Dict[str, str] = {"event_type": str(event.get("event_type", "unknown"))}
+    for key in ("tool_name", "mcp_tool_name", "success", "runtime_surface", "transport", "deployment_type"):
+        value = event.get(key)
+        if value is not None:
+            labels[key] = str(value)
+    return labels
 
 
 def map_to_datadog_log(
@@ -97,7 +128,16 @@ def map_to_datadog_log(
     if success is not None:
         tags.append(f"success:{str(success).lower()}")
 
-    attributes: Dict[str, Any] = {"event_type": event_type}
+    attributes: Dict[str, Any] = {
+        "event_type": event_type,
+        "schema_version": event.get("schema_version", "1.0"),
+    }
+    if success is not None:
+        attributes["success"] = success
+    for key in ("release_version", "timestamp"):
+        value = event.get(key)
+        if value is not None:
+            attributes[key] = value
     for key in (
         "runtime_surface",
         "transport",
@@ -113,6 +153,7 @@ def map_to_datadog_log(
 
     duration_ms = event.get("duration_ms")
     if duration_ms is not None:
+        attributes["duration_ms"] = duration_ms
         attributes["duration"] = int(duration_ms * 1_000_000)
 
     if event_type == "request":
@@ -136,7 +177,16 @@ def map_to_datadog_log(
 
     user_id = event.get("user_id")
     if user_id:
+        attributes["user_id"] = user_id
         attributes["usr"] = {"id": user_id}
+
+    safe_params = _datadog_safe_params(event)
+    if safe_params:
+        attributes["params"] = safe_params
+
+    labels = _datadog_safe_labels(event)
+    if labels:
+        attributes["labels"] = labels
 
     if event_type == "tool_call":
         tool_attrs: Dict[str, Any] = {}
