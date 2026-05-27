@@ -176,6 +176,40 @@ class TestDatadogAttributes:
         entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
         assert entry["attributes"]["session_id"] == "sess_abc"
 
+    def test_tool_call_includes_raw_analytics_parity_fields(self):
+        event = _make_event(
+            "tool_call",
+            tool_name="get_run_history",
+            success=True,
+            duration_ms=546.08,
+            release_version="0.3.5",
+            timestamp="2026-05-27T17:58:00+00:00",
+            params={
+                "entity_name": "wandb-applied-ai-team",
+                "project_name": "mcp-tests",
+                "run_id": "h0fm5qp5",
+                "samples": 20,
+            },
+            runtime_surface="cloud_run",
+            transport="http",
+            deployment_type="hosted",
+        )
+        entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
+        attrs = entry["attributes"]
+
+        assert attrs["schema_version"] == "1.0"
+        assert attrs["release_version"] == "0.3.5"
+        assert attrs["timestamp"] == "2026-05-27T17:58:00+00:00"
+        assert attrs["tool_name"] == "get_run_history"
+        assert attrs["success"] is True
+        assert attrs["duration_ms"] == 546.08
+        assert attrs["params"]["entity_name"] == "wandb-applied-ai-team"
+        assert attrs["params"]["project_name"] == "mcp-tests"
+        assert attrs["params"]["run_id"] == "h0fm5qp5"
+        assert attrs["params"]["samples"] == 20
+        assert attrs["labels"]["tool_name"] == "get_run_history"
+        assert attrs["labels"]["event_type"] == "tool_call"
+
 
 # ---------------------------------------------------------------------------
 # map_to_datadog_log -- PII exclusion
@@ -185,16 +219,76 @@ class TestDatadogAttributes:
 class TestPIIExclusion:
     """Datadog must NOT receive params, api_key_hash, metadata, or email_domain."""
 
-    def test_params_excluded(self):
+    def test_params_are_sanitized_not_raw(self):
         event = _make_event(
             "tool_call",
             tool_name="query_traces",
             success=True,
-            params={"entity": "team", "project": "proj"},
+            params={"query": "query { viewer { username } }"},
         )
         entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
-        assert "team" not in entry["attributes"]
-        assert "params" not in entry["attributes"]
+        assert entry["attributes"]["params"]["query"] == "<redacted: text len=29>"
+
+    def test_params_redact_secrets(self):
+        event = _make_event(
+            "tool_call",
+            tool_name="query_traces",
+            success=True,
+            params={"api_key": "secret", "Authorization": "Bearer token", "token": "x"},
+        )
+        entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
+        assert entry["attributes"]["params"]["api_key"] == "<redacted>"
+        assert entry["attributes"]["params"]["Authorization"] == "<redacted>"
+        assert entry["attributes"]["params"]["token"] == "<redacted>"
+
+    def test_params_preserve_safe_dimensions(self):
+        event = _make_event(
+            "tool_call",
+            tool_name="get_run_history",
+            success=True,
+            params={
+                "entity_name": "team",
+                "project_name": "project",
+                "run_id": "abc123",
+                "samples": 20,
+                "max_items": 100,
+            },
+        )
+        entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
+        assert entry["attributes"]["params"] == {
+            "entity_name": "team",
+            "project_name": "project",
+            "run_id": "abc123",
+            "samples": 20,
+            "max_items": 100,
+        }
+
+    @patch.dict("os.environ", {"MCP_DATADOG_PARAM_PRIVACY_LEVEL": "strict"})
+    def test_params_can_hash_identifiers_at_strict(self):
+        event = _make_event(
+            "tool_call",
+            tool_name="get_run_history",
+            success=True,
+            params={"entity_name": "team", "project_name": "project", "run_id": "abc123"},
+        )
+        entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
+        params = entry["attributes"]["params"]
+        assert params["entity_name"].startswith("<h:")
+        assert params["project_name"].startswith("<h:")
+        assert params["run_id"].startswith("<h:")
+
+    def test_params_do_not_become_tags(self):
+        event = _make_event(
+            "tool_call",
+            tool_name="get_run_history",
+            success=True,
+            params={"entity_name": "team", "project_name": "project", "run_id": "abc123"},
+        )
+        entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
+        tags = entry["ddtags"]
+        assert "team" not in tags
+        assert "project" not in tags
+        assert "abc123" not in tags
 
     def test_api_key_hash_excluded(self):
         event = _make_event("user_session", session_id="s1", api_key_hash="abcdef1234567890")
@@ -516,7 +610,7 @@ class TestE2ETrackerToDatadog:
             assert entry["status"] == "info"
             assert entry["attributes"]["tool"]["name"] == "query_traces"
             assert entry["attributes"]["duration"] == 150_500_000
-            assert "params" not in entry["attributes"]
+            assert entry["attributes"]["params"]["entity"] == "team"
 
     @patch.dict(
         "os.environ",

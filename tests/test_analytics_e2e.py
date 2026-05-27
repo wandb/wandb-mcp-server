@@ -103,7 +103,7 @@ class TestSuccessfulToolCall:
         assert "error" not in dd["attributes"]
         assert dd["attributes"]["duration"] >= 0
         assert dd["attributes"]["usr"]["id"] == "testuser"
-        assert "params" not in dd["attributes"]
+        assert dd["attributes"]["params"] == {"entity": "org", "project": "proj"}
 
     @pytest.mark.usefixtures("_enable_analytics")
     def test_success_segment_excludes_email_domain(self):
@@ -242,15 +242,20 @@ class TestDurationTracking:
 
 
 class TestDataSeparation:
-    """Segment and Datadog must receive different data per their purposes."""
+    """Segment and Datadog receive differently sanitized analytics data."""
 
     @pytest.mark.usefixtures("_enable_analytics")
-    def test_segment_gets_params_datadog_does_not(self):
+    def test_segment_gets_raw_params_datadog_gets_sanitized_params(self):
         from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 
         viewer = _mock_viewer()
         dd_fwd = get_datadog_forwarder()
-        params = {"entity_name": "wandb-smle", "project_name": "email-agent", "limit": 10}
+        params = {
+            "entity_name": "wandb-smle",
+            "project_name": "email-agent",
+            "limit": 10,
+            "query": "query { viewer { username } }",
+        }
 
         with patch.object(dd_fwd, "_post"):
             with track_tool_execution("query_traces", viewer, params):
@@ -259,10 +264,13 @@ class TestDataSeparation:
         seg = get_segment_forwarder().get_forwarded_payloads()[0]
         assert "params" in seg["properties"]
         assert seg["properties"]["params"]["entity_name"] == "wandb-smle"
+        assert seg["properties"]["params"]["query"] == "query { viewer { username } }"
 
         dd = dd_fwd.get_forwarded_payloads()[0]
-        assert "params" not in dd["attributes"]
-        assert "wandb-smle" not in str(dd["attributes"])
+        assert dd["attributes"]["params"]["entity_name"] == "wandb-smle"
+        assert dd["attributes"]["params"]["project_name"] == "email-agent"
+        assert dd["attributes"]["params"]["limit"] == 10
+        assert dd["attributes"]["params"]["query"] == "<redacted: text len=29>"
 
     @pytest.mark.usefixtures("_enable_analytics")
     def test_datadog_has_structured_severity_segment_does_not(self):
