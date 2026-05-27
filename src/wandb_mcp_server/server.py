@@ -70,6 +70,12 @@ from wandb_mcp_server.mcp_tools.query_artifacts import (
     COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
     compare_artifact_versions,
 )
+from wandb_mcp_server.mcp_tools.automations import (
+    LIST_AUTOMATIONS_TOOL_DESCRIPTION,
+    list_automations,
+    LIST_INTEGRATIONS_TOOL_DESCRIPTION,
+    list_integrations,
+)
 
 # wandbot removed -- zero usage across 400+ benchmark runs, superseded by search_wandb_docs_tool
 from wandb_mcp_server.mcp_tools.query_weave import (
@@ -373,7 +379,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
     """
     Register all W&B MCP tools on the given FastMCP instance.
 
-    Available tools (20):
+    Available tools (22):
     - query_weave_traces_tool: Query LLM traces with filtering and pagination
     - count_weave_traces_tool: Efficiently count traces without returning data
     - resolve_trace_roots_tool: Batch-resolve root spans for child trace_ids
@@ -394,6 +400,10 @@ def register_tools(mcp_instance: FastMCP) -> None:
     - summarize_evaluation_tool: Aggregate Weave evaluation results
     - diagnose_run_tool: Automatic training health check
     - probe_project_tool: Run-side schema and structure discovery
+    - list_wandb_automations_tool: List W&B Automations (rules that trigger
+      notifications/webhooks on artifact, run-state, or run-metric events)
+    - list_wandb_integrations_tool: List Slack and webhook integrations
+      available as targets for Automation actions
 
     Args:
         mcp_instance: The FastMCP instance to register tools on
@@ -763,6 +773,24 @@ def register_tools(mcp_instance: FastMCP) -> None:
     ) -> str:
         """List projects for a W&B entity."""
         return list_entity_projects(entity=entity, max_projects=max_projects)
+
+    @mcp_instance.tool(description=LIST_AUTOMATIONS_TOOL_DESCRIPTION)
+    def list_wandb_automations_tool(
+        entity: Optional[str] = None,
+        name: Optional[str] = None,
+        max_items: int = 50,
+    ) -> str:
+        """List W&B Automations accessible with the current API key."""
+        return list_automations(entity=entity, name=name, max_items=max_items)
+
+    @mcp_instance.tool(description=LIST_INTEGRATIONS_TOOL_DESCRIPTION)
+    def list_wandb_integrations_tool(
+        entity: Optional[str] = None,
+        integration_type: Optional[str] = None,
+        max_items: int = 50,
+    ) -> str:
+        """List Slack and webhook integrations for a W&B entity."""
+        return list_integrations(entity=entity, integration_type=integration_type, max_items=max_items)
 
     from wandb_mcp_server.mcp_tools.infer_schema import (
         INFER_TRACE_SCHEMA_TOOL_DESCRIPTION,

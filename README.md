@@ -33,7 +33,7 @@ Query and analyze your Weights & Biases data using natural language through the 
 </details>
 
 <details>
-<summary><strong>Available Tools</strong> (14 tools)</summary>
+<summary><strong>Available Tools</strong> (16 tools)</summary>
 
 | Tool | Description | Example Query |
 |------|-------------|---------------|
@@ -51,6 +51,8 @@ Query and analyze your Weights & Biases data using natural language through the 
 | **list_artifact_versions_tool** | List versions of an artifact collection | *"Show versions of my model artifact"* |
 | **get_artifact_details_tool** | Get full details of an artifact version | *"What's in model-v2 artifact?"* |
 | **compare_artifact_versions_tool** | Diff two artifact versions | *"Compare model v1 vs v2"* |
+| **list_wandb_automations_tool** | List W&B Automations (artifact, run-state, run-metric triggers) | *"What automations alert my team on Slack?"* |
+| **list_wandb_integrations_tool** | List Slack and webhook integrations | *"Which Slack channels can my automations target?"* |
 
 **Schema-first workflow:** Call `infer_trace_schema_tool` first to discover fields, then `query_weave_traces_tool` with precise columns and `detail_level`:
 - `"schema"` -- structural fields only (fast browsing)
