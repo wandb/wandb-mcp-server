@@ -83,14 +83,33 @@ def map_to_datadog_log(
         f"version:{dd_version}",
         f"event_type:{event_type}",
     ]
+    for key in ("runtime_surface", "transport", "deployment_type", "environment"):
+        value = event.get(key)
+        if value is not None:
+            tags.append(f"{key}:{value}")
     tool_name = event.get("tool_name")
     if tool_name:
         tags.append(f"tool_name:{tool_name}")
+    mcp_tool_name = event.get("mcp_tool_name")
+    if mcp_tool_name:
+        tags.append(f"mcp_tool_name:{mcp_tool_name}")
     success = event.get("success")
     if success is not None:
         tags.append(f"success:{str(success).lower()}")
 
     attributes: Dict[str, Any] = {"event_type": event_type}
+    for key in (
+        "runtime_surface",
+        "transport",
+        "deployment_type",
+        "environment",
+        "hosted_mode",
+        "deployment_id",
+        "wandb_base_host",
+    ):
+        value = event.get(key)
+        if value is not None:
+            attributes[key] = value
 
     duration_ms = event.get("duration_ms")
     if duration_ms is not None:
@@ -123,6 +142,10 @@ def map_to_datadog_log(
         tool_attrs: Dict[str, Any] = {}
         if tool_name:
             tool_attrs["name"] = tool_name
+            attributes["tool_name"] = tool_name
+        if mcp_tool_name:
+            tool_attrs["mcp_name"] = mcp_tool_name
+            attributes["mcp_tool_name"] = mcp_tool_name
         if success is not None:
             tool_attrs["success"] = success
         if tool_attrs:

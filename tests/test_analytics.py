@@ -353,6 +353,45 @@ class TestSchemaVersion:
         t._emit({"event_type": "test"}, {})
         assert capture.event is None
 
+    @patch.dict(
+        "os.environ",
+        {
+            "MCP_RUNTIME_SURFACE": "cloud_run",
+            "MCP_TRANSPORT": "http",
+            "MCP_DEPLOYMENT_TYPE": "hosted",
+            "ENVIRONMENT": "production",
+            "MCP_HOSTED_MODE": "true",
+            "WANDB_BASE_URL": "https://api.wandb.ai",
+        },
+        clear=False,
+    )
+    def test_base_event_has_deployment_dimensions(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_gql",
+            session_id="s",
+            viewer_info="v",
+        )
+
+        assert capture.event is not None
+        assert capture.event["runtime_surface"] == "cloud_run"
+        assert capture.event["transport"] == "http"
+        assert capture.event["deployment_type"] == "hosted"
+        assert capture.event["environment"] == "production"
+        assert capture.event["hosted_mode"] is True
+        assert capture.event["wandb_base_host"] == "api.wandb.ai"
+
+    @patch.dict("os.environ", {"MCP_TRANSPORT": "stdio"}, clear=False)
+    def test_base_event_infers_local_stdio(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_gql",
+            session_id="s",
+            viewer_info="v",
+        )
+
+        assert capture.event is not None
+        assert capture.event["runtime_surface"] == "local_stdio"
+        assert capture.event["deployment_type"] == "local"
+
 
 # -- track_user_session -------------------------------------------------------
 
@@ -449,6 +488,18 @@ class TestTrackToolCall:
             duration_ms=123.4,
         )
         assert capture.event["duration_ms"] == 123.4
+
+    def test_mcp_tool_name_recorded_when_available(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_paginated_wandb_gql",
+            mcp_tool_name="query_wandb_tool",
+            session_id="s",
+            viewer_info="v",
+        )
+
+        assert capture.event["tool_name"] == "query_paginated_wandb_gql"
+        assert capture.event["mcp_tool_name"] == "query_wandb_tool"
+        assert capture.labels["mcp_tool_name"] == "query_wandb_tool"
 
     def test_labels_include_tool_name(self, capture):
         AnalyticsTracker(enabled=True).track_tool_call(
