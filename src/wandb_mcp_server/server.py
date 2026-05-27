@@ -123,6 +123,7 @@ _COUNT_EXECUTOR = ThreadPoolExecutor(
 
 def _count_traces_with_context(
     api_key: Optional[str],
+    session_id: Optional[str],
     entity_name: str,
     project_name: str,
     filters: Dict[str, Any],
@@ -130,8 +131,10 @@ def _count_traces_with_context(
 ) -> int:
     """Run count_traces inside a worker while preserving the request API key."""
     from wandb_mcp_server.api_client import WandBApiManager
+    from wandb_mcp_server.session_manager import current_session_id
 
     token = WandBApiManager.set_context_api_key(api_key) if api_key else None
+    session_token = current_session_id.set(session_id) if session_id else None
     try:
         return count_traces(
             entity_name=entity_name,
@@ -140,12 +143,15 @@ def _count_traces_with_context(
             request_timeout=request_timeout,
         )
     finally:
+        if session_token is not None:
+            current_session_id.reset(session_token)
         if token is not None:
             WandBApiManager.reset_context_api_key(token)
 
 
 async def _count_traces_with_deadline(
     api_key: Optional[str],
+    session_id: Optional[str],
     entity_name: str,
     project_name: str,
     filters: Dict[str, Any],
@@ -159,6 +165,7 @@ async def _count_traces_with_deadline(
         partial(
             _count_traces_with_context,
             api_key,
+            session_id,
             entity_name,
             project_name,
             filters,
@@ -174,6 +181,7 @@ async def _count_traces_with_deadline(
 
 async def _count_traces_or_none(
     api_key: Optional[str],
+    session_id: Optional[str],
     entity_name: str,
     project_name: str,
     filters: Dict[str, Any],
@@ -183,6 +191,7 @@ async def _count_traces_or_none(
     try:
         return await _count_traces_with_deadline(
             api_key,
+            session_id,
             entity_name,
             project_name,
             filters,
@@ -475,12 +484,16 @@ def register_tools(mcp_instance: FastMCP) -> None:
 
         try:
             api_key = WandBApiManager.get_api_key()
+            from wandb_mcp_server.session_manager import current_session_id
+
+            session_id = current_session_id.get()
             from wandb_mcp_server.config import MCP_TOOL_TIMEOUT_SECONDS
 
             count_deadline = min(10, MCP_TOOL_TIMEOUT_SECONDS)
             if detail_level != "schema" and effective_limit > 100 and not metadata_only:
                 pre_count = await _count_traces_or_none(
                     api_key,
+                    session_id,
                     entity_name,
                     project_name,
                     filters or {},
@@ -522,6 +535,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             try:
                 matching_count = await _count_traces_or_none(
                     api_key,
+                    session_id,
                     entity_name=entity_name,
                     project_name=project_name,
                     filters=filters or {},
@@ -608,10 +622,14 @@ def register_tools(mcp_instance: FastMCP) -> None:
             root_filters["trace_roots_only"] = True
 
             api_key = WandBApiManager.get_api_key()
+            from wandb_mcp_server.session_manager import current_session_id
+
+            session_id = current_session_id.get()
             total_count, root_traces_count = await asyncio.wait_for(
                 asyncio.gather(
                     _count_traces_with_deadline(
                         api_key,
+                        session_id,
                         entity_name,
                         project_name,
                         filters or {},
@@ -619,6 +637,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
                     ),
                     _count_traces_with_deadline(
                         api_key,
+                        session_id,
                         entity_name,
                         project_name,
                         root_filters,
