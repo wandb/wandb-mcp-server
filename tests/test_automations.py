@@ -18,6 +18,12 @@ import pytest
 
 # ---------------------------------------------------------------------------
 # Helpers to build fake wandb-SDK-shaped objects
+#
+# We mirror the public pydantic shapes from wandb/wandb/automations/:
+#   - Scope:        scope_type (enum), id, name
+#   - Event:        event_type (enum), filter (typed per event)
+#   - Action:       action_type (enum), integration (with .id), + variant fields
+#   - Integration:  typename__ (literal), id, + variant fields
 # ---------------------------------------------------------------------------
 
 
@@ -26,60 +32,76 @@ def _enum(value):
     return SimpleNamespace(value=value)
 
 
-def _project_scope(entity="my-team", project="my-project"):
-    return SimpleNamespace(
-        scope_type=_enum("PROJECT"),
-        name=project,
-        project=SimpleNamespace(name=project, entity_name=entity),
+def _project_scope(id="scope_proj_1", name="my-project"):
+    return SimpleNamespace(scope_type=_enum("PROJECT"), id=id, name=name)
+
+
+def _collection_scope(id="scope_coll_1", name="my-models"):
+    return SimpleNamespace(scope_type=_enum("ARTIFACT_COLLECTION"), id=id, name=name)
+
+
+# Inner metric filters: each defines exactly one of threshold_filter /
+# change_filter / zscore_filter, matching wandb's _Wrapped* pydantic shapes.
+
+
+def _threshold_metric_filter(name="acc", agg="MAX", window=5, cmp="$gt", threshold=0.9):
+    inner = SimpleNamespace(
+        name=name,
+        agg=_enum(agg) if agg else None,
+        window=window,
+        cmp=cmp,
+        threshold=threshold,
     )
+    return SimpleNamespace(threshold_filter=inner)
 
 
-def _collection_scope(entity="my-team", project="my-project", collection="my-models"):
-    # ArtifactSequenceScope / ArtifactPortfolioScope shape: name on the scope
-    # itself, project/entity on a nested project ref.
-    return SimpleNamespace(
-        scope_type=_enum("ARTIFACT_COLLECTION"),
-        name=collection,
-        project=SimpleNamespace(name=project, entity_name=entity),
+def _change_metric_filter(
+    name="loss",
+    agg="AVERAGE",
+    window=3,
+    prior_window=3,
+    change_type="RELATIVE",
+    change_dir="DECREASE",
+    threshold=0.1,
+):
+    inner = SimpleNamespace(
+        name=name,
+        agg=_enum(agg) if agg else None,
+        window=window,
+        prior_window=prior_window,
+        change_type=_enum(change_type),
+        change_dir=_enum(change_dir),
+        threshold=threshold,
     )
+    return SimpleNamespace(change_filter=inner)
 
 
-def _threshold_event():
-    # Mirrors the wrapping in events.py: RunMetricFilter.metric.threshold_filter
-    inner = MagicMock()
-    inner.__repr__ = lambda self: "'MAX(acc) > 0.9'"  # mimics MetricThresholdFilter.__repr__
-    filt = SimpleNamespace(metric=SimpleNamespace(threshold_filter=inner, change_filter=None, zscore_filter=None))
-    return SimpleNamespace(event_type=_enum("RUN_METRIC"), filter=filt)
+def _zscore_metric_filter(name="loss", window=30, change_dir="ANY", threshold=3.0):
+    inner = SimpleNamespace(
+        name=name,
+        window=window,
+        change_dir=_enum(change_dir),
+        threshold=threshold,
+    )
+    return SimpleNamespace(zscore_filter=inner)
 
 
-def _change_event():
-    inner = MagicMock()
-    inner.__repr__ = lambda self: "'AVG(loss) decreases 10.00%'"
-    filt = SimpleNamespace(metric=SimpleNamespace(threshold_filter=None, change_filter=inner, zscore_filter=None))
-    return SimpleNamespace(event_type=_enum("RUN_METRIC_CHANGE"), filter=filt)
+def _run_metric_event(event_type="RUN_METRIC", metric=None):
+    filt = SimpleNamespace(metric=metric or _threshold_metric_filter())
+    return SimpleNamespace(event_type=_enum(event_type), filter=filt)
 
 
-def _zscore_event():
-    inner = MagicMock()
-    inner.__repr__ = lambda self: "'abs(zscore(\"loss\")) > 3.0'"
-    filt = SimpleNamespace(metric=SimpleNamespace(threshold_filter=None, change_filter=None, zscore_filter=inner))
-    return SimpleNamespace(event_type=_enum("RUN_METRIC_ZSCORE"), filter=filt)
-
-
-def _run_state_event():
-    state = MagicMock()
-    state.__repr__ = lambda self: "'state in [finished, failed]'"
-    filt = SimpleNamespace(metric=None, state=state)
+def _run_state_event(states=("finished", "failed")):
+    state = SimpleNamespace(states=[_enum(s) for s in states])
+    filt = SimpleNamespace(state=state)
+    # `filter` for RUN_STATE only carries .state, not .metric -- match that.
     return SimpleNamespace(event_type=_enum("RUN_STATE"), filter=filt)
 
 
-def _create_artifact_event():
-    # Mutation events use _WrappedSavedEventFilter -> no .metric / .state.
-    filt = MagicMock()
-    filt.metric = None
-    filt.state = None
-    filt.__repr__ = lambda self: "And()"
-    return SimpleNamespace(event_type=_enum("CREATE_ARTIFACT"), filter=filt)
+def _mutation_event(event_type="CREATE_ARTIFACT"):
+    # Mutation-event filters are MongoLikeFilter (And() etc.) -- no .metric or .state.
+    filt = SimpleNamespace()
+    return SimpleNamespace(event_type=_enum(event_type), filter=filt)
 
 
 def _notification_action(integration_id="int_slack_1", title="t", message="m", severity="INFO"):
@@ -88,14 +110,15 @@ def _notification_action(integration_id="int_slack_1", title="t", message="m", s
         integration=SimpleNamespace(id=integration_id),
         title=title,
         message=message,
-        severity=_enum(severity),
+        severity=_enum(severity) if severity else None,
     )
 
 
-def _webhook_action(integration_id="int_webhook_1"):
+def _webhook_action(integration_id="int_webhook_1", request_payload=None):
     return SimpleNamespace(
         action_type=_enum("GENERIC_WEBHOOK"),
         integration=SimpleNamespace(id=integration_id),
+        request_payload=request_payload,
     )
 
 
@@ -112,6 +135,7 @@ def _automation(
     scope=None,
     event=None,
     action=None,
+    updated_at=datetime(2026, 5, 1, 12, 0, 0),
 ):
     return SimpleNamespace(
         id=id,
@@ -119,9 +143,9 @@ def _automation(
         enabled=enabled,
         description=description,
         created_at=datetime(2026, 1, 1, 12, 0, 0),
-        updated_at=datetime(2026, 5, 1, 12, 0, 0),
+        updated_at=updated_at,
         scope=scope or _project_scope(),
-        event=event or _threshold_event(),
+        event=event or _run_metric_event(),
         action=action or _notification_action(),
     )
 
@@ -163,7 +187,6 @@ class TestListAutomations:
         assert result["count"] == 1
         assert result["entity"] is None
         assert result["truncated"] is False
-        # entity must NOT be in the kwargs when caller passed None
         kwargs = api.automations.call_args.kwargs
         assert "entity" not in kwargs
         assert "name" not in kwargs
@@ -188,7 +211,7 @@ class TestListAutomations:
     @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
     def test_max_items_truncation(self, mock_mgr):
         api = MagicMock()
-        api.automations.return_value = iter([_automation(id=f"a{i}", name=f"n{i}") for i in range(10)])
+        api.automations.return_value = iter([_automation(id=f"a{i}") for i in range(10)])
         mock_mgr.get_api.return_value = api
 
         from wandb_mcp_server.mcp_tools.automations import list_automations
@@ -205,7 +228,6 @@ class TestListAutomations:
 
         from wandb_mcp_server.mcp_tools.automations import list_automations
 
-        # ceiling is 200
         result = json.loads(list_automations(max_items=999))
         assert result["count"] == 200
         assert result["truncated"] is True
@@ -229,59 +251,144 @@ class TestListAutomations:
     @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
     def test_serializes_project_scope(self, mock_mgr):
         api = MagicMock()
-        api.automations.return_value = iter([_automation(scope=_project_scope(entity="t1", project="p1"))])
+        api.automations.return_value = iter([_automation(scope=_project_scope(id="scope_p1", name="proj-1"))])
         mock_mgr.get_api.return_value = api
 
         from wandb_mcp_server.mcp_tools.automations import list_automations
 
         scope = json.loads(list_automations())["automations"][0]["scope"]
-        assert scope["type"] == "PROJECT"
-        assert scope["project"] == "p1"
-        assert scope["entity"] == "t1"
+        assert scope == {"type": "PROJECT", "id": "scope_p1", "name": "proj-1"}
 
     @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
     def test_serializes_collection_scope(self, mock_mgr):
         api = MagicMock()
-        api.automations.return_value = iter(
-            [_automation(scope=_collection_scope(entity="t1", project="p1", collection="my-models"))]
-        )
+        api.automations.return_value = iter([_automation(scope=_collection_scope(id="scope_c1", name="my-models"))])
         mock_mgr.get_api.return_value = api
 
         from wandb_mcp_server.mcp_tools.automations import list_automations
 
         scope = json.loads(list_automations())["automations"][0]["scope"]
-        assert scope["type"] == "ARTIFACT_COLLECTION"
-        assert scope["name"] == "my-models"
-        assert scope["project"] == "p1"
-        assert scope["entity"] == "t1"
+        assert scope == {"type": "ARTIFACT_COLLECTION", "id": "scope_c1", "name": "my-models"}
 
     @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
-    def test_each_event_type_serializes(self, mock_mgr):
+    def test_threshold_event_serialized_structured(self, mock_mgr):
         api = MagicMock()
         api.automations.return_value = iter(
             [
-                _automation(id="a1", event=_threshold_event()),
-                _automation(id="a2", event=_change_event()),
-                _automation(id="a3", event=_zscore_event()),
-                _automation(id="a4", event=_run_state_event()),
-                _automation(id="a5", event=_create_artifact_event()),
+                _automation(
+                    event=_run_metric_event(
+                        event_type="RUN_METRIC",
+                        metric=_threshold_metric_filter(
+                            name="accuracy", agg="MAX", window=5, cmp="$gt", threshold=0.95
+                        ),
+                    )
+                )
             ]
         )
         mock_mgr.get_api.return_value = api
 
         from wandb_mcp_server.mcp_tools.automations import list_automations
 
-        events = [a["event"] for a in json.loads(list_automations())["automations"]]
-        assert [e["type"] for e in events] == [
-            "RUN_METRIC",
-            "RUN_METRIC_CHANGE",
-            "RUN_METRIC_ZSCORE",
-            "RUN_STATE",
-            "CREATE_ARTIFACT",
-        ]
-        # threshold/change/zscore/state should have a non-empty summary string
-        for e in events[:4]:
-            assert isinstance(e["summary"], str) and e["summary"]
+        event = json.loads(list_automations())["automations"][0]["event"]
+        assert event["type"] == "RUN_METRIC"
+        assert event["filter"] == {
+            "kind": "threshold",
+            "metric": "accuracy",
+            "agg": "MAX",
+            "window": 5,
+            "cmp": "$gt",
+            "threshold": 0.95,
+        }
+
+    @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
+    def test_change_event_serialized_structured(self, mock_mgr):
+        api = MagicMock()
+        api.automations.return_value = iter(
+            [
+                _automation(
+                    event=_run_metric_event(
+                        event_type="RUN_METRIC_CHANGE",
+                        metric=_change_metric_filter(
+                            name="loss",
+                            agg="AVERAGE",
+                            window=3,
+                            prior_window=3,
+                            change_type="RELATIVE",
+                            change_dir="DECREASE",
+                            threshold=0.1,
+                        ),
+                    )
+                )
+            ]
+        )
+        mock_mgr.get_api.return_value = api
+
+        from wandb_mcp_server.mcp_tools.automations import list_automations
+
+        event = json.loads(list_automations())["automations"][0]["event"]
+        assert event["type"] == "RUN_METRIC_CHANGE"
+        assert event["filter"] == {
+            "kind": "change",
+            "metric": "loss",
+            "agg": "AVERAGE",
+            "current_window": 3,
+            "prior_window": 3,
+            "change_type": "RELATIVE",
+            "change_dir": "DECREASE",
+            "threshold": 0.1,
+        }
+
+    @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
+    def test_zscore_event_serialized_structured(self, mock_mgr):
+        api = MagicMock()
+        api.automations.return_value = iter(
+            [
+                _automation(
+                    event=_run_metric_event(
+                        event_type="RUN_METRIC_ZSCORE",
+                        metric=_zscore_metric_filter(name="loss", window=30, change_dir="ANY", threshold=3.0),
+                    )
+                )
+            ]
+        )
+        mock_mgr.get_api.return_value = api
+
+        from wandb_mcp_server.mcp_tools.automations import list_automations
+
+        event = json.loads(list_automations())["automations"][0]["event"]
+        assert event["type"] == "RUN_METRIC_ZSCORE"
+        assert event["filter"] == {
+            "kind": "zscore",
+            "metric": "loss",
+            "window": 30,
+            "change_dir": "ANY",
+            "threshold": 3.0,
+        }
+
+    @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
+    def test_run_state_event_serialized(self, mock_mgr):
+        api = MagicMock()
+        api.automations.return_value = iter([_automation(event=_run_state_event(states=("finished", "failed")))])
+        mock_mgr.get_api.return_value = api
+
+        from wandb_mcp_server.mcp_tools.automations import list_automations
+
+        event = json.loads(list_automations())["automations"][0]["event"]
+        assert event["type"] == "RUN_STATE"
+        assert event["filter"] == {"states": ["finished", "failed"]}
+
+    @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
+    def test_mutation_event_serialized(self, mock_mgr):
+        api = MagicMock()
+        api.automations.return_value = iter([_automation(event=_mutation_event("CREATE_ARTIFACT"))])
+        mock_mgr.get_api.return_value = api
+
+        from wandb_mcp_server.mcp_tools.automations import list_automations
+
+        event = json.loads(list_automations())["automations"][0]["event"]
+        assert event["type"] == "CREATE_ARTIFACT"
+        # Mutation event filter is open-ended; we just expose a summary.
+        assert "summary" in event["filter"]
 
     @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
     def test_serializes_notification_action(self, mock_mgr):
@@ -305,13 +412,19 @@ class TestListAutomations:
     @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
     def test_serializes_webhook_action(self, mock_mgr):
         api = MagicMock()
-        api.automations.return_value = iter([_automation(action=_webhook_action(integration_id="int_w"))])
+        api.automations.return_value = iter(
+            [_automation(action=_webhook_action(integration_id="int_w", request_payload={"k": "v"}))]
+        )
         mock_mgr.get_api.return_value = api
 
         from wandb_mcp_server.mcp_tools.automations import list_automations
 
         action = json.loads(list_automations())["automations"][0]["action"]
-        assert action == {"type": "GENERIC_WEBHOOK", "integration_id": "int_w"}
+        assert action == {
+            "type": "GENERIC_WEBHOOK",
+            "integration_id": "int_w",
+            "request_payload": {"k": "v"},
+        }
 
     @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
     def test_serializes_no_op_action(self, mock_mgr):
@@ -335,6 +448,17 @@ class TestListAutomations:
         auto = json.loads(list_automations())["automations"][0]
         assert auto["created_at"] == "2026-01-01T12:00:00"
         assert auto["updated_at"] == "2026-05-01T12:00:00"
+
+    @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
+    def test_null_updated_at(self, mock_mgr):
+        api = MagicMock()
+        api.automations.return_value = iter([_automation(updated_at=None)])
+        mock_mgr.get_api.return_value = api
+
+        from wandb_mcp_server.mcp_tools.automations import list_automations
+
+        auto = json.loads(list_automations())["automations"][0]
+        assert auto["updated_at"] is None
 
     @patch("wandb_mcp_server.mcp_tools.automations.WandBApiManager")
     def test_api_error_returns_error_dict(self, mock_mgr):
@@ -367,7 +491,6 @@ class TestListIntegrations:
         assert result["count"] == 2
         types = {item["type"] for item in result["integrations"]}
         assert types == {"slack", "webhook"}
-        # Slack and webhook endpoints were NOT both called
         api.slack_integrations.assert_not_called()
         api.webhook_integrations.assert_not_called()
 
@@ -420,7 +543,6 @@ class TestListIntegrations:
 
         result = json.loads(list_integrations(integration_type="email"))
         assert result["error"] == "invalid_input"
-        # No API calls should have happened
         api.integrations.assert_not_called()
         api.slack_integrations.assert_not_called()
         api.webhook_integrations.assert_not_called()

@@ -8,7 +8,7 @@ public ``wandb.Api`` interface introduced in wandb 0.19.11.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
@@ -22,7 +22,13 @@ MAX_ITEMS_CEILING = 200
 # Valid integration_type values for list_integrations.
 _SLACK = "slack"
 _WEBHOOK = "webhook"
-_VALID_INTEGRATION_TYPES = {_SLACK, _WEBHOOK}
+_VALID_INTEGRATION_TYPES = frozenset({_SLACK, _WEBHOOK})
+
+# wandb backend `__typename` strings used to discriminate the Integration union.
+# See wandb/automations/_generated/fragments.py: SlackIntegrationFields,
+# WebhookIntegrationFields.
+_TYPENAME_SLACK_INTEGRATION = "SlackIntegration"
+_TYPENAME_WEBHOOK_INTEGRATION = "GenericWebhookIntegration"
 
 
 # ---------------------------------------------------------------------------
@@ -56,9 +62,13 @@ instead (or in addition).
   the response sets truncated=true.
 - Each returned automation has:
     id, name, enabled, description, created_at, updated_at,
-    scope:  {type, name, ...}     -- PROJECT or ARTIFACT_COLLECTION
-    event:  {type, summary}       -- e.g. RUN_METRIC threshold, ADD_ARTIFACT_ALIAS
+    scope:  {type, id, name}      -- PROJECT or ARTIFACT_COLLECTION
+    event:  {type, filter}        -- e.g. RUN_METRIC threshold, ADD_ARTIFACT_ALIAS
     action: {type, ...}           -- NOTIFICATION (Slack), GENERIC_WEBHOOK, NO_OP
+- The wandb GraphQL schema only stores the scope's id + name; it does NOT
+  return the parent project/entity on the scope itself. If you need that
+  context, use the `entity` you passed in (for the scope) and look up the
+  project separately.
 - This tool is read-only. It cannot create, modify, or delete automations.
 </critical_info>
 
@@ -82,105 +92,150 @@ JSON with:
 """
 
 
-def _serialize_scope(scope: Any) -> Dict[str, Any]:
-    """Flatten an AutomationScope (ProjectScope or ArtifactCollectionScope) to a dict.
+def _serialize_scope(scope: Any) -> dict[str, Any]:
+    """Flatten an AutomationScope to ``{type, id, name}``.
 
-    Uses getattr with defaults so any future scope-type addition still serializes
-    without raising. The ``scope_type`` field is set by the SDK on every scope
-    subclass (see wandb/wandb/automations/scopes.py).
+    The wandb GraphQL fragments only carry ``id`` and ``name`` on scopes
+    (see ``wandb/automations/_generated/fragments.py:ProjectScopeFields``,
+    ``ArtifactSequenceScopeFields``, ``ArtifactPortfolioScopeFields``).
+    ``scope_type`` is the public enum (``PROJECT`` or ``ARTIFACT_COLLECTION``)
+    added by ``wandb.automations.scopes``.
     """
-    scope_type = getattr(scope, "scope_type", None)
-    out: Dict[str, Any] = {
-        "type": getattr(scope_type, "value", str(scope_type)) if scope_type is not None else None,
-        "name": getattr(scope, "name", None),
+    return {
+        "type": scope.scope_type.value,
+        "id": scope.id,
+        "name": scope.name,
     }
-    # ProjectScope carries entity/project info directly; ArtifactCollection scopes
-    # carry it on a nested project field. Try both flat and nested locations.
-    project = getattr(scope, "project", None)
-    if project is not None and not isinstance(project, str):
-        out["project"] = getattr(project, "name", None)
-        out["entity"] = getattr(project, "entity_name", None) or getattr(project, "entity", None)
-    else:
-        out["project"] = project
-        out["entity"] = getattr(scope, "entity_name", None) or getattr(scope, "entity", None)
-    return out
 
 
-def _serialize_event(event: Any) -> Dict[str, Any]:
-    """Flatten a SavedEvent into a small dict with type + human-readable summary."""
-    event_type = getattr(event, "event_type", None)
-    type_str = getattr(event_type, "value", str(event_type)) if event_type is not None else None
+def _serialize_metric_filter(metric: Any) -> dict[str, Any]:
+    """Flatten the inner metric filter from a RunMetricFilter wrapper.
 
-    # The filter on a SavedEvent is either a _WrappedSavedEventFilter (mutation
-    # events) or a RunMetricFilter / RunStateFilter. For each, prefer the
-    # built-in __repr__ on the innermost metric/state filter, which produces a
-    # compact human-readable string (see _filters/run_metrics.py:147-150).
-    summary: Optional[str] = None
-    filt = getattr(event, "filter", None)
-    try:
-        inner_metric = getattr(filt, "metric", None)
-        inner_state = getattr(filt, "state", None)
-        if inner_metric is not None:
-            inner = (
-                getattr(inner_metric, "threshold_filter", None)
-                or getattr(inner_metric, "change_filter", None)
-                or getattr(inner_metric, "zscore_filter", None)
-                or inner_metric
-            )
-            summary = repr(inner).strip("'")
-        elif inner_state is not None:
-            summary = repr(inner_state).strip("'")
-        elif filt is not None:
-            summary = repr(filt).strip("'")
-    except Exception:
-        summary = None
+    A ``RunMetricFilter.metric`` is one of three pydantic wrapper variants
+    (``_WrappedMetricThresholdFilter`` / ``_WrappedMetricChangeFilter`` /
+    ``_WrappedMetricZScoreFilter``); each defines exactly one of the
+    ``threshold_filter`` / ``change_filter`` / ``zscore_filter`` attributes.
+    We discriminate by attribute presence rather than reaching into wandb's
+    private union types.
+    """
+    if (inner := getattr(metric, "threshold_filter", None)) is not None:
+        return {
+            "kind": "threshold",
+            "metric": inner.name,
+            "agg": inner.agg.value if inner.agg else None,
+            "window": inner.window,
+            "cmp": inner.cmp,
+            "threshold": inner.threshold,
+        }
+    if (inner := getattr(metric, "change_filter", None)) is not None:
+        return {
+            "kind": "change",
+            "metric": inner.name,
+            "agg": inner.agg.value if inner.agg else None,
+            "current_window": inner.window,
+            "prior_window": inner.prior_window,
+            "change_type": inner.change_type.value,
+            "change_dir": inner.change_dir.value,
+            "threshold": inner.threshold,
+        }
+    if (inner := getattr(metric, "zscore_filter", None)) is not None:
+        return {
+            "kind": "zscore",
+            "metric": inner.name,
+            "window": inner.window,
+            "change_dir": inner.change_dir.value,
+            "threshold": inner.threshold,
+        }
+    return {"kind": "unknown"}
 
-    return {"type": type_str, "summary": summary}
+
+def _serialize_state_filter(state: Any) -> dict[str, Any]:
+    """Flatten a run-state filter to ``{states: [...]}``.
+
+    ``StateFilter`` (from wandb.automations._filters.run_states) carries an
+    in-list of states. We expose them as plain strings for easy LLM use.
+    """
+    states = getattr(state, "states", None)
+    if states is None:
+        # Older saved automations may store the state differently; fall back to repr.
+        return {"summary": repr(state)}
+    return {"states": [s.value if hasattr(s, "value") else str(s) for s in states]}
 
 
-def _serialize_action(action: Any) -> Dict[str, Any]:
-    """Flatten a SavedAction into a dict with type + the fields agents need."""
-    action_type = getattr(action, "action_type", None)
-    type_str = getattr(action_type, "value", str(action_type)) if action_type is not None else None
-    out: Dict[str, Any] = {"type": type_str}
+def _serialize_event(event: Any) -> dict[str, Any]:
+    """Flatten a SavedEvent to ``{type, filter}``.
+
+    ``event.filter`` is one of:
+    - ``_WrappedSavedEventFilter`` for mutation events (CREATE_ARTIFACT etc.),
+      whose ``.filter`` is a MongoLikeFilter -- we just expose it as a brief
+      string summary, since the structure is open-ended.
+    - ``RunMetricFilter`` for RUN_METRIC* events, whose ``.metric`` holds the
+      typed threshold/change/zscore filter we flatten via _serialize_metric_filter.
+    - ``RunStateFilter`` for RUN_STATE events, whose ``.state`` holds the
+      state filter we flatten via _serialize_state_filter.
+    """
+    type_str = event.event_type.value
+    raw_filter = event.filter
+
+    metric = getattr(raw_filter, "metric", None)
+    if metric is not None:
+        return {"type": type_str, "filter": _serialize_metric_filter(metric)}
+
+    state = getattr(raw_filter, "state", None)
+    if state is not None:
+        return {"type": type_str, "filter": _serialize_state_filter(state)}
+
+    # Mutation-event filter (And()/MongoLikeFilter) -- no public structured shape.
+    return {"type": type_str, "filter": {"summary": repr(raw_filter)}}
+
+
+def _serialize_action(action: Any) -> dict[str, Any]:
+    """Flatten a SavedAction to ``{type, ...}``.
+
+    Saved actions are a discriminated union on ``action_type``
+    (``NOTIFICATION`` / ``GENERIC_WEBHOOK`` / ``NO_OP`` / ``QUEUE_JOB``).
+    NOTIFICATION carries title/message/severity; GENERIC_WEBHOOK carries
+    request_payload; both reference an integration by id.
+    """
+    type_str = action.action_type.value
+    out: dict[str, Any] = {"type": type_str}
 
     integration = getattr(action, "integration", None)
     if integration is not None:
-        out["integration_id"] = getattr(integration, "id", None)
+        out["integration_id"] = integration.id
 
-    # NOTIFICATION (Slack) carries title/message/severity; webhook does not.
     if type_str == "NOTIFICATION":
-        out["title"] = getattr(action, "title", None)
-        out["message"] = getattr(action, "message", None)
-        severity = getattr(action, "severity", None)
-        out["severity"] = getattr(severity, "value", str(severity)) if severity is not None else None
+        out["title"] = action.title
+        out["message"] = action.message
+        out["severity"] = action.severity.value if action.severity else None
+    elif type_str == "GENERIC_WEBHOOK":
+        # request_payload is JSON-encoded on the wire; the SDK already
+        # parses it back into a dict via JsonEncoded[dict[str, Any]].
+        out["request_payload"] = getattr(action, "request_payload", None)
+
     return out
 
 
-def _serialize_automation(automation: Any) -> Dict[str, Any]:
-    """Flatten an Automation pydantic object into a JSON-safe dict."""
-    created_at = getattr(automation, "created_at", None)
-    updated_at = getattr(automation, "updated_at", None)
+def _serialize_automation(automation: Any) -> dict[str, Any]:
+    """Flatten an Automation pydantic object to a JSON-safe dict."""
+    created_at = automation.created_at
+    updated_at = automation.updated_at
     return {
-        "id": getattr(automation, "id", None),
-        "name": getattr(automation, "name", None),
-        "enabled": getattr(automation, "enabled", None),
-        "description": getattr(automation, "description", None),
-        "created_at": created_at.isoformat()
-        if hasattr(created_at, "isoformat")
-        else (str(created_at) if created_at is not None else None),
-        "updated_at": updated_at.isoformat()
-        if hasattr(updated_at, "isoformat")
-        else (str(updated_at) if updated_at is not None else None),
-        "scope": _serialize_scope(getattr(automation, "scope", None)),
-        "event": _serialize_event(getattr(automation, "event", None)),
-        "action": _serialize_action(getattr(automation, "action", None)),
+        "id": automation.id,
+        "name": automation.name,
+        "enabled": automation.enabled,
+        "description": automation.description,
+        "created_at": created_at.isoformat(),
+        "updated_at": updated_at.isoformat() if updated_at is not None else None,
+        "scope": _serialize_scope(automation.scope),
+        "event": _serialize_event(automation.event),
+        "action": _serialize_action(automation.action),
     }
 
 
 def list_automations(
-    entity: Optional[str] = None,
-    name: Optional[str] = None,
+    entity: str | None = None,
+    name: str | None = None,
     max_items: int = DEFAULT_MAX_ITEMS,
 ) -> str:
     """List W&B Automations accessible with the current API key."""
@@ -194,13 +249,13 @@ def list_automations(
         max_items = min(max_items, MAX_ITEMS_CEILING)
 
         try:
-            kwargs: Dict[str, Any] = {"per_page": min(max_items, 100)}
+            kwargs: dict[str, Any] = {"per_page": min(max_items, 100)}
             if entity is not None:
                 kwargs["entity"] = entity
             if name is not None:
                 kwargs["name"] = name
 
-            automations: List[Dict[str, Any]] = []
+            automations: list[dict[str, Any]] = []
             truncated = False
             for auto in api.automations(**kwargs):
                 if len(automations) >= max_items:
@@ -274,38 +329,39 @@ JSON with:
 """
 
 
-def _serialize_integration(integration: Any) -> Dict[str, Any]:
-    """Flatten a SlackIntegration or WebhookIntegration into a JSON-safe dict.
+def _serialize_integration(integration: Any) -> dict[str, Any]:
+    """Flatten a SlackIntegration or WebhookIntegration to a JSON-safe dict.
 
-    The two integration kinds are discriminated by the GraphQL ``__typename``
-    field, exposed in the SDK as ``typename__``. Slack integrations carry
-    team_name + channel_name; webhook integrations carry name + url_endpoint.
+    The Integration union is discriminated by the GraphQL ``__typename``
+    field, exposed on the SDK pydantic models as ``typename__``. Both
+    variants share ``id``; Slack adds ``team_name`` / ``channel_name``,
+    webhook adds ``name`` / ``url_endpoint``.
     """
-    typename = getattr(integration, "typename__", None)
-    if typename == "SlackIntegration":
+    typename = integration.typename__
+    if typename == _TYPENAME_SLACK_INTEGRATION:
         return {
-            "id": getattr(integration, "id", None),
+            "id": integration.id,
             "type": _SLACK,
-            "team_name": getattr(integration, "team_name", None),
-            "channel_name": getattr(integration, "channel_name", None),
+            "team_name": integration.team_name,
+            "channel_name": integration.channel_name,
         }
-    if typename == "GenericWebhookIntegration":
+    if typename == _TYPENAME_WEBHOOK_INTEGRATION:
         return {
-            "id": getattr(integration, "id", None),
+            "id": integration.id,
             "type": _WEBHOOK,
-            "name": getattr(integration, "name", None),
-            "url_endpoint": getattr(integration, "url_endpoint", None),
+            "name": integration.name,
+            "url_endpoint": integration.url_endpoint,
         }
-    # Fallback for unknown future integration kinds: surface what we can.
-    return {
-        "id": getattr(integration, "id", None),
-        "type": typename or "unknown",
-    }
+    # Forward-compat: surface unknown kinds with at least an id + raw typename
+    # rather than dropping or erroring, so future integration kinds added on
+    # the server side don't break this tool. ``id`` is on every Integration
+    # subclass in the generated fragments.
+    return {"id": integration.id, "type": typename}
 
 
 def list_integrations(
-    entity: Optional[str] = None,
-    integration_type: Optional[str] = None,
+    entity: str | None = None,
+    integration_type: str | None = None,
     max_items: int = DEFAULT_MAX_ITEMS,
 ) -> str:
     """List Slack and/or webhook integrations for an entity."""
@@ -331,7 +387,7 @@ def list_integrations(
             )
 
         try:
-            kwargs: Dict[str, Any] = {"per_page": min(max_items, 100)}
+            kwargs: dict[str, Any] = {"per_page": min(max_items, 100)}
             if entity is not None:
                 kwargs["entity"] = entity
 
@@ -342,7 +398,7 @@ def list_integrations(
             else:
                 source = api.integrations(**kwargs)
 
-            integrations: List[Dict[str, Any]] = []
+            integrations: list[dict[str, Any]] = []
             truncated = False
             for item in source:
                 if len(integrations) >= max_items:
