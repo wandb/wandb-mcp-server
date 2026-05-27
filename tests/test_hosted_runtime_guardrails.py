@@ -199,6 +199,31 @@ async def test_count_tool_passes_bounded_request_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_count_tool_preserves_session_context_in_executor(monkeypatch):
+    from wandb_mcp_server.session_manager import current_session_id
+
+    monkeypatch.setattr(cfg, "MCP_TOOL_TIMEOUT_SECONDS", 3)
+    monkeypatch.setattr(WandBApiManager, "get_api_key", staticmethod(lambda: "test-key"))
+    observed_session_ids = []
+
+    def capture_count(*args, **kwargs):
+        observed_session_ids.append(current_session_id.get())
+        return 2
+
+    monkeypatch.setattr(server, "count_traces", capture_count)
+
+    token = current_session_id.set("sess_test")
+    try:
+        tool = _registered_tools(monkeypatch)["count_weave_traces_tool"]
+        result = json.loads(await tool("entity", "project"))
+    finally:
+        current_session_id.reset(token)
+
+    assert result == {"total_count": 2, "root_traces_count": 2}
+    assert observed_session_ids == ["sess_test", "sess_test"]
+
+
+@pytest.mark.asyncio
 async def test_trace_query_preflight_timeout_does_not_block_main_query(monkeypatch):
     monkeypatch.setattr(cfg, "MCP_HOSTED_MODE", True)
     monkeypatch.setattr(cfg, "MCP_MAX_QUERY_LIMIT", 100)
