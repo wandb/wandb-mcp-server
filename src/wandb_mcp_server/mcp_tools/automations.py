@@ -65,18 +65,18 @@ LIST_AUTOMATIONS_TOOL_DESCRIPTION = dedent(
     <critical_info>
     - entity=None lists every automation the authenticated viewer can see across
     all of their teams. Pass entity="<team-or-user>" to scope to one entity.
-    - The optional name filter is an exact match (not regex/substring).
+    - The optional name filter is an exact match (not regex or substring).
     - Results are capped by max_items (default 50, ceiling 200). When more exist,
     the response sets truncated=true.
-    - Each returned automation has:
-        id, name, enabled, description, created_at, updated_at,
-        scope:  {type, id, name}      -- PROJECT or ARTIFACT_COLLECTION
-        event:  {type, filter}        -- structured per event type
-        action: {type, ...}           -- NOTIFICATION (Slack), GENERIC_WEBHOOK, NO_OP
-    - The wandb GraphQL schema only stores the scope's id + name; it does NOT
-    return the parent project/entity on the scope itself. If you need that
-    context, use the `entity` you passed in (for the scope) and look up the
-    project separately.
+    - Each returned automation has these fields: id, name, enabled, description,
+    created_at, updated_at, scope, event, action.
+    - scope is {type, id, name} where type is PROJECT or ARTIFACT_COLLECTION.
+    - event is {type, filter} where filter shape depends on the event type.
+    - action is {type, ...} with extra fields per action type (NOTIFICATION for
+    Slack, GENERIC_WEBHOOK for webhooks, NO_OP for placeholders).
+    - The scope only includes id and name. The parent project and entity are
+    not on the scope. If you need them, use the `entity` you passed to this
+    tool and look up the project separately.
     - This tool is read-only. It cannot create, modify, or delete automations.
     </critical_info>
 
@@ -88,7 +88,7 @@ LIST_AUTOMATIONS_TOOL_DESCRIPTION = dedent(
     name : str, optional
         Exact-match filter on the automation's name.
     max_items : int, optional
-        Maximum automations to return. Default: 50, max: 200.
+        Maximum automations to return. Default 50, ceiling 200.
 
     Returns
     -------
@@ -120,9 +120,9 @@ def _jsonify_scope(scope: ProjectScope | ArtifactCollectionScope) -> dict[str, A
 def _jsonify_metric_filter(metric_filter: Any) -> dict[str, Any]:
     """Flatten the inner metric filter from a RunMetricFilter wrapper.
 
-    A ``RunMetricFilter.metric`` is one of three pydantic wrapper variants;
-    each carries its own ``event_type`` discriminator and exposes exactly
-    one of the threshold / change / zscore sub-filter attributes. We
+    A ``RunMetricFilter.metric`` is one of three pydantic wrapper variants.
+    Each carries its own ``event_type`` discriminator and exposes exactly
+    one of the threshold, change, or zscore sub-filter attributes. We
     discriminate via the upstream-defined enum value rather than poking at
     attribute presence.
     """
@@ -159,10 +159,10 @@ def _jsonify_event(event: SavedEvent) -> dict[str, Any]:
 def _jsonify_action(action: SavedAction) -> dict[str, Any]:
     """Flatten a SavedAction to a JSON-safe dict.
 
-    Discriminated on the public ``ActionType`` enum. Each variant emits
-    exactly the fields that the wandb SDK guarantees on its pydantic class
-    (SavedNotificationAction / SavedWebhookAction / SavedNoOpAction); no
-    cross-variant attribute access is needed.
+    Match-cases on the public ``Saved*Action`` pydantic types
+    (SavedNotificationAction, SavedWebhookAction, SavedNoOpAction). Each
+    arm emits only the fields its variant guarantees, so we never reach
+    for an attribute the variant does not define.
     """
     from wandb.automations.actions import SavedNoOpAction, SavedNotificationAction, SavedWebhookAction
 
@@ -228,7 +228,7 @@ LIST_INTEGRATIONS_TOOL_DESCRIPTION = dedent("""\
     List W&B integrations (Slack channels and webhooks) for an entity.
 
     Integrations are the destinations that W&B Automations send notifications to.
-    A SlackIntegration represents a connected Slack channel; a WebhookIntegration
+    A SlackIntegration represents a connected Slack channel. A WebhookIntegration
     represents a configured outbound webhook URL. An Automation action references
     exactly one integration by id.
 
@@ -243,13 +243,12 @@ LIST_INTEGRATIONS_TOOL_DESCRIPTION = dedent("""\
     </when_to_use>
 
     <critical_info>
-    - Integrations are configured at the entity (team) level via the W&B UI; this
-    tool only lists existing integrations, it does not create them.
+    - Integrations are configured at the entity (team) level via the W&B UI.
+    This tool only lists existing integrations. It does not create them.
     - entity=None defaults to the authenticated viewer's default entity.
-    - kind filters: "slack" returns only Slack integrations,
-    "webhook" returns only generic webhook integrations, omit/null returns both.
+    - kind is "slack" (Slack only), "webhook" (webhook only), or null (both).
     - Each returned record always has {id, type}. Slack adds {team_name,
-    channel_name}; webhook adds {name, url_endpoint}.
+    channel_name}. Webhook adds {name, url_endpoint}.
     </critical_info>
 
     Parameters
@@ -259,7 +258,7 @@ LIST_INTEGRATIONS_TOOL_DESCRIPTION = dedent("""\
     kind : "slack" | "webhook" | None
         Omit to return both kinds.
     max_items : int, optional
-        Maximum integrations to return. Default: 50, max: 200.
+        Maximum integrations to return. Default 50, ceiling 200.
 
     Returns
     -------
@@ -276,7 +275,7 @@ def _jsonify_integration(integration: Integration) -> dict[str, Any]:
     """Flatten a Slack or Webhook integration to a JSON-safe dict.
 
     Discriminated via ``isinstance`` against the public wandb pydantic
-    classes -- pydantic v2 returns concrete subclass instances for
+    classes. pydantic v2 returns concrete subclass instances for
     discriminated unions, so this is the canonical way to branch.
     The wildcard arm keeps the tool forward-compatible with future
     integration kinds the server may add.
@@ -318,7 +317,7 @@ def list_integrations(
                     iterator = api.slack_integrations(entity=entity, per_page=_clamp(max_items, 1, 100))
                 case "webhook":
                     iterator = api.webhook_integrations(entity=entity, per_page=_clamp(max_items, 1, 100))
-                case _:  # None -- already validated above
+                case _:  # None (already validated above)
                     iterator = api.integrations(entity=entity, per_page=_clamp(max_items, 1, 100))
 
             integrations = list(map(_jsonify_integration, islice(iterator, max_items)))

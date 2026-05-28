@@ -1,13 +1,13 @@
 """Unit tests for the list_automations and list_integrations tools.
 
-These tests use *real* wandb pydantic instances (via ``Automation.model_validate``
+These tests use real wandb pydantic instances (via ``Automation.model_validate``
 and ``SlackIntegration.model_validate`` / ``WebhookIntegration.model_validate``)
-rather than mocks, so they exercise the production serializer (``_jsonify_*``)
-against the actual model contracts the wandb SDK guarantees -- if wandb
-renames a field or changes a discriminator, these tests catch it. The only
-``MagicMock`` left in the file is the one ``test_unknown_typename_falls_back``
-needs to simulate a future integration kind that isn't ``SlackIntegration``
-or ``WebhookIntegration`` -- there's no way to do that with a real type.
+rather than mocks. The production serializer (``_jsonify_*``) runs against the
+actual model contracts the wandb SDK guarantees, so if wandb renames a field
+or changes a discriminator, these tests catch it. The one ``MagicMock`` left
+in the file is in ``test_unknown_typename_falls_back``. It simulates an
+integration kind that is not ``SlackIntegration`` or ``WebhookIntegration``,
+which no real type satisfies by construction.
 """
 
 from __future__ import annotations
@@ -37,9 +37,9 @@ PATCH_TARGET = "wandb_mcp_server.mcp_tools.automations.WandBApiManager"
 
 @fixture
 def mock_api(mocker) -> MagicMock:
-    """Patch ``WandBApiManager`` and yield the mocked ``api`` instance.
+    """Patch ``WandBApiManager`` and return the mocked ``api`` instance.
 
-    Production calls ``WandBApiManager.get_api()``; we replace the manager
+    Production calls ``WandBApiManager.get_api()``. We replace the manager
     with a MagicMock and return the api so tests can configure
     ``api.automations.return_value`` etc.
     """
@@ -50,8 +50,8 @@ def mock_api(mocker) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# Scope payload factories (GraphQL-shaped dicts; assembled by make_automation
-# and validated through Automation.model_validate).
+# Scope payload factories. These return GraphQL-shaped dicts that
+# make_automation assembles and validates through Automation.model_validate.
 # ---------------------------------------------------------------------------
 
 
@@ -71,7 +71,7 @@ def make_collection_scope() -> Callable[..., dict[str, Any]]:
         name: str = "my-models",
         kind: str = "ArtifactSequence",
     ) -> dict[str, Any]:
-        # wandb has two artifact-collection variants -- ArtifactSequence
+        # wandb has two artifact-collection variants: ArtifactSequence
         # (versioned artifact) and ArtifactPortfolio (registry collection).
         # Both serialize to ARTIFACT_COLLECTION scope_type so either works.
         return {"__typename": kind, "id": id, "name": name}
@@ -202,7 +202,7 @@ def make_run_state_event() -> Callable[..., dict[str, Any]]:
 def make_mutation_event() -> Callable[..., dict[str, Any]]:
     """An event for CREATE_ARTIFACT / ADD_ARTIFACT_ALIAS / LINK_ARTIFACT.
 
-    Mutation-event filters are open-ended MongoLikeFilter objects; the
+    Mutation-event filters are open-ended MongoLikeFilter objects. The
     production code falls back to ``repr()`` for these, so we only need
     a sentinel filter payload.
     """
@@ -248,8 +248,9 @@ def make_webhook_action() -> Callable[..., dict[str, Any]]:
         return {
             "__typename": "GenericWebhookTriggeredAction",
             "integration": {"__typename": "GenericWebhookIntegration", "id": integration_id},
-            # wire format is JSON-encoded; wandb parses it back to a dict in-memory
-            # but model_dump round-trips it to a string. Tests assert the string form.
+            # wire format is JSON-encoded. wandb parses it back to a dict
+            # in-memory but model_dump round-trips it to a string. Tests
+            # assert the string form.
             "requestPayload": json.dumps(request_payload) if request_payload is not None else None,
         }
 
@@ -524,7 +525,7 @@ class TestListAutomations:
 
         event = json.loads(list_automations())["automations"][0]["event"]
         assert event["type"] == "RUN_STATE"
-        # StateFilter dedupes + sorts; ``FAILED`` sorts before ``FINISHED``.
+        # StateFilter dedupes and sorts. ``FAILED`` sorts before ``FINISHED``.
         assert event["filter"] == {"states": ["FAILED", "FINISHED"]}
 
     @mark.parametrize(
@@ -538,7 +539,7 @@ class TestListAutomations:
 
         event = json.loads(list_automations())["automations"][0]["event"]
         assert event["type"] == event_type.value
-        # Mutation-event filter has no structured shape -- only a summary string.
+        # Mutation-event filter has no structured shape, only a summary string.
         assert set(event["filter"].keys()) == {"summary"}
 
     def test_notification_action_serialized(self, mock_api, make_automation, make_notification_action):
@@ -715,11 +716,11 @@ class TestListIntegrations:
         """Forward-compat: an Integration kind that's neither Slack nor Webhook
         should still serialize through the wildcard match arm.
 
-        This is the one case where a real wandb instance won't do -- the
-        whole point is "we don't know about this type yet" -- so we drop
+        This is the one case where a real wandb instance won't do. The
+        whole point is "we don't know about this type yet", so we drop
         down to a MagicMock for this test specifically. The production
-        wildcard arm calls ``.model_dump(include={"id"}, ...)``, so we wire
-        that up to return the expected dict.
+        wildcard arm calls ``.model_dump(include={"id"}, ...)``, so we
+        wire that up to return the expected dict.
         """
         other = MagicMock()
         other.id = "d1"
