@@ -145,7 +145,7 @@ def _jsonify_event(event: SavedEvent) -> dict[str, Any]:
     that we surface as a brief string ``summary`` since the SDK doesn't
     expose a stable structured shape for it.
     """
-    from wandb.automations.events import RunMetricFilter, RunStateFilter
+    from wandb.automations.events import RunMetricFilter, RunStateFilter, SavedEvent
 
     match event:
         case SavedEvent(event_type=type_, filter=RunMetricFilter(metric=metric_filter)):

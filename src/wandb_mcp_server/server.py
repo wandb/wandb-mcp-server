@@ -19,7 +19,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import wandb
 from dotenv import load_dotenv
@@ -84,8 +84,7 @@ from wandb_mcp_server.mcp_tools.query_weave import (
 )
 from wandb_mcp_server.utils import ServerMCPArgs, get_rich_logger, get_server_args
 
-if TYPE_CHECKING:
-    from pydantic import PositiveInt
+from pydantic import PositiveInt
 
 # Export key functions for HF Spaces app
 __all__ = [
