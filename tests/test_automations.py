@@ -1,22 +1,23 @@
-"""Mock-based unit tests for the list_automations and list_integrations tools.
+"""Unit tests for the list_automations and list_integrations tools.
 
-These tests exercise the flattening logic in ``mcp_tools/automations.py``
-against ``MagicMock(spec=...)`` stand-ins for the wandb SDK's pydantic
-models -- this gives us correct ``isinstance``/``match-case`` behavior
-without paying the cost of constructing real Automation/Integration
-objects through pydantic validation. No live wandb API calls.
+These tests use *real* wandb pydantic instances (via ``Automation.model_validate``
+and ``SlackIntegration.model_validate`` / ``WebhookIntegration.model_validate``)
+rather than mocks, so they exercise the production serializer (``_jsonify_*``)
+against the actual model contracts the wandb SDK guarantees -- if wandb
+renames a field or changes a discriminator, these tests catch it. The only
+``MagicMock`` left in the file is the one ``test_unknown_typename_falls_back``
+needs to simulate a future integration kind that isn't ``SlackIntegration``
+or ``WebhookIntegration`` -- there's no way to do that with a real type.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime
-from typing import Callable
+from typing import Any, Callable
 from unittest.mock import MagicMock
 
 from pytest import fixture, mark
 from wandb.automations import (
-    ActionType,
     Automation,
     EventType,
     SlackIntegration,
@@ -27,22 +28,20 @@ PATCH_TARGET = "wandb_mcp_server.mcp_tools.automations.WandBApiManager"
 
 
 # ---------------------------------------------------------------------------
-# Fixtures: factories for fake wandb-SDK-shaped objects
-#
-# We use MagicMock(spec=<real wandb class>) so that isinstance() and the
-# match-case class patterns in the production code work correctly. Each
-# fixture returns a *factory* so individual tests can override only the
-# fields they care about.
+# Fixtures: factories that build real wandb pydantic instances via
+# ``model_validate``, the canonical "construct from API response" path.
+# Tests get factories rather than fixed instances so individual cases can
+# override only the fields they care about.
 # ---------------------------------------------------------------------------
 
 
 @fixture
 def mock_api(mocker) -> MagicMock:
-    """Patch WandBApiManager and yield the mocked ``api`` instance.
+    """Patch ``WandBApiManager`` and yield the mocked ``api`` instance.
 
-    The production code under test calls ``WandBApiManager.get_api()``;
-    we replace the whole manager with a MagicMock and return the api
-    object so tests can configure ``api.automations.return_value`` etc.
+    Production calls ``WandBApiManager.get_api()``; we replace the manager
+    with a MagicMock and return the api so tests can configure
+    ``api.automations.return_value`` etc.
     """
     mgr = mocker.patch(PATCH_TARGET)
     api = MagicMock()
@@ -50,37 +49,52 @@ def mock_api(mocker) -> MagicMock:
     return api
 
 
+# ---------------------------------------------------------------------------
+# Scope payload factories (GraphQL-shaped dicts; assembled by make_automation
+# and validated through Automation.model_validate).
+# ---------------------------------------------------------------------------
+
+
 @fixture
-def make_project_scope() -> Callable[..., MagicMock]:
-    def _make(*, id: str = "scope_proj_1", name: str = "my-project") -> MagicMock:
-        s = MagicMock()
-        s.scope_type = MagicMock(value="PROJECT")
-        s.id = id
-        s.name = name
-        return s
+def make_project_scope() -> Callable[..., dict[str, Any]]:
+    def _make(*, id: str = "scope_proj_1", name: str = "my-project") -> dict[str, Any]:
+        return {"__typename": "Project", "id": id, "name": name}
 
     return _make
 
 
 @fixture
-def make_collection_scope() -> Callable[..., MagicMock]:
-    def _make(*, id: str = "scope_coll_1", name: str = "my-models") -> MagicMock:
-        s = MagicMock()
-        s.scope_type = MagicMock(value="ARTIFACT_COLLECTION")
-        s.id = id
-        s.name = name
-        return s
+def make_collection_scope() -> Callable[..., dict[str, Any]]:
+    def _make(
+        *,
+        id: str = "scope_coll_1",
+        name: str = "my-models",
+        kind: str = "ArtifactSequence",
+    ) -> dict[str, Any]:
+        # wandb has two artifact-collection variants -- ArtifactSequence
+        # (versioned artifact) and ArtifactPortfolio (registry collection).
+        # Both serialize to ARTIFACT_COLLECTION scope_type so either works.
+        return {"__typename": kind, "id": id, "name": name}
 
     return _make
 
 
-# NOTE: ``MagicMock(name=x, ...)`` treats ``name`` as the mock's repr name,
-# NOT as setting the ``.name`` attribute. For any wandb field literally called
-# "name" we always assign it via attribute after construction.
+# ---------------------------------------------------------------------------
+# Event payload factories.
+# ---------------------------------------------------------------------------
+
+
+def _filter_event_payload(event_type: str, filter_obj: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "__typename": "FilterEventTriggeringCondition",
+        "eventType": event_type,
+        # The wire format stores the filter as a JSON-encoded string.
+        "filter": json.dumps(filter_obj),
+    }
 
 
 @fixture
-def make_threshold_event() -> Callable[..., MagicMock]:
+def make_threshold_event() -> Callable[..., dict[str, Any]]:
     def _make(
         *,
         metric_name: str = "acc",
@@ -88,18 +102,28 @@ def make_threshold_event() -> Callable[..., MagicMock]:
         window: int = 5,
         cmp: str = "$gt",
         threshold: float = 0.9,
-    ) -> MagicMock:
-        inner = MagicMock(window=window, cmp=cmp, threshold=threshold)
-        inner.name = metric_name
-        inner.agg = MagicMock(value=agg) if agg else None
-        wrapper = MagicMock(event_type=EventType.RUN_METRIC_THRESHOLD, threshold_filter=inner)
-        return MagicMock(event_type=EventType.RUN_METRIC_THRESHOLD, filter=MagicMock(metric=wrapper))
+    ) -> dict[str, Any]:
+        threshold_filter: dict[str, Any] = {
+            "name": metric_name,
+            "window_size": window,
+            "cmp_op": cmp,
+            "threshold": threshold,
+        }
+        if agg is not None:
+            threshold_filter["agg_op"] = agg
+        return _filter_event_payload(
+            "RUN_METRIC",
+            {
+                "run_filter": {"$and": []},
+                "run_metric_filter": {"threshold_filter": threshold_filter},
+            },
+        )
 
     return _make
 
 
 @fixture
-def make_change_event() -> Callable[..., MagicMock]:
+def make_change_event() -> Callable[..., dict[str, Any]]:
     def _make(
         *,
         metric_name: str = "loss",
@@ -109,120 +133,150 @@ def make_change_event() -> Callable[..., MagicMock]:
         change_type: str = "RELATIVE",
         change_dir: str = "DECREASE",
         threshold: float = 0.1,
-    ) -> MagicMock:
-        inner = MagicMock(
-            window=window,
-            prior_window=prior_window,
-            change_type=MagicMock(value=change_type),
-            change_dir=MagicMock(value=change_dir),
-            threshold=threshold,
+    ) -> dict[str, Any]:
+        change_filter: dict[str, Any] = {
+            "name": metric_name,
+            "current_window_size": window,
+            "prior_window_size": prior_window,
+            "change_type": change_type,
+            "change_dir": change_dir,
+            "change_amount": threshold,
+        }
+        if agg is not None:
+            change_filter["agg_op"] = agg
+        return _filter_event_payload(
+            "RUN_METRIC_CHANGE",
+            {
+                "run_filter": {"$and": []},
+                "run_metric_filter": {"change_filter": change_filter},
+            },
         )
-        inner.name = metric_name
-        inner.agg = MagicMock(value=agg) if agg else None
-        wrapper = MagicMock(event_type=EventType.RUN_METRIC_CHANGE, change_filter=inner)
-        return MagicMock(event_type=EventType.RUN_METRIC_CHANGE, filter=MagicMock(metric=wrapper))
 
     return _make
 
 
 @fixture
-def make_zscore_event() -> Callable[..., MagicMock]:
+def make_zscore_event() -> Callable[..., dict[str, Any]]:
     def _make(
         *,
         metric_name: str = "loss",
         window: int = 30,
         change_dir: str = "ANY",
         threshold: float = 3.0,
-    ) -> MagicMock:
-        inner = MagicMock(
-            window=window,
-            change_dir=MagicMock(value=change_dir),
-            threshold=threshold,
+    ) -> dict[str, Any]:
+        return _filter_event_payload(
+            "RUN_METRIC_ZSCORE",
+            {
+                "run_filter": {"$and": []},
+                "run_metric_filter": {
+                    "zscore_filter": {
+                        "name": metric_name,
+                        "window_size": window,
+                        "change_dir": change_dir,
+                        "threshold": threshold,
+                    },
+                },
+            },
         )
-        inner.name = metric_name
-        wrapper = MagicMock(event_type=EventType.RUN_METRIC_ZSCORE, zscore_filter=inner)
-        return MagicMock(event_type=EventType.RUN_METRIC_ZSCORE, filter=MagicMock(metric=wrapper))
 
     return _make
 
 
 @fixture
-def make_run_state_event() -> Callable[..., MagicMock]:
-    def _make(*, states: tuple[str, ...] = ("finished", "failed")) -> MagicMock:
-        state = MagicMock(states=[MagicMock(value=s) for s in states])
-        return MagicMock(event_type=EventType.RUN_STATE, filter=MagicMock(state=state))
+def make_run_state_event() -> Callable[..., dict[str, Any]]:
+    def _make(*, states: tuple[str, ...] = ("FINISHED", "FAILED")) -> dict[str, Any]:
+        # wandb's StateFilter validator dedupes + sorts these on the way in,
+        # so the order tests assert on is the canonical sorted order.
+        return _filter_event_payload(
+            "RUN_STATE",
+            {
+                "run_filter": {"$and": []},
+                "run_state_filter": {"states": list(states)},
+            },
+        )
 
     return _make
 
 
 @fixture
-def make_mutation_event() -> Callable[..., MagicMock]:
+def make_mutation_event() -> Callable[..., dict[str, Any]]:
     """An event for CREATE_ARTIFACT / ADD_ARTIFACT_ALIAS / LINK_ARTIFACT.
 
     Mutation-event filters are open-ended MongoLikeFilter objects; the
     production code falls back to ``repr()`` for these, so we only need
-    a sentinel filter object whose ``repr`` is recognizable.
+    a sentinel filter payload.
     """
 
-    def _make(*, event_type: EventType = EventType.CREATE_ARTIFACT) -> MagicMock:
-        return MagicMock(event_type=event_type, filter=MagicMock())
+    def _make(*, event_type: EventType = EventType.CREATE_ARTIFACT) -> dict[str, Any]:
+        return _filter_event_payload(event_type.value, {"filter": {}})
 
     return _make
 
 
+# ---------------------------------------------------------------------------
+# Action payload factories.
+# ---------------------------------------------------------------------------
+
+
 @fixture
-def make_notification_action() -> Callable[..., MagicMock]:
+def make_notification_action() -> Callable[..., dict[str, Any]]:
     def _make(
         *,
         integration_id: str = "int_slack_1",
         title: str = "t",
         message: str = "m",
         severity: str | None = "INFO",
-    ) -> MagicMock:
-        a = MagicMock(
-            action_type=ActionType.NOTIFICATION,
-            integration=MagicMock(id=integration_id),
-            title=title,
-            message=message,
-            severity=MagicMock(value=severity) if severity else None,
-        )
-        return a
+    ) -> dict[str, Any]:
+        return {
+            "__typename": "NotificationTriggeredAction",
+            "integration": {"__typename": "SlackIntegration", "id": integration_id},
+            "title": title,
+            "message": message,
+            "severity": severity,
+        }
 
     return _make
 
 
 @fixture
-def make_webhook_action() -> Callable[..., MagicMock]:
+def make_webhook_action() -> Callable[..., dict[str, Any]]:
     def _make(
         *,
         integration_id: str = "int_webhook_1",
-        request_payload: dict | None = None,
-    ) -> MagicMock:
-        return MagicMock(
-            action_type=ActionType.GENERIC_WEBHOOK,
-            integration=MagicMock(id=integration_id),
-            request_payload=request_payload,
-        )
+        request_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "__typename": "GenericWebhookTriggeredAction",
+            "integration": {"__typename": "GenericWebhookIntegration", "id": integration_id},
+            # wire format is JSON-encoded; wandb parses it back to a dict in-memory
+            # but model_dump round-trips it to a string. Tests assert the string form.
+            "requestPayload": json.dumps(request_payload) if request_payload is not None else None,
+        }
 
     return _make
 
 
 @fixture
-def make_no_op_action() -> Callable[..., MagicMock]:
-    def _make() -> MagicMock:
-        return MagicMock(action_type=ActionType.NO_OP)
+def make_no_op_action() -> Callable[..., dict[str, Any]]:
+    def _make() -> dict[str, Any]:
+        return {"__typename": "NoOpTriggeredAction", "noOp": True}
 
     return _make
 
 
-@fixture
-def make_automation(make_project_scope, make_threshold_event, make_notification_action) -> Callable[..., MagicMock]:
-    """Build a MagicMock with the same surface as ``wandb.automations.Automation``.
+# ---------------------------------------------------------------------------
+# Top-level Automation factory.
+# ---------------------------------------------------------------------------
 
-    Using ``spec=Automation`` would make ``isinstance(m, Automation)`` true,
-    but the production code doesn't isinstance-check Automations -- it
-    only attribute-accesses them -- so a plain MagicMock keeps fixture
-    setup simpler. Override any field via kwargs.
+
+@fixture
+def make_automation(make_project_scope, make_threshold_event, make_notification_action) -> Callable[..., Automation]:
+    """Build a real ``wandb.automations.Automation`` via ``model_validate``.
+
+    Override any of ``scope`` / ``event`` / ``action`` with a payload dict
+    from the matching factory (e.g. ``make_threshold_event(...)``). Defaults
+    produce a Project-scoped RUN_METRIC threshold automation with a Slack
+    notification action.
     """
 
     def _make(
@@ -231,65 +285,70 @@ def make_automation(make_project_scope, make_threshold_event, make_notification_
         name: str = "my-automation",
         enabled: bool = True,
         description: str | None = "desc",
-        created_at: datetime = datetime(2026, 1, 1, 12, 0, 0),
-        updated_at: datetime | None = datetime(2026, 5, 1, 12, 0, 0),
-        scope: MagicMock | None = None,
-        event: MagicMock | None = None,
-        action: MagicMock | None = None,
-    ) -> MagicMock:
-        m = MagicMock(
-            id=id,
-            enabled=enabled,
-            description=description,
-            created_at=created_at,
-            updated_at=updated_at,
-            scope=scope or make_project_scope(),
-            event=event or make_threshold_event(),
-            action=action or make_notification_action(),
-        )
-        m.name = name  # see note above: ``name`` is reserved in MagicMock()
-        return m
+        created_at: str = "2026-01-01T12:00:00",
+        updated_at: str | None = "2026-05-01T12:00:00",
+        scope: dict[str, Any] | None = None,
+        event: dict[str, Any] | None = None,
+        action: dict[str, Any] | None = None,
+    ) -> Automation:
+        payload = {
+            "__typename": "Trigger",
+            "id": id,
+            "name": name,
+            "enabled": enabled,
+            "description": description,
+            "createdAt": created_at,
+            "updatedAt": updated_at,
+            "scope": scope if scope is not None else make_project_scope(),
+            "event": event if event is not None else make_threshold_event(),
+            "action": action if action is not None else make_notification_action(),
+        }
+        return Automation.model_validate(payload)
 
     return _make
 
 
+# ---------------------------------------------------------------------------
+# Integration factories.
+# ---------------------------------------------------------------------------
+
+
 @fixture
-def make_slack_integration() -> Callable[..., MagicMock]:
-    """Build a MagicMock that passes ``isinstance(m, SlackIntegration)``.
-
-    Using ``spec=SlackIntegration`` is the canonical way to get a mock
-    that the production code's ``match SlackIntegration():`` pattern
-    will recognize.
-    """
-
+def make_slack_integration() -> Callable[..., SlackIntegration]:
     def _make(
         *,
         id: str = "int_slack_1",
         team_name: str = "acme",
         channel_name: str = "alerts",
-    ) -> MagicMock:
-        m = MagicMock(spec=SlackIntegration)
-        m.id = id
-        m.team_name = team_name
-        m.channel_name = channel_name
-        return m
+    ) -> SlackIntegration:
+        return SlackIntegration.model_validate(
+            {
+                "__typename": "SlackIntegration",
+                "id": id,
+                "teamName": team_name,
+                "channelName": channel_name,
+            }
+        )
 
     return _make
 
 
 @fixture
-def make_webhook_integration() -> Callable[..., MagicMock]:
+def make_webhook_integration() -> Callable[..., WebhookIntegration]:
     def _make(
         *,
         id: str = "int_webhook_1",
         name: str = "prod-webhook",
         url_endpoint: str = "https://example.com/hook",
-    ) -> MagicMock:
-        m = MagicMock(spec=WebhookIntegration)
-        m.id = id
-        m.name = name  # safe here -- assigned via attribute, not kwarg
-        m.url_endpoint = url_endpoint
-        return m
+    ) -> WebhookIntegration:
+        return WebhookIntegration.model_validate(
+            {
+                "__typename": "GenericWebhookIntegration",
+                "id": id,
+                "name": name,
+                "urlEndpoint": url_endpoint,
+            }
+        )
 
     return _make
 
@@ -311,8 +370,8 @@ class TestListAutomations:
         assert result["entity"] is None
         assert result["truncated"] is False
         kwargs = mock_api.automations.call_args.kwargs
-        assert "entity" not in kwargs
-        assert "name" not in kwargs
+        assert kwargs.get("entity") is None
+        assert kwargs.get("name") is None
 
     def test_entity_and_name_passed_through(self, mock_api, make_automation):
         mock_api.automations.return_value = iter([make_automation(name="exact-match")])
@@ -395,7 +454,7 @@ class TestListAutomations:
             "type": "RUN_METRIC",
             "filter": {
                 "kind": "threshold",
-                "metric": "accuracy",
+                "name": "accuracy",
                 "agg": "MAX",
                 "window": 5,
                 "cmp": "$gt",
@@ -427,9 +486,9 @@ class TestListAutomations:
             "type": "RUN_METRIC_CHANGE",
             "filter": {
                 "kind": "change",
-                "metric": "loss",
+                "name": "loss",
                 "agg": "AVERAGE",
-                "current_window": 3,
+                "window": 3,
                 "prior_window": 3,
                 "change_type": "RELATIVE",
                 "change_dir": "DECREASE",
@@ -449,7 +508,7 @@ class TestListAutomations:
             "type": "RUN_METRIC_ZSCORE",
             "filter": {
                 "kind": "zscore",
-                "metric": "loss",
+                "name": "loss",
                 "window": 30,
                 "change_dir": "ANY",
                 "threshold": 3.0,
@@ -458,14 +517,15 @@ class TestListAutomations:
 
     def test_run_state_event_serialized(self, mock_api, make_automation, make_run_state_event):
         mock_api.automations.return_value = iter(
-            [make_automation(event=make_run_state_event(states=("finished", "failed")))]
+            [make_automation(event=make_run_state_event(states=("FINISHED", "FAILED")))]
         )
 
         from wandb_mcp_server.mcp_tools.automations import list_automations
 
         event = json.loads(list_automations())["automations"][0]["event"]
         assert event["type"] == "RUN_STATE"
-        assert event["filter"] == {"states": ["finished", "failed"]}
+        # StateFilter dedupes + sorts; ``FAILED`` sorts before ``FINISHED``.
+        assert event["filter"] == {"states": ["FAILED", "FINISHED"]}
 
     @mark.parametrize(
         "event_type",
@@ -509,10 +569,12 @@ class TestListAutomations:
         from wandb_mcp_server.mcp_tools.automations import list_automations
 
         action = json.loads(list_automations())["automations"][0]["action"]
+        # wandb's ``request_payload`` round-trips through model_dump as the
+        # JSON-encoded wire form, not the in-memory dict.
         assert action == {
             "type": "GENERIC_WEBHOOK",
             "integration_id": "int_w",
-            "request_payload": {"k": "v"},
+            "request_payload": '{"k":"v"}',
         }
 
     def test_no_op_action_serialized(self, mock_api, make_automation, make_no_op_action):
@@ -651,12 +713,18 @@ class TestListIntegrations:
 
     def test_unknown_typename_falls_back(self, mock_api):
         """Forward-compat: an Integration kind that's neither Slack nor Webhook
-        should still serialize (this is the wildcard match arm)."""
+        should still serialize through the wildcard match arm.
+
+        This is the one case where a real wandb instance won't do -- the
+        whole point is "we don't know about this type yet" -- so we drop
+        down to a MagicMock for this test specifically. The production
+        wildcard arm calls ``.model_dump(include={"id"}, ...)``, so we wire
+        that up to return the expected dict.
+        """
         other = MagicMock()
         other.id = "d1"
         other.typename__ = "DiscordIntegration"
-        # IMPORTANT: do NOT spec=SlackIntegration/WebhookIntegration so the
-        # match-case wildcard fires.
+        other.model_dump.return_value = {"id": "d1"}
         mock_api.integrations.return_value = iter([other])
 
         from wandb_mcp_server.mcp_tools.automations import list_integrations
@@ -679,14 +747,3 @@ def test_tool_descriptions_present(const_name):
     assert isinstance(val, str)
     assert "<when_to_use>" in val
     assert "<critical_info>" in val
-
-
-# ---------------------------------------------------------------------------
-# Sanity check: ``Automation`` import works so spec= would work in future tests
-# ---------------------------------------------------------------------------
-
-
-def test_wandb_automation_class_importable():
-    """If wandb ever moves/renames Automation, this test will fail loudly
-    so the mock fixtures above can be updated in lockstep."""
-    assert isinstance(Automation, type)
