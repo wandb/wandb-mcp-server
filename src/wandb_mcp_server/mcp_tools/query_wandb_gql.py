@@ -2,6 +2,7 @@
 
 import copy
 import logging
+import re
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -526,6 +527,125 @@ def get_nested_value(obj: Dict, path: list[str]) -> Optional[Any]:
     return current
 
 
+_HOSTED_LIMIT_VARIABLE_RE = re.compile(r"^(first|limit|count|max_?items|page_?size|items_per_page)$", re.I)
+
+
+def _field_name(node: gql_ast.FieldNode) -> str:
+    """Return the response field name for a GraphQL field."""
+    return node.alias.value if node.alias else node.name.value
+
+
+def _is_connection_field(node: gql_ast.FieldNode) -> bool:
+    """Return True if a field selection looks like a W&B connection."""
+    if not node.selection_set:
+        return False
+    child_names = {
+        selection.name.value for selection in node.selection_set.selections if isinstance(selection, gql_ast.FieldNode)
+    }
+    return {"edges", "pageInfo"}.issubset(child_names)
+
+
+class HostedGraphQLPreflightVisitor(gql_visitor.Visitor):
+    """Clamp hosted GraphQL page sizes and reject unsafe fanout shapes."""
+
+    def __init__(self, max_first: int) -> None:
+        super().__init__()
+        self.max_first = max_first
+        self.path: list[str] = []
+        self.connection_depth = 0
+        self.connection_paths: list[tuple[str, ...]] = []
+        self.rewrites: list[str] = []
+        self.rejections: list[str] = []
+
+    def enter_variable_definition(self, node, key, parent, path, ancestors):
+        if not isinstance(node, gql_ast.VariableDefinitionNode):
+            return
+        if not _HOSTED_LIMIT_VARIABLE_RE.match(node.variable.name.value):
+            return
+        if not isinstance(node.default_value, gql_ast.IntValueNode):
+            return
+
+        requested = int(node.default_value.value)
+        if requested <= self.max_first:
+            return
+
+        node.default_value = gql_ast.IntValueNode(value=str(self.max_first))
+        self.rewrites.append(f"Clamped ${node.variable.name.value} default from {requested} to {self.max_first}")
+
+    def enter_field(self, node, key, parent, path, ancestors):
+        if not isinstance(node, gql_ast.FieldNode):
+            return
+
+        self.path.append(_field_name(node))
+        if not _is_connection_field(node):
+            return
+
+        current_path = tuple(self.path)
+        self.connection_paths.append(current_path)
+        if self.connection_depth > 0:
+            self.rejections.append(
+                f"Nested paginated collection is not allowed in hosted mode: {'/'.join(current_path)}"
+            )
+        if len(self.connection_paths) > 1:
+            self.rejections.append(
+                f"Hosted GraphQL queries may include only one paginated collection; found {len(self.connection_paths)}."
+            )
+
+        existing_args = list(node.arguments or [])
+        has_first = False
+        for idx, arg in enumerate(existing_args):
+            arg_name = arg.name.value
+            if arg_name == "last":
+                self.rejections.append(
+                    f"Hosted GraphQL does not support reverse pagination with last: {'/'.join(current_path)}"
+                )
+            if arg_name != "first":
+                continue
+            has_first = True
+            if isinstance(arg.value, gql_ast.IntValueNode):
+                requested = int(arg.value.value)
+                if requested > self.max_first:
+                    existing_args[idx] = gql_ast.ArgumentNode(
+                        name=arg.name,
+                        value=gql_ast.IntValueNode(value=str(self.max_first)),
+                    )
+                    self.rewrites.append(f"Clamped {'/'.join(current_path)} first from {requested} to {self.max_first}")
+
+        if not has_first:
+            self.rejections.append(
+                "Hosted GraphQL paginated collections must include a first argument so the initial request "
+                f"can be bounded: {'/'.join(current_path)}"
+            )
+
+        node.arguments = tuple(existing_args)
+        self.connection_depth += 1
+
+    def leave_field(self, node, key, parent, path, ancestors):
+        if isinstance(node, gql_ast.FieldNode) and _is_connection_field(node):
+            self.connection_depth = max(0, self.connection_depth - 1)
+        if self.path:
+            self.path.pop()
+
+
+def _hosted_preprocess_graphql_query(query: str, max_first: int) -> tuple[str, list[str], list[str]]:
+    """Rewrite hosted GraphQL pagination limits before the first execution."""
+    document = parse(query.strip())
+    visitor = HostedGraphQLPreflightVisitor(max_first=max_first)
+    rewritten = gql_visitor.visit(document, visitor)
+    return gql_printer.print_ast(rewritten), visitor.rewrites, visitor.rejections
+
+
+def _hosted_clamp_variables(variables: Dict[str, Any], max_first: int) -> Dict[str, Any]:
+    """Clamp common page-size variable names before the initial GraphQL execute."""
+    clamped = dict(variables)
+    for key, value in list(clamped.items()):
+        if not _HOSTED_LIMIT_VARIABLE_RE.match(key):
+            continue
+        if isinstance(value, int) and value > max_first:
+            clamped[key] = max_first
+    return clamped
+
+
 def query_paginated_wandb_gql(
     query: str,
     variables: Optional[Dict[str, Any]] = None,
@@ -595,6 +715,34 @@ def query_paginated_wandb_gql(
                 limit_key = "limit"
                 page1_vars_func[limit_key] = items_per_page
                 logger.debug(f"No limit variable found in input, adding '{limit_key}={items_per_page}'")
+
+            if MCP_HOSTED_MODE:
+                try:
+                    query, rewrites, rejections = _hosted_preprocess_graphql_query(
+                        query,
+                        MCP_MAX_GQL_ITEMS_PER_PAGE,
+                    )
+                    page1_vars_func = _hosted_clamp_variables(
+                        page1_vars_func,
+                        MCP_MAX_GQL_ITEMS_PER_PAGE,
+                    )
+                    if rejections:
+                        ctx.mark_error(f"query_too_complex: {rejections[0]}")
+                        return {
+                            "errors": [
+                                {
+                                    "message": rejections[0],
+                                    "details": rejections,
+                                    "error": "query_too_complex",
+                                }
+                            ]
+                        }
+                    if rewrites:
+                        logger.warning("Hosted GraphQL preflight rewrote query: %s", rewrites)
+                except Exception as e:
+                    logger.error("Hosted GraphQL preflight failed: %s", e, exc_info=True)
+                    ctx.mark_error(f"invalid_input: {e}")
+                    return {"errors": [{"message": f"Failed to validate initial query: {e}"}]}
 
             try:
                 parsed_initial_query = gql(query.strip())

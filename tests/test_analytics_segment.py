@@ -53,6 +53,12 @@ class TestMapToSegmentTrack:
             "tool_call",
             session_id="s1",
             tool_name="query_wandb_gql",
+            mcp_tool_name="query_wandb_tool",
+            runtime_surface="cloud_run",
+            transport="http",
+            deployment_type="hosted",
+            environment="production",
+            hosted_mode=True,
             params={"entity": "team"},
             success=True,
         )
@@ -61,6 +67,12 @@ class TestMapToSegmentTrack:
         assert result["userId"] == "alice"
         assert result["event"] == f"{SEGMENT_EVENT_PREFIX}.tool_call"
         assert result["properties"]["tool_name"] == "query_wandb_gql"
+        assert result["properties"]["mcp_tool_name"] == "query_wandb_tool"
+        assert result["properties"]["runtime_surface"] == "cloud_run"
+        assert result["properties"]["transport"] == "http"
+        assert result["properties"]["deployment_type"] == "hosted"
+        assert result["properties"]["environment"] == "production"
+        assert result["properties"]["hosted_mode"] is True
         assert result["properties"]["source"] == "wandb-mcp-server"
         assert result["properties"]["schema_version"] == "1.0"
 
@@ -76,10 +88,16 @@ class TestMapToSegmentTrack:
             session_id="sess",
             email_domain="wandb.com",
             api_key_hash="abcd1234",
+            runtime_surface="local_stdio",
+            transport="stdio",
+            deployment_type="local",
         )
         result = map_to_segment_track(event)
         assert result["event"] == f"{SEGMENT_EVENT_PREFIX}.session_start"
         assert result["properties"]["email_domain"] == "wandb.com"
+        assert result["properties"]["runtime_surface"] == "local_stdio"
+        assert result["properties"]["transport"] == "stdio"
+        assert result["properties"]["deployment_type"] == "local"
 
     def test_request_basic(self):
         event = self._make_event(

@@ -21,6 +21,7 @@ import os
 import sys
 from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -182,9 +183,62 @@ analytics_logger = logging.getLogger("wandb_mcp_server.analytics")
 analytics_logger.setLevel(logging.INFO)
 analytics_logger.propagate = False
 
-_handler = logging.StreamHandler(sys.stdout)
-_handler.setFormatter(_StructuredJsonFormatter())
-analytics_logger.addHandler(_handler)
+_ANALYTICS_STREAM_STDOUT = "stdout"
+_ANALYTICS_STREAM_STDERR = "stderr"
+_VALID_ANALYTICS_STREAMS = frozenset({_ANALYTICS_STREAM_STDOUT, _ANALYTICS_STREAM_STDERR})
+
+
+def _resolve_analytics_stream_name(stream: Optional[str] = None) -> str:
+    """Resolve the structured analytics log stream name."""
+    raw = stream or os.environ.get("MCP_ANALYTICS_LOG_STREAM", _ANALYTICS_STREAM_STDOUT)
+    stream_name = raw.strip().lower()
+    if stream_name in _VALID_ANALYTICS_STREAMS:
+        return stream_name
+
+    logger.warning(
+        "MCP_ANALYTICS_LOG_STREAM=%r is not one of %s; falling back to stdout.",
+        raw,
+        sorted(_VALID_ANALYTICS_STREAMS),
+    )
+    return _ANALYTICS_STREAM_STDOUT
+
+
+def configure_analytics_logging(stream: Optional[str] = None) -> str:
+    """Configure the structured analytics logger stream.
+
+    HTTP/container deployments keep stdout so Cloud Logging can parse analytics
+    JSON. Stdio transport must use stderr because stdout is the MCP JSON-RPC
+    wire and any non-protocol line corrupts clients like Claude Desktop.
+
+    Args:
+        stream: Optional explicit stream name, "stdout" or "stderr". If omitted,
+            MCP_ANALYTICS_LOG_STREAM is honored, then stdout is used.
+
+    Returns:
+        The resolved stream name.
+    """
+    stream_name = _resolve_analytics_stream_name(stream)
+    target_stream = sys.stderr if stream_name == _ANALYTICS_STREAM_STDERR else sys.stdout
+
+    analytics_logger.handlers.clear()
+    handler = logging.StreamHandler(target_stream)
+    handler.setFormatter(_StructuredJsonFormatter())
+    analytics_logger.addHandler(handler)
+    analytics_logger.setLevel(logging.INFO)
+    analytics_logger.propagate = False
+    return stream_name
+
+
+def configure_analytics_logging_for_transport(transport: str) -> str:
+    """Configure analytics output for an MCP transport."""
+    if os.environ.get("MCP_ANALYTICS_LOG_STREAM"):
+        return configure_analytics_logging()
+    if transport == "stdio":
+        return configure_analytics_logging(_ANALYTICS_STREAM_STDERR)
+    return configure_analytics_logging(_ANALYTICS_STREAM_STDOUT)
+
+
+configure_analytics_logging()
 
 _REQUIRED_BASE_FIELDS = frozenset({"schema_version", "event_type", "timestamp"})
 
@@ -211,6 +265,85 @@ def _resolve_release_version() -> str:
 def _utcnow_iso() -> str:
     """Return current UTC time in ISO-8601 format."""
     return datetime.now(UTC).isoformat()
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean environment variable."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_stripped(name: str) -> Optional[str]:
+    """Return a stripped environment value or None when unset/empty."""
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _safe_wandb_base_host() -> Optional[str]:
+    """Return a host-only W&B base URL dimension."""
+    raw = _env_stripped("WANDB_BASE_URL")
+    if not raw:
+        return None
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    return parsed.netloc or parsed.path or None
+
+
+def _resolve_transport() -> str:
+    """Resolve the MCP transport dimension."""
+    transport = (_env_stripped("MCP_TRANSPORT") or "unknown").lower()
+    if transport in {"stdio", "http", "streamable-http", "sse"}:
+        return "http" if transport == "streamable-http" else transport
+    return transport
+
+
+def _resolve_runtime_surface(transport: str) -> str:
+    """Resolve where the MCP server is running."""
+    explicit = _env_stripped("MCP_RUNTIME_SURFACE")
+    if explicit:
+        return explicit
+    if os.environ.get("K_SERVICE") or os.environ.get("K_REVISION"):
+        return "cloud_run"
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return "helm_k8s"
+    if transport == "stdio":
+        return "local_stdio"
+    if transport == "http":
+        return "local_http"
+    return "unknown"
+
+
+def _resolve_deployment_type(runtime_surface: str, transport: str) -> str:
+    """Resolve the deployment type dimension."""
+    explicit = _env_stripped("MCP_DEPLOYMENT_TYPE")
+    if explicit:
+        return explicit
+    if _env_bool("MCP_HOSTED_MODE"):
+        return "hosted"
+    if runtime_surface.startswith("local") or transport == "stdio":
+        return "local"
+    return "unknown"
+
+
+def _deployment_context() -> Dict[str, Any]:
+    """Build low-cardinality deployment dimensions shared by all events."""
+    transport = _resolve_transport()
+    runtime_surface = _resolve_runtime_surface(transport)
+    context: Dict[str, Any] = {
+        "runtime_surface": runtime_surface,
+        "transport": transport,
+        "deployment_type": _resolve_deployment_type(runtime_surface, transport),
+        "environment": _env_stripped("ENVIRONMENT") or _env_stripped("DD_ENV") or "unknown",
+        "hosted_mode": _env_bool("MCP_HOSTED_MODE"),
+    }
+    wandb_base_host = _safe_wandb_base_host()
+    if wandb_base_host:
+        context["wandb_base_host"] = wandb_base_host
+    return context
 
 
 class AnalyticsTracker:
@@ -357,6 +490,7 @@ class AnalyticsTracker:
             "event_type": event_type,
             "timestamp": _utcnow_iso(),
             "release_version": _resolve_release_version(),
+            **_deployment_context(),
         }
         deployment_id = os.environ.get("MCP_DEPLOYMENT_ID")
         if deployment_id:
@@ -464,6 +598,7 @@ class AnalyticsTracker:
         success: bool = True,
         error: Optional[str] = None,
         duration_ms: Optional[float] = None,
+        mcp_tool_name: Optional[str] = None,
     ) -> None:
         """Record an MCP tool invocation."""
         if not self.enabled:
@@ -484,14 +619,19 @@ class AnalyticsTracker:
                 "error": error,
                 "duration_ms": duration_ms,
             }
+            if mcp_tool_name:
+                event["mcp_tool_name"] = mcp_tool_name
+            labels = {
+                "event_type": "tool_call",
+                "tool_name": tool_name,
+                "email_domain": email_domain or "unknown",
+                "success": str(success),
+            }
+            if mcp_tool_name:
+                labels["mcp_tool_name"] = mcp_tool_name
             self._emit(
                 event,
-                {
-                    "event_type": "tool_call",
-                    "tool_name": tool_name,
-                    "email_domain": email_domain or "unknown",
-                    "success": str(success),
-                },
+                labels,
             )
         except Exception as exc:
             logger.warning(f"Failed to track tool call: {exc}")

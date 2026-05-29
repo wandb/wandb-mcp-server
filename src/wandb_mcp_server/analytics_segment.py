@@ -51,9 +51,21 @@ _SESSION_PROPERTY_KEYS: List[str] = [
     "metadata",
 ]
 
+_BASE_PROPERTY_KEYS: List[str] = [
+    "release_version",
+    "deployment_id",
+    "runtime_surface",
+    "transport",
+    "deployment_type",
+    "environment",
+    "hosted_mode",
+    "wandb_base_host",
+]
+
 _TOOL_CALL_PROPERTY_KEYS: List[str] = [
     "session_id",
     "tool_name",
+    "mcp_tool_name",
     "params",
     "success",
     "error",
@@ -98,9 +110,7 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "schema_version": event.get("schema_version", "1.0"),
         "source": "wandb-mcp-server",
     }
-    if event.get("release_version"):
-        properties["release_version"] = event["release_version"]
-    for key in property_keys:
+    for key in [*_BASE_PROPERTY_KEYS, *property_keys]:
         if key in event:
             properties[key] = event[key]
 

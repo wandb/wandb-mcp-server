@@ -4,6 +4,8 @@ Rewritten from Nico's PR #2 with improved datetime handling and
 cleaner param sanitisation.
 """
 
+import io
+import json
 import logging
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
@@ -14,6 +16,9 @@ import pytest
 from wandb_mcp_server.analytics import (
     SCHEMA_VERSION,
     AnalyticsTracker,
+    analytics_logger,
+    configure_analytics_logging,
+    configure_analytics_logging_for_transport,
     get_analytics_tracker,
     reset_analytics_tracker,
 )
@@ -22,8 +27,10 @@ from wandb_mcp_server.analytics import (
 @pytest.fixture(autouse=True)
 def _reset():
     reset_analytics_tracker()
+    configure_analytics_logging("stdout")
     yield
     reset_analytics_tracker()
+    configure_analytics_logging("stdout")
 
 
 class _EventCapture(logging.Filter):
@@ -69,6 +76,113 @@ class TestEnableDisable:
     @patch.dict("os.environ", {"MCP_ANALYTICS_DISABLED": "false"})
     def test_env_false_keeps_enabled(self):
         assert AnalyticsTracker(enabled=True).enabled is True
+
+
+# -- Analytics log stream ----------------------------------------------------
+
+
+class TestAnalyticsLogStream:
+    def test_configure_analytics_logging_uses_stdout(self, monkeypatch):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        monkeypatch.setattr("sys.stdout", stdout)
+        monkeypatch.setattr("sys.stderr", stderr)
+
+        assert configure_analytics_logging("stdout") == "stdout"
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_tool",
+            session_id="s",
+            viewer_info="viewer",
+            duration_ms=1.0,
+        )
+
+        assert "ANALYTICS_EVENT" in stdout.getvalue()
+        assert stderr.getvalue() == ""
+
+    def test_configure_analytics_logging_uses_stderr(self, monkeypatch):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        monkeypatch.setattr("sys.stdout", stdout)
+        monkeypatch.setattr("sys.stderr", stderr)
+
+        assert configure_analytics_logging("stderr") == "stderr"
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="get_run_history",
+            session_id="s",
+            viewer_info="viewer",
+            duration_ms=1.0,
+        )
+
+        assert stdout.getvalue() == ""
+        payload = json.loads(stderr.getvalue())
+        assert payload["message"] == "ANALYTICS_EVENT"
+        assert payload["event_type"] == "tool_call"
+        assert payload["tool_name"] == "get_run_history"
+        assert payload["duration_ms"] == 1.0
+
+    def test_configure_analytics_logging_for_stdio_uses_stderr(self, monkeypatch):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        monkeypatch.setattr("sys.stdout", stdout)
+        monkeypatch.setattr("sys.stderr", stderr)
+
+        assert configure_analytics_logging_for_transport("stdio") == "stderr"
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="get_run_history",
+            session_id="s",
+            viewer_info="viewer",
+        )
+
+        assert stdout.getvalue() == ""
+        assert "ANALYTICS_EVENT" in stderr.getvalue()
+
+    def test_configure_analytics_logging_for_http_uses_stdout(self, monkeypatch):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        monkeypatch.setattr("sys.stdout", stdout)
+        monkeypatch.setattr("sys.stderr", stderr)
+
+        assert configure_analytics_logging_for_transport("http") == "stdout"
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_tool",
+            session_id="s",
+            viewer_info="viewer",
+        )
+
+        assert "ANALYTICS_EVENT" in stdout.getvalue()
+        assert stderr.getvalue() == ""
+
+    def test_explicit_stream_env_overrides_transport(self, monkeypatch):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        monkeypatch.setattr("sys.stdout", stdout)
+        monkeypatch.setattr("sys.stderr", stderr)
+        monkeypatch.setenv("MCP_ANALYTICS_LOG_STREAM", "stdout")
+
+        assert configure_analytics_logging_for_transport("stdio") == "stdout"
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_tool",
+            session_id="s",
+            viewer_info="viewer",
+        )
+
+        assert "ANALYTICS_EVENT" in stdout.getvalue()
+        assert stderr.getvalue() == ""
+
+    def test_reconfiguration_replaces_handler_instead_of_duplicating(self, monkeypatch):
+        stdout = io.StringIO()
+        monkeypatch.setattr("sys.stdout", stdout)
+
+        configure_analytics_logging("stdout")
+        configure_analytics_logging("stdout")
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_tool",
+            session_id="s",
+            viewer_info="viewer",
+        )
+
+        assert len(analytics_logger.handlers) == 1
+        assert stdout.getvalue().count("ANALYTICS_EVENT") == 1
 
 
 # -- Email domain extraction --------------------------------------------------
@@ -239,6 +353,45 @@ class TestSchemaVersion:
         t._emit({"event_type": "test"}, {})
         assert capture.event is None
 
+    @patch.dict(
+        "os.environ",
+        {
+            "MCP_RUNTIME_SURFACE": "cloud_run",
+            "MCP_TRANSPORT": "http",
+            "MCP_DEPLOYMENT_TYPE": "hosted",
+            "ENVIRONMENT": "production",
+            "MCP_HOSTED_MODE": "true",
+            "WANDB_BASE_URL": "https://api.wandb.ai",
+        },
+        clear=False,
+    )
+    def test_base_event_has_deployment_dimensions(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_gql",
+            session_id="s",
+            viewer_info="v",
+        )
+
+        assert capture.event is not None
+        assert capture.event["runtime_surface"] == "cloud_run"
+        assert capture.event["transport"] == "http"
+        assert capture.event["deployment_type"] == "hosted"
+        assert capture.event["environment"] == "production"
+        assert capture.event["hosted_mode"] is True
+        assert capture.event["wandb_base_host"] == "api.wandb.ai"
+
+    @patch.dict("os.environ", {"MCP_TRANSPORT": "stdio"}, clear=False)
+    def test_base_event_infers_local_stdio(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_gql",
+            session_id="s",
+            viewer_info="v",
+        )
+
+        assert capture.event is not None
+        assert capture.event["runtime_surface"] == "local_stdio"
+        assert capture.event["deployment_type"] == "local"
+
 
 # -- track_user_session -------------------------------------------------------
 
@@ -335,6 +488,18 @@ class TestTrackToolCall:
             duration_ms=123.4,
         )
         assert capture.event["duration_ms"] == 123.4
+
+    def test_mcp_tool_name_recorded_when_available(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_paginated_wandb_gql",
+            mcp_tool_name="query_wandb_tool",
+            session_id="s",
+            viewer_info="v",
+        )
+
+        assert capture.event["tool_name"] == "query_paginated_wandb_gql"
+        assert capture.event["mcp_tool_name"] == "query_wandb_tool"
+        assert capture.labels["mcp_tool_name"] == "query_wandb_tool"
 
     def test_labels_include_tool_name(self, capture):
         AnalyticsTracker(enabled=True).track_tool_call(

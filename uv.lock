@@ -2144,7 +2144,7 @@ wheels = [
 
 [[package]]
 name = "wandb-mcp-server"
-version = "0.3.3"
+version = "0.3.5"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -2195,7 +2195,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.9.0" },
     { name = "uvicorn", marker = "extra == 'http'", specifier = ">=0.24.0" },
     { name = "wandb", specifier = ">=0.25.1" },
-    { name = "wandb-workspaces", specifier = ">=0.1.12" },
+    { name = "wandb-workspaces", specifier = ">=0.3.9" },
     { name = "weave", specifier = ">=0.52.35" },
 ]
 provides-extras = ["test", "http"]
@@ -2208,15 +2208,15 @@ dev = [
 
 [[package]]
 name = "wandb-workspaces"
-version = "0.1.18"
+version = "0.3.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
     { name = "wandb" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0a/2c/dc9a134b7383b7555ebb2da2894f0d4c8ebee8e3bf944601f3122e8b4def/wandb_workspaces-0.1.18.tar.gz", hash = "sha256:3fcbfa391fd4d469dcf091ea897a8ed39c2688806a307d56df721e2f1689a337", size = 77294, upload-time = "2025-09-05T15:18:26.357Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/13/d3/3a5ebc8b969ec8d2391bb43e4a3d76ceaee2bfc11c9e9dc96b61577a9092/wandb_workspaces-0.3.9.tar.gz", hash = "sha256:d186faa7b0c4e6c33aecfea833e81ca0256d117b26f7e428f002c14cbf30601c", size = 210169, upload-time = "2026-03-31T15:23:20.337Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/75/14f5eb4ff53a6732637f000e7e6c14e055b0d69a9636689502d13a13b302/wandb_workspaces-0.1.18-py3-none-any.whl", hash = "sha256:ab4134cc7c0e33daf4dd70b67848a05bcd1ee21bad924b943edc8303fe789bdc", size = 87843, upload-time = "2025-09-05T15:18:24.255Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/46/112522e555b1fef7129e85065348d20dcb8761171b07614b5d3e95f86759/wandb_workspaces-0.3.9-py3-none-any.whl", hash = "sha256:79fbb9e899e5457f18446fd6a8c066a05709562ad9fe31b3d215ca4749a65f25", size = 100710, upload-time = "2026-03-31T15:23:18.934Z" },
 ]
 
 [[package]]

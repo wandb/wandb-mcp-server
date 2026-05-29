@@ -123,8 +123,8 @@ class TestAnalysisRunId:
 
         assert len(blocks) == 1
         runset_call = mock_wr.Runset.call_args
-        assert runset_call[1]["query"] == "abc123"
-        assert "filters" not in runset_call[1]
+        assert runset_call[1]["filters"] == 'name == "abc123"'
+        assert "query" not in runset_call[1]
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     def test_no_analysis_run_id_uses_default_runset(self, mock_wr):
@@ -161,5 +161,5 @@ class TestRunComparisonFix:
 
         assert len(blocks) == 1
         filtered_runset_call = mock_wr.Runset.call_args_list[-1]
-        assert filtered_runset_call[1]["query"] == "r1 r2"
-        assert "filters" not in filtered_runset_call[1]
+        assert filtered_runset_call[1]["filters"] == 'name in ["r1", "r2"]'
+        assert "query" not in filtered_runset_call[1]

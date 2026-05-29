@@ -507,6 +507,8 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_DEBUG` | Set to `"true"` to enable detailed W&B logging | No |
 | `MCP_AUTH_DISABLED` | Disable HTTP authentication (development only) | No |
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
+| `WANDB_MCP_ENABLE_WEAVE_TOOLS` | Enable Weave trace tools (default: `true`; set `false` for installs without a trace backend) | No |
+| `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events. Useful as a workaround for older stdio builds that wrote analytics to stdout. | No |
 | `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |
 
 #### Usage Examples
@@ -520,6 +522,13 @@ uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
 # Or with API key as argument
 uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server --wandb_api_key your-api-key
 ```
+
+For stdio clients such as Claude Desktop, stdout is reserved for MCP JSON-RPC
+messages. The server routes logs and analytics to stderr in stdio mode so
+desktop clients do not parse diagnostics as protocol messages. If you are using
+an older version and see JSON-RPC parse warnings containing analytics fields
+such as `schema_version` or `event_type`, set `MCP_ANALYTICS_DISABLED=true` as
+a workaround.
 
 **HTTP Transport (for testing and development):**
 ```bash
