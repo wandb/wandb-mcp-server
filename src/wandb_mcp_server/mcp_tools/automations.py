@@ -304,7 +304,7 @@ def list_integrations(
     with track_tool_execution("list_integrations", api.viewer, params) as ctx:
         max_items = _clamp(max_items, 1, MAX_ITEMS_CEIL)
 
-        if kind and (kind not in _VALID_INTEGRATION_KINDS):
+        if kind is not None and kind not in _VALID_INTEGRATION_KINDS:
             ctx.mark_error(f"invalid kind: {kind!r}")
 
             msg = f"kind must be one of {sorted(_VALID_INTEGRATION_KINDS)} or null, got {kind!r}"

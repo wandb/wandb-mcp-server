@@ -675,6 +675,19 @@ class TestListIntegrations:
         mock_api.slack_integrations.assert_not_called()
         mock_api.webhook_integrations.assert_not_called()
 
+    def test_empty_string_kind_is_invalid(self, mock_api):
+        """Regression: empty string is falsy in Python so a naive truthy check
+        would silently treat ``kind=""`` as ``None`` and return both kinds.
+        It must be rejected like any other non-allowed value.
+        """
+        from wandb_mcp_server.mcp_tools.automations import list_integrations
+
+        result = json.loads(list_integrations(kind=""))
+        assert result["error"] == "invalid_input"
+        mock_api.integrations.assert_not_called()
+        mock_api.slack_integrations.assert_not_called()
+        mock_api.webhook_integrations.assert_not_called()
+
     def test_empty(self, mock_api):
         mock_api.integrations.return_value = iter([])
 
