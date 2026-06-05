@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --extra test --python ${{ matrix.python-version }}
 
+      - name: Smoke test package import
+        run: uv run --no-sync python -c "import wandb_mcp_server; print('ok')"
+
       - name: Lint with ruff
         run: |
           uv run --no-sync ruff check src/ tests/
@@ -33,6 +36,17 @@ jobs:
 
       - name: Run unit tests
         run: uv run --no-sync pytest tests/ -x -v --tb=short -q
+        env:
+          WANDB_SILENT: "True"
+          WEAVE_SILENT: "True"
+
+      - name: Build and smoke test wheel install
+        run: |
+          uv build
+          SMOKE_ENV="$RUNNER_TEMP/wandb-mcp-install-smoke"
+          uv venv "$SMOKE_ENV" --python ${{ matrix.python-version }}
+          uv pip install --python "$SMOKE_ENV/bin/python" dist/*.whl
+          "$SMOKE_ENV/bin/python" -c "import wandb_mcp_server; print('ok')"
         env:
           WANDB_SILENT: "True"
           WEAVE_SILENT: "True"
