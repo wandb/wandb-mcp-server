@@ -515,6 +515,9 @@ class TestRealWorkspacesReportObjects:
         fake_api = MagicMock()
         fake_api.client.app_url = "https://wandb.ai"
         fake_api.client.execute.return_value = {"project": {"internalId": "project-internal-id"}}
+        fake_api._service_api = MagicMock()
+        fake_api._service_api.app_url = "https://wandb.ai"
+        fake_api._service_api.execute_graphql.return_value = {"project": {"internalId": "project-internal-id"}}
         captured_reports = []
 
         def fake_save(report, *args, **kwargs):
@@ -565,11 +568,26 @@ class TestRealWorkspacesReportObjects:
         panel_grid = panel_grids[0]
         runset = panel_grid.metadata.run_sets[0]
         assert runset.search.query == ""
-        filters = runset.filters.filters[0].filters
-        assert len(filters) == 1
-        assert filters[0].key.name == "name"
-        assert filters[0].op == "IN"
-        assert filters[0].value == ["run_a", "run_b"]
+        if isinstance(runset.filters, dict):
+
+            def iter_filter_nodes(node):
+                if isinstance(node, dict):
+                    yield node
+                    for child in node.get("filters", []):
+                        yield from iter_filter_nodes(child)
+
+            assert any(
+                node.get("key") == {"section": "run", "name": "name"}
+                and node.get("op") == "IN"
+                and node.get("value") == ["run_a", "run_b"]
+                for node in iter_filter_nodes(runset.filters)
+            )
+        else:
+            filters = runset.filters.filters[0].filters
+            assert len(filters) == 1
+            assert filters[0].key.name == "name"
+            assert filters[0].op == "IN"
+            assert filters[0].value == ["run_a", "run_b"]
 
         panels = panel_grid.metadata.panel_bank_section_config.panels
         assert len(panels) == 2
