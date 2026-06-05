@@ -1,7 +1,6 @@
 """Module for querying the W&B GraphQL API."""
 
 import copy
-import importlib
 import logging
 import re
 import traceback
@@ -11,12 +10,9 @@ from graphql import parse
 from graphql.language import ast as gql_ast
 from graphql.language import printer as gql_printer
 from graphql.language import visitor as gql_visitor
+from wandb_gql import gql
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.wandb_vendor import wandb_vendor_path
-
-with wandb_vendor_path():
-    gql = importlib.import_module("wandb_gql").gql
 
 logger = get_rich_logger(__name__)
 
