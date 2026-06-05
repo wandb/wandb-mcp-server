@@ -4,17 +4,19 @@ SAFE VERSION - W&B Report creation with markdown-only output
 This version eliminates the singleton contamination vulnerability and uses only markdown.
 """
 
-from typing import Any, Dict, List, Optional, Union
 import json
 import re
-
-import wandb_workspaces.reports.v2 as wr
-import wandb_workspaces.reports.v2.interface as wr_interface
+from typing import Any, Dict, List, Optional, Union
 
 import wandb
-from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.config import WANDB_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.wandb_vendor import wandb_vendor_path
+
+with wandb_vendor_path():
+    import wandb_workspaces.reports.v2 as wr
+    import wandb_workspaces.reports.v2.interface as wr_interface
 
 logger = get_rich_logger(__name__)
 
