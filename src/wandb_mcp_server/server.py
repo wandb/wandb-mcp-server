@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Union
 import wandb
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
 from wandb_mcp_server.config import WANDB_BASE_URL
 
 # Import Weave for tracing MCP tool calls
@@ -35,6 +36,20 @@ except ImportError:
     weave = None
     WEAVE_AVAILABLE = False
 
+from wandb_mcp_server.mcp_tools.automations import (
+    LIST_AUTOMATIONS_TOOL_DESCRIPTION,
+    LIST_INTEGRATIONS_TOOL_DESCRIPTION,
+    list_automations,
+    list_integrations,
+)
+from wandb_mcp_server.mcp_tools.count_traces import (
+    COUNT_WEAVE_TRACES_TOOL_DESCRIPTION,
+    count_traces,
+)
+from wandb_mcp_server.mcp_tools.create_report import (
+    CREATE_WANDB_REPORT_TOOL_DESCRIPTION,
+    create_report,
+)
 from wandb_mcp_server.mcp_tools.list_entities import (
     LIST_ENTITIES_TOOL_DESCRIPTION,
     list_entities,
@@ -43,32 +58,23 @@ from wandb_mcp_server.mcp_tools.list_wandb_entities_projects import (
     LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION,
     list_entity_projects,
 )
-from wandb_mcp_server.mcp_tools.create_report import (
-    CREATE_WANDB_REPORT_TOOL_DESCRIPTION,
-    create_report,
+from wandb_mcp_server.mcp_tools.query_artifacts import (
+    COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
+    GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION,
+    LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
+    compare_artifact_versions,
+    get_artifact_details,
+    list_artifact_versions,
 )
-from wandb_mcp_server.mcp_tools.count_traces import (
-    COUNT_WEAVE_TRACES_TOOL_DESCRIPTION,
-    count_traces,
+from wandb_mcp_server.mcp_tools.query_registry import (
+    LIST_REGISTRIES_TOOL_DESCRIPTION,
+    LIST_REGISTRY_COLLECTIONS_TOOL_DESCRIPTION,
+    list_registries,
+    list_registry_collections,
 )
 from wandb_mcp_server.mcp_tools.query_wandb_gql import (
     QUERY_WANDB_GQL_TOOL_DESCRIPTION,
     query_paginated_wandb_gql,
-)
-
-from wandb_mcp_server.mcp_tools.query_registry import (
-    LIST_REGISTRIES_TOOL_DESCRIPTION,
-    list_registries,
-    LIST_REGISTRY_COLLECTIONS_TOOL_DESCRIPTION,
-    list_registry_collections,
-)
-from wandb_mcp_server.mcp_tools.query_artifacts import (
-    LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
-    list_artifact_versions,
-    GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION,
-    get_artifact_details,
-    COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
-    compare_artifact_versions,
 )
 
 # wandbot removed -- zero usage across 400+ benchmark runs, superseded by search_wandb_docs_tool
@@ -76,7 +82,9 @@ from wandb_mcp_server.mcp_tools.query_weave import (
     QUERY_WEAVE_TRACES_TOOL_DESCRIPTION,
     query_paginated_weave_traces,
 )
-from wandb_mcp_server.utils import get_rich_logger, get_server_args, ServerMCPArgs
+from wandb_mcp_server.utils import ServerMCPArgs, get_rich_logger, get_server_args
+
+from pydantic import PositiveInt
 
 # Export key functions for HF Spaces app
 __all__ = [
@@ -373,7 +381,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
     """
     Register all W&B MCP tools on the given FastMCP instance.
 
-    Available tools (20):
+    Available tools (22):
     - query_weave_traces_tool: Query LLM traces with filtering and pagination
     - count_weave_traces_tool: Efficiently count traces without returning data
     - resolve_trace_roots_tool: Batch-resolve root spans for child trace_ids
@@ -394,6 +402,10 @@ def register_tools(mcp_instance: FastMCP) -> None:
     - summarize_evaluation_tool: Aggregate Weave evaluation results
     - diagnose_run_tool: Automatic training health check
     - probe_project_tool: Run-side schema and structure discovery
+    - list_wandb_automations_tool: List W&B Automations (rules that trigger
+      notifications/webhooks on artifact, run-state, or run-metric events)
+    - list_wandb_integrations_tool: List Slack and webhook integrations
+      available as targets for Automation actions
 
     Args:
         mcp_instance: The FastMCP instance to register tools on
@@ -728,6 +740,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         scalars: Optional[Dict[str, float]] = None,
     ) -> str:
         from concurrent.futures import ThreadPoolExecutor
+
         from wandb_mcp_server.api_client import WandBApiManager
 
         try:
@@ -763,6 +776,24 @@ def register_tools(mcp_instance: FastMCP) -> None:
     ) -> str:
         """List projects for a W&B entity."""
         return list_entity_projects(entity=entity, max_projects=max_projects)
+
+    @mcp_instance.tool(description=LIST_AUTOMATIONS_TOOL_DESCRIPTION)
+    def list_wandb_automations_tool(
+        entity: Optional[str] = None,
+        name: Optional[str] = None,
+        max_items: int = 50,
+    ) -> str:
+        """List W&B Automations accessible with the current API key."""
+        return list_automations(entity=entity, name=name, max_items=max_items)
+
+    @mcp_instance.tool(description=LIST_INTEGRATIONS_TOOL_DESCRIPTION)
+    def list_wandb_integrations_tool(
+        entity: str | None = None,
+        kind: str | None = None,
+        max_items: PositiveInt = 50,
+    ) -> str:
+        """List Slack and webhook integrations for a W&B entity."""
+        return list_integrations(entity=entity, kind=kind, max_items=max_items)
 
     from wandb_mcp_server.mcp_tools.infer_schema import (
         INFER_TRACE_SCHEMA_TOOL_DESCRIPTION,
