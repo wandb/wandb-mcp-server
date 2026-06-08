@@ -33,7 +33,7 @@ Query and analyze your Weights & Biases data using natural language through the 
 </details>
 
 <details>
-<summary><strong>Available Tools</strong> (14 tools)</summary>
+<summary><strong>Available Tools</strong> (16 tools)</summary>
 
 | Tool | Description | Example Query |
 |------|-------------|---------------|
@@ -51,6 +51,8 @@ Query and analyze your Weights & Biases data using natural language through the 
 | **list_artifact_versions_tool** | List versions of an artifact collection | *"Show versions of my model artifact"* |
 | **get_artifact_details_tool** | Get full details of an artifact version | *"What's in model-v2 artifact?"* |
 | **compare_artifact_versions_tool** | Diff two artifact versions | *"Compare model v1 vs v2"* |
+| **list_wandb_automations_tool** | List W&B Automations | *"What automations alert on run metrics or status for my team's runs?"* |
+| **list_wandb_integrations_tool** | List registered integrations for W&B automations (e.g. Slack, webhook) | *"Which Slack channels can my automations target?"* |
 
 **Schema-first workflow:** Call `infer_trace_schema_tool` first to discover fields, then `query_weave_traces_tool` with precise columns and `detail_level`:
 - `"schema"` -- structural fields only (fast browsing)
@@ -66,13 +68,13 @@ Query and analyze your Weights & Biases data using natural language through the 
 <details>
 <summary><strong>Usage Tips</strong> (best practices)</summary>
 
-**→ Provide your W&B project and entity name**  
+**→ Provide your W&B project and entity name**
 LLMs are not mind readers, ensure you specify the W&B Entity and W&B Project to the LLM.
 
-**→ Avoid asking overly broad questions**  
+**→ Avoid asking overly broad questions**
 Questions such as "what is my best evaluation?" are probably overly broad and you'll get to an answer faster by refining your question to be more specific such as: "what eval had the highest f1 score?"
 
-**→ Ensure all data was retrieved**  
+**→ Ensure all data was retrieved**
 When asking broad, general questions such as "what are my best performing runs/evaluations?" it's always a good idea to ask the LLM to check that it retrieved all the available runs. The MCP tools are designed to fetch the correct amount of data, but sometimes there can be a tendency from the LLMs to only retrieve the latest runs or the last N runs.
 
 </details>
@@ -94,7 +96,7 @@ We recommend using our **hosted server** at `https://mcp.withwandb.com` - no ins
   * Click on the button above to automatically add the config to Cursor
   * Then add your WANDB_API_KEY in the respective field `Bearer YOUR_API_KEY` and connect
 
-For manual or local installation, see [Option 2](#general-installation-guide) below. 
+For manual or local installation, see [Option 2](#general-installation-guide) below.
 </details>
 
 ### OpenAI Response API
@@ -214,7 +216,7 @@ If adding the W&B connector from the Le Chat connector directory returns an `int
 <details>
 <summary>Configuration setup</summary>
 
-Add to your Claude config file. Claude desktop currently doesn't support remote MCPs to be added so we're adding the local MCP. Be careful to add the full path to `uv` for the command because Claude Desktop potentially doesn't find your `uv` installation otherwise. 
+Add to your Claude config file. Claude desktop currently doesn't support remote MCPs to be added so we're adding the local MCP. Be careful to add the full path to `uv` for the command because Claude Desktop potentially doesn't find your `uv` installation otherwise.
 
 ```bash
 # macOS
@@ -245,7 +247,7 @@ notepad %APPDATA%\Claude\claude_desktop_config.json
 Restart Claude Desktop to activate.
 </details>
 
-We're working on adding OAuth support so that we can integrate with ChatGPT. 
+We're working on adding OAuth support so that we can integrate with ChatGPT.
 
 ---
 
@@ -313,7 +315,7 @@ Add to your MCP client config (for detailed client-specific configs see below):
 }
 ```
 
-### Cursor 
+### Cursor
 1. Open Cursor Settings (`⌘,` or `Ctrl,`)
 2. Navigate to **Features** → **Model Context Protocol**
 3. Click **"Install from Registry"** or **"Add MCP Server"**
@@ -321,8 +323,8 @@ Add to your MCP client config (for detailed client-specific configs see below):
    - **Name**: `wandb`
    - **URL**: `https://mcp.withwandb.com/mcp`
    - **API Key**: Your W&B API key
-  
-Manual hosted config in `mcp.json`: 
+
+Manual hosted config in `mcp.json`:
 ```
 "wandb": {
   "transport": "http",
@@ -365,8 +367,8 @@ Add `--scope user` for global config.
 claude mcp add wandb -e WANDB_API_KEY=your-api-key -e WANDB_BASE_URL=your-base-url -- uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
 ```
 
-### Claude Desktop 
-Same as above. 
+### Claude Desktop
+Same as above.
 ```bash
 # macOS
 open ~/Library/Application\ Support/Claude/claude_desktop_config.json
