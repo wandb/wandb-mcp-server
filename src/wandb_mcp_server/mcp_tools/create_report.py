@@ -121,7 +121,8 @@ Args:
         - {"type": "panel_grid", "run_ids": ["run_a", "run_b"], "hide_run_sets": false,
            "panels": [{...chart panel...}, {...chart panel...}]}
           Creates one PanelGrid whose child panels share a single Runset.
-        Use custom_chart_table for PR curves, ROC curves, confusion matrices, and other table-backed Vega charts.
+        Use custom_chart_table for summary-table-backed charts. Use custom_chart with an explicit historyTable
+        query for PR/ROC curves or other charts logged through run history.
         If panels only contains chart specs, the tool appends them under a Charts heading for backward compatibility.
         If panels contains heading, markdown, or panel_grid blocks, the list is treated as an ordered layout and no
         automatic Charts heading is added. If omitted, report is markdown-only.
@@ -132,9 +133,9 @@ Use native panel types for ordinary run metrics:
 - bar: summary metric comparisons
 - scatter: two summary/config fields
 
-Use custom_chart_table when the source data already exists as a W&B Table or
-summary table key. This is the preferred path for precision/recall curves,
-ROC curves, confusion matrices, and table-backed customer visualizations:
+Use custom_chart_table when the source data already exists as a W&B Table saved
+in run summary. This is the preferred path for final confusion matrices,
+per-class AP tables, and other one-snapshot table-backed visualizations:
 {
   "type": "custom_chart_table",
   "title": "Precision-Recall Curve",
@@ -151,6 +152,19 @@ Use custom_chart only when you know the exact wandb-workspaces query shape:
   "query": {"summaryTable": {"tableKey": "pr_curve_table"}},
   "chart_name": "wandb/line/v0",
   "chart_fields": {"x": "recall", "y": "precision"},
+  "chart_strings": {"title": "Precision-Recall Curve"},
+  "run_ids": ["abc123"],
+  "hide_run_sets": true
+}
+
+For PR curves, ROC curves, and other charts logged through run history, use an
+explicit historyTable query. tableKey is the key passed to run.log(), not a
+column name inside the table:
+{
+  "type": "custom_chart",
+  "query": {"historyTable": {"tableKey": "pr_curve"}},
+  "chart_name": "wandb/line/v0",
+  "chart_fields": {"x": "r", "y": "p", "color": "c"},
   "chart_strings": {"title": "Precision-Recall Curve"},
   "run_ids": ["abc123"],
   "hide_run_sets": true
@@ -188,8 +202,8 @@ Runset scoping:
 
 <manual_validation_recipe>
 To validate a table-backed custom chart manually:
-1. Pick a run that has a logged W&B Table or summary table key, such as a PR or ROC curve table.
-2. Call create_wandb_report_tool with a custom_chart_table panel using that table_name.
+1. Pick a run that has a logged W&B Table key, such as a summary table or PR/ROC history table.
+2. Call create_wandb_report_tool with custom_chart_table for summary tables or custom_chart with historyTable for PR/ROC curves.
 3. Open the returned report URL and confirm the custom Vega chart renders.
 4. If the chart does not render, verify the table_name and chart_fields match the table columns and UI chart config.
 </manual_validation_recipe>

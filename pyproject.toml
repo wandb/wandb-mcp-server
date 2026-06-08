@@ -45,6 +45,9 @@ log_cli = true
 log_cli_level = "INFO"  # or "DEBUG"
 log_cli_format = "%(levelname)s %(message)s"
 log_cli_date_format = "%H:%M:%S"
+markers = [
+    "integration: marks tests that require live external services",
+]
 filterwarnings = [
     # Ignore Sentry Hub deprecation from weave
     'ignore:::weave\.trace\.trace_sentry',

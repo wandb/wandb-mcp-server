@@ -59,7 +59,7 @@ Query and analyze your Weights & Biases data using natural language through the 
 - `"summary"` -- truncated inputs/outputs (default)
 - `"full"` -- everything untruncated (drill into specific traces)
 
-**Chart panels:** `create_wandb_report_tool` accepts a `panels` parameter for LinePlots, BarPlots, and run comparisons alongside markdown.
+**Chart panels:** `create_wandb_report_tool` accepts a `panels` parameter for LinePlots, BarPlots, run comparisons, custom Vega charts, and ordered report layouts. Use `panel_grid` when multiple charts should share one runset, and use `heading` plus `markdown` blocks to interleave narrative sections with charts.
 
 **Docs search:** `search_wandb_docs_tool` proxies [docs.wandb.ai](https://docs.wandb.ai) so you get data tools + documentation search from a single MCP connection. Disable with `WANDB_MCP_PROXY_DOCS=false` if you connect the docs MCP separately.
 

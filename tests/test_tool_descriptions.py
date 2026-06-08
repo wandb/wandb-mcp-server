@@ -88,3 +88,18 @@ class TestPanelsInCreateReport:
 
     def test_bar_type_documented(self):
         assert "bar" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION.lower()
+
+    def test_layout_types_documented(self):
+        assert "panel_grid" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION
+        assert "heading" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION
+        assert "markdown" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION
+
+    def test_custom_chart_sources_documented(self):
+        assert "custom_chart" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION
+        assert "custom_chart_table" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION
+        assert "summaryTable" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION
+        assert "historyTable" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION
+
+    def test_run_filtering_documented(self):
+        assert "run_ids are converted to deterministic Reports v2 filters" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION
+        assert "filters may be passed as a Reports v2 expression string" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION
