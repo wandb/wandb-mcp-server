@@ -667,14 +667,15 @@ def query_paginated_wandb_gql(
     Returns:
         The aggregated GraphQL response dictionary.
     """
-    from wandb_mcp_server.api_client import get_wandb_api
+    from wandb_mcp_server.api_client import WandBApiManager, get_wandb_api
 
+    api_key = WandBApiManager.get_api_key()
     api = get_wandb_api()
     result_dict = {}
     limit_key = None
     with track_tool_execution(
         "query_paginated_wandb_gql",
-        api.viewer,
+        "unknown",
         {
             "query": query,
             "variables": variables,
@@ -752,7 +753,12 @@ def query_paginated_wandb_gql(
                 return {"errors": [{"message": f"Failed to parse initial query: {e}"}]}
 
             try:
-                result1 = execute_graphql(api, query.strip(), page1_vars_func)
+                result1 = execute_graphql(
+                    api,
+                    query.strip(),
+                    page1_vars_func,
+                    api_key=api_key,
+                )
                 result_dict = copy.deepcopy(result1)
                 if "errors" in result_dict:
                     logger.error(f"GraphQL errors in initial response: {result_dict['errors']}")
@@ -860,7 +866,12 @@ def query_paginated_wandb_gql(
 
                 try:
                     logging.info(f"Executing generated query for page {page_num} with vars: {page_vars}")
-                    result_page = execute_graphql(api, generated_paginated_query_string, page_vars)
+                    result_page = execute_graphql(
+                        api,
+                        generated_paginated_query_string,
+                        page_vars,
+                        api_key=api_key,
+                    )
 
                     if "errors" in result_page:
                         logger.error(
