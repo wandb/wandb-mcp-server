@@ -22,6 +22,7 @@ from wandb_mcp_server.analytics import (
     get_analytics_tracker,
     reset_analytics_tracker,
 )
+from wandb_mcp_server.harness import HarnessContext, current_harness_context
 
 
 @pytest.fixture(autouse=True)
@@ -550,6 +551,62 @@ class TestTrackRequest:
         assert e["path"] == "/mcp/sse"
         assert e["status_code"] == 200
         assert e["duration_ms"] == 55.0
+
+    def test_event_includes_default_harness_fields(self, capture):
+        context = HarnessContext(
+            mcp_client_family="claude",
+            mcp_client_app="claude_code",
+            mcp_client_source="initialize_client_info",
+            mcp_protocol_version="2025-06-18",
+            mcp_jsonrpc_method="tools.call",
+            mcp_client_name="claude-code",
+        )
+        token = current_harness_context.set(context)
+        try:
+            AnalyticsTracker(enabled=True).track_request(
+                request_id="r1",
+                session_id="s1",
+                method="POST",
+                path="/mcp",
+                status_code=200,
+            )
+        finally:
+            current_harness_context.reset(token)
+
+        e = capture.event
+        assert e["mcp_client_family"] == "claude"
+        assert e["mcp_client_app"] == "claude_code"
+        assert e["mcp_client_source"] == "initialize_client_info"
+        assert e["mcp_protocol_version"] == "2025-06-18"
+        assert e["mcp_jsonrpc_method"] == "tools.call"
+        assert "mcp_client_name" not in e
+
+    @patch.dict("os.environ", {"MCP_HARNESS_DEBUG_FIELDS": "true"})
+    def test_debug_harness_fields_are_gated(self, capture):
+        context = HarnessContext(
+            mcp_client_family="claude",
+            mcp_client_app="claude_code",
+            mcp_client_source="initialize_client_info",
+            mcp_protocol_version="2025-06-18",
+            mcp_jsonrpc_method="tools.call",
+            mcp_client_name="claude-code",
+            mcp_client_version="2.1.89",
+        )
+        token = current_harness_context.set(context)
+        try:
+            AnalyticsTracker(enabled=True).track_request(
+                request_id="r1",
+                session_id="s1",
+                method="POST",
+                path="/mcp",
+                status_code=200,
+            )
+        finally:
+            current_harness_context.reset(token)
+
+        e = capture.event
+        assert e["mcp_client_name"] == "claude-code"
+        assert e["mcp_client_version"] == "2.1.89"
 
 
 # -- Global tracker singleton --------------------------------------------------

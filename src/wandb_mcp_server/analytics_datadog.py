@@ -71,7 +71,17 @@ def _datadog_safe_params(event: Dict[str, Any]) -> Dict[str, Any]:
 def _datadog_safe_labels(event: Dict[str, Any]) -> Dict[str, str]:
     """Return low-cardinality labels safe for Datadog attributes."""
     labels: Dict[str, str] = {"event_type": str(event.get("event_type", "unknown"))}
-    for key in ("tool_name", "mcp_tool_name", "success", "runtime_surface", "transport", "deployment_type"):
+    for key in (
+        "tool_name",
+        "mcp_tool_name",
+        "success",
+        "runtime_surface",
+        "transport",
+        "deployment_type",
+        "mcp_client_family",
+        "mcp_client_app",
+        "mcp_client_source",
+    ):
         value = event.get(key)
         if value is not None:
             labels[key] = str(value)
@@ -115,6 +125,10 @@ def map_to_datadog_log(
         f"event_type:{event_type}",
     ]
     for key in ("runtime_surface", "transport", "deployment_type", "environment"):
+        value = event.get(key)
+        if value is not None:
+            tags.append(f"{key}:{value}")
+    for key in ("mcp_client_family", "mcp_client_app", "mcp_client_source"):
         value = event.get(key)
         if value is not None:
             tags.append(f"{key}:{value}")
@@ -166,6 +180,31 @@ def map_to_datadog_log(
             http_attrs["url_details"] = {"path": event["path"]}
         if http_attrs:
             attributes["http"] = http_attrs
+
+    mcp_client_attrs: Dict[str, Any] = {}
+    for event_key, attr_key in (
+        ("mcp_client_family", "family"),
+        ("mcp_client_app", "app"),
+        ("mcp_client_source", "source"),
+    ):
+        value = event.get(event_key)
+        if value is not None:
+            mcp_client_attrs[attr_key] = value
+    mcp_protocol_attrs: Dict[str, Any] = {}
+    for event_key, attr_key in (
+        ("mcp_protocol_version", "version"),
+        ("mcp_jsonrpc_method", "jsonrpc_method"),
+    ):
+        value = event.get(event_key)
+        if value is not None:
+            mcp_protocol_attrs[attr_key] = value
+    if mcp_client_attrs or mcp_protocol_attrs:
+        mcp_attrs: Dict[str, Any] = {}
+        if mcp_client_attrs:
+            mcp_attrs["client"] = mcp_client_attrs
+        if mcp_protocol_attrs:
+            mcp_attrs["protocol"] = mcp_protocol_attrs
+        attributes["mcp"] = mcp_attrs
 
     error_str = event.get("error")
     if error_str:
