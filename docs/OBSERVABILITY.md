@@ -205,6 +205,48 @@ prompts, descriptions, report text, and messages are redacted to
 Only use `MCP_DATADOG_PARAM_PRIVACY_LEVEL=off` for short-lived debugging in a
 controlled environment. Do not set it as a production default.
 
+## MCP client harness dimensions
+
+Hosted MCP analytics include a small client dimension for Datadog incident
+analysis and Hex adoption analysis. These fields are derived from allowlisted MCP
+signals such as `initialize.params.clientInfo`, session metadata, and
+`User-Agent` fallback. They are untrusted analytics dimensions only and must not
+be used for authentication, authorization, rate-limit bypasses, or protocol
+branching.
+
+Default fields:
+
+| Field | Purpose |
+|---|---|
+| `mcp_client_family` | Broad client bucket, such as `claude`, `cursor`, `openai`, `mistral`, `gemini`, `linear`, or `unknown`. |
+| `mcp_client_app` | More specific client bucket, such as `claude_code`, `codex_cli`, `cursor`, `lechat`, or `gemini_cli`. |
+| `mcp_client_source` | Signal used for classification: `initialize_client_info`, `meta_client_info`, `session_metadata`, `user_agent`, or `unknown`. |
+| `mcp_protocol_version` | MCP protocol version observed on the request. |
+| `mcp_jsonrpc_method` | JSON-RPC method such as `initialize`, `tools.list`, or `tools.call`. |
+
+Debug-only fields such as raw-ish client names, versions, and user-agent product
+tokens are disabled by default. If enabled for classifier maintenance, they must
+remain sampled, bounded, and excluded from Datadog tags and default Hex
+dashboards.
+
+Recommended Datadog views:
+
+- Request error rate by `mcp_client_app`.
+- Tool error rate by `mcp_client_app` and `tool_name`.
+- p95 latency by `mcp_client_app` and `tool_name`.
+- Unknown-client rate by `mcp_client_source`.
+- Initialize failures by `mcp_protocol_version` and `mcp_client_app`.
+
+Recommended Hex analyses:
+
+- Daily active users, sessions, and tool calls by `mcp_client_family` and
+  `mcp_client_app`.
+- Tool adoption and tool mix by client app.
+- Success rate, error rate, and latency by client app and tool.
+- Initialize to tools/list to tools/call funnel health by client app.
+- Unknown-client coverage and classifier candidates.
+- Release-over-release regressions by client app and `release_version`.
+
 ### Identifier hashing at `strict`
 
 `<h:sha256_prefix>` uses the first 12 hex chars of `sha256(value)`.

@@ -60,6 +60,11 @@ _BASE_PROPERTY_KEYS: List[str] = [
     "environment",
     "hosted_mode",
     "wandb_base_host",
+    "mcp_client_family",
+    "mcp_client_app",
+    "mcp_client_source",
+    "mcp_protocol_version",
+    "mcp_jsonrpc_method",
 ]
 
 _TOOL_CALL_PROPERTY_KEYS: List[str] = [

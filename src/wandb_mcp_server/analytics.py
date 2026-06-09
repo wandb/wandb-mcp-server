@@ -346,6 +346,19 @@ def _deployment_context() -> Dict[str, Any]:
     return context
 
 
+def _harness_context() -> Dict[str, Any]:
+    """Return the current request's low-cardinality MCP harness dimensions."""
+    try:
+        from wandb_mcp_server.harness import current_harness_context
+
+        context = current_harness_context.get()
+        if context is None:
+            return {}
+        return context.analytics_fields()
+    except Exception:
+        return {}
+
+
 class AnalyticsTracker:
     """Emit structured analytics events for the MCP server.
 
@@ -491,6 +504,7 @@ class AnalyticsTracker:
             "timestamp": _utcnow_iso(),
             "release_version": _resolve_release_version(),
             **_deployment_context(),
+            **_harness_context(),
         }
         deployment_id = os.environ.get("MCP_DEPLOYMENT_ID")
         if deployment_id:

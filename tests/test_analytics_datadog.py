@@ -171,6 +171,35 @@ class TestDatadogAttributes:
         assert "deployment_type:hosted" in entry["ddtags"]
         assert "mcp_tool_name:count_weave_traces_tool" in entry["ddtags"]
 
+    def test_mcp_harness_tags_and_attributes(self):
+        event = _make_event(
+            "request",
+            method="POST",
+            path="/mcp",
+            status_code=200,
+            mcp_client_family="claude",
+            mcp_client_app="claude_code",
+            mcp_client_source="session_metadata",
+            mcp_protocol_version="2025-06-18",
+            mcp_jsonrpc_method="tools.call",
+            mcp_client_name="claude-code",
+        )
+        entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
+
+        assert "mcp_client_family:claude" in entry["ddtags"]
+        assert "mcp_client_app:claude_code" in entry["ddtags"]
+        assert "mcp_client_source:session_metadata" in entry["ddtags"]
+        assert "claude-code" not in entry["ddtags"]
+        assert entry["attributes"]["mcp"]["client"] == {
+            "family": "claude",
+            "app": "claude_code",
+            "source": "session_metadata",
+        }
+        assert entry["attributes"]["mcp"]["protocol"] == {
+            "version": "2025-06-18",
+            "jsonrpc_method": "tools.call",
+        }
+
     def test_session_id_forwarded(self):
         event = _make_event("tool_call", tool_name="x", success=True, session_id="sess_abc")
         entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
