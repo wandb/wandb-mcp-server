@@ -421,6 +421,13 @@ class AnalyticsTracker:
                         text = str(val).strip()
                         if text.lower() not in _MISSING_IDENTITY_VALUES:
                             return text
+            if isinstance(viewer_info, dict):
+                for key in ("username", "entity"):
+                    val = viewer_info.get(key)
+                    if val:
+                        text = str(val).strip()
+                        if text.lower() not in _MISSING_IDENTITY_VALUES:
+                            return text
             if hasattr(viewer_info, "email"):
                 email = getattr(viewer_info, "email")
                 if email and "@" in str(email):

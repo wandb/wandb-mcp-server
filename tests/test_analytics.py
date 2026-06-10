@@ -246,6 +246,12 @@ class TestExtractUserId:
         """String inputs that look like emails must return domain only."""
         assert self.t._extract_user_id("alice@wandb.com") == "wandb.com"
 
+    def test_username_dict(self):
+        assert self.t._extract_user_id({"username": "jdoe"}) == "jdoe"
+
+    def test_entity_dict(self):
+        assert self.t._extract_user_id({"entity": "team"}) == "team"
+
     def test_username_priority(self):
         v = SimpleNamespace(username="u", entity="e", email="x@y.com")
         assert self.t._extract_user_id(v) == "u"
