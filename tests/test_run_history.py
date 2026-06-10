@@ -450,53 +450,32 @@ class TestHistoryTruncation:
 
 
 class TestTieredStepRangeFetch:
-    """Tests for the tiered step-range strategy: beta -> scan -> history fallback."""
+    """Tests for the tiered step-range strategy: scan_history -> history fallback."""
 
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
-    def test_beta_scan_history_tried_first(self, mock_wandb_mod, mock_api_mgr):
-        """beta_scan_history is the first strategy attempted for step-range queries."""
+    def test_scan_history_tried_first(self, mock_wandb_mod, mock_api_mgr):
+        """scan_history is the first strategy attempted for step-range queries."""
         mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
         mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
 
-        beta_rows = [{"_step": i, "loss": 0.5} for i in range(50)]
+        scan_rows = [{"_step": i, "loss": 0.5} for i in range(50)]
         mock_run = MagicMock()
-        mock_run.name = "beta-run"
+        mock_run.name = "scan-run"
         mock_run.lastHistoryStep = 100
-        mock_run.beta_scan_history.return_value = iter(beta_rows)
+        mock_run.scan_history.return_value = iter(scan_rows)
         mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1", min_step=0, max_step=100))
-        mock_run.beta_scan_history.assert_called_once()
-        mock_run.scan_history.assert_not_called()
+        mock_run.scan_history.assert_called_once()
+        mock_run.history.assert_not_called()
         assert result["sampled_points"] == 50
 
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
-    def test_fallback_to_scan_history_on_beta_error(self, mock_wandb_mod, mock_api_mgr):
-        """If beta_scan_history raises, falls back to scan_history."""
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
-        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
-
-        fallback_rows = [{"_step": i, "loss": 0.3} for i in range(20)]
-        mock_run = MagicMock()
-        mock_run.name = "fallback-run"
-        mock_run.lastHistoryStep = 50
-        mock_run.beta_scan_history.side_effect = RuntimeError("wandb-core not available")
-        mock_run.scan_history.return_value = iter(fallback_rows)
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
-        mock_wandb_mod.errors = wandb.errors
-
-        result = json.loads(get_run_history("e", "p", "run1", min_step=0))
-        mock_run.beta_scan_history.assert_called_once()
-        mock_run.scan_history.assert_called_once()
-        assert result["sampled_points"] == 20
-
-    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
-    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
-    def test_fallback_to_history_when_both_return_empty(self, mock_wandb_mod, mock_api_mgr):
-        """When beta returns empty and scan returns empty with lastHistoryStep<=0, falls back to history()."""
+    def test_fallback_to_history_when_scan_empty(self, mock_wandb_mod, mock_api_mgr):
+        """When scan returns empty with lastHistoryStep<=0, falls back to history()."""
         mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
         mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
 
@@ -504,34 +483,32 @@ class TestTieredStepRangeFetch:
         mock_run = MagicMock()
         mock_run.name = "broken-step-run"
         mock_run.lastHistoryStep = -1
-        mock_run.beta_scan_history.return_value = iter([])
         mock_run.scan_history.return_value = iter([])
         mock_run.history.return_value = history_rows
         mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1", min_step=0, max_step=100))
-        mock_run.beta_scan_history.assert_called_once()
         mock_run.scan_history.assert_called_once()
         mock_run.history.assert_called_once()
         assert result["sampled_points"] == 10
 
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
-    def test_beta_scan_history_passes_keys_and_range(self, mock_wandb_mod, mock_api_mgr):
-        """beta_scan_history receives keys, min_step, max_step."""
+    def test_scan_history_passes_keys_and_range(self, mock_wandb_mod, mock_api_mgr):
+        """scan_history receives keys, min_step, max_step."""
         mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
         mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
 
         mock_run = MagicMock()
         mock_run.name = "params-run"
         mock_run.lastHistoryStep = 200
-        mock_run.beta_scan_history.return_value = iter([{"_step": 10, "loss": 0.5}])
+        mock_run.scan_history.return_value = iter([{"_step": 10, "loss": 0.5}])
         mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         get_run_history("e", "p", "run1", keys=["loss"], min_step=10, max_step=100)
-        call_kwargs = mock_run.beta_scan_history.call_args[1]
+        call_kwargs = mock_run.scan_history.call_args[1]
         assert call_kwargs["keys"] == ["loss"]
         assert call_kwargs["min_step"] == 10
         assert call_kwargs["max_step"] == 100
@@ -546,7 +523,6 @@ class TestTieredStepRangeFetch:
         mock_run = MagicMock()
         mock_run.name = "normal-run"
         mock_run.lastHistoryStep = 1000
-        mock_run.beta_scan_history.return_value = iter([])
         mock_run.scan_history.return_value = iter([])
         mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
