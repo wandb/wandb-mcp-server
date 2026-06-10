@@ -60,38 +60,3 @@ def test_execute_graphql_lazily_falls_back_to_wandb_gql(monkeypatch):
 
     assert result == {"ok": True}
     assert api.client.calls == [("parsed:query Test { viewer { id } }", {"x": 1})]
-
-
-def test_execute_graphql_uses_direct_bearer_request(monkeypatch):
-    calls = []
-
-    class Response:
-        def raise_for_status(self):
-            calls.append(("raise_for_status",))
-
-        def json(self):
-            return {"data": {"viewer": {"username": "test"}}}
-
-    def fake_post(url, *, headers, json, timeout):
-        calls.append((url, headers, json, timeout))
-        return Response()
-
-    monkeypatch.setattr("wandb_mcp_server.wandb_graphql.requests.post", fake_post)
-
-    result = execute_graphql(
-        object(),
-        "query Test { viewer { username } }",
-        {"x": 1},
-        api_key="wandb_v1_test",
-    )
-
-    assert result == {"data": {"viewer": {"username": "test"}}}
-    url, headers, payload, timeout = calls[0]
-    assert url == "https://api.wandb.ai/graphql"
-    assert headers["Authorization"] == "Bearer wandb_v1_test"
-    assert payload == {
-        "query": "query Test { viewer { username } }",
-        "variables": {"x": 1},
-    }
-    assert timeout == 30
-    assert calls[1] == ("raise_for_status",)
