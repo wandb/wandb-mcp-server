@@ -238,6 +238,10 @@ class TestExtractUserId:
     def test_string(self):
         assert self.t._extract_user_id("raw") == "raw"
 
+    @pytest.mark.parametrize("value", ["", " ", "unknown", "Unknown", "anonymous", "none", "null"])
+    def test_sentinel_strings_return_none(self, value):
+        assert self.t._extract_user_id(value) is None
+
     def test_string_email_returns_domain(self):
         """String inputs that look like emails must return domain only."""
         assert self.t._extract_user_id("alice@wandb.com") == "wandb.com"
@@ -256,6 +260,14 @@ class TestExtractUserId:
     def test_empty_username_falls_through(self):
         v = SimpleNamespace(username="", entity="team")
         assert self.t._extract_user_id(v) == "team"
+
+    def test_unknown_username_falls_through_to_entity(self):
+        v = SimpleNamespace(username="unknown", entity="team")
+        assert self.t._extract_user_id(v) == "team"
+
+    def test_unknown_entity_returns_none(self):
+        v = SimpleNamespace(entity="unknown")
+        assert self.t._extract_user_id(v) is None
 
     def test_email_only_viewer_never_leaks_full_email(self):
         """Regression: _extract_user_id must never return a full email address."""
