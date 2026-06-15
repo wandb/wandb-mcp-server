@@ -667,9 +667,8 @@ def query_paginated_wandb_gql(
     Returns:
         The aggregated GraphQL response dictionary.
     """
-    from wandb_mcp_server.api_client import WandBApiManager, get_wandb_api
+    from wandb_mcp_server.api_client import get_wandb_api
 
-    api_key = WandBApiManager.get_api_key()
     api = get_wandb_api()
     result_dict = {}
     limit_key = None
@@ -757,7 +756,6 @@ def query_paginated_wandb_gql(
                     api,
                     query.strip(),
                     page1_vars_func,
-                    api_key=api_key,
                 )
                 result_dict = copy.deepcopy(result1)
                 if "errors" in result_dict:
@@ -870,7 +868,6 @@ def query_paginated_wandb_gql(
                         api,
                         generated_paginated_query_string,
                         page_vars,
-                        api_key=api_key,
                     )
 
                     if "errors" in result_page:
