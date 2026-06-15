@@ -28,6 +28,14 @@ class TestCreateReportPanelsDescription:
         assert "<when_to_use>" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION
         assert "</when_to_use>" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION
 
+    def test_layout_and_history_table_documented(self):
+        description = CREATE_WANDB_REPORT_TOOL_DESCRIPTION
+        assert "panel_grid" in description
+        assert "heading" in description
+        assert "markdown" in description
+        assert "historyTable" in description
+        assert "run_ids are converted to deterministic Reports v2 filters" in description
+
 
 class TestBuildPanelBlocks:
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
@@ -194,6 +202,35 @@ class TestBuildPanelBlocks:
             chart_strings={"title": "PR Curve"},
         )
         mock_wr.PanelGrid.assert_called_once_with(runsets=["Runset"], hide_run_sets=True, panels=["CustomChart"])
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_custom_chart_history_table_query(self, mock_wr):
+        mock_wr.PanelGrid = MagicMock()
+        mock_wr.CustomChart = MagicMock(return_value="CustomChart")
+        mock_wr.Runset = MagicMock(return_value="Runset")
+
+        panels = [
+            {
+                "type": "custom_chart",
+                "title": "PR Curve",
+                "query": {"historyTable": {"tableKey": "pr_curve"}},
+                "chart_name": "wandb/line/v0",
+                "chart_fields": {"x": "r", "y": "p", "color": "c"},
+                "chart_strings": {"title": "Precision-Recall Curve"},
+                "run_ids": ["abc123"],
+                "hide_run_sets": True,
+            }
+        ]
+
+        blocks = _build_panel_blocks(panels, "entity", "project")
+
+        assert len(blocks) == 1
+        mock_wr.CustomChart.assert_called_once_with(
+            query={"historyTable": {"tableKey": "pr_curve"}},
+            chart_name="wandb/line/v0",
+            chart_fields={"x": "r", "y": "p", "color": "c"},
+            chart_strings={"title": "Precision-Recall Curve"},
+        )
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     def test_custom_chart_table_panel(self, mock_wr):
@@ -515,6 +552,9 @@ class TestRealWorkspacesReportObjects:
         fake_api = MagicMock()
         fake_api.client.app_url = "https://wandb.ai"
         fake_api.client.execute.return_value = {"project": {"internalId": "project-internal-id"}}
+        fake_api._service_api = MagicMock()
+        fake_api._service_api.app_url = "https://wandb.ai"
+        fake_api._service_api.execute_graphql.return_value = {"project": {"internalId": "project-internal-id"}}
         captured_reports = []
 
         def fake_save(report, *args, **kwargs):
@@ -565,11 +605,26 @@ class TestRealWorkspacesReportObjects:
         panel_grid = panel_grids[0]
         runset = panel_grid.metadata.run_sets[0]
         assert runset.search.query == ""
-        filters = runset.filters.filters[0].filters
-        assert len(filters) == 1
-        assert filters[0].key.name == "name"
-        assert filters[0].op == "IN"
-        assert filters[0].value == ["run_a", "run_b"]
+        if isinstance(runset.filters, dict):
+
+            def iter_filter_nodes(node):
+                if isinstance(node, dict):
+                    yield node
+                    for child in node.get("filters", []):
+                        yield from iter_filter_nodes(child)
+
+            assert any(
+                node.get("key") == {"section": "run", "name": "name"}
+                and node.get("op") == "IN"
+                and node.get("value") == ["run_a", "run_b"]
+                for node in iter_filter_nodes(runset.filters)
+            )
+        else:
+            filters = runset.filters.filters[0].filters
+            assert len(filters) == 1
+            assert filters[0].key.name == "name"
+            assert filters[0].op == "IN"
+            assert filters[0].value == ["run_a", "run_b"]
 
         panels = panel_grid.metadata.panel_bank_section_config.panels
         assert len(panels) == 2

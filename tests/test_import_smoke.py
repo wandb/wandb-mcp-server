@@ -1,0 +1,73 @@
+"""Smoke tests for import paths that must work after a fresh install."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import textwrap
+
+import pytest
+
+
+_IMPORT_SCRIPT = textwrap.dedent(
+    """
+    import importlib
+    import sys
+
+    target = sys.argv[1]
+    for name in list(sys.modules):
+        if name == "wandb_gql" or name.startswith("wandb_gql."):
+            del sys.modules[name]
+        if name == "wandb_graphql" or name.startswith("wandb_graphql."):
+            del sys.modules[name]
+
+    sys.path = [
+        path for path in sys.path
+        if "/wandb/vendor" not in path
+        and "gql-0.2.0" not in path
+        and "graphql-core-1.1" not in path
+    ]
+
+    importlib.import_module(target)
+
+    leaked_paths = [
+        path for path in sys.path
+        if "/wandb/vendor" in path
+        or "gql-0.2.0" in path
+        or "graphql-core-1.1" in path
+    ]
+    if leaked_paths:
+        message = "W&B vendor paths leaked into sys.path: "
+        raise AssertionError(message + repr(leaked_paths))
+
+    print("ok")
+    """
+)
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "wandb_mcp_server.mcp_tools.create_report",
+        "wandb_mcp_server.mcp_tools.query_wandb_gql",
+        "wandb_mcp_server",
+    ],
+)
+def test_fresh_install_imports_without_preloaded_vendor_path(
+    module_name: str,
+) -> None:
+    env = os.environ.copy()
+    env["WANDB_SILENT"] = "True"
+    env["WEAVE_SILENT"] = "True"
+
+    result = subprocess.run(
+        [sys.executable, "-c", _IMPORT_SCRIPT, module_name],
+        check=False,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"

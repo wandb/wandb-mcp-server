@@ -6,6 +6,7 @@ from graphql.language.printer import print_ast
 
 import wandb_mcp_server.api_client as api_client
 import wandb_mcp_server.config as cfg
+import wandb_mcp_server.wandb_graphql as graphql_transport
 from wandb_mcp_server.mcp_tools import query_wandb_gql as gql_tool
 
 
@@ -42,7 +43,11 @@ class FakeApi:
 
 def _install_fake_api(monkeypatch, client):
     monkeypatch.setattr(api_client, "get_wandb_api", lambda: FakeApi(client))
-    monkeypatch.setattr(gql_tool, "gql", parse)
+    monkeypatch.setattr(
+        graphql_transport.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(gql=parse),
+    )
 
     @contextmanager
     def fake_track_tool_execution(*args, **kwargs):

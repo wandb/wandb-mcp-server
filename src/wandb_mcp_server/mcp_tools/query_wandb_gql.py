@@ -10,9 +10,9 @@ from graphql import parse
 from graphql.language import ast as gql_ast
 from graphql.language import printer as gql_printer
 from graphql.language import visitor as gql_visitor
-from wandb_gql import gql  # This must be imported after wandb
-from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.wandb_graphql import execute_graphql
 
 logger = get_rich_logger(__name__)
 
@@ -745,14 +745,14 @@ def query_paginated_wandb_gql(
                     return {"errors": [{"message": f"Failed to validate initial query: {e}"}]}
 
             try:
-                parsed_initial_query = gql(query.strip())
+                parse(query.strip())
             except Exception as e:
-                logger.error(f"Failed to parse initial query with wandb_gql: {e}")
+                logger.error(f"Failed to parse initial query with graphql-core: {e}")
                 ctx.mark_error(f"invalid_input: {e}")
                 return {"errors": [{"message": f"Failed to parse initial query: {e}"}]}
 
             try:
-                result1 = api.client.execute(parsed_initial_query, variable_values=page1_vars_func)
+                result1 = execute_graphql(api, query.strip(), page1_vars_func)
                 result_dict = copy.deepcopy(result1)
                 if "errors" in result_dict:
                     logger.error(f"GraphQL errors in initial response: {result_dict['errors']}")
@@ -859,9 +859,8 @@ def query_paginated_wandb_gql(
                 page_vars[after_variable_name] = current_cursor
 
                 try:
-                    parsed_generated = gql(generated_paginated_query_string)
                     logging.info(f"Executing generated query for page {page_num} with vars: {page_vars}")
-                    result_page = api.client.execute(parsed_generated, variable_values=page_vars)
+                    result_page = execute_graphql(api, generated_paginated_query_string, page_vars)
 
                     if "errors" in result_page:
                         logger.error(

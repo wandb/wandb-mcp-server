@@ -76,6 +76,30 @@ class TestMapToSegmentTrack:
         assert result["properties"]["source"] == "wandb-mcp-server"
         assert result["properties"]["schema_version"] == "1.0"
 
+    def test_harness_fields_are_base_properties(self):
+        event = self._make_event(
+            "request",
+            request_id="r1",
+            method="POST",
+            path="/mcp",
+            status_code=200,
+            mcp_client_family="cursor",
+            mcp_client_app="cursor",
+            mcp_client_source="user_agent",
+            mcp_protocol_version="2025-06-18",
+            mcp_jsonrpc_method="tools.list",
+            mcp_client_name="cursor-internal-debug",
+        )
+        result = map_to_segment_track(event)
+        assert result is not None
+        properties = result["properties"]
+        assert properties["mcp_client_family"] == "cursor"
+        assert properties["mcp_client_app"] == "cursor"
+        assert properties["mcp_client_source"] == "user_agent"
+        assert properties["mcp_protocol_version"] == "2025-06-18"
+        assert properties["mcp_jsonrpc_method"] == "tools.list"
+        assert "mcp_client_name" not in properties
+
     def test_tool_call_preserves_timestamp(self):
         event = self._make_event("tool_call", tool_name="t")
         result = map_to_segment_track(event)

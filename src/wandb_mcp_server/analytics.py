@@ -106,6 +106,16 @@ _IDENTIFIER_KEYS_FOR_HASHING: frozenset = frozenset(
     }
 )
 
+_MISSING_IDENTITY_VALUES: frozenset = frozenset(
+    {
+        "",
+        "anonymous",
+        "none",
+        "null",
+        "unknown",
+    }
+)
+
 # Once-per-process latch so an invalid MCP_LOG_PRIVACY_LEVEL doesn't spam logs
 # on every analytics emit. Operators see one WARNING in their first scrape.
 _warned_invalid_privacy_level = False
@@ -346,6 +356,19 @@ def _deployment_context() -> Dict[str, Any]:
     return context
 
 
+def _harness_context() -> Dict[str, Any]:
+    """Return the current request's low-cardinality MCP harness dimensions."""
+    try:
+        from wandb_mcp_server.harness import current_harness_context
+
+        context = current_harness_context.get()
+        if context is None:
+            return {}
+        return context.analytics_fields()
+    except Exception:
+        return {}
+
+
 class AnalyticsTracker:
     """Emit structured analytics events for the MCP server.
 
@@ -395,15 +418,29 @@ class AnalyticsTracker:
                 if hasattr(viewer_info, attr):
                     val = getattr(viewer_info, attr)
                     if val:
-                        return str(val)
+                        text = str(val).strip()
+                        if text.lower() not in _MISSING_IDENTITY_VALUES:
+                            return text
+            if isinstance(viewer_info, dict):
+                for key in ("username", "entity"):
+                    val = viewer_info.get(key)
+                    if val:
+                        text = str(val).strip()
+                        if text.lower() not in _MISSING_IDENTITY_VALUES:
+                            return text
             if hasattr(viewer_info, "email"):
                 email = getattr(viewer_info, "email")
                 if email and "@" in str(email):
-                    return str(email).split("@")[1].lower()
+                    domain = str(email).split("@", 1)[1].strip().lower()
+                    return domain or None
             if isinstance(viewer_info, str):
-                if "@" in viewer_info:
-                    return viewer_info.split("@")[1].lower()
-                return viewer_info
+                text = viewer_info.strip()
+                if text.lower() in _MISSING_IDENTITY_VALUES:
+                    return None
+                if "@" in text:
+                    domain = text.split("@", 1)[1].strip().lower()
+                    return domain or None
+                return text
             return None
         except Exception:
             return None
@@ -491,6 +528,7 @@ class AnalyticsTracker:
             "timestamp": _utcnow_iso(),
             "release_version": _resolve_release_version(),
             **_deployment_context(),
+            **_harness_context(),
         }
         deployment_id = os.environ.get("MCP_DEPLOYMENT_ID")
         if deployment_id:

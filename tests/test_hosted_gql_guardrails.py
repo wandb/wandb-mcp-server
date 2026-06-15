@@ -6,6 +6,7 @@ from graphql.language.printer import print_ast
 
 import wandb_mcp_server.api_client as api_client
 import wandb_mcp_server.config as cfg
+import wandb_mcp_server.wandb_graphql as graphql_transport
 from wandb_mcp_server.mcp_tools import query_wandb_gql as gql_tool
 
 
@@ -40,9 +41,50 @@ class FakeApi:
         self.viewer = SimpleNamespace(username="tester")
 
 
+class FakeServiceApi:
+    def __init__(self, response=None):
+        self.response = response or {
+            "project": {
+                "runs": {
+                    "edges": [],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            }
+        }
+        self.executions = []
+
+    def execute_graphql(self, query, variables=None):
+        self.executions.append((query, dict(variables or {})))
+        return self.response
+
+
+class FakeServiceBackedApi:
+    def __init__(self, service_api):
+        self._service_api = service_api
+        self.viewer = SimpleNamespace(username="tester")
+
+
 def _install_fake_api(monkeypatch, client):
     monkeypatch.setattr(api_client, "get_wandb_api", lambda: FakeApi(client))
-    monkeypatch.setattr(gql_tool, "gql", parse)
+    monkeypatch.setattr(
+        graphql_transport.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(gql=parse),
+    )
+
+    @contextmanager
+    def fake_track_tool_execution(*args, **kwargs):
+        yield DummyToolContext()
+
+    monkeypatch.setattr(gql_tool, "track_tool_execution", fake_track_tool_execution)
+
+
+def _install_fake_service_api(monkeypatch, service_api):
+    monkeypatch.setattr(
+        api_client,
+        "get_wandb_api",
+        lambda: FakeServiceBackedApi(service_api),
+    )
 
     @contextmanager
     def fake_track_tool_execution(*args, **kwargs):
@@ -81,6 +123,24 @@ def test_hosted_literal_first_is_rewritten_before_execute(monkeypatch):
     assert "first: 50" in executed_query
     assert "100000" not in executed_query
     assert variables["limit"] == 50
+    assert "errors" not in result
+
+
+def test_query_executes_with_service_api_without_client(monkeypatch):
+    monkeypatch.setattr(cfg, "MCP_HOSTED_MODE", False)
+    service_api = FakeServiceApi()
+    _install_fake_service_api(monkeypatch, service_api)
+
+    result = gql_tool.query_paginated_wandb_gql(
+        _run_query(),
+        variables={"entity": "e", "project": "p"},
+        max_items=100,
+        items_per_page=100,
+    )
+
+    executed_query, variables = service_api.executions[0]
+    assert "first: 100000" in executed_query
+    assert variables["limit"] == 100
     assert "errors" not in result
 
 
