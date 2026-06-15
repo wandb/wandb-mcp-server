@@ -17,7 +17,7 @@ def execute_graphql(
     *,
     api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Execute a GraphQL document with the current or legacy W&B SDK transport."""
+    """Execute GraphQL for the existing ``query_wandb_gql`` compatibility tool."""
     variables_dict = dict(variables or {})
     if api_key:
         response = requests.post(

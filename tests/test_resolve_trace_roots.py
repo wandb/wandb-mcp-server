@@ -146,13 +146,8 @@ class TestResolveTraceRootsTool:
     """Tests for the standalone resolve_trace_roots MCP tool wrapper."""
 
     @patch("wandb_mcp_server.mcp_tools.resolve_trace_roots.get_trace_service")
-    @patch("wandb_mcp_server.mcp_tools.resolve_trace_roots.WandBApiManager")
-    def test_tool_returns_json_with_roots(self, mock_mgr, mock_get_svc):
+    def test_tool_returns_json_with_roots(self, mock_get_svc):
         from wandb_mcp_server.mcp_tools.resolve_trace_roots import resolve_trace_roots
-
-        mock_api = MagicMock()
-        mock_api.viewer = {"username": "testuser"}
-        mock_mgr.get_api.return_value = mock_api
 
         mock_svc = MagicMock()
         mock_svc.resolve_trace_roots.return_value = {
@@ -169,13 +164,8 @@ class TestResolveTraceRootsTool:
         assert result["roots"]["t2"]["display_name"] == "Pipeline Run"
 
     @patch("wandb_mcp_server.mcp_tools.resolve_trace_roots.get_trace_service")
-    @patch("wandb_mcp_server.mcp_tools.resolve_trace_roots.WandBApiManager")
-    def test_tool_empty_trace_ids(self, mock_mgr, mock_get_svc):
+    def test_tool_empty_trace_ids(self, mock_get_svc):
         from wandb_mcp_server.mcp_tools.resolve_trace_roots import resolve_trace_roots
-
-        mock_api = MagicMock()
-        mock_api.viewer = {"username": "testuser"}
-        mock_mgr.get_api.return_value = mock_api
 
         result = json.loads(resolve_trace_roots("entity", "project", []))
 
@@ -185,13 +175,8 @@ class TestResolveTraceRootsTool:
         mock_get_svc.assert_not_called()
 
     @patch("wandb_mcp_server.mcp_tools.resolve_trace_roots.get_trace_service")
-    @patch("wandb_mcp_server.mcp_tools.resolve_trace_roots.WandBApiManager")
-    def test_tool_handles_service_error(self, mock_mgr, mock_get_svc):
+    def test_tool_handles_service_error(self, mock_get_svc):
         from wandb_mcp_server.mcp_tools.resolve_trace_roots import resolve_trace_roots
-
-        mock_api = MagicMock()
-        mock_api.viewer = {"username": "testuser"}
-        mock_mgr.get_api.return_value = mock_api
 
         mock_svc = MagicMock()
         mock_svc.resolve_trace_roots.side_effect = ValueError("connection failed")
@@ -203,13 +188,8 @@ class TestResolveTraceRootsTool:
         assert "connection failed" in result["message"]
 
     @patch("wandb_mcp_server.mcp_tools.resolve_trace_roots.get_trace_service")
-    @patch("wandb_mcp_server.mcp_tools.resolve_trace_roots.WandBApiManager")
-    def test_tool_deduplicates_in_response(self, mock_mgr, mock_get_svc):
+    def test_tool_deduplicates_in_response(self, mock_get_svc):
         from wandb_mcp_server.mcp_tools.resolve_trace_roots import resolve_trace_roots
-
-        mock_api = MagicMock()
-        mock_api.viewer = {"username": "testuser"}
-        mock_mgr.get_api.return_value = mock_api
 
         mock_svc = MagicMock()
         mock_svc.resolve_trace_roots.return_value = {
@@ -223,14 +203,9 @@ class TestResolveTraceRootsTool:
         assert result["total_requested"] == 1
 
     @patch("wandb_mcp_server.mcp_tools.resolve_trace_roots.get_trace_service")
-    @patch("wandb_mcp_server.mcp_tools.resolve_trace_roots.WandBApiManager")
-    def test_tool_response_shape(self, mock_mgr, mock_get_svc):
+    def test_tool_response_shape(self, mock_get_svc):
         """Verify the tool output contains only the expected root span fields."""
         from wandb_mcp_server.mcp_tools.resolve_trace_roots import resolve_trace_roots
-
-        mock_api = MagicMock()
-        mock_api.viewer = {"username": "testuser"}
-        mock_mgr.get_api.return_value = mock_api
 
         full_root = _make_root_trace("t1", "chat", "Chat")
         full_root["extra_field"] = "should_not_appear"

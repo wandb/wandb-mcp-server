@@ -149,21 +149,12 @@ async def mcp_auth_middleware(request: Request, call_next):
             content={"error": "Authentication failed"},
         )
 
-    # --- Set up request context (API key, viewer, session) ----------------
+    # --- Set up request context (API key, session) ------------------------
     request.state.wandb_api_key = wandb_api_key
 
     from wandb_mcp_server.api_client import WandBApiManager
 
     api_key_token = WandBApiManager.set_context_api_key(wandb_api_key)
-
-    viewer = None
-    try:
-        api = WandBApiManager.get_api()
-        viewer = api.viewer
-        viewer_id = getattr(viewer, "username", None) or getattr(viewer, "entity", None) or "<unknown>"
-        logger.info(f"Authenticated W&B viewer: {viewer_id}")
-    except Exception as viewer_err:
-        logger.warning(f"Could not fetch W&B viewer: {viewer_err}")
 
     # --- Session management -----------------------------------------------
     # Finalize session_id *before* setting the contextvar so that
@@ -212,7 +203,7 @@ async def mcp_auth_middleware(request: Request, call_next):
 
         get_analytics_tracker().track_user_session(
             session_id=session_id,
-            viewer_info=viewer,
+            viewer_info=None,
             api_key_hash=hashlib.sha256(wandb_api_key.encode()).hexdigest(),
         )
     except Exception as analytics_err:
@@ -224,7 +215,7 @@ async def mcp_auth_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
     except Exception:
-        _track_request_event(request_start, request_id, session_id, request, 500, viewer)
+        _track_request_event(request_start, request_id, session_id, request, 500, None)
         raise
     finally:
         WandBApiManager.reset_context_api_key(api_key_token)
@@ -233,7 +224,7 @@ async def mcp_auth_middleware(request: Request, call_next):
     if is_new_session:
         response.headers["Mcp-Session-Id"] = session_id
 
-    _track_request_event(request_start, request_id, session_id, request, response.status_code, viewer)
+    _track_request_event(request_start, request_id, session_id, request, response.status_code, None)
 
     return response
 

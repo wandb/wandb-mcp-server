@@ -7,7 +7,7 @@ name to pass to other tools (query_traces, list_entity_projects, etc.).
 
 import json
 
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.mcp_tools.identity import get_viewer_identity
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -42,12 +42,13 @@ JSON with:
 
 def list_entities() -> str:
     """List W&B entities (user + teams) accessible with the current API key."""
-    api = WandBApiManager.get_api()
-    viewer = api.viewer
+    viewer = get_viewer_identity()
 
-    with track_tool_execution("list_entities", viewer, {}):
-        entities = [{"name": viewer.entity, "type": "user"}]
-        for team in getattr(viewer, "teams", []):
+    with track_tool_execution("list_entities", viewer.as_analytics_viewer(), {}):
+        entities = []
+        if viewer.entity:
+            entities.append({"name": viewer.entity, "type": "user"})
+        for team in viewer.teams:
             entities.append({"name": team, "type": "team"})
 
         return json.dumps({"entities": entities, "count": len(entities)})

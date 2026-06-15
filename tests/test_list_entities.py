@@ -3,22 +3,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-
-@pytest.fixture()
-def mock_viewer():
-    viewer = MagicMock()
-    viewer.entity = "alice"
-    viewer.teams = ["team-a", "team-b", "team-c"]
-    return viewer
-
-
-@pytest.fixture()
-def mock_api(mock_viewer):
-    api = MagicMock()
-    api.viewer = mock_viewer
-    return api
+from wandb_mcp_server.mcp_tools.identity import ViewerIdentity
 
 
 def _make_project(name, entity):
@@ -36,9 +21,13 @@ def _make_project(name, entity):
 class TestListEntities:
     """list_entities returns viewer entity + teams without project enumeration."""
 
-    @patch("wandb_mcp_server.mcp_tools.list_entities.WandBApiManager")
-    def test_returns_user_and_teams(self, mock_mgr, mock_api, mock_viewer):
-        mock_mgr.get_api.return_value = mock_api
+    @patch("wandb_mcp_server.mcp_tools.list_entities.get_viewer_identity")
+    def test_returns_user_and_teams(self, mock_get_identity):
+        mock_get_identity.return_value = ViewerIdentity(
+            entity="alice",
+            username="alice",
+            teams=("team-a", "team-b", "team-c"),
+        )
         from wandb_mcp_server.mcp_tools.list_entities import list_entities
 
         result = json.loads(list_entities())
@@ -47,15 +36,9 @@ class TestListEntities:
         assert result["entities"][1] == {"name": "team-a", "type": "team"}
         assert result["entities"][3] == {"name": "team-c", "type": "team"}
 
-    @patch("wandb_mcp_server.mcp_tools.list_entities.WandBApiManager")
-    def test_no_teams(self, mock_mgr):
-        viewer = MagicMock()
-        viewer.entity = "solo-user"
-        viewer.teams = []
-        api = MagicMock()
-        api.viewer = viewer
-        mock_mgr.get_api.return_value = api
-
+    @patch("wandb_mcp_server.mcp_tools.list_entities.get_viewer_identity")
+    def test_no_teams(self, mock_get_identity):
+        mock_get_identity.return_value = ViewerIdentity(entity="solo-user", username="solo-user", teams=())
         from wandb_mcp_server.mcp_tools.list_entities import list_entities
 
         result = json.loads(list_entities())
@@ -63,14 +46,9 @@ class TestListEntities:
         assert result["entities"][0]["name"] == "solo-user"
         assert result["entities"][0]["type"] == "user"
 
-    @patch("wandb_mcp_server.mcp_tools.list_entities.WandBApiManager")
-    def test_viewer_without_teams_attr(self, mock_mgr):
-        viewer = MagicMock(spec=[])
-        viewer.entity = "no-attr-user"
-        api = MagicMock()
-        api.viewer = viewer
-        mock_mgr.get_api.return_value = api
-
+    @patch("wandb_mcp_server.mcp_tools.list_entities.get_viewer_identity")
+    def test_viewer_without_teams_attr(self, mock_get_identity):
+        mock_get_identity.return_value = ViewerIdentity(entity="no-attr-user", username=None, teams=())
         from wandb_mcp_server.mcp_tools.list_entities import list_entities
 
         result = json.loads(list_entities())
@@ -103,12 +81,14 @@ class TestListEntityProjectsBounds:
         assert len(result["projects"]["alice"]) == 200
 
     @patch("wandb_mcp_server.api_client.get_wandb_api")
-    def test_entity_none_caps_entities(self, mock_get_api):
-        viewer = MagicMock()
-        viewer.entity = "user"
-        viewer.teams = [f"team-{i}" for i in range(20)]
+    @patch("wandb_mcp_server.mcp_tools.list_wandb_entities_projects.get_viewer_identity")
+    def test_entity_none_caps_entities(self, mock_get_identity, mock_get_api):
+        mock_get_identity.return_value = ViewerIdentity(
+            entity="user",
+            username="user",
+            teams=tuple(f"team-{i}" for i in range(20)),
+        )
         api = MagicMock()
-        api.viewer = viewer
         api.projects.return_value = iter([_make_project("p1", "user")])
         mock_get_api.return_value = api
 

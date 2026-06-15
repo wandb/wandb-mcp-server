@@ -3,6 +3,7 @@
 import json
 from typing import Optional
 
+from wandb_mcp_server.mcp_tools.identity import get_viewer_identity
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -55,10 +56,11 @@ def list_entity_projects(
     api = get_wandb_api()
     max_projects = min(max(1, max_projects), MAX_PROJECTS_CEILING)
 
-    viewer = None
+    viewer_info = entity
     if entity is None:
-        viewer = api.viewer
-        all_entities = [viewer.entity] + getattr(viewer, "teams", [])
+        viewer = get_viewer_identity()
+        viewer_info = viewer.as_analytics_viewer()
+        all_entities = viewer.entity_names()
         entities = all_entities[:MAX_ENTITIES_WHEN_NONE]
         entities_truncated = len(all_entities) > MAX_ENTITIES_WHEN_NONE
     else:
@@ -67,7 +69,7 @@ def list_entity_projects(
 
     with track_tool_execution(
         "list_entity_projects",
-        viewer or entity,
+        viewer_info,
         {"entity": entity, "max_projects": max_projects},
     ) as ctx:
         entities_projects = {}

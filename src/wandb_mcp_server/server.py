@@ -226,12 +226,12 @@ def validate_api_key(api_key: str) -> bool:
         True if the API key is valid, False otherwise
     """
     try:
-        # Try to create an API instance and fetch the viewer
-        # This validates the key without setting any global state
+        # Validate the key with a narrow identity read. Avoid ``api.viewer``:
+        # the SDK viewer query includes API-key metadata and can trip relogin
+        # checks that are unrelated to MCP tool access.
         api = wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
-        viewer = api.viewer  # This will fail if the key is invalid
-        viewer_id = getattr(viewer, "username", None) or getattr(viewer, "entity", None) or "<unknown>"
-        logger.info(f"W&B API key validated successfully. Viewer: {viewer_id}")
+        default_entity = api.default_entity
+        logger.info(f"W&B API key validated successfully. Default entity: {default_entity or '<unknown>'}")
         return True
     except Exception as e:
         logger.error(f"Invalid W&B API key: {e}")
@@ -1160,11 +1160,10 @@ def cli():
 
             try:
                 api = WandBApiManager.get_api()
-                viewer = api.viewer
-                viewer_id = getattr(viewer, "username", None) or getattr(viewer, "entity", None) or "<unknown>"
-                logger.info(f"Authenticated W&B viewer: {viewer_id}")
+                default_entity = api.default_entity
+                logger.info(f"Authenticated W&B default entity: {default_entity or '<unknown>'}")
             except Exception as viewer_err:
-                logger.warning(f"Could not fetch W&B viewer: {viewer_err}")
+                logger.warning(f"Could not fetch W&B default entity: {viewer_err}")
 
     # Initialize Weave tracing for MCP tool calls
     initialize_weave_tracing()

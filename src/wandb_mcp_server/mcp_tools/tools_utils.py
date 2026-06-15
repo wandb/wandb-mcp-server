@@ -333,7 +333,7 @@ _tools_logger = get_rich_logger("mcp_tools")
 @contextmanager
 def track_tool_execution(
     tool_name: str,
-    viewer: Any,
+    viewer_info: Any,
     params: Dict[str, Any],
     mcp_tool_name: Optional[str] = None,
 ):
@@ -343,6 +343,9 @@ def track_tool_execution(
     ``track_tool_call`` analytics event in ``finally`` so every invocation --
     success or failure -- is recorded with real ``success``, ``error``, and
     ``duration_ms`` values.
+
+    ``viewer_info`` must be request-local or already known to the tool. Callers
+    should not fetch ``wandb.Api.viewer`` only for analytics attribution.
 
     Yields a ``_ToolExecutionContext`` so tools that return error dicts
     instead of raising can call ``ctx.mark_error(...)`` explicitly.
@@ -377,7 +380,7 @@ def track_tool_execution(
             get_analytics_tracker().track_tool_call(
                 tool_name=tool_name,
                 session_id=current_session_id.get(),
-                viewer_info=viewer,
+                viewer_info=viewer_info,
                 params=params,
                 success=ctx.success,
                 error=ctx.error,

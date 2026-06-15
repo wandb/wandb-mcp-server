@@ -97,7 +97,7 @@ def list_artifact_versions(
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "list_artifact_versions",
-        api.viewer,
+        None,
         {
             "collection_name": collection_name,
             "entity_name": entity_name,
@@ -225,7 +225,7 @@ def get_artifact_details(
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "get_artifact_details",
-        api.viewer,
+        None,
         {
             "artifact_name": artifact_name,
             "type_name": type_name,
@@ -329,7 +329,7 @@ def compare_artifact_versions(
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "compare_artifact_versions",
-        api.viewer,
+        None,
         {
             "artifact_name_a": artifact_name_a,
             "artifact_name_b": artifact_name_b,

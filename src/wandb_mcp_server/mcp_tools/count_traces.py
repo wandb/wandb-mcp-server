@@ -144,10 +144,9 @@ def count_traces(
 
     logger.debug("W&B API key: present")
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "count_traces",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,

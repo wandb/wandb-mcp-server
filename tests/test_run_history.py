@@ -1,6 +1,7 @@
 """Tests for the get_run_history_tool."""
 
 import json
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,6 +25,44 @@ class TestRunHistoryDescription:
 
 
 class TestGetRunHistory:
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_does_not_resolve_viewer_for_analytics(
+        self,
+        mock_wandb_mod,
+        mock_api_mgr,
+    ):
+        """Run history must not fail before fetch because analytics resolved viewer."""
+        mock_api_mgr.get_api.side_effect = AssertionError("api.viewer should not be resolved")
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+
+        mock_run = MagicMock()
+        mock_run.name = "viewer-free"
+        mock_run.lastHistoryStep = 1
+        mock_run.history.return_value = [{"_step": 0, "loss": 1.0}]
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        @contextmanager
+        def fake_track_tool_execution(
+            tool_name,
+            viewer_info,
+            params,
+            mcp_tool_name=None,
+        ):
+            assert tool_name == "get_run_history"
+            assert viewer_info is None
+            yield MagicMock()
+
+        with patch(
+            "wandb_mcp_server.mcp_tools.run_history.track_tool_execution",
+            fake_track_tool_execution,
+        ):
+            result = json.loads(get_run_history("entity", "project", "abc12345", keys=["loss"]))
+
+        assert result["run_name"] == "viewer-free"
+        mock_api_mgr.get_api.assert_not_called()
+
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
     def test_basic_history(self, mock_wandb_mod, mock_api_mgr):

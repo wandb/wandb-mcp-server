@@ -404,6 +404,15 @@ class AnalyticsTracker:
         types rather than stringifying arbitrary objects.
         """
         try:
+            if isinstance(viewer_info, dict):
+                for key in ("username", "entity"):
+                    val = viewer_info.get(key)
+                    if val:
+                        return str(val)
+                email = viewer_info.get("email")
+                if email and "@" in str(email):
+                    return str(email).split("@")[1].lower()
+                return None
             for attr in ("username", "entity"):
                 if hasattr(viewer_info, attr):
                     val = getattr(viewer_info, attr)
