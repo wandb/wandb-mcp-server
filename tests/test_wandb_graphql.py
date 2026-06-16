@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import ast
+from contextlib import contextmanager
 from pathlib import Path
 import sys
 import types
+from unittest.mock import MagicMock
 
 from wandb_mcp_server.wandb_graphql import execute_graphql
 
@@ -72,3 +74,33 @@ def test_execute_graphql_has_no_raw_bearer_request_path():
     assert "requests.post" not in source
     assert "Authorization" not in source
     assert "Bearer" not in source
+
+
+def test_query_wandb_tool_does_not_resolve_viewer_for_analytics(monkeypatch):
+    from wandb_mcp_server.mcp_tools import query_wandb_gql
+
+    class Api:
+        @property
+        def viewer(self):
+            raise AssertionError("api.viewer should not be resolved")
+
+    @contextmanager
+    def fake_track_tool_execution(tool_name, viewer_info, params, mcp_tool_name=None):
+        assert tool_name == "query_paginated_wandb_gql"
+        assert viewer_info == "unknown"
+        yield MagicMock()
+
+    monkeypatch.setattr("wandb_mcp_server.api_client.get_wandb_api", lambda: Api())
+    monkeypatch.setattr(query_wandb_gql, "track_tool_execution", fake_track_tool_execution)
+    monkeypatch.setattr(
+        query_wandb_gql,
+        "execute_graphql",
+        lambda api, query, variables: {"data": {"viewer": {"id": "viewer-id"}}},
+    )
+
+    result = query_wandb_gql.query_paginated_wandb_gql(
+        "query Test { viewer { id } }",
+        {},
+    )
+
+    assert result == {"data": {"viewer": {"id": "viewer-id"}}}

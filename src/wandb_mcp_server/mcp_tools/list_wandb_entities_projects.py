@@ -4,7 +4,11 @@ import json
 from typing import Optional
 
 from wandb_mcp_server.mcp_tools.identity import get_viewer_identity
-from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.mcp_tools.tools_utils import (
+    is_relogin_required_error,
+    sdk_relogin_required_error,
+    track_tool_execution,
+)
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -96,6 +100,12 @@ def list_entity_projects(
                     )
                 entities_projects[ent] = projects_data
             except Exception as e:
+                if is_relogin_required_error(e):
+                    error = sdk_relogin_required_error("Project listing")
+                    logger.warning("Project listing blocked by SDK relogin guard for entity %s", ent)
+                    ctx.mark_error(error["error"])
+                    entities_projects[ent] = [error]
+                    continue
                 logger.warning(f"Failed to list projects for entity {ent}: {e}")
                 ctx.mark_error(f"{type(e).__name__}: {e}")
                 entities_projects[ent] = [{"error": str(e)}]

@@ -14,7 +14,11 @@ import wandb_workspaces.reports.v2.interface as wr_interface
 import wandb
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.config import WANDB_BASE_URL
-from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.mcp_tools.tools_utils import (
+    is_relogin_required_error,
+    sdk_relogin_required_error,
+    track_tool_execution,
+)
 
 logger = get_rich_logger(__name__)
 
@@ -328,6 +332,9 @@ def create_report(
             return {"url": report.url}
 
         except Exception as e:
+            if is_relogin_required_error(e):
+                logger.warning("Report creation blocked by SDK/workspaces relogin guard")
+                return sdk_relogin_required_error("Report creation")
             logger.error(f"Error creating report: {e}")
             raise Exception(f"Error creating report: {e}")
 

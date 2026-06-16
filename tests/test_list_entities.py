@@ -117,3 +117,18 @@ class TestListEntityProjectsBounds:
         parsed = json.loads(result)
         assert "projects" in parsed
         assert "truncated" in parsed
+
+    @patch("wandb_mcp_server.api_client.get_wandb_api")
+    def test_relogin_required_returns_structured_sdk_error(self, mock_get_api):
+        api = MagicMock()
+        api.projects.side_effect = Exception("[relogin required; relogin required; relogin required]")
+        mock_get_api.return_value = api
+
+        from wandb_mcp_server.mcp_tools.list_wandb_entities_projects import list_entity_projects
+
+        result = json.loads(list_entity_projects(entity="alice"))
+        error = result["projects"]["alice"][0]
+
+        assert error["error"] == "sdk_relogin_required"
+        assert "API-key metadata" in error["message"]
+        assert "relogin required; relogin required" not in json.dumps(result)

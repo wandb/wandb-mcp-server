@@ -721,6 +721,8 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 panels=panels,
             )
 
+            if "error" in result:
+                return json.dumps(result)
             return f"The report was saved here: {result['url']}"
         except Exception as e:
             raise e

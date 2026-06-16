@@ -428,6 +428,24 @@ class TestCreateReportWithPanels:
         assert result["url"] == "https://wandb.ai/report/123"
 
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    @patch("wandb_mcp_server.api_client.WandBApiManager")
+    def test_relogin_required_returns_structured_error(self, mock_api_mgr, mock_wr):
+        """Report.save relogin errors should not leak repeated raw messages."""
+        mock_api_mgr.get_api_key.return_value = "fake_key"
+
+        mock_report = MagicMock()
+        mock_report.save.side_effect = Exception("[relogin required; relogin required; relogin required]")
+        mock_wr.Report.return_value = mock_report
+        mock_wr.P = MagicMock()
+        mock_wr.H2 = MagicMock()
+
+        result = create_report("entity", "project", "Test Report", panels=None)
+
+        assert result["error"] == "sdk_relogin_required"
+        assert "API-key metadata" in result["message"]
+        assert "relogin required; relogin required" not in str(result)
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     def test_run_comparison_without_run_ids(self, mock_wr):
         """run_comparison panel without run_ids should not set filters."""
         mock_wr.PanelGrid = MagicMock()

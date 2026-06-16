@@ -330,6 +330,24 @@ class _ToolExecutionContext:
 _tools_logger = get_rich_logger("mcp_tools")
 
 
+def is_relogin_required_error(exc: BaseException) -> bool:
+    """Return whether an exception came from Gorilla's sensitive relogin guard."""
+    return "relogin required" in str(exc).lower()
+
+
+def sdk_relogin_required_error(operation: str) -> Dict[str, str]:
+    """Build a structured error for SDK queries that over-select API-key fields."""
+    return {
+        "error": "sdk_relogin_required",
+        "message": (
+            f"{operation} is blocked by a W&B SDK query that selects sensitive "
+            "API-key metadata and can require a fresh W&B login. The MCP server "
+            "does not need API keys for this operation; this is being tracked "
+            "with the SDK/workspaces owners."
+        ),
+    }
+
+
 @contextmanager
 def track_tool_execution(
     tool_name: str,

@@ -674,7 +674,7 @@ def query_paginated_wandb_gql(
     limit_key = None
     with track_tool_execution(
         "query_paginated_wandb_gql",
-        api.viewer,
+        "unknown",
         {
             "query": query,
             "variables": variables,
