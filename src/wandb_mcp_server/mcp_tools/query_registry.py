@@ -10,7 +10,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.mcp_tools.tools_utils import safe_viewer_info, track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -75,7 +75,7 @@ def list_registries(
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "list_registries",
-        None,
+        safe_viewer_info(api),
         {"organization": organization, "filter": filter, "max_items": max_items},
     ) as ctx:
         max_items = min(max_items, MAX_ITEMS_CEILING)
@@ -167,7 +167,7 @@ def list_registry_collections(
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "list_registry_collections",
-        None,
+        safe_viewer_info(api),
         {
             "registry_name": registry_name,
             "organization": organization,

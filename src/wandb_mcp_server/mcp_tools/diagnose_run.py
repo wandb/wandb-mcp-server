@@ -5,7 +5,7 @@ import math
 from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.mcp_tools.tools_utils import safe_viewer_info, track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -116,7 +116,7 @@ def diagnose_run(
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "diagnose_run",
-        None,
+        safe_viewer_info(api),
         {"entity_name": entity_name, "project_name": project_name, "run_id": run_id},
     ) as ctx:
         try:

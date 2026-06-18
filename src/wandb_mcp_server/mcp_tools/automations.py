@@ -17,7 +17,7 @@ from pydantic import PositiveInt
 from wandb.automations import EventType, SlackIntegration, WebhookIntegration
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.mcp_tools.tools_utils import safe_viewer_info, track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
 if TYPE_CHECKING:
@@ -198,7 +198,7 @@ def list_automations(
     params = locals()  # Must be first so it only picks up the function args
 
     api = WandBApiManager.get_api()
-    with track_tool_execution("list_automations", None, params) as ctx:
+    with track_tool_execution("list_automations", safe_viewer_info(api), params) as ctx:
         max_items = _clamp(max_items, 1, MAX_ITEMS_CEIL)
 
         try:
@@ -301,7 +301,7 @@ def list_integrations(
     params = locals()  # Must be first so it only picks up the function args
 
     api = WandBApiManager.get_api()
-    with track_tool_execution("list_integrations", None, params) as ctx:
+    with track_tool_execution("list_integrations", safe_viewer_info(api), params) as ctx:
         max_items = _clamp(max_items, 1, MAX_ITEMS_CEIL)
 
         if kind is not None and kind not in _VALID_INTEGRATION_KINDS:

@@ -4,7 +4,7 @@ version = "0.3.6"
 requires-python = ">=3.11"
 dependencies = [
     "weave>=0.52.35",
-    "wandb[workspaces]>=0.27.1",
+    "wandb[workspaces] @ git+https://github.com/wandb/wandb.git@eeceff66c5530e3786876b005de7af772f2bc005",
     "httpx>=0.28.1",
     "mcp[cli]>=1.0.0",
     "simple-parsing>=0.1.7",
@@ -39,6 +39,9 @@ http = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wandb_mcp_server"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 log_cli = true

@@ -87,7 +87,7 @@ def test_query_wandb_tool_does_not_resolve_viewer_for_analytics(monkeypatch):
     @contextmanager
     def fake_track_tool_execution(tool_name, viewer_info, params, mcp_tool_name=None):
         assert tool_name == "query_paginated_wandb_gql"
-        assert viewer_info == "unknown"
+        assert viewer_info is None
         yield MagicMock()
 
     monkeypatch.setattr("wandb_mcp_server.api_client.get_wandb_api", lambda: Api())

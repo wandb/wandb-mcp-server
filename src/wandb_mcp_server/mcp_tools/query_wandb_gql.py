@@ -10,7 +10,7 @@ from graphql import parse
 from graphql.language import ast as gql_ast
 from graphql.language import printer as gql_printer
 from graphql.language import visitor as gql_visitor
-from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.mcp_tools.tools_utils import safe_viewer_info, track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_graphql import execute_graphql
 
@@ -674,7 +674,7 @@ def query_paginated_wandb_gql(
     limit_key = None
     with track_tool_execution(
         "query_paginated_wandb_gql",
-        "unknown",
+        safe_viewer_info(api),
         {
             "query": query,
             "variables": variables,

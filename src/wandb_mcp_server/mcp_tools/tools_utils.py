@@ -348,6 +348,15 @@ def sdk_relogin_required_error(operation: str) -> Dict[str, str]:
     }
 
 
+def safe_viewer_info(api: Any) -> Any:
+    """Best-effort viewer info for analytics that must not fail tool calls."""
+    try:
+        return api.viewer
+    except Exception as exc:
+        _tools_logger.debug(f"Viewer attribution unavailable: {exc}")
+        return None
+
+
 @contextmanager
 def track_tool_execution(
     tool_name: str,
