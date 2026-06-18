@@ -107,11 +107,8 @@ class TestAggregateEval:
 
 
 class TestSummarizeEvaluation:
-    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
-    def test_no_evals_found(self, mock_get_svc, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-
+    def test_no_evals_found(self, mock_get_svc):
         mock_service = MagicMock()
         mock_get_svc.return_value = mock_service
 
@@ -124,11 +121,8 @@ class TestSummarizeEvaluation:
         assert result["evaluations"] == []
         assert "No Evaluation.evaluate" in result["message"]
 
-    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
-    def test_with_eval_traces(self, mock_get_svc, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-
+    def test_with_eval_traces(self, mock_get_svc):
         mock_service = MagicMock()
         mock_get_svc.return_value = mock_service
 
@@ -160,11 +154,8 @@ class TestSummarizeEvaluation:
         assert ev["successes"] == 1
         assert ev["scores"]["correctness"]["true_fraction"] == 0.9
 
-    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
-    def test_query_failure_returns_error(self, mock_get_svc, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-
+    def test_query_failure_returns_error(self, mock_get_svc):
         mock_service = MagicMock()
         mock_get_svc.return_value = mock_service
         mock_service.query_traces.side_effect = Exception("Connection refused")
@@ -174,11 +165,8 @@ class TestSummarizeEvaluation:
         assert result["error"] == "evaluation_query_failed"
         assert "Connection refused" in result["message"]
 
-    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
-    def test_project_path_in_response(self, mock_get_svc, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-
+    def test_project_path_in_response(self, mock_get_svc):
         mock_service = MagicMock()
         mock_get_svc.return_value = mock_service
 
