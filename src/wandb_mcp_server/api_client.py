@@ -10,8 +10,12 @@ from contextvars import ContextVar
 import wandb
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.config import WANDB_BASE_URL
+from wandb_mcp_server.wandb_public_api_shim import (
+    apply_public_api_relogin_shim,
+)
 
 logger = get_rich_logger(__name__)
+apply_public_api_relogin_shim()
 
 # Context variable for storing the current request's API key
 api_key_context: ContextVar[Optional[str]] = ContextVar("wandb_api_key", default=None)
