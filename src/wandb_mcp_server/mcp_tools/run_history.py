@@ -1,8 +1,8 @@
 """Retrieve sampled time-series metric history for a W&B run.
 
 Uses `wandb.Api().run().history()` for sampled data and a tiered
-strategy for step-range queries: beta_scan_history (parquet) first,
-scan_history (GraphQL) second, history() (sampled) as last resort.
+strategy for step-range queries: scan_history (parquet-backed) first,
+history() (sampled) as last resort.
 """
 
 from __future__ import annotations
@@ -185,26 +185,11 @@ def _fetch_step_range(
     """Fetch history rows for a step range using a tiered strategy.
 
     Strategy order:
-      1. beta_scan_history (parquet via wandb-core, works on all run types)
-      2. scan_history (GraphQL, fails silently when lastHistoryStep == -1)
-      3. history() sampled fallback (always works, ignores step bounds)
+      1. scan_history (parquet-backed when available, falls back to GraphQL;
+         fails silently when lastHistoryStep == -1)
+      2. history() sampled fallback (always works, ignores step bounds)
     """
-    # Strategy 1: beta_scan_history
-    try:
-        beta_kwargs: Dict[str, Any] = {"min_step": min_step or 0}
-        if keys:
-            beta_kwargs["keys"] = keys
-        if max_step is not None:
-            beta_kwargs["max_step"] = max_step
-        beta_kwargs["page_size"] = min(clamped_samples, 1000)
-        rows = _reservoir_sample(run.beta_scan_history(**beta_kwargs), clamped_samples)
-        if rows:
-            return rows
-        logger.info("beta_scan_history returned 0 rows, trying scan_history")
-    except Exception as e:
-        logger.info(f"beta_scan_history unavailable ({type(e).__name__}), trying scan_history")
-
-    # Strategy 2: scan_history
+    # Strategy 1: scan_history
     scan_kwargs: Dict[str, Any] = {}
     if keys:
         scan_kwargs["keys"] = keys
@@ -216,7 +201,7 @@ def _fetch_step_range(
     if rows:
         return rows
 
-    # Strategy 3: history() sampled fallback (ignores step bounds but always works)
+    # Strategy 2: history() sampled fallback (ignores step bounds but always works)
     last_step = getattr(run, "lastHistoryStep", 0) or 0
     if last_step <= 0:
         logger.warning(

@@ -165,8 +165,9 @@ def test_count_traces_live(suite: TestSuite):
 def test_h4_parallel_count(suite: TestSuite):
     """Two sequential counts should be slower than concurrent execution."""
     from concurrent.futures import ThreadPoolExecutor
-    from wandb_mcp_server.mcp_tools.count_traces import count_traces
+
     from wandb_mcp_server.api_client import WandBApiManager
+    from wandb_mcp_server.mcp_tools.count_traces import count_traces
 
     api_key = os.environ["WANDB_API_KEY"]
 
@@ -237,6 +238,7 @@ def test_h3_schema_projection(suite: TestSuite):
     t0 = time.monotonic()
     try:
         from unittest.mock import AsyncMock, patch
+
         from wandb_mcp_server.weave_api.models import QueryResult, TraceMetadata
 
         mock_query = AsyncMock(
@@ -250,8 +252,9 @@ def test_h3_schema_projection(suite: TestSuite):
             patch("wandb_mcp_server.server.count_traces", return_value=5),
             patch("wandb_mcp_server.api_client.WandBApiManager.get_api_key", return_value="fake"),
         ):
-            from wandb_mcp_server.server import register_tools
             from mcp.server.fastmcp import FastMCP
+
+            from wandb_mcp_server.server import register_tools
 
             mcp = FastMCP("test-h3")
             register_tools(mcp)
@@ -312,10 +315,10 @@ def test_m2_or_in_filters(suite: TestSuite):
         suite.record("M2: $or/$in filters", False, time.monotonic() - t0, error=str(e))
 
 
-# ── H5: beta_scan_history wiring ─────────────────────────────────────────────
+# ── H5: scan_history wiring ──────────────────────────────────────────────────
 
 
-def test_h5_beta_scan_wiring(suite: TestSuite):
+def test_h5_scan_history_wiring(suite: TestSuite):
     """Validate the _fetch_step_range function exists and respects env var."""
     t0 = time.monotonic()
     try:
@@ -328,11 +331,9 @@ def test_h5_beta_scan_wiring(suite: TestSuite):
         steps = [r["_step"] for r in sampled]
         assert steps == sorted(steps), "Reservoir sample not sorted"
 
-        suite.record(
-            "H5: beta_scan_history wiring", True, time.monotonic() - t0, "functions exist, reservoir sample works"
-        )
+        suite.record("H5: scan_history wiring", True, time.monotonic() - t0, "functions exist, reservoir sample works")
     except Exception as e:
-        suite.record("H5: beta_scan_history wiring", False, time.monotonic() - t0, error=str(e))
+        suite.record("H5: scan_history wiring", False, time.monotonic() - t0, error=str(e))
 
 
 # ── M1: history row budget ────────────────────────────────────────────────────
@@ -417,7 +418,7 @@ def main():
         test_m4_no_networkx,
         test_h2_cost_sort_cap,
         test_m2_or_in_filters,
-        test_h5_beta_scan_wiring,
+        test_h5_scan_history_wiring,
         test_m1_row_budget,
         test_h3_schema_projection,
         test_count_traces_live,
