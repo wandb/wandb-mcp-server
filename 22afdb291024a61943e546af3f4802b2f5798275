@@ -1,0 +1,39 @@
+## Conversation
+User: "Add the new weave agent APIs (github.com/wandb/weave) backed by OTEL to the MCP." First mistaken for the threads API; user corrected: it's the Agents API added recently by Ben Sherman, in the weave repo's `agents` dir. User chose FULL surface (all 8 read endpoints) over a smaller core set, and provided bcanfieldsherman/agents-demo for live verification. Then: "put this up as draft".
+
+## What this adds
+8 MCP tools over the Weave Agents observability API (OTel/GenAI agent spans), a data plane SEPARATE from classic Weave calls. New files: weave_api/agents_client.py (AgentsApiClient), mcp_tools/agents.py (tools + descriptions). Registered in server.py and added to _WEAVE_TOOL_NAMES so WANDB_MCP_ENABLE_WEAVE_TOOLS=false disables them too.
+
+## API contract (reverse-engineered; NOT in local weave 0.52.35)
+Source of truth: weave/trace_server/agents/types.py @ github.com/wandb/weave (master). Endpoints confirmed via sdks/node/src/generated/traceServerApi.ts + Node SDK request cassettes (sdks/node/src/__tests__/__cassettes__/weaveclient_*.yaml -- these contain real request/response JSON against https://trace.wandb.ai).
+Read endpoints (all POST, plain JSON, NOT JSONL-streamed like /calls/stream_query):
+  /agents/query                      -> AgentsQueryReq{project_id,filters{agent_name},sort_by[{field,direction}],limit,offset,include_costs} -> {agents,total_count}
+  /agents/agent-versions/query       -> {versions,total_count}
+  /agents/spans/query                -> AgentSpansQueryReq{project_id,query(Mongo $expr),group_by,measures,sort_by,limit,offset,started_after,started_before,include_details,include_costs} -> {spans|groups,total_count}
+  /agents/spans/stats                -> AgentSpanStatsReq{project_id,start,end,granularity,timezone,group_by,metrics[AgentSpanStatsMetricSpec]} -> {columns,rows,...}
+  /agents/spans/custom-attrs/schema  -> {attributes,has_more}
+  /agents/search                     -> AgentSearchReq{project_id,query,trace_id,conversation_id,agent_name,roles,...} -> {results,total_conversations}
+  /agents/traces/chat                -> AgentTraceChatReq{project_id,trace_id,include_feedback} -> AgentTraceChatRes{messages[typed timeline],...}
+  /agents/conversations/chat         -> AgentConversationChatReq{project_id,conversation_id,limit,offset,include_feedback} -> {turns:[AgentTraceChatRes],...}
+Ingest (write, not exposed): /agents/otel/v1/traces.
+Auth: HTTP Basic, base64(":"+api_key) -- same as the calls client. project_id = "entity/project".
+
+## Key design decisions
+- Do NOT import weave agent types: pinned weave 0.52.35 predates them; MCP already speaks raw HTTP to the trace server. Request bodies are dicts (None values dropped so server defaults apply); responses returned as dicts.
+- AgentsApiClient mirrors WeaveApiClient construction + get_retry_session(); inlines the 3-line basic-auth (matches count_traces.py precedent) rather than abstracting.
+- mcp_tools/agents.py: shared _run() envelope = auth check -> track_tool_execution -> AgentsApiError mapping (404 -> agents_api_unavailable, else agents_query_failed) -> _truncate_response -> json.dumps. _truncate_response trims the largest list field to MAX_RESPONSE_TOKENS (reuses TraceProcessor.estimate_tokens) and adds a _truncation note; it does NOT reuse enforce_token_budget (that one is calls/trace-shaped).
+- Stats tool: _normalize_stats_metrics turns user-friendly metric inputs into AgentSpanStatsMetricSpec dicts. String "input_tokens" -> {source:field}; derived names (duration_ms,total_tokens,is_error,is_invocation,total_cost_usd,input_cost_usd,output_cost_usd) -> {source:derived}; boolean derived -> aggregations ["count_true"] (sum/avg invalid for boolean per server _ALLOWED_AGGS_BY_TYPE). Full spec dicts pass through.
+- query_agent_spans: agent_name shortcut becomes a Mongo $eq on agent_name, AND-combined with any caller query. include_details defaults False to keep payloads lean (raw OTel dumps are huge).
+
+## Errors / dead ends
+- Initially pursued the THREADS API (ThreadsQueryReq/ThreadSchema, /threads/stream_query) -- WRONG; user wanted the Agents API. Threads is a different (older) feature.
+- Local env had no venv / no python3.11 / no uv / no gh / no gt. Installed uv via astral script; `uv venv --python 3.11 && uv sync`; pytest needed `uv sync --extra test`. gh/gt absent -> PR created via GitHub REST API using git credential helper token.
+- `ls` is aliased to eza in the interactive shell (Bash tool sources profile) -> use find/Glob, not ls.
+
+## Verification
+778 unit tests pass (10 integration deselected); ruff check + format clean. Live: /tmp/verify_agents.py bcanfieldsherman/agents-demo exercised all 8 tools against trace.wandb.ai (key from ~/.netrc) -- all returned real data. Observed: agent "Weave Signals" 41 spans/71428 in tokens; custom attrs weave.claude_code.display_name (2037 spans); stats daily buckets with count_true is_error; trace/conversation chat timelines. Note: that agent shows invocation_count=0 with span_count=41 (server data property, not a bug).
+
+## Open questions / follow-ups
+- PR is large (~1617 insertions) vs repo's ~500-line target; ~half of agents.py is tool-description prose and server.py delta is mechanical registrations. Could be split into a gt stack (client+core tools / spans+stats+advanced / docs) if reviewers prefer.
+- Hosted-mode limit clamping (MCP_HOSTED_MODE) is NOT replicated for agent tools; relies on server-side caps + response truncation. Revisit if hosted deployments need stricter guardrails.
+- No live integration test committed (verify script lives in /tmp). Could add one marked `integration`.
