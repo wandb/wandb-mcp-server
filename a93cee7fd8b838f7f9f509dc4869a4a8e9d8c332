@@ -1,0 +1,42 @@
+## Conversation
+User: "Add the new weave agent APIs (github.com/wandb/weave) backed by OTEL to the MCP." First mistaken for the threads API; user corrected: it's the Agents API added recently by Ben Sherman, in the weave repo's `agents` dir. User chose FULL surface (all 8 read endpoints), provided bcanfieldsherman/agents-demo for live verification, then "put this up as draft". After the first draft: "re-use existing code; keep the PR description tight; agents.py is confusing; is this how the rest of the repo instruments it?" Then, emphatically: "It's important that this PR and the code be concise!" -> drove the two refactor rounds below.
+
+## What this adds
+8 MCP read tools over the Weave Agents observability API (OTel/GenAI agent spans), a data plane SEPARATE from classic Weave calls. Single new module: mcp_tools/agents.py (tools + descriptions + helpers). Registered in server.py and added to _WEAVE_TOOL_NAMES so WANDB_MCP_ENABLE_WEAVE_TOOLS=false disables them too.
+
+## Refactor round 1 -- "re-use existing code / agents.py confusing"
+First draft had a separate weave_api/agents_client.py (AgentsApiClient class) + a _run(tool_name, params, lambda c: c.method(...)) envelope -- non-idiomatic. Refactored to match mcp_tools/count_traces.py: DELETED agents_client.py entirely; each tool builds a request-body dict inline and calls one shared helper _agents_request(tool_name, path, body, track_params) doing the basic-auth POST via get_retry_session() wrapped in track_tool_execution + structured_error mapping + _truncate_response. count_traces.py is THE precedent (direct POST, no client class) -- that's the answer to "is this how the repo instruments it?".
+
+## Refactor round 2 -- "the code be concise"
+The 8 tool registrations in server.py were ~190 lines of pure pass-through wrappers: each re-declared the full signature already in agents.py and forwarded every param by keyword. (Contrast count_weave_traces_tool, whose wrapper adds REAL logic -- timeouts/deadline/context -- so it stays a wrapper.) Since the agent wrappers add nothing, replaced all 8 with a module-level tuple _AGENT_TOOLS = ((tool_name, impl, description), ...) and a loop: `for n, fn, d in _AGENT_TOOLS: mcp_instance.tool(name=n, description=d)(fn)`. Verified FastMCP.tool() accepts name= and derives the schema from fn's signature (identical schema to the old wrappers). _AGENT_TOOLS is also the single source of truth for the agent names spread into _WEAVE_TOOL_NAMES. Result: server.py delta +234 -> +60 lines; total PR insertions 1617 -> 1160 (~28% smaller), zero behavior change.
+TEST FALLOUT: tests/test_hosted_runtime_guardrails.py has a FakeMCP double whose tool() only accepted description=. The new name= kwarg raised TypeError inside register_tools, failing all 10 tests in that file (they all call register_tools(fake)). Fix: FakeMCP.tool(self, name=None, description=None) keyed by (name or func.__name__) -- mirrors the real FastMCP contract. The other two register_tools callers (test_detail_level, test_tool_registration) use a REAL FastMCP, so they were unaffected.
+NOT cut: agents.py's ~300 lines of *_TOOL_DESCRIPTION prose. It's the LLM-facing interface, consistent with count_traces.py's verbose NumPy-style description (which is even longer -- it also has Examples + a duplicated function docstring; agents.py has neither). Trimming would break house style and tool usability.
+
+## API contract (reverse-engineered; NOT in local weave 0.52.35)
+Source of truth: weave/trace_server/agents/types.py @ github.com/wandb/weave (master). Endpoints confirmed via sdks/node/src/generated/traceServerApi.ts + Node SDK request cassettes (real request/response JSON vs https://trace.wandb.ai).
+Read endpoints (all POST, plain JSON, NOT JSONL-streamed like /calls/stream_query):
+  /agents/query  /agents/agent-versions/query  /agents/spans/query  /agents/spans/stats
+  /agents/spans/custom-attrs/schema  /agents/search  /agents/traces/chat  /agents/conversations/chat
+Ingest (write, not exposed): /agents/otel/v1/traces. Auth: HTTP Basic base64(\":\"+api_key). project_id = \"entity/project\".
+
+## Key design decisions
+- Do NOT import weave agent types: pinned weave 0.52.35 predates them; MCP already speaks raw HTTP. Request bodies are dicts (None dropped via _drop_none so server defaults apply); responses parsed as dicts.
+- _best_effort_viewer(): the analytics viewer fetch (WandBApiManager.get_api().viewer) is a SEPARATE GraphQL call that can raise WandbApiFailedError 'relogin required' independently of the data request. count_traces.py calls it unguarded; here wrapped try/except -> None so analytics identity NEVER breaks a data tool. Deliberate divergence -- see Errors.
+- _truncate_response trims the largest list field (_TRUNCATABLE_LIST_KEYS, most-verbose first) to MAX_RESPONSE_TOKENS (reuses TraceProcessor.estimate_tokens) + adds a _truncation note. Does NOT reuse enforce_token_budget (calls/trace-shaped).
+- Stats: _normalize_stats_metrics -> AgentSpanStatsMetricSpec dicts. String 'input_tokens' -> {source:field}; derived names (duration_ms,total_tokens,is_error,is_invocation,*_cost_usd) -> {source:derived}; boolean derived -> aggregations ['count_true'] (sum/avg invalid for boolean per server _ALLOWED_AGGS_BY_TYPE). Full dicts pass through.
+- query_agent_spans: agent_name shortcut becomes a Mongo \$eq on agent_name, AND-combined with any caller query. include_details defaults False (raw OTel dumps huge).
+
+## Errors / dead ends
+- Initially pursued the THREADS API (/threads/stream_query) -- WRONG; different (older) feature.
+- REFACTOR REGRESSION (round 1): replacing _best_effort_viewer() with unguarded .viewer (to match count_traces) made live verify crash 'relogin required' -- viewer/analytics fetch took down the whole tool. Fix: restored the guard. Lesson: count_traces is the structural precedent but its unguarded viewer call is a latent bug not to copy.
+- TEST REGRESSION (round 2): FakeMCP.tool() lacked name= -> see Refactor round 2.
+- Local env had no venv/python3.11/uv/gh/gt. Installed uv via astral; uv venv --python 3.11 && uv sync && uv sync --extra test. gh/gt absent -> first PR via GitHub REST API + git credential token. `ls` aliased to eza -> use find/Glob.
+
+## Verification
+787 unit tests pass (was 778 pre-agent-tests), 1 skipped; ruff check + format clean. Registration sanity: real FastMCP registers all 8 agent tools with correct names + schemas. Live: /tmp/verify_agents.py bcanfieldsherman/agents-demo exercised all 8 vs trace.wandb.ai (key from ~/.netrc, never printed) -- all returned real data after BOTH refactor rounds.
+
+## Open questions / follow-ups
+- PR now ~1160 insertions (was 1617). ~300 lines of agents.py is description prose. Could still split into a gt stack if reviewers prefer, but it's leaner now.
+- Hosted-mode limit clamping (MCP_HOSTED_MODE) NOT replicated for agent tools; relies on server-side caps + response truncation.
+- No live integration test committed (verify script in /tmp). Could add one marked `integration`.
+- Commit amended twice this session (was 22afdb2 -> 3cd7494 -> a93cee7). Draft PR #105 branch still points at the original pre-refactor commit until force-pushed.
