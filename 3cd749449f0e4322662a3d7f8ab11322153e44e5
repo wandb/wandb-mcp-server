@@ -1,0 +1,43 @@
+## Conversation
+User: "Add the new weave agent APIs (github.com/wandb/weave) backed by OTEL to the MCP." First mistaken for the threads API; user corrected: it's the Agents API added recently by Ben Sherman, in the weave repo's `agents` dir. User chose FULL surface (all 8 read endpoints) over a smaller core set, provided bcanfieldsherman/agents-demo for live verification, then "put this up as draft". After the first draft went up: "Please re-use code from the existing implementation where you can. Keep the PR description tight. I find agents.py quite confusing. Is this how the rest of the repo has it instrumented?" -> drove the refactor below.
+
+## What this adds
+8 MCP tools over the Weave Agents observability API (OTel/GenAI agent spans), a data plane SEPARATE from classic Weave calls. Single new module: mcp_tools/agents.py (tools + descriptions + helpers). Registered in server.py and added to _WEAVE_TOOL_NAMES so WANDB_MCP_ENABLE_WEAVE_TOOLS=false disables them too.
+
+## Refactor (post-first-draft, in response to "re-use existing code / agents.py confusing")
+The first draft had a separate weave_api/agents_client.py (AgentsApiClient class) + a _run(tool_name, params, lambda c: c.method(...)) envelope in agents.py -- non-idiomatic (triple param repetition; a client class for plain JSON POSTs that no other simple tool in this repo uses). Refactored to match mcp_tools/count_traces.py exactly: deleted agents_client.py entirely; each tool now builds a request-body dict inline and calls one shared helper _agents_request(tool_name, path, body, track_params) that does the basic-auth POST via get_retry_session(), wrapped in track_tool_execution, with structured_error mapping + _truncate_response. Net: -332 lines (client gone) and agents.py slimmed ~116 lines. This is THE answer to "is this how the rest of the repo has it instrumented?" -- yes, count_traces.py is the precedent (direct basic-auth POST to /calls/query_stats, no client class).
+
+## API contract (reverse-engineered; NOT in local weave 0.52.35)
+Source of truth: weave/trace_server/agents/types.py @ github.com/wandb/weave (master). Endpoints confirmed via sdks/node/src/generated/traceServerApi.ts + Node SDK request cassettes (sdks/node/src/__tests__/__cassettes__/weaveclient_*.yaml -- real request/response JSON against https://trace.wandb.ai).
+Read endpoints (all POST, plain JSON, NOT JSONL-streamed like /calls/stream_query):
+  /agents/query                      -> {project_id,filters{agent_name},sort_by[{field,direction}],limit,offset,include_costs} -> {agents,total_count}
+  /agents/agent-versions/query       -> {versions,total_count}
+  /agents/spans/query                -> {project_id,query(Mongo \$expr),sort_by,limit,offset,started_after,started_before,include_details,include_costs} -> {spans,total_count}
+  /agents/spans/stats                -> {project_id,start,end,granularity,timezone,group_by,metrics[AgentSpanStatsMetricSpec]} -> {columns,rows,...}
+  /agents/spans/custom-attrs/schema  -> {attributes,has_more}
+  /agents/search                     -> {project_id,query,trace_id,conversation_id,agent_name,roles,...} -> {results,total_conversations}
+  /agents/traces/chat                -> {project_id,trace_id,include_feedback} -> AgentTraceChatRes{messages[typed timeline],...}
+  /agents/conversations/chat         -> {project_id,conversation_id,limit,offset,include_feedback} -> {turns:[AgentTraceChatRes],...}
+Ingest (write, not exposed): /agents/otel/v1/traces. Auth: HTTP Basic, base64(\":\"+api_key). project_id = \"entity/project\".
+
+## Key design decisions
+- Do NOT import weave agent types: pinned weave 0.52.35 predates them; MCP already speaks raw HTTP to the trace server. Request bodies are dicts (None values dropped via _drop_none so server defaults apply); responses returned as dicts.
+- _best_effort_viewer(): the analytics viewer fetch (WandBApiManager.get_api().viewer) is a SEPARATE GraphQL call that can raise WandbApiFailedError 'relogin required' independently of the data request. count_traces.py calls it unguarded; here it is wrapped try/except -> None so analytics identity NEVER breaks a data tool. This is a deliberate, justified divergence from count_traces -- see Errors below (it crashed live verify when left unguarded).
+- _truncate_response trims the largest list field (_TRUNCATABLE_LIST_KEYS, most-verbose first) to MAX_RESPONSE_TOKENS (reuses TraceProcessor.estimate_tokens) and adds a _truncation note. Does NOT reuse enforce_token_budget (that one is calls/trace-shaped).
+- Stats tool: _normalize_stats_metrics turns user-friendly metric inputs into AgentSpanStatsMetricSpec dicts. String 'input_tokens' -> {source:field}; derived names (duration_ms,total_tokens,is_error,is_invocation,total_cost_usd,input_cost_usd,output_cost_usd) -> {source:derived}; boolean derived -> aggregations ['count_true'] (sum/avg invalid for boolean per server _ALLOWED_AGGS_BY_TYPE). Full spec dicts pass through.
+- query_agent_spans: agent_name shortcut becomes a Mongo \$eq on agent_name, AND-combined with any caller query. include_details defaults False (raw OTel dumps are huge).
+
+## Errors / dead ends
+- Initially pursued the THREADS API (/threads/stream_query) -- WRONG; user wanted the Agents API. Different (older) feature.
+- REFACTOR REGRESSION: when matching count_traces exactly I replaced _best_effort_viewer() with unguarded WandBApiManager.get_api().viewer. Live verify then crashed with wandb...WandbApiFailedError: relogin required -- the viewer/analytics fetch took down the whole tool. Fix: restored the guarded _best_effort_viewer(). Lesson: count_traces is the structural precedent but its unguarded viewer call is a latent bug we should not copy.
+- Local env had no venv / no python3.11 / no uv / no gh / no gt. Installed uv via astral script; uv venv --python 3.11 && uv sync && uv sync --extra test. gh/gt absent -> first PR created via GitHub REST API using git credential helper token.
+- `ls` is aliased to eza in the interactive shell -> use find/Glob, not ls.
+
+## Verification
+787 unit tests pass (was 778 before agent tests), 1 skipped; ruff check + format clean. Live: /tmp/verify_agents.py bcanfieldsherman/agents-demo exercised all 8 tools against trace.wandb.ai (key from ~/.netrc, never printed) -- all returned real data (agents Explore/Weave Signals, spans, daily token/error stat buckets, custom attrs e.g. weave.claude_code.display_name, search results, trace + conversation chat timelines).
+
+## Open questions / follow-ups
+- PR is ~1332 insertions vs repo's ~500-line target; ~half of agents.py is tool-description prose and server.py delta is mechanical registrations. Could split into a gt stack if reviewers prefer.
+- Hosted-mode limit clamping (MCP_HOSTED_MODE) NOT replicated for agent tools; relies on server-side caps + response truncation.
+- No live integration test committed (verify script lives in /tmp). Could add one marked `integration`.
+- This commit was amended from the first-draft commit (was 22afdb2). Draft PR #105 branch still points at the pre-refactor commit until force-pushed.
