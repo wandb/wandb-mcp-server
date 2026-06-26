@@ -33,7 +33,7 @@ Query and analyze your Weights & Biases data using natural language through the 
 </details>
 
 <details>
-<summary><strong>Available Tools</strong> (16 tools)</summary>
+<summary><strong>Available Tools</strong></summary>
 
 | Tool | Description | Example Query |
 |------|-------------|---------------|
@@ -53,6 +53,19 @@ Query and analyze your Weights & Biases data using natural language through the 
 | **compare_artifact_versions_tool** | Diff two artifact versions | *"Compare model v1 vs v2"* |
 | **list_wandb_automations_tool** | List W&B Automations | *"What automations alert on run metrics or status for my team's runs?"* |
 | **list_wandb_integrations_tool** | List registered integrations for W&B automations (e.g. Slack, webhook) | *"Which Slack channels can my automations target?"* |
+
+**Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
+
+| Tool | Description | Example Query |
+|------|-------------|---------------|
+| **list_weave_agents_tool** | List agents with aggregated stats (invocations, tokens, duration, errors) | *"Which agents ran this week and how many errors did each have?"* |
+| **list_weave_agent_versions_tool** | Per-version stats for one agent | *"Did v2 of my agent regress on latency?"* |
+| **query_weave_agent_spans_tool** | Query individual agent/LLM/tool spans (filter by agent, model, time) | *"Show failed tool spans for my-agent yesterday"* |
+| **get_weave_agent_span_stats_tool** | Time-bucketed metric series (tokens, cost, latency, error rate) | *"Plot daily token usage by agent"* |
+| **list_weave_agent_custom_attributes_tool** | Discover custom attribute keys on agent spans | *"What custom attributes do my agent spans have?"* |
+| **search_weave_agents_tool** | Full-text / structured message search, grouped by conversation | *"Find conversations mentioning refunds"* |
+| **get_weave_agent_trace_tool** | Structured chat/trajectory view for one trace (a turn) | *"What did the agent do in trace abc123?"* |
+| **get_weave_agent_conversation_tool** | Multi-turn chat view for a conversation | *"Show the whole conversation conv-42"* |
 
 **Schema-first workflow:** Call `infer_trace_schema_tool` first to discover fields, then `query_weave_traces_tool` with precise columns and `detail_level`:
 - `"schema"` -- structural fields only (fast browsing)

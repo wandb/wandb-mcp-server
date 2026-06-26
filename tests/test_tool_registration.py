@@ -23,6 +23,19 @@ NON_WEAVE_TOOLS = {
     "probe_project_tool",
 }
 
+# Agents (OTel) tools read the same trace backend, so they are gated with the
+# Weave tools.
+AGENT_TOOLS = {
+    "list_weave_agents_tool",
+    "list_weave_agent_versions_tool",
+    "query_weave_agent_spans_tool",
+    "get_weave_agent_span_stats_tool",
+    "list_weave_agent_custom_attributes_tool",
+    "search_weave_agents_tool",
+    "get_weave_agent_trace_tool",
+    "get_weave_agent_conversation_tool",
+}
+
 
 def _registered_tool_names() -> set[str]:
     mcp = FastMCP("test")
@@ -39,6 +52,7 @@ def test_weave_tools_registered_by_default():
 
     assert WEAVE_TOOLS.issubset(names)
     assert NON_WEAVE_TOOLS.issubset(names)
+    assert AGENT_TOOLS.issubset(names)
 
 
 def test_weave_tools_can_be_disabled():
@@ -53,4 +67,5 @@ def test_weave_tools_can_be_disabled():
         importlib.reload(cfg)
 
     assert WEAVE_TOOLS.isdisjoint(names)
+    assert AGENT_TOOLS.isdisjoint(names)
     assert NON_WEAVE_TOOLS.issubset(names)
