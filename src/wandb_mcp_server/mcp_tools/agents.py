@@ -104,6 +104,11 @@ def _truncate_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     items = payload[list_key]
     original = len(items)
     kept = list(items)
+    # Shrink the list until the *whole* serialized payload fits the budget.
+    # Items vary in size, so instead of computing a fixed cut we re-measure after
+    # each pass and drop ~10% of whatever remains (at least one item) from the
+    # end. This geometric shrink converges in a handful of iterations even for a
+    # very large list, while overshooting as little as possible.
     while (
         kept
         and TraceProcessor.estimate_tokens(json.dumps({**payload, list_key: kept}, default=str)) > MAX_RESPONSE_TOKENS
@@ -147,30 +152,40 @@ def _agents_request(tool_name: str, path: str, body: Dict[str, Any], track_param
     data = json.dumps(_drop_none(body))
 
     with track_tool_execution(tool_name, _best_effort_viewer(), track_params) as ctx:
+        # Only the HTTP round-trip can raise here, so the try wraps just that;
+        # the status-code branching below is plain control flow and stays outside.
         try:
             response = get_retry_session().post(url, headers=headers, data=data, timeout=_REQUEST_TIMEOUT_SECONDS)
-            if response.status_code == 404:
-                ctx.mark_error("agents_api_unavailable")
-                return json.dumps(
-                    structured_error(
-                        "agents_api_unavailable",
-                        f"The trace server at {WF_TRACE_SERVER_URL} has no {path} endpoint (404); "
-                        "it may predate the Weave Agents API.",
-                        status_code=404,
-                    )
+        except Exception as e:
+            logger.error(f"Agents API request to {path} failed: {e}", exc_info=True)
+            ctx.mark_error(str(e))
+            return json.dumps(structured_error("agents_query_failed", str(e)[:500]))
+
+        if response.status_code == 404:
+            ctx.mark_error("agents_api_unavailable")
+            return json.dumps(
+                structured_error(
+                    "agents_api_unavailable",
+                    f"The trace server at {WF_TRACE_SERVER_URL} has no {path} endpoint (404); "
+                    "it may predate the Weave Agents API.",
+                    status_code=404,
                 )
-            if response.status_code != 200:
-                ctx.mark_error(f"http_{response.status_code}")
-                return json.dumps(
-                    structured_error(
-                        "agents_query_failed",
-                        f"Agents API {path} returned {response.status_code}: {response.text[:500]}",
-                        status_code=response.status_code,
-                    )
+            )
+        if response.status_code != 200:
+            ctx.mark_error(f"http_{response.status_code}")
+            return json.dumps(
+                structured_error(
+                    "agents_query_failed",
+                    f"Agents API {path} returned {response.status_code}: {response.text[:500]}",
+                    status_code=response.status_code,
                 )
+            )
+
+        # Parsing the body is the only other thing that can raise.
+        try:
             result = response.json()
         except Exception as e:
-            logger.error(f"Error in {tool_name}: {e}", exc_info=True)
+            logger.error(f"Agents API {path} returned a non-JSON body: {e}", exc_info=True)
             ctx.mark_error(str(e))
             return json.dumps(structured_error("agents_query_failed", str(e)[:500]))
 

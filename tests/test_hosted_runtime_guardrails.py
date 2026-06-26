@@ -17,6 +17,9 @@ class FakeMCP:
         self.tools = {}
 
     def tool(self, name=None, description=None):
+        # Mirror FastMCP.tool(name=..., description=...): the agent tools are now
+        # registered directly with an explicit name (server.register_tools), so the
+        # double must honor `name`, falling back to __name__ for the decorator form.
         def decorator(func):
             self.tools[name or func.__name__] = func
             return func

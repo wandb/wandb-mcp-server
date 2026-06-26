@@ -13,13 +13,14 @@ This server provides tools for:
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from functools import partial
 import json
 import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import wandb
 from dotenv import load_dotenv
@@ -121,23 +122,35 @@ from wandb_mcp_server.weave_api.models import QueryResult
 logging.basicConfig(level=logging.INFO)
 logger = get_rich_logger("weave-mcp-server", default_level_str="WARNING", env_var_name="MCP_SERVER_LOG_LEVEL")
 
-# Weave Agents (OTel/GenAI) tools: (tool_name, implementation, description).
-# Each implementation in mcp_tools.agents is a complete tool -- it builds its
-# request and returns a JSON string -- so it is registered directly (no wrapper);
-# this tuple is the single source of truth for the names below and registration.
+
+@dataclass(frozen=True, slots=True)
+class _AgentTool:
+    """One Weave Agents (OTel/GenAI) tool: the MCP tool name, its implementation,
+    and its description. Each implementation in mcp_tools.agents is a complete
+    tool -- it builds its request and returns a JSON string -- so it is registered
+    directly (no wrapper) and its parameter schema comes from the function signature.
+    """
+
+    name: str
+    impl: Callable[..., str]
+    description: str
+
+
+# Single source of truth for the agent tools: the names spread into
+# _WEAVE_TOOL_NAMES below and the registration loop in register_tools().
 _AGENT_TOOLS = (
-    ("list_weave_agents_tool", list_agents, LIST_AGENTS_TOOL_DESCRIPTION),
-    ("list_weave_agent_versions_tool", list_agent_versions, LIST_AGENT_VERSIONS_TOOL_DESCRIPTION),
-    ("query_weave_agent_spans_tool", query_agent_spans, QUERY_AGENT_SPANS_TOOL_DESCRIPTION),
-    ("get_weave_agent_span_stats_tool", get_agent_span_stats, GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION),
-    (
+    _AgentTool("list_weave_agents_tool", list_agents, LIST_AGENTS_TOOL_DESCRIPTION),
+    _AgentTool("list_weave_agent_versions_tool", list_agent_versions, LIST_AGENT_VERSIONS_TOOL_DESCRIPTION),
+    _AgentTool("query_weave_agent_spans_tool", query_agent_spans, QUERY_AGENT_SPANS_TOOL_DESCRIPTION),
+    _AgentTool("get_weave_agent_span_stats_tool", get_agent_span_stats, GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION),
+    _AgentTool(
         "list_weave_agent_custom_attributes_tool",
         list_agent_custom_attributes,
         LIST_AGENT_CUSTOM_ATTRIBUTES_TOOL_DESCRIPTION,
     ),
-    ("search_weave_agents_tool", search_agents, SEARCH_AGENTS_TOOL_DESCRIPTION),
-    ("get_weave_agent_trace_tool", get_agent_trace, GET_AGENT_TRACE_TOOL_DESCRIPTION),
-    ("get_weave_agent_conversation_tool", get_agent_conversation, GET_AGENT_CONVERSATION_TOOL_DESCRIPTION),
+    _AgentTool("search_weave_agents_tool", search_agents, SEARCH_AGENTS_TOOL_DESCRIPTION),
+    _AgentTool("get_weave_agent_trace_tool", get_agent_trace, GET_AGENT_TRACE_TOOL_DESCRIPTION),
+    _AgentTool("get_weave_agent_conversation_tool", get_agent_conversation, GET_AGENT_CONVERSATION_TOOL_DESCRIPTION),
 )
 
 _WEAVE_TOOL_NAMES = {
@@ -147,7 +160,7 @@ _WEAVE_TOOL_NAMES = {
     "infer_trace_schema_tool",
     "summarize_evaluation_tool",
     # Agents (OTel/GenAI) tools -- same trace backend, gated together.
-    *(name for name, _impl, _desc in _AGENT_TOOLS),
+    *(tool.name for tool in _AGENT_TOOLS),
 }
 
 
@@ -1088,8 +1101,8 @@ def register_tools(mcp_instance: FastMCP) -> None:
     # calls), so they are gated with the other Weave tools via _WEAVE_TOOL_NAMES.
     # Each implementation is a complete tool, so it is registered directly; its
     # parameter schema is derived from the function signature.
-    for _tool_name, _impl, _desc in _AGENT_TOOLS:
-        mcp_instance.tool(name=_tool_name, description=_desc)(_impl)
+    for tool in _AGENT_TOOLS:
+        mcp_instance.tool(name=tool.name, description=tool.description)(tool.impl)
 
     from wandb_mcp_server.config import WANDB_MCP_ENABLE_WEAVE_TOOLS
 
