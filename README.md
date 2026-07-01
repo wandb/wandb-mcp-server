@@ -56,6 +56,8 @@ Query and analyze your Weights & Biases data using natural language through the 
 
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
 
+These tools are disabled by default. Enable them with `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=true`.
+
 | Tool | Description | Example Query |
 |------|-------------|---------------|
 | **list_weave_agents_tool** | List agents with aggregated stats (invocations, tokens, duration, errors) | *"Which agents ran this week and how many errors did each have?"* |

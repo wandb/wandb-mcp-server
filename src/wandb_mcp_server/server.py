@@ -20,7 +20,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Collection, Dict, List, Optional, Union
 
 import wandb
 from dotenv import load_dotenv
@@ -136,8 +136,8 @@ class _AgentTool:
     description: str
 
 
-# Single source of truth for the agent tools: the names spread into
-# _WEAVE_TOOL_NAMES below and the registration loop in register_tools().
+# Single source of truth for the agent tools: the names feed the optional tool
+# group registry below and the registration loop in register_tools().
 _AGENT_TOOLS = (
     _AgentTool("list_weave_agents_tool", list_agents, LIST_AGENTS_TOOL_DESCRIPTION),
     _AgentTool("list_weave_agent_versions_tool", list_agent_versions, LIST_AGENT_VERSIONS_TOOL_DESCRIPTION),
@@ -153,18 +153,46 @@ _AGENT_TOOLS = (
     _AgentTool("get_weave_agent_conversation_tool", get_agent_conversation, GET_AGENT_CONVERSATION_TOOL_DESCRIPTION),
 )
 
-_WEAVE_TOOL_NAMES = {
-    "query_weave_traces_tool",
-    "count_weave_traces_tool",
-    "resolve_trace_roots_tool",
-    "infer_trace_schema_tool",
-    "summarize_evaluation_tool",
-    # Agents (OTel/GenAI) tools -- same trace backend, gated together.
-    *(tool.name for tool in _AGENT_TOOLS),
-}
+_AGENT_TOOL_NAMES = frozenset(tool.name for tool in _AGENT_TOOLS)
+
+_WEAVE_TOOL_NAMES = frozenset(
+    {
+        "query_weave_traces_tool",
+        "count_weave_traces_tool",
+        "resolve_trace_roots_tool",
+        "infer_trace_schema_tool",
+        "summarize_evaluation_tool",
+    }
+)
 
 
-def _remove_registered_tools(mcp_instance: FastMCP, tool_names: set[str]) -> None:
+@dataclass(frozen=True, slots=True)
+class _OptionalToolGroup:
+    """A group of tools controlled by one environment-backed feature flag."""
+
+    key: str
+    env_var: str
+    default_enabled: bool
+    tool_names: frozenset[str]
+
+
+_OPTIONAL_TOOL_GROUPS = (
+    _OptionalToolGroup(
+        key="weave",
+        env_var="WANDB_MCP_ENABLE_WEAVE_TOOLS",
+        default_enabled=True,
+        tool_names=_WEAVE_TOOL_NAMES,
+    ),
+    _OptionalToolGroup(
+        key="weave_agents",
+        env_var="WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
+        default_enabled=False,
+        tool_names=_AGENT_TOOL_NAMES,
+    ),
+)
+
+
+def _remove_registered_tools(mcp_instance: FastMCP, tool_names: Collection[str]) -> None:
     """Remove tools from FastMCP's registry after decorator registration."""
     tool_manager = getattr(mcp_instance, "_tool_manager", None)
     tools = getattr(tool_manager, "_tools", None)
@@ -1098,17 +1126,22 @@ def register_tools(mcp_instance: FastMCP) -> None:
 
     # ----- Weave Agents (OTel/GenAI) tools -----
     # These read the OTel agent-spans data plane (separate from classic Weave
-    # calls), so they are gated with the other Weave tools via _WEAVE_TOOL_NAMES.
-    # Each implementation is a complete tool, so it is registered directly; its
-    # parameter schema is derived from the function signature.
+    # calls), so they are registered directly and independently gated below.
+    # Each implementation is a complete tool; its parameter schema is derived
+    # from the function signature.
     for tool in _AGENT_TOOLS:
         mcp_instance.tool(name=tool.name, description=tool.description)(tool.impl)
 
-    from wandb_mcp_server.config import WANDB_MCP_ENABLE_WEAVE_TOOLS
+    from wandb_mcp_server.config import _env_bool
 
-    if not WANDB_MCP_ENABLE_WEAVE_TOOLS:
-        logger.info("Weave MCP tools disabled by WANDB_MCP_ENABLE_WEAVE_TOOLS=false")
-        _remove_registered_tools(mcp_instance, _WEAVE_TOOL_NAMES)
+    for group in _OPTIONAL_TOOL_GROUPS:
+        if not _env_bool(group.env_var, group.default_enabled):
+            logger.info(
+                "Optional MCP tool group '%s' disabled via %s",
+                group.key,
+                group.env_var,
+            )
+            _remove_registered_tools(mcp_instance, group.tool_names)
 
 
 # ===============================================================================
