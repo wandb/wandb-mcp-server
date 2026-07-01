@@ -41,7 +41,6 @@ SEGMENT_EVENT_PREFIX = "mcp_server"
 _EVENT_NAME_MAP: Dict[str, str] = {
     "user_session": f"{SEGMENT_EVENT_PREFIX}.session_start",
     "tool_call": f"{SEGMENT_EVENT_PREFIX}.tool_call",
-    "request": f"{SEGMENT_EVENT_PREFIX}.http_request",
 }
 
 _SESSION_PROPERTY_KEYS: List[str] = [
@@ -77,15 +76,6 @@ _TOOL_CALL_PROPERTY_KEYS: List[str] = [
     "duration_ms",
 ]
 
-_REQUEST_PROPERTY_KEYS: List[str] = [
-    "session_id",
-    "request_id",
-    "method",
-    "path",
-    "status_code",
-    "duration_ms",
-]
-
 
 def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Convert an internal analytics event dict to a Segment Track payload.
@@ -108,7 +98,6 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     property_keys = {
         "user_session": _SESSION_PROPERTY_KEYS,
         "tool_call": _TOOL_CALL_PROPERTY_KEYS,
-        "request": _REQUEST_PROPERTY_KEYS,
     }.get(event_type, [])
 
     properties: Dict[str, Any] = {
