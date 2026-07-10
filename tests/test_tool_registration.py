@@ -23,8 +23,7 @@ NON_WEAVE_TOOLS = {
     "probe_project_tool",
 }
 
-# Agents (OTel) tools read the same trace backend, so they are gated with the
-# Weave tools.
+# Agents (OTel) tools read a separate agent-spans data plane and are opt-in.
 AGENT_TOOLS = {
     "list_weave_agents_tool",
     "list_weave_agent_versions_tool",
@@ -37,6 +36,11 @@ AGENT_TOOLS = {
 }
 
 
+def _reset_tool_gate_env() -> None:
+    os.environ.pop("WANDB_MCP_ENABLE_WEAVE_TOOLS", None)
+    os.environ.pop("WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS", None)
+
+
 def _registered_tool_names() -> set[str]:
     mcp = FastMCP("test")
     register_tools(mcp)
@@ -44,7 +48,7 @@ def _registered_tool_names() -> set[str]:
 
 
 def test_weave_tools_registered_by_default():
-    os.environ.pop("WANDB_MCP_ENABLE_WEAVE_TOOLS", None)
+    _reset_tool_gate_env()
     import wandb_mcp_server.config as cfg
 
     importlib.reload(cfg)
@@ -52,7 +56,7 @@ def test_weave_tools_registered_by_default():
 
     assert WEAVE_TOOLS.issubset(names)
     assert NON_WEAVE_TOOLS.issubset(names)
-    assert AGENT_TOOLS.issubset(names)
+    assert AGENT_TOOLS.isdisjoint(names)
 
 
 def test_weave_tools_can_be_disabled():
@@ -63,9 +67,44 @@ def test_weave_tools_can_be_disabled():
         importlib.reload(cfg)
         names = _registered_tool_names()
     finally:
-        os.environ.pop("WANDB_MCP_ENABLE_WEAVE_TOOLS", None)
+        _reset_tool_gate_env()
         importlib.reload(cfg)
 
     assert WEAVE_TOOLS.isdisjoint(names)
     assert AGENT_TOOLS.isdisjoint(names)
+    assert NON_WEAVE_TOOLS.issubset(names)
+
+
+def test_agent_tools_enabled_via_flag():
+    _reset_tool_gate_env()
+    os.environ["WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS"] = "true"
+    import wandb_mcp_server.config as cfg
+
+    try:
+        importlib.reload(cfg)
+        names = _registered_tool_names()
+    finally:
+        _reset_tool_gate_env()
+        importlib.reload(cfg)
+
+    assert WEAVE_TOOLS.issubset(names)
+    assert AGENT_TOOLS.issubset(names)
+    assert NON_WEAVE_TOOLS.issubset(names)
+
+
+def test_agent_and_weave_flags_are_independent():
+    _reset_tool_gate_env()
+    os.environ["WANDB_MCP_ENABLE_WEAVE_TOOLS"] = "false"
+    os.environ["WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS"] = "true"
+    import wandb_mcp_server.config as cfg
+
+    try:
+        importlib.reload(cfg)
+        names = _registered_tool_names()
+    finally:
+        _reset_tool_gate_env()
+        importlib.reload(cfg)
+
+    assert WEAVE_TOOLS.isdisjoint(names)
+    assert AGENT_TOOLS.issubset(names)
     assert NON_WEAVE_TOOLS.issubset(names)
