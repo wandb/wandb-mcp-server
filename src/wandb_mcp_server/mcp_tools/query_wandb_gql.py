@@ -12,12 +12,16 @@ from graphql.language import printer as gql_printer
 from graphql.language import visitor as gql_visitor
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.wandb_graphql import execute_graphql
+from wandb_mcp_server.wandb_graphql import (
+    GraphQLReadOnlyViolation,
+    execute_graphql,
+    validate_read_only_graphql,
+)
 
 logger = get_rich_logger(__name__)
 
 
-QUERY_WANDB_GQL_TOOL_DESCRIPTION = """Execute a GraphQL query against the W&B Models API.
+QUERY_WANDB_GQL_TOOL_DESCRIPTION = """Execute a read-only GraphQL query against the W&B Models API.
 
 Use for experiment tracking runs, metrics, configs, artifacts, sweeps, and model registry.
 For LLM traces or Weave evaluations, use query_weave_traces_tool instead.
@@ -58,8 +62,8 @@ using the GraphQL query language.
 Parameters
 ----------
 query : str
-   he GraphQL query string. This defines the operation (query/mutation),
-                    the data to fetch (selection set), and any variables used.
+    The GraphQL query string. Only query operations are accepted; mutations and
+    subscriptions are rejected before any request is sent to W&B.
 variables : dict[str, Any] | None, optional
     A dictionary of variables to pass to the query.
                                             Keys should match variable names defined in the query
@@ -100,7 +104,9 @@ structure will fail with the error "Query doesn't follow the W&B connection patt
 
 Example of required pagination structure for any collection:
 ```graphql
-runs(first: 10) {  # or artifacts, files, etc.
+query PaginatedRuns($entity: String!, $project: String!) {
+  project(name: $project, entityName: $entity) {
+  runs(first: 10) {  # or artifacts, files, etc.
     edges {
     node {
         id
@@ -113,6 +119,8 @@ runs(first: 10) {  # or artifacts, files, etc.
     endCursor
     hasNextPage
     }
+  }
+  }
 }
 ```
 </required_pagination_structure>
@@ -145,7 +153,19 @@ Bad:
 query AllRuns($entity: String!, $project: String!) {
     project(name: $project, entityName: $entity) {
     # Potentially huge response: requests all fields for all runs
-    runs { edges { node { id name state history summaryMetrics config files { edges { node { name size }}}}}}}
+    runs {
+        edges {
+        node {
+            id
+            name
+            state
+            history
+            summaryMetrics
+            config
+            files { edges { node { name size } } }
+        }
+        }
+    }
     }
 }
 ```
@@ -183,7 +203,7 @@ use the tool again with additional filters or pagination to get a more complete 
 
 **Constructing GraphQL Queries:**
 
-1.  **Operation Type:** Start with `query` for fetching data or `mutation` for modifying data.
+1.  **Operation Type:** Start with `query`. This tool is read-only and rejects `mutation` and `subscription` operations.
 2.  **Operation Name:** (Optional but recommended) A descriptive name (e.g., `ProjectInfo`).
 3.  **Variables Definition:** Define variables used in the query with their types (e.g., `($entity: String!, $project: String!)`). `!` means required.
 4.  **Selection Set:** Specify the fields you want to retrieve, nesting as needed based on the W&B schema.
@@ -196,9 +216,13 @@ use the tool again with additional filters or pagination to get a more complete 
         not `summary`, to access the run's summary dictionary as a JSON string), `historyKeys` (List of String), etc.
 *   **Connections (Lists):** Many lists (like `project.runs`, `artifact.files`) use a connection pattern:
     ```graphql
-    runs(first: Int, after: String, filters: JSONString, order: String) {
-        edges { node { id name ... } cursor }
+    query PaginatedRuns($entity: String!, $project: String!, $first: Int, $after: String, $filters: JSONString, $order: String) {
+      project(name: $project, entityName: $entity) {
+      runs(first: $first, after: $after, filters: $filters, order: $order) {
+        edges { node { id name } cursor }
         pageInfo { hasNextPage endCursor }
+      }
+      }
     }
     ```
     Use `first` for limit, `after` with `pageInfo.endCursor` for pagination, `filters` (as a JSON string) for complex filtering, and `order` for sorting.
@@ -667,6 +691,21 @@ def query_paginated_wandb_gql(
     Returns:
         The aggregated GraphQL response dictionary.
     """
+    try:
+        validate_read_only_graphql(query)
+    except GraphQLReadOnlyViolation as e:
+        return {
+            "errors": [
+                {
+                    "error": "read_only_violation",
+                    "message": str(e),
+                    "operation_types": list(e.operation_types),
+                }
+            ]
+        }
+    except Exception as e:
+        return {"errors": [{"message": f"Failed to validate initial query: {e}"}]}
+
     from wandb_mcp_server.api_client import get_wandb_api
 
     api = get_wandb_api()
