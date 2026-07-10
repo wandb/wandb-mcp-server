@@ -20,6 +20,16 @@ from wandb_mcp_server.mcp_tools.query_artifacts import (
     GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION,
     COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
 )
+from wandb_mcp_server.mcp_tools.agents import (
+    LIST_AGENTS_TOOL_DESCRIPTION,
+    LIST_AGENT_VERSIONS_TOOL_DESCRIPTION,
+    QUERY_AGENT_SPANS_TOOL_DESCRIPTION,
+    GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION,
+    LIST_AGENT_CUSTOM_ATTRIBUTES_TOOL_DESCRIPTION,
+    SEARCH_AGENTS_TOOL_DESCRIPTION,
+    GET_AGENT_TRACE_TOOL_DESCRIPTION,
+    GET_AGENT_CONVERSATION_TOOL_DESCRIPTION,
+)
 
 
 ALL_DESCRIPTIONS = {
@@ -37,6 +47,14 @@ ALL_DESCRIPTIONS = {
     "list_artifact_versions": LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
     "get_artifact_details": GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION,
     "compare_artifact_versions": COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
+    "list_agents": LIST_AGENTS_TOOL_DESCRIPTION,
+    "list_agent_versions": LIST_AGENT_VERSIONS_TOOL_DESCRIPTION,
+    "query_agent_spans": QUERY_AGENT_SPANS_TOOL_DESCRIPTION,
+    "get_agent_span_stats": GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION,
+    "list_agent_custom_attributes": LIST_AGENT_CUSTOM_ATTRIBUTES_TOOL_DESCRIPTION,
+    "search_agents": SEARCH_AGENTS_TOOL_DESCRIPTION,
+    "get_agent_trace": GET_AGENT_TRACE_TOOL_DESCRIPTION,
+    "get_agent_conversation": GET_AGENT_CONVERSATION_TOOL_DESCRIPTION,
 }
 
 
@@ -77,6 +95,35 @@ class TestDetailLevelInQueryWeave:
 
     def test_full_level_documented(self):
         assert '"full"' in QUERY_WEAVE_TRACES_TOOL_DESCRIPTION
+
+
+class TestQueryWandbSdkRouting:
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "query_wandb_entity_projects",
+            "get_run_history_tool",
+            "list_artifact_versions_tool",
+            "get_artifact_details_tool",
+            "list_registries_tool",
+            "list_registry_collections_tool",
+            "list_wandb_automations_tool",
+            "list_wandb_integrations_tool",
+        ],
+    )
+    def test_recommends_existing_sdk_backed_tools(self, tool_name):
+        assert tool_name in QUERY_WANDB_GQL_TOOL_DESCRIPTION
+
+    @pytest.mark.parametrize(
+        "removed_example",
+        ["GetRunHistoryKeys", "GetRunHistorySampled", "GetArtifactDetails", "GetViewerInfo"],
+    )
+    def test_redundant_graphql_examples_are_removed(self, removed_example):
+        assert f"name={removed_example}" not in QUERY_WANDB_GQL_TOOL_DESCRIPTION
+
+    def test_documents_remaining_raw_graphql_use_cases(self):
+        for use_case in ("filtering", "sorting", "custom project fields", "sweeps", "reports", "introspection"):
+            assert use_case in QUERY_WANDB_GQL_TOOL_DESCRIPTION
 
 
 class TestPanelsInCreateReport:

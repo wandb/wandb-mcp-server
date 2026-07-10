@@ -252,6 +252,100 @@ class TestAuthMiddlewareSession:
         assert result is resp
 
 
+class TestAuthMiddlewareSessionAnalytics:
+    @pytest.fixture(autouse=True)
+    def _env(self):
+        with patch.dict("os.environ", {"MCP_ANALYTICS_DISABLED": "false"}):
+            yield
+
+    @pytest.fixture()
+    def _mock_deps(self):
+        """Patch WandBApiManager and session manager to avoid side effects."""
+        with (
+            patch("wandb_mcp_server.api_client.WandBApiManager") as mock_wbm,
+            patch("wandb_mcp_server.session_manager.MultiTenantSessionManager._start_cleanup_task"),
+        ):
+            mock_wbm.set_context_api_key.return_value = "tok"
+            mock_wbm.reset_context_api_key.return_value = None
+            mock_api = MagicMock()
+            mock_api.viewer = SimpleNamespace(
+                username="alice",
+                entity="team",
+                email="a@co.com",
+            )
+            mock_wbm.get_api.return_value = mock_api
+            yield mock_wbm
+
+    @pytest.mark.asyncio
+    async def test_server_issued_session_tracks_once(self, _mock_deps):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {}
+
+        async def call_next(_):
+            return resp
+
+        tracker = MagicMock()
+        with patch(
+            "wandb_mcp_server.analytics.get_analytics_tracker",
+            return_value=tracker,
+        ):
+            result = await mcp_auth_middleware(_make_fake_request(), call_next)
+
+        tracker.track_user_session.assert_called_once()
+        assert tracker.track_user_session.call_args.kwargs["session_id"] == result.headers["Mcp-Session-Id"]
+
+    @pytest.mark.asyncio
+    async def test_client_provided_new_session_tracks_session_start(self, _mock_deps):
+        session = "sess_client_provided"
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {}
+
+        async def call_next(_):
+            return resp
+
+        tracker = MagicMock()
+        with patch(
+            "wandb_mcp_server.analytics.get_analytics_tracker",
+            return_value=tracker,
+        ):
+            await mcp_auth_middleware(
+                _make_fake_request(session_header=session),
+                call_next,
+            )
+
+        tracker.track_user_session.assert_called_once()
+        assert tracker.track_user_session.call_args.kwargs["session_id"] == session
+
+    @pytest.mark.asyncio
+    async def test_legitimate_session_reuse_skips_session_start(self, _mock_deps):
+        session = "sess_reused_by_same_tenant"
+
+        async def call_next(_):
+            r = MagicMock()
+            r.status_code = 200
+            r.headers = {}
+            return r
+
+        tracker = MagicMock()
+        with patch(
+            "wandb_mcp_server.analytics.get_analytics_tracker",
+            return_value=tracker,
+        ):
+            await mcp_auth_middleware(
+                _make_fake_request(session_header=session),
+                call_next,
+            )
+            await mcp_auth_middleware(
+                _make_fake_request(session_header=session),
+                call_next,
+            )
+
+        tracker.track_user_session.assert_called_once()
+        assert tracker.track_user_session.call_args.kwargs["session_id"] == session
+
+
 # ---------------------------------------------------------------------------
 # Session fixation prevention (cross-tenant session ID reuse)
 # ---------------------------------------------------------------------------

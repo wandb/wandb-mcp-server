@@ -13,13 +13,14 @@ This server provides tools for:
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from functools import partial
 import json
 import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Collection, Dict, List, Optional, Union
 
 import wandb
 from dotenv import load_dotenv
@@ -82,6 +83,24 @@ from wandb_mcp_server.mcp_tools.query_weave import (
     QUERY_WEAVE_TRACES_TOOL_DESCRIPTION,
     query_paginated_weave_traces,
 )
+from wandb_mcp_server.mcp_tools.agents import (
+    GET_AGENT_CONVERSATION_TOOL_DESCRIPTION,
+    GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION,
+    GET_AGENT_TRACE_TOOL_DESCRIPTION,
+    LIST_AGENT_CUSTOM_ATTRIBUTES_TOOL_DESCRIPTION,
+    LIST_AGENT_VERSIONS_TOOL_DESCRIPTION,
+    LIST_AGENTS_TOOL_DESCRIPTION,
+    QUERY_AGENT_SPANS_TOOL_DESCRIPTION,
+    SEARCH_AGENTS_TOOL_DESCRIPTION,
+    get_agent_conversation,
+    get_agent_span_stats,
+    get_agent_trace,
+    list_agent_custom_attributes,
+    list_agent_versions,
+    list_agents,
+    query_agent_spans,
+    search_agents,
+)
 from wandb_mcp_server.utils import ServerMCPArgs, get_rich_logger, get_server_args
 
 from pydantic import PositiveInt
@@ -103,16 +122,77 @@ from wandb_mcp_server.weave_api.models import QueryResult
 logging.basicConfig(level=logging.INFO)
 logger = get_rich_logger("weave-mcp-server", default_level_str="WARNING", env_var_name="MCP_SERVER_LOG_LEVEL")
 
-_WEAVE_TOOL_NAMES = {
-    "query_weave_traces_tool",
-    "count_weave_traces_tool",
-    "resolve_trace_roots_tool",
-    "infer_trace_schema_tool",
-    "summarize_evaluation_tool",
-}
+
+@dataclass(frozen=True, slots=True)
+class _AgentTool:
+    """One Weave Agents (OTel/GenAI) tool: the MCP tool name, its implementation,
+    and its description. Each implementation in mcp_tools.agents is a complete
+    tool -- it builds its request and returns a JSON string -- so it is registered
+    directly (no wrapper) and its parameter schema comes from the function signature.
+    """
+
+    name: str
+    impl: Callable[..., str]
+    description: str
 
 
-def _remove_registered_tools(mcp_instance: FastMCP, tool_names: set[str]) -> None:
+# Single source of truth for the agent tools: the names feed the optional tool
+# group registry below and the registration loop in register_tools().
+_AGENT_TOOLS = (
+    _AgentTool("list_weave_agents_tool", list_agents, LIST_AGENTS_TOOL_DESCRIPTION),
+    _AgentTool("list_weave_agent_versions_tool", list_agent_versions, LIST_AGENT_VERSIONS_TOOL_DESCRIPTION),
+    _AgentTool("query_weave_agent_spans_tool", query_agent_spans, QUERY_AGENT_SPANS_TOOL_DESCRIPTION),
+    _AgentTool("get_weave_agent_span_stats_tool", get_agent_span_stats, GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION),
+    _AgentTool(
+        "list_weave_agent_custom_attributes_tool",
+        list_agent_custom_attributes,
+        LIST_AGENT_CUSTOM_ATTRIBUTES_TOOL_DESCRIPTION,
+    ),
+    _AgentTool("search_weave_agents_tool", search_agents, SEARCH_AGENTS_TOOL_DESCRIPTION),
+    _AgentTool("get_weave_agent_trace_tool", get_agent_trace, GET_AGENT_TRACE_TOOL_DESCRIPTION),
+    _AgentTool("get_weave_agent_conversation_tool", get_agent_conversation, GET_AGENT_CONVERSATION_TOOL_DESCRIPTION),
+)
+
+_AGENT_TOOL_NAMES = frozenset(tool.name for tool in _AGENT_TOOLS)
+
+_WEAVE_TOOL_NAMES = frozenset(
+    {
+        "query_weave_traces_tool",
+        "count_weave_traces_tool",
+        "resolve_trace_roots_tool",
+        "infer_trace_schema_tool",
+        "summarize_evaluation_tool",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _OptionalToolGroup:
+    """A group of tools controlled by one environment-backed feature flag."""
+
+    key: str
+    env_var: str
+    default_enabled: bool
+    tool_names: frozenset[str]
+
+
+_OPTIONAL_TOOL_GROUPS = (
+    _OptionalToolGroup(
+        key="weave",
+        env_var="WANDB_MCP_ENABLE_WEAVE_TOOLS",
+        default_enabled=True,
+        tool_names=_WEAVE_TOOL_NAMES,
+    ),
+    _OptionalToolGroup(
+        key="weave_agents",
+        env_var="WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
+        default_enabled=False,
+        tool_names=_AGENT_TOOL_NAMES,
+    ),
+)
+
+
+def _remove_registered_tools(mcp_instance: FastMCP, tool_names: Collection[str]) -> None:
     """Remove tools from FastMCP's registry after decorator registration."""
     tool_manager = getattr(mcp_instance, "_tool_manager", None)
     tools = getattr(tool_manager, "_tools", None)
@@ -381,7 +461,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
     """
     Register all W&B MCP tools on the given FastMCP instance.
 
-    Available tools (22):
+    Available tools:
     - query_weave_traces_tool: Query LLM traces with filtering and pagination
     - count_weave_traces_tool: Efficiently count traces without returning data
     - resolve_trace_roots_tool: Batch-resolve root spans for child trace_ids
@@ -407,9 +487,21 @@ def register_tools(mcp_instance: FastMCP) -> None:
     - list_wandb_integrations_tool: List Slack and webhook integrations
       available as targets for Automation actions
 
+    Weave Agents (OTel/GenAI) tools -- read the agent-spans data plane, which
+    is separate from classic Weave calls:
+    - list_weave_agents_tool: List agents with aggregated stats
+    - list_weave_agent_versions_tool: Per-version stats for one agent
+    - query_weave_agent_spans_tool: Query individual agent/LLM/tool spans
+    - get_weave_agent_span_stats_tool: Time-bucketed metric series
+    - list_weave_agent_custom_attributes_tool: Discover custom attribute keys
+    - search_weave_agents_tool: Search messages, grouped by conversation
+    - get_weave_agent_trace_tool: Chat/trajectory view for one trace (a turn)
+    - get_weave_agent_conversation_tool: Multi-turn chat view for a conversation
+
     Args:
         mcp_instance: The FastMCP instance to register tools on
     """
+    from wandb_mcp_server.config import WANDB_MCP_READ_ONLY
 
     @mcp_instance.tool(description=QUERY_WEAVE_TRACES_TOOL_DESCRIPTION)
     async def query_weave_traces_tool(
@@ -700,69 +792,71 @@ def register_tools(mcp_instance: FastMCP) -> None:
     ) -> Dict[str, Any]:
         return query_paginated_wandb_gql(query, variables, max_items, items_per_page)
 
-    @mcp_instance.tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
-    async def create_wandb_report_tool(
-        entity_name: str,
-        project_name: str,
-        title: str,
-        description: Optional[str] = None,
-        markdown_report_text: str = "",
-        plots_html: Optional[Union[Dict[str, str], str]] = None,
-        panels: Optional[List[Dict[str, Any]]] = None,
-    ) -> str:
-        try:
-            result = create_report(
-                entity_name=entity_name,
-                project_name=project_name,
-                title=title,
-                description=description,
-                markdown_report_text=markdown_report_text,
-                plots_html=plots_html,
-                panels=panels,
-            )
+    if not WANDB_MCP_READ_ONLY:
 
-            return f"The report was saved here: {result['url']}"
-        except Exception as e:
-            raise e
-
-    from wandb_mcp_server.mcp_tools.log_analysis import (
-        LOG_ANALYSIS_TOOL_DESCRIPTION,
-        log_analysis,
-    )
-
-    @mcp_instance.tool(description=LOG_ANALYSIS_TOOL_DESCRIPTION)
-    async def log_analysis_to_wandb(
-        entity_name: str,
-        project_name: str,
-        analysis_name: str,
-        data: List[Dict[str, Any]],
-        charts: Optional[List[Dict[str, Any]]] = None,
-        scalars: Optional[Dict[str, float]] = None,
-    ) -> str:
-        from concurrent.futures import ThreadPoolExecutor
-
-        from wandb_mcp_server.api_client import WandBApiManager
-
-        try:
-            api_key = WandBApiManager.get_api_key()
-
-            def _log_with_context():
-                WandBApiManager.set_context_api_key(api_key)
-                return log_analysis(
+        @mcp_instance.tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
+        async def create_wandb_report_tool(
+            entity_name: str,
+            project_name: str,
+            title: str,
+            description: Optional[str] = None,
+            markdown_report_text: str = "",
+            plots_html: Optional[Union[Dict[str, str], str]] = None,
+            panels: Optional[List[Dict[str, Any]]] = None,
+        ) -> str:
+            try:
+                result = create_report(
                     entity_name=entity_name,
                     project_name=project_name,
-                    analysis_name=analysis_name,
-                    data=data,
-                    charts=charts,
-                    scalars=scalars,
+                    title=title,
+                    description=description,
+                    markdown_report_text=markdown_report_text,
+                    plots_html=plots_html,
+                    panels=panels,
                 )
 
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                result = await asyncio.get_event_loop().run_in_executor(pool, _log_with_context)
-            return json.dumps(result)
-        except Exception as e:
-            logger.error(f"Error in log_analysis_to_wandb: {e}", exc_info=True)
-            return json.dumps({"error": "log_failed", "message": str(e)[:500]})
+                return f"The report was saved here: {result['url']}"
+            except Exception as e:
+                raise e
+
+        from wandb_mcp_server.mcp_tools.log_analysis import (
+            LOG_ANALYSIS_TOOL_DESCRIPTION,
+            log_analysis,
+        )
+
+        @mcp_instance.tool(description=LOG_ANALYSIS_TOOL_DESCRIPTION)
+        async def log_analysis_to_wandb(
+            entity_name: str,
+            project_name: str,
+            analysis_name: str,
+            data: List[Dict[str, Any]],
+            charts: Optional[List[Dict[str, Any]]] = None,
+            scalars: Optional[Dict[str, float]] = None,
+        ) -> str:
+            from concurrent.futures import ThreadPoolExecutor
+
+            from wandb_mcp_server.api_client import WandBApiManager
+
+            try:
+                api_key = WandBApiManager.get_api_key()
+
+                def _log_with_context():
+                    WandBApiManager.set_context_api_key(api_key)
+                    return log_analysis(
+                        entity_name=entity_name,
+                        project_name=project_name,
+                        analysis_name=analysis_name,
+                        data=data,
+                        charts=charts,
+                        scalars=scalars,
+                    )
+
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    result = await asyncio.get_event_loop().run_in_executor(pool, _log_with_context)
+                return json.dumps(result)
+            except Exception as e:
+                logger.error(f"Error in log_analysis_to_wandb: {e}", exc_info=True)
+                return json.dumps({"error": "log_failed", "message": str(e)[:500]})
 
     @mcp_instance.tool(description=LIST_ENTITIES_TOOL_DESCRIPTION)
     def list_entities_tool() -> str:
@@ -1033,11 +1127,24 @@ def register_tools(mcp_instance: FastMCP) -> None:
             sample_runs=sample_runs,
         )
 
-    from wandb_mcp_server.config import WANDB_MCP_ENABLE_WEAVE_TOOLS
+    # ----- Weave Agents (OTel/GenAI) tools -----
+    # These read the OTel agent-spans data plane (separate from classic Weave
+    # calls), so they are registered directly and independently gated below.
+    # Each implementation is a complete tool; its parameter schema is derived
+    # from the function signature.
+    for tool in _AGENT_TOOLS:
+        mcp_instance.tool(name=tool.name, description=tool.description)(tool.impl)
 
-    if not WANDB_MCP_ENABLE_WEAVE_TOOLS:
-        logger.info("Weave MCP tools disabled by WANDB_MCP_ENABLE_WEAVE_TOOLS=false")
-        _remove_registered_tools(mcp_instance, _WEAVE_TOOL_NAMES)
+    from wandb_mcp_server.config import _env_bool
+
+    for group in _OPTIONAL_TOOL_GROUPS:
+        if not _env_bool(group.env_var, group.default_enabled):
+            logger.info(
+                "Optional MCP tool group '%s' disabled via %s",
+                group.key,
+                group.env_var,
+            )
+            _remove_registered_tools(mcp_instance, group.tool_names)
 
 
 # ===============================================================================

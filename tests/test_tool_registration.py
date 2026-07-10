@@ -16,12 +16,34 @@ WEAVE_TOOLS = {
 
 NON_WEAVE_TOOLS = {
     "query_wandb_tool",
-    "create_wandb_report_tool",
     "get_run_history_tool",
     "list_artifact_versions_tool",
     "compare_runs_tool",
     "probe_project_tool",
 }
+
+WRITE_TOOLS = {
+    "create_wandb_report_tool",
+    "log_analysis_to_wandb",
+}
+
+# Agents (OTel) tools read a separate agent-spans data plane and are opt-in.
+AGENT_TOOLS = {
+    "list_weave_agents_tool",
+    "list_weave_agent_versions_tool",
+    "query_weave_agent_spans_tool",
+    "get_weave_agent_span_stats_tool",
+    "list_weave_agent_custom_attributes_tool",
+    "search_weave_agents_tool",
+    "get_weave_agent_trace_tool",
+    "get_weave_agent_conversation_tool",
+}
+
+
+def _reset_tool_gate_env() -> None:
+    os.environ.pop("WANDB_MCP_ENABLE_WEAVE_TOOLS", None)
+    os.environ.pop("WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS", None)
+    os.environ.pop("WANDB_MCP_READ_ONLY", None)
 
 
 def _registered_tool_names() -> set[str]:
@@ -31,7 +53,7 @@ def _registered_tool_names() -> set[str]:
 
 
 def test_weave_tools_registered_by_default():
-    os.environ.pop("WANDB_MCP_ENABLE_WEAVE_TOOLS", None)
+    _reset_tool_gate_env()
     import wandb_mcp_server.config as cfg
 
     importlib.reload(cfg)
@@ -39,6 +61,8 @@ def test_weave_tools_registered_by_default():
 
     assert WEAVE_TOOLS.issubset(names)
     assert NON_WEAVE_TOOLS.issubset(names)
+    assert WRITE_TOOLS.issubset(names)
+    assert AGENT_TOOLS.isdisjoint(names)
 
 
 def test_weave_tools_can_be_disabled():
@@ -49,8 +73,92 @@ def test_weave_tools_can_be_disabled():
         importlib.reload(cfg)
         names = _registered_tool_names()
     finally:
-        os.environ.pop("WANDB_MCP_ENABLE_WEAVE_TOOLS", None)
+        _reset_tool_gate_env()
         importlib.reload(cfg)
 
     assert WEAVE_TOOLS.isdisjoint(names)
+    assert AGENT_TOOLS.isdisjoint(names)
     assert NON_WEAVE_TOOLS.issubset(names)
+    assert WRITE_TOOLS.issubset(names)
+
+
+def test_agent_tools_enabled_via_flag():
+    _reset_tool_gate_env()
+    os.environ["WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS"] = "true"
+    import wandb_mcp_server.config as cfg
+
+    try:
+        importlib.reload(cfg)
+        names = _registered_tool_names()
+    finally:
+        _reset_tool_gate_env()
+        importlib.reload(cfg)
+
+    assert WEAVE_TOOLS.issubset(names)
+    assert AGENT_TOOLS.issubset(names)
+    assert NON_WEAVE_TOOLS.issubset(names)
+    assert WRITE_TOOLS.issubset(names)
+
+
+def test_agent_and_weave_flags_are_independent():
+    _reset_tool_gate_env()
+    os.environ["WANDB_MCP_ENABLE_WEAVE_TOOLS"] = "false"
+    os.environ["WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS"] = "true"
+    import wandb_mcp_server.config as cfg
+
+    try:
+        importlib.reload(cfg)
+        names = _registered_tool_names()
+    finally:
+        _reset_tool_gate_env()
+        importlib.reload(cfg)
+
+    assert WEAVE_TOOLS.isdisjoint(names)
+    assert AGENT_TOOLS.issubset(names)
+    assert NON_WEAVE_TOOLS.issubset(names)
+    assert WRITE_TOOLS.issubset(names)
+
+
+def test_read_only_mode_removes_exactly_the_write_tools():
+    _reset_tool_gate_env()
+    import wandb_mcp_server.config as cfg
+
+    importlib.reload(cfg)
+    default_names = _registered_tool_names()
+    os.environ["WANDB_MCP_READ_ONLY"] = "true"
+    try:
+        importlib.reload(cfg)
+        read_only_names = _registered_tool_names()
+        assert cfg.WANDB_MCP_READ_ONLY is True
+    finally:
+        _reset_tool_gate_env()
+        importlib.reload(cfg)
+
+    assert default_names - read_only_names == WRITE_TOOLS
+    assert read_only_names - default_names == set()
+    assert WRITE_TOOLS.isdisjoint(read_only_names)
+    assert NON_WEAVE_TOOLS.issubset(read_only_names)
+    assert "query_wandb_tool" in read_only_names
+    assert WEAVE_TOOLS.issubset(read_only_names)
+    assert AGENT_TOOLS.isdisjoint(read_only_names)
+
+
+def test_read_only_mode_is_independent_of_weave_and_agent_gates():
+    _reset_tool_gate_env()
+    os.environ["WANDB_MCP_READ_ONLY"] = "true"
+    os.environ["WANDB_MCP_ENABLE_WEAVE_TOOLS"] = "false"
+    os.environ["WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS"] = "true"
+    import wandb_mcp_server.config as cfg
+
+    try:
+        importlib.reload(cfg)
+        names = _registered_tool_names()
+    finally:
+        _reset_tool_gate_env()
+        importlib.reload(cfg)
+
+    assert WRITE_TOOLS.isdisjoint(names)
+    assert WEAVE_TOOLS.isdisjoint(names)
+    assert AGENT_TOOLS.issubset(names)
+    assert NON_WEAVE_TOOLS.issubset(names)
+    assert "query_wandb_tool" in names

@@ -78,11 +78,9 @@ class TestMapToSegmentTrack:
 
     def test_harness_fields_are_base_properties(self):
         event = self._make_event(
-            "request",
-            request_id="r1",
-            method="POST",
-            path="/mcp",
-            status_code=200,
+            "tool_call",
+            tool_name="query_wandb_gql",
+            success=True,
             mcp_client_family="cursor",
             mcp_client_app="cursor",
             mcp_client_source="user_agent",
@@ -131,9 +129,7 @@ class TestMapToSegmentTrack:
             path="/mcp/sse",
             status_code=200,
         )
-        result = map_to_segment_track(event)
-        assert result["event"] == f"{SEGMENT_EVENT_PREFIX}.http_request"
-        assert result["properties"]["method"] == "POST"
+        assert map_to_segment_track(event) is None
 
     def test_returns_none_for_unknown_event_type(self):
         event = self._make_event("unknown_type")
@@ -348,7 +344,7 @@ class TestEndToEndIntegration:
         assert payloads[0]["event"] == f"{SEGMENT_EVENT_PREFIX}.session_start"
 
     @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
-    def test_tracker_request_reaches_forwarder(self):
+    def test_tracker_request_skips_forwarder(self):
         reset_segment_forwarder()
         forwarder = get_segment_forwarder()
 
@@ -364,9 +360,7 @@ class TestEndToEndIntegration:
         )
 
         payloads = forwarder.get_forwarded_payloads()
-        assert len(payloads) == 1
-        assert payloads[0]["event"] == f"{SEGMENT_EVENT_PREFIX}.http_request"
-        assert payloads[0]["properties"]["status_code"] == 200
+        assert len(payloads) == 0
 
     def test_forwarder_inactive_does_not_accumulate(self):
         """When forwarder is off (default), no payloads should accumulate."""
