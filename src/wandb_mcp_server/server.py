@@ -501,6 +501,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
     Args:
         mcp_instance: The FastMCP instance to register tools on
     """
+    from wandb_mcp_server.config import WANDB_MCP_READ_ONLY
 
     @mcp_instance.tool(description=QUERY_WEAVE_TRACES_TOOL_DESCRIPTION)
     async def query_weave_traces_tool(
@@ -791,69 +792,71 @@ def register_tools(mcp_instance: FastMCP) -> None:
     ) -> Dict[str, Any]:
         return query_paginated_wandb_gql(query, variables, max_items, items_per_page)
 
-    @mcp_instance.tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
-    async def create_wandb_report_tool(
-        entity_name: str,
-        project_name: str,
-        title: str,
-        description: Optional[str] = None,
-        markdown_report_text: str = "",
-        plots_html: Optional[Union[Dict[str, str], str]] = None,
-        panels: Optional[List[Dict[str, Any]]] = None,
-    ) -> str:
-        try:
-            result = create_report(
-                entity_name=entity_name,
-                project_name=project_name,
-                title=title,
-                description=description,
-                markdown_report_text=markdown_report_text,
-                plots_html=plots_html,
-                panels=panels,
-            )
+    if not WANDB_MCP_READ_ONLY:
 
-            return f"The report was saved here: {result['url']}"
-        except Exception as e:
-            raise e
-
-    from wandb_mcp_server.mcp_tools.log_analysis import (
-        LOG_ANALYSIS_TOOL_DESCRIPTION,
-        log_analysis,
-    )
-
-    @mcp_instance.tool(description=LOG_ANALYSIS_TOOL_DESCRIPTION)
-    async def log_analysis_to_wandb(
-        entity_name: str,
-        project_name: str,
-        analysis_name: str,
-        data: List[Dict[str, Any]],
-        charts: Optional[List[Dict[str, Any]]] = None,
-        scalars: Optional[Dict[str, float]] = None,
-    ) -> str:
-        from concurrent.futures import ThreadPoolExecutor
-
-        from wandb_mcp_server.api_client import WandBApiManager
-
-        try:
-            api_key = WandBApiManager.get_api_key()
-
-            def _log_with_context():
-                WandBApiManager.set_context_api_key(api_key)
-                return log_analysis(
+        @mcp_instance.tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
+        async def create_wandb_report_tool(
+            entity_name: str,
+            project_name: str,
+            title: str,
+            description: Optional[str] = None,
+            markdown_report_text: str = "",
+            plots_html: Optional[Union[Dict[str, str], str]] = None,
+            panels: Optional[List[Dict[str, Any]]] = None,
+        ) -> str:
+            try:
+                result = create_report(
                     entity_name=entity_name,
                     project_name=project_name,
-                    analysis_name=analysis_name,
-                    data=data,
-                    charts=charts,
-                    scalars=scalars,
+                    title=title,
+                    description=description,
+                    markdown_report_text=markdown_report_text,
+                    plots_html=plots_html,
+                    panels=panels,
                 )
 
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                result = await asyncio.get_event_loop().run_in_executor(pool, _log_with_context)
-            return json.dumps(result)
-        except Exception as e:
-            logger.error(f"Error in log_analysis_to_wandb: {e}", exc_info=True)
-            return json.dumps({"error": "log_failed", "message": str(e)[:500]})
+                return f"The report was saved here: {result['url']}"
+            except Exception as e:
+                raise e
+
+        from wandb_mcp_server.mcp_tools.log_analysis import (
+            LOG_ANALYSIS_TOOL_DESCRIPTION,
+            log_analysis,
+        )
+
+        @mcp_instance.tool(description=LOG_ANALYSIS_TOOL_DESCRIPTION)
+        async def log_analysis_to_wandb(
+            entity_name: str,
+            project_name: str,
+            analysis_name: str,
+            data: List[Dict[str, Any]],
+            charts: Optional[List[Dict[str, Any]]] = None,
+            scalars: Optional[Dict[str, float]] = None,
+        ) -> str:
+            from concurrent.futures import ThreadPoolExecutor
+
+            from wandb_mcp_server.api_client import WandBApiManager
+
+            try:
+                api_key = WandBApiManager.get_api_key()
+
+                def _log_with_context():
+                    WandBApiManager.set_context_api_key(api_key)
+                    return log_analysis(
+                        entity_name=entity_name,
+                        project_name=project_name,
+                        analysis_name=analysis_name,
+                        data=data,
+                        charts=charts,
+                        scalars=scalars,
+                    )
+
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    result = await asyncio.get_event_loop().run_in_executor(pool, _log_with_context)
+                return json.dumps(result)
+            except Exception as e:
+                logger.error(f"Error in log_analysis_to_wandb: {e}", exc_info=True)
+                return json.dumps({"error": "log_failed", "message": str(e)[:500]})
 
     @mcp_instance.tool(description=LIST_ENTITIES_TOOL_DESCRIPTION)
     def list_entities_tool() -> str:
