@@ -23,12 +23,25 @@ logger = get_rich_logger(__name__)
 
 QUERY_WANDB_GQL_TOOL_DESCRIPTION = """Execute a read-only GraphQL query against the W&B Models API.
 
-Use for experiment tracking runs, metrics, configs, artifacts, sweeps, and model registry.
+Use for read-only W&B Models queries that need GraphQL-specific filtering, sorting,
+nested selections, custom fields, sweeps, reports, or schema introspection.
 For LLM traces or Weave evaluations, use query_weave_traces_tool instead.
-For time-series metric history of a specific run, use get_run_history_tool instead.
+
+Prefer the existing SDK-backed tools when they provide the requested operation:
+- entity/project discovery: list_entities_tool and query_wandb_entity_projects
+- sampled or scanned run history: get_run_history_tool
+- artifact reads: list_artifact_versions_tool and get_artifact_details_tool
+- registry reads: list_registries_tool and list_registry_collections_tool
+- automations and integrations: list_wandb_automations_tool and list_wandb_integrations_tool
+
+Keep this raw GraphQL tool for general run filtering/sorting, custom project fields,
+sweeps, reports, introspection, and arbitrary nested selections where the exact
+response shape is not available from an existing tool. Do not translate arbitrary
+GraphQL into SDK calls: aliases, field selection, and nesting are part of its contract.
 
 <when_to_use>
-Call when user asks about runs, experiments, metrics, sweeps, or artifacts.
+Call when a read requires GraphQL-only filtering, sorting, nesting, custom fields,
+sweeps, reports, introspection, or an exact response shape not covered by an existing tool.
 </when_to_use>
 
 <query_analysis_step>
@@ -358,58 +371,6 @@ use the tool again with additional filters or pagination to get a more complete 
     ```
 <!-- WANDB_GQL_EXAMPLE_END name=GetFilteredRuns -->
 
-<!-- WANDB_GQL_EXAMPLE_START name=GetRunHistoryKeys -->
-*   **Get Run History Keys:** (Run is not a collection, historyKeys is scalar)
-    ```graphql
-    query RunHistoryKeys($entity: String!, $project: String!, $runName: String!) {
-        project(name: $project, entityName: $entity) {
-        run(name: $runName) {
-            id
-            name
-            historyKeys # Returns ["metric1", "metric2", ...]
-        }
-        }
-    }
-    ```
-    ```python
-    variables = {"entity": "my-entity", "project": "my-project", "runName": "run-abc"}
-    ```
-<!-- WANDB_GQL_EXAMPLE_END name=GetRunHistoryKeys -->
-
-<!-- WANDB_GQL_EXAMPLE_START name=GetRunHistorySampled -->
-*   **Get Specific Run History Data:** (Uses `sampledHistory` for specific keys)
-    ```graphql
-    # Corrected: Use specs argument
-    query RunHistorySampled($entity: String!, $project: String!, $runName: String!, $specs: [JSONString!]!) {
-        project(name: $project, entityName: $entity) {
-        run(name: $runName) {
-            id
-            name
-            # Use sampledHistory with specs to get actual values for specific keys
-            sampledHistory(specs: $specs) {
-                step # The step number
-                timestamp # Timestamp of the log
-                item # JSON string containing {key: value} for requested keys at this step
-            }
-        }
-        }
-    }
-    ```
-    ```python
-    # Corrected: Define specs variable with escaped JSON string literal for keys
-    variables = {
-        "entity": "my-entity",
-        "project": "my-project",
-        "runName": "run-abc",
-        "specs": ["{\"keys\": [\"loss\", \"val_accuracy\"]}}"] # List containing escaped JSON string
-    }
-    # Note: sampledHistory returns rows where *at least one* of the specified keys was logged.
-    # The 'item' field is a JSON string, you'll need to parse it (e.g., json.loads(row['item']))
-    # to get the actual key-value pairs for that step. It might not contain all requested keys
-    # if they weren't logged together at that specific step.
-    ```
-<!-- WANDB_GQL_EXAMPLE_END name=GetRunHistorySampled -->
-
 <!-- WANDB_GQL_EXAMPLE_START name=GetRunByDisplayName -->
 *   **Get Run by Display Name:** (Requires filtering and pagination structure)
     ```graphql
@@ -446,60 +407,13 @@ use the tool again with additional filters or pagination to get a more complete 
     ```
 <!-- WANDB_GQL_EXAMPLE_END name=GetRunByDisplayName -->
 
-<!-- WANDB_GQL_EXAMPLE_START name=GetArtifactDetails -->
-*   **Get Artifact Details:** (Artifact is not a collection, but `files` is)
-    ```graphql
-    query ArtifactDetails($entity: String!, $project: String!, $artifactName: String!) {
-        project(name: $project, entityName: $entity) {
-        artifact(name: $artifactName) { # Name format often 'artifact-name:version' or 'artifact-name:alias'
-            id
-            digest
-            description
-            state
-            size
-            createdAt
-            metadata # JSON String
-            aliases { alias } # Corrected: Use 'alias' field instead of 'name'
-            files { # Files is a collection, requires pagination structure
-            edges {
-                node { name url digest } # Corrected: Removed 'size' from File fields
-            }
-            pageInfo { endCursor hasNextPage } # Required for files collection
-            }
-        }
-        }
-    }
-    ```
-    ```python
-    variables = {"entity": "my-entity", "project": "my-project", "artifactName": "my-dataset:v3"}
-    ```
-<!-- WANDB_GQL_EXAMPLE_END name=GetArtifactDetails -->
-
-<!-- WANDB_GQL_EXAMPLE_START name=GetViewerInfo -->
-*   **Get Current User Info (Viewer):** (No variables needed)
-    ```graphql
-    query GetViewerInfo {
-        viewer {
-        id
-        username
-        email
-        entity
-        }
-    }
-    ```
-    ```python
-    # No variables needed for this query
-    variables = {}
-    ```
-<!-- WANDB_GQL_EXAMPLE_END name=GetViewerInfo -->
-
 **Troubleshooting Common Errors:**
 
 *   `"Cannot query field 'summary' on type 'Run'"`: Use the `summaryMetrics` field instead of `summary`. It returns a JSON string containing the summary dictionary.
 *   `"Argument 'filters' has invalid value ... Expected type 'JSONString'"`: Ensure the `filters` argument in your `variables` is a JSON formatted *string*, likely created using `json.dumps()`. Also check the *content* of the filter string for valid W&B filter syntax.
 *   `"400 Client Error: Bad Request"` (especially when using filters): Double-check the *syntax* inside your `filters` JSON string. Ensure operators (`$eq`, `$gt`, etc.) and structure are valid for the W&B API. Invalid field names or operators within the filter string can cause this.
 *   `"Unknown argument 'direction' on field 'runs'"`: Control sort direction using `+` (ascending) or `-` (descending) prefixes in the `order` argument string (e.g., `order: "-createdAt"`), not with a separate `direction` argument.
-*   Errors related to `history` (e.g., `"Unknown argument 'keys' on field 'history'"` or `"Field 'history' must not have a selection..."`): To get *available* metric keys, query the `historyKeys` field (returns `[String!]`). To get *time-series data* for specific keys, use the `sampledHistory(keys: [...])` field as shown in the examples; it returns structured data points. The simple `history` field might return raw data unsuitable for direct querying or is deprecated.
+*   For run history keys or time-series values, use `get_run_history_tool`; it provides sampled or scanned history through the supported SDK path.
 *   `"Query doesn't follow the W&B connection pattern"`: Ensure any field returning a list/collection (like `runs`, `files`, `artifacts`, etc.) includes the full `edges { node { ... } } pageInfo { endCursor hasNextPage }` structure. This is mandatory for pagination.
 *   `"Field must not have a selection"` / `"Field must have a selection"`: Check if the field you are querying is a scalar type (like `String`, `Int`, `JSONString`, `[String!]`) which cannot have sub-fields selected, or an object type which requires you to select sub-fields.
 *   `"Cannot query field 'step' on type 'Run'"`: The `Run` type does not have a direct `step` field. To find the maximum step count or total steps logged, query the `summaryMetrics` field (look for a key like `_step` or similar in the returned JSON string) or use the `historyLineCount` field which indicates the total number of history rows logged (often corresponding to steps).

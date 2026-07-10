@@ -69,7 +69,7 @@ def test_transport_revalidates_before_service_api_execution():
     assert executions == []
 
 
-def test_transport_revalidates_before_legacy_execution():
+def test_transport_revalidates_before_sdk_compatibility_check():
     executions = []
     client = SimpleNamespace(
         execute=lambda document, variable_values=None: executions.append((document, variable_values)) or {}

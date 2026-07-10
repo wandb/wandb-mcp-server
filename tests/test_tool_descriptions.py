@@ -97,6 +97,35 @@ class TestDetailLevelInQueryWeave:
         assert '"full"' in QUERY_WEAVE_TRACES_TOOL_DESCRIPTION
 
 
+class TestQueryWandbSdkRouting:
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "query_wandb_entity_projects",
+            "get_run_history_tool",
+            "list_artifact_versions_tool",
+            "get_artifact_details_tool",
+            "list_registries_tool",
+            "list_registry_collections_tool",
+            "list_wandb_automations_tool",
+            "list_wandb_integrations_tool",
+        ],
+    )
+    def test_recommends_existing_sdk_backed_tools(self, tool_name):
+        assert tool_name in QUERY_WANDB_GQL_TOOL_DESCRIPTION
+
+    @pytest.mark.parametrize(
+        "removed_example",
+        ["GetRunHistoryKeys", "GetRunHistorySampled", "GetArtifactDetails", "GetViewerInfo"],
+    )
+    def test_redundant_graphql_examples_are_removed(self, removed_example):
+        assert f"name={removed_example}" not in QUERY_WANDB_GQL_TOOL_DESCRIPTION
+
+    def test_documents_remaining_raw_graphql_use_cases(self):
+        for use_case in ("filtering", "sorting", "custom project fields", "sweeps", "reports", "introspection"):
+            assert use_case in QUERY_WANDB_GQL_TOOL_DESCRIPTION
+
+
 class TestPanelsInCreateReport:
     def test_panels_documented(self):
         assert "panels" in CREATE_WANDB_REPORT_TOOL_DESCRIPTION
