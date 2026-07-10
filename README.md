@@ -54,6 +54,10 @@ Query and analyze your Weights & Biases data using natural language through the 
 | **list_wandb_automations_tool** | List W&B Automations | *"What automations alert on run metrics or status for my team's runs?"* |
 | **list_wandb_integrations_tool** | List registered integrations for W&B automations (e.g. Slack, webhook) | *"Which Slack channels can my automations target?"* |
 
+**Read-only deployment mode:** Set `WANDB_MCP_READ_ONLY=true` to omit the two write tools,
+`create_wandb_report_tool` and `log_analysis_to_wandb`, while keeping every existing read tool.
+`query_wandb_tool` is query-only in every mode, regardless of this setting.
+
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
 
 These tools are disabled by default. Enable them with `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=true`.
@@ -525,6 +529,8 @@ When running the server locally, you can customize its behavior with command lin
 | `MCP_AUTH_DISABLED` | Disable HTTP authentication (development only) | No |
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
 | `WANDB_MCP_ENABLE_WEAVE_TOOLS` | Enable Weave trace tools (default: `true`; set `false` for installs without a trace backend) | No |
+| `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS` | Enable Weave Agents (OTel/GenAI) tools (default: `false`) | No |
+| `WANDB_MCP_READ_ONLY` | Omit report creation and analysis logging write tools (default: `false`) | No |
 | `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events. Useful as a workaround for older stdio builds that wrote analytics to stdout. | No |
 | `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |
 

@@ -56,6 +56,7 @@ WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS: bool = _env_bool(
     "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
     False,
 )
+WANDB_MCP_READ_ONLY: bool = _env_bool("WANDB_MCP_READ_ONLY", False)
 COST_SORT_FIELDS: frozenset[str] = frozenset({"total_cost", "completion_cost", "prompt_cost"})
 
 
