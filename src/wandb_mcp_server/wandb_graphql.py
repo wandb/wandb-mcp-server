@@ -1,8 +1,7 @@
-"""GraphQL helpers compatible across W&B SDK GraphQL transports."""
+"""Read-only GraphQL helpers for the supported W&B SDK transport."""
 
 from __future__ import annotations
 
-import importlib
 from typing import Any, Mapping
 
 from graphql import parse
@@ -40,12 +39,13 @@ def execute_graphql(
     query: str,
     variables: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Execute a read-only GraphQL document with the current or legacy W&B SDK transport."""
+    """Execute a read-only GraphQL document with W&B's service transport."""
     validate_read_only_graphql(query)
     variables_dict = dict(variables or {})
-    service_api = getattr(api, "__dict__", {}).get("_service_api")
-    if service_api is not None and hasattr(service_api, "execute_graphql"):
-        return service_api.execute_graphql(query, variables=variables_dict)
-
-    gql = importlib.import_module("wandb_gql").gql
-    return api.client.execute(gql(query), variable_values=variables_dict)
+    service_api = getattr(api, "_service_api", None)
+    execute = getattr(service_api, "execute_graphql", None)
+    if not callable(execute):
+        raise RuntimeError(
+            "W&B SDK compatibility error: query_wandb_tool requires wandb>=0.28.0 with ServiceApi.execute_graphql."
+        )
+    return execute(query, variables=variables_dict)

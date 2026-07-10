@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, "staging/**"]
   pull_request:
-    branches: [main]
+    branches: [main, "staging/**"]
 
 jobs:
   test:
@@ -35,7 +35,7 @@ jobs:
           uv run --no-sync ruff format --check src/ tests/
 
       - name: Run unit tests
-        run: uv run --no-sync pytest tests/ -x -v --tb=short -q
+        run: uv run --no-sync pytest tests/ -m "not integration" -x -v --tb=short -q
         env:
           WANDB_SILENT: "True"
           WEAVE_SILENT: "True"
@@ -47,6 +47,40 @@ jobs:
           uv venv "$SMOKE_ENV" --python ${{ matrix.python-version }}
           uv pip install --python "$SMOKE_ENV/bin/python" dist/*.whl
           "$SMOKE_ENV/bin/python" -c "import wandb_mcp_server; print('ok')"
+        env:
+          WANDB_SILENT: "True"
+          WEAVE_SILENT: "True"
+
+  wandb-latest-compatibility:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install project and latest W&B SDKs
+        run: |
+          uv sync --frozen --extra test --python 3.12
+          uv pip install --python .venv/bin/python --upgrade "wandb[workspaces]" wandb-workspaces
+
+      - name: Show installed W&B SDK versions
+        run: uv run --no-sync python -c "from importlib.metadata import version; print('wandb', version('wandb')); print('wandb-workspaces', version('wandb-workspaces'))"
+
+      - name: Verify latest W&B GraphQL compatibility
+        run: |
+          uv run --no-sync pytest \
+            tests/test_wandb_graphql.py \
+            tests/test_wandb_graphql_read_only.py \
+            tests/test_hosted_gql_guardrails.py \
+            tests/test_hosted_gql_production_errors.py \
+            -k "not locked_wandb_versions_are_installed" \
+            -x -v --tb=short -q
         env:
           WANDB_SILENT: "True"
           WEAVE_SILENT: "True"
