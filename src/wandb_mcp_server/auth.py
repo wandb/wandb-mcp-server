@@ -172,12 +172,15 @@ async def mcp_auth_middleware(request: Request, call_next):
     from wandb_mcp_server.session_manager import SessionCapacityError, current_session_id
 
     session_id, is_new_session = _resolve_session_id(request, wandb_api_key)
+    session_was_created = False
 
     try:
         from wandb_mcp_server.session_manager import get_session_manager
 
         mgr = get_session_manager()
+        session_exists = mgr.get_session(session_id) is not None
         mgr.create_session(wandb_api_key, session_id=session_id)
+        session_was_created = not session_exists
     except SessionCapacityError:
         logger.warning("Session capacity exceeded for API key")
         WandBApiManager.reset_context_api_key(api_key_token)
@@ -191,6 +194,7 @@ async def mcp_auth_middleware(request: Request, call_next):
         is_new_session = True
         try:
             mgr.create_session(wandb_api_key, session_id=session_id)
+            session_was_created = True
         except SessionCapacityError:
             logger.warning("Session capacity exceeded on retry")
             WandBApiManager.reset_context_api_key(api_key_token)
@@ -207,16 +211,17 @@ async def mcp_auth_middleware(request: Request, call_next):
     session_ctx_token = current_session_id.set(session_id)
 
     # --- Analytics: session event -----------------------------------------
-    try:
-        from wandb_mcp_server.analytics import get_analytics_tracker
+    if session_was_created:
+        try:
+            from wandb_mcp_server.analytics import get_analytics_tracker
 
-        get_analytics_tracker().track_user_session(
-            session_id=session_id,
-            viewer_info=viewer,
-            api_key_hash=hashlib.sha256(wandb_api_key.encode()).hexdigest(),
-        )
-    except Exception as analytics_err:
-        logger.debug(f"Analytics tracking failed (non-fatal): {analytics_err}")
+            get_analytics_tracker().track_user_session(
+                session_id=session_id,
+                viewer_info=viewer,
+                api_key_hash=hashlib.sha256(wandb_api_key.encode()).hexdigest(),
+            )
+        except Exception as analytics_err:
+            logger.debug(f"Analytics tracking failed (non-fatal): {analytics_err}")
 
     # --- Execute request (errors here propagate as 500, not 401) ----------
     request_start = time.monotonic()
