@@ -88,10 +88,8 @@ class TestInferTraceSchema:
         mock_service.query_traces.return_value = mock_result
         return mock_service
 
-    @patch("wandb_mcp_server.mcp_tools.infer_schema.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
-    def test_basic_schema_inference(self, mock_count, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+    def test_basic_schema_inference(self, mock_count):
         mock_count.side_effect = [100, 25]
 
         mock_service = self._make_mock_service(
@@ -117,10 +115,8 @@ class TestInferTraceSchema:
         assert "limit" in call_kwargs, "Should use 'limit', not 'target_limit'"
         assert call_kwargs["limit"] == 20
 
-    @patch("wandb_mcp_server.mcp_tools.infer_schema.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
-    def test_empty_project(self, mock_count, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+    def test_empty_project(self, mock_count):
         mock_count.side_effect = [0, 0]
 
         mock_service = self._make_mock_service([])
@@ -132,10 +128,8 @@ class TestInferTraceSchema:
         assert result["fields"] == []
         assert "note" in result
 
-    @patch("wandb_mcp_server.mcp_tools.infer_schema.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
-    def test_top_values_limited(self, mock_count, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+    def test_top_values_limited(self, mock_count):
         mock_count.side_effect = [50, 10]
 
         traces = [{"status": f"val{i % 7}"} for i in range(20)]
@@ -147,10 +141,8 @@ class TestInferTraceSchema:
         status_field = next(f for f in result["fields"] if f["path"] == "status")
         assert len(status_field["top_values"]) <= 3
 
-    @patch("wandb_mcp_server.mcp_tools.infer_schema.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
-    def test_nested_fields_flattened(self, mock_count, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+    def test_nested_fields_flattened(self, mock_count):
         mock_count.side_effect = [10, 5]
 
         mock_service = self._make_mock_service(
@@ -166,20 +158,16 @@ class TestInferTraceSchema:
         assert "summary.weave.status" in field_paths
         assert "summary.weave.latency_ms" in field_paths
 
-    @patch("wandb_mcp_server.mcp_tools.infer_schema.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
-    def test_query_failure_returns_error(self, mock_count, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+    def test_query_failure_returns_error(self, mock_count):
         mock_count.side_effect = Exception("Network timeout")
 
         result = json.loads(infer_trace_schema("e", "p"))
         assert "error" in result
 
-    @patch("wandb_mcp_server.mcp_tools.infer_schema.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
-    def test_pydantic_trace_objects_handled(self, mock_count, mock_api_mgr):
+    def test_pydantic_trace_objects_handled(self, mock_count):
         """Non-dict trace objects with model_dump() should be converted, not dropped."""
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
         mock_count.side_effect = [5, 2]
 
         pydantic_trace = MagicMock()
