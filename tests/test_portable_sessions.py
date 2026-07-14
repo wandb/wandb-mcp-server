@@ -25,6 +25,7 @@ def test_portable_session_restores_metadata_in_another_manager() -> None:
             "agent_harness": "codex",
             "mcp_client_app": "codex",
             "mcp_protocol_version": "2025-06-18",
+            "session_event_emitted": True,
         },
     )
 
@@ -36,6 +37,7 @@ def test_portable_session_restores_metadata_in_another_manager() -> None:
     assert restored is not None
     assert restored.metadata["agent_harness"] == "codex"
     assert restored.metadata["mcp_protocol_version"] == "2025-06-18"
+    assert restored.metadata["session_event_emitted"] is True
 
 
 def test_portable_session_rejects_tampering() -> None:

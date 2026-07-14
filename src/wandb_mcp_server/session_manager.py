@@ -170,6 +170,7 @@ class MultiTenantSessionManager:
         metadata = metadata or {}
         harness = str(metadata.get("agent_harness") or metadata.get("mcp_client_app") or "unknown").lower()
         protocol = str(metadata.get("mcp_protocol_version") or "unknown").lower()
+        session_event_code = "e" if metadata.get("session_event_emitted") is True else "p"
         issued_at = format(int(time.time()), "x")
         payload = "|".join(
             (
@@ -179,6 +180,7 @@ class MultiTenantSessionManager:
                 api_key_hash[:24],
                 _HARNESS_CODES.get(harness, "u"),
                 _PROTOCOL_CODES.get(protocol, "u"),
+                session_event_code,
             )
         ).encode("ascii")
         signature = hmac.new(self._hmac_sha256_key, payload, hashlib.sha256).digest()[:12]
@@ -210,12 +212,19 @@ class MultiTenantSessionManager:
         if not hmac.compare_digest(signature, expected):
             raise ValueError("Portable session signature mismatch")
         try:
-            version, issued_hex, _nonce, key_prefix, harness_code, protocol_code = payload.decode("ascii").split("|")
+            parts = payload.decode("ascii").split("|")
+            if len(parts) == 6:
+                version, issued_hex, _nonce, key_prefix, harness_code, protocol_code = parts
+                session_event_code = "p"
+            else:
+                version, issued_hex, _nonce, key_prefix, harness_code, protocol_code, session_event_code = parts
             issued_at = int(issued_hex, 16)
         except (UnicodeDecodeError, ValueError) as exc:
             raise ValueError("Malformed portable session payload") from exc
         if version != "v1":
             raise ValueError("Unsupported portable session version")
+        if session_event_code not in {"e", "p"}:
+            raise ValueError("Unsupported portable session event state")
         now = int(time.time())
         if issued_at > now + 300 or now - issued_at > self._session_ttl:
             raise ValueError("Portable session expired")
@@ -229,6 +238,7 @@ class MultiTenantSessionManager:
             "mcp_client_app": harness,
             "mcp_protocol_version": protocol,
             "mcp_client_source": "portable_session",
+            "session_event_emitted": session_event_code == "e",
         }
 
     def create_session(
