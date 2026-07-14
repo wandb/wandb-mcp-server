@@ -40,7 +40,7 @@ Query and analyze your Weights & Biases data using natural language through the 
 | **infer_trace_schema_tool** | Discover field names, types, and sample values | *"What fields are in my traces?"* |
 | **query_weave_traces_tool** | Analyze LLM traces with `detail_level` control | *"Show failed traces with full data"* |
 | **count_weave_traces_tool** | Count traces and get storage metrics | *"How many traces failed?"* |
-| **query_wandb_tool** | Query W&B runs, metrics, and experiments | *"Show me runs with loss < 0.1"* |
+| **query_wandb_tool** | Query projects, runs, sweeps, and reports through the W&B SDK | *"Show me runs with loss < 0.1"* |
 | **get_run_history_tool** | Sampled time-series metric data | *"Show loss curve for run abc123"* |
 | **create_wandb_report_tool** | Create reports with markdown, charts, and panels | *"Create a report with loss plots"* |
 | **log_analysis_to_wandb** | Log analysis metrics to W&B as a run | *"Log these latency stats to W&B"* |
@@ -56,7 +56,18 @@ Query and analyze your Weights & Biases data using natural language through the 
 
 **Read-only deployment mode:** Set `WANDB_MCP_READ_ONLY=true` to omit the two write tools,
 `create_wandb_report_tool` and `log_analysis_to_wandb`, while keeping every existing read tool.
-`query_wandb_tool` is query-only in every mode, regardless of this setting.
+`query_wandb_tool` uses read-only public SDK operations in every mode, regardless of this setting.
+
+**Advanced raw GraphQL:** Raw GraphQL is not registered by default. Set
+`WANDB_MCP_ENABLE_RAW_GRAPHQL=true` to add the query-only `query_wandb_graphql_tool`
+for schema introspection, unmodeled fields, cross-resource nesting, aliases, or exact
+response shapes that the public SDK cannot represent. Mutations and subscriptions are
+always rejected, and this flag is independent of `WANDB_MCP_READ_ONLY`.
+
+**Migration from v0.3.7:** `query_wandb_tool` now accepts structured SDK parameters
+(`entity_name`, `project_name`, `resource`, filters, ordering, and identifiers) instead
+of a GraphQL document. Existing raw-query callers must explicitly enable and call
+`query_wandb_graphql_tool`.
 
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
 

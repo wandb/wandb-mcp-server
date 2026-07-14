@@ -50,6 +50,7 @@ _IMPORT_SCRIPT = textwrap.dedent(
     "module_name",
     [
         "wandb_mcp_server.mcp_tools.create_report",
+        "wandb_mcp_server.mcp_tools.query_wandb",
         "wandb_mcp_server.mcp_tools.query_wandb_gql",
         "wandb_mcp_server",
     ],
@@ -63,6 +64,32 @@ def test_fresh_install_imports_without_preloaded_vendor_path(
 
     result = subprocess.run(
         [sys.executable, "-c", _IMPORT_SCRIPT, module_name],
+        check=False,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
+
+
+def test_default_server_import_does_not_load_raw_graphql_modules() -> None:
+    script = """
+import sys
+import wandb_mcp_server.server
+
+assert "wandb_mcp_server.mcp_tools.query_wandb_gql" not in sys.modules
+assert "wandb_mcp_server.mcp_tools.query_wandb_graphql" not in sys.modules
+print("ok")
+"""
+    env = os.environ.copy()
+    env.pop("WANDB_MCP_ENABLE_RAW_GRAPHQL", None)
+    env["WANDB_SILENT"] = "True"
+    env["WEAVE_SILENT"] = "True"
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
         check=False,
         env=env,
         text=True,

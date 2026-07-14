@@ -47,6 +47,7 @@ jobs:
           uv venv "$SMOKE_ENV" --python ${{ matrix.python-version }}
           uv pip install --python "$SMOKE_ENV/bin/python" dist/*.whl
           "$SMOKE_ENV/bin/python" -c "import wandb_mcp_server; print('ok')"
+          WANDB_MCP_ENABLE_RAW_GRAPHQL=true "$SMOKE_ENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; from wandb_mcp_server.server import register_tools; mcp = FastMCP('smoke'); register_tools(mcp); assert 'query_wandb_graphql_tool' in mcp._tool_manager._tools; print('raw graphql ok')"
         env:
           WANDB_SILENT: "True"
           WEAVE_SILENT: "True"
@@ -72,9 +73,11 @@ jobs:
       - name: Show installed W&B SDK versions
         run: uv run --no-sync python -c "from importlib.metadata import version; print('wandb', version('wandb')); print('wandb-workspaces', version('wandb-workspaces'))"
 
-      - name: Verify latest W&B GraphQL compatibility
+      - name: Verify latest W&B SDK and optional GraphQL compatibility
         run: |
           uv run --no-sync pytest \
+            tests/test_query_wandb_sdk.py \
+            tests/test_tool_registration.py \
             tests/test_wandb_graphql.py \
             tests/test_wandb_graphql_read_only.py \
             tests/test_hosted_gql_guardrails.py \
