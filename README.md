@@ -532,6 +532,7 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS` | Enable Weave Agents (OTel/GenAI) tools (default: `false`) | No |
 | `WANDB_MCP_READ_ONLY` | Omit report creation and analysis logging write tools (default: `false`) | No |
 | `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events. Useful as a workaround for older stdio builds that wrote analytics to stdout. | No |
+| `MCP_REQUEST_SUCCESS_SAMPLE_RATE` | Deterministic sample rate for successful HTTP request telemetry (default: `0.10`; failures and requests over two seconds are always retained). | No |
 | `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |
 
 #### Usage Examples

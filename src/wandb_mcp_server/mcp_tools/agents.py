@@ -69,19 +69,6 @@ def _drop_none(body: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in body.items() if v is not None}
 
 
-def _best_effort_viewer() -> Any:
-    """Fetch the W&B viewer for analytics attribution; never fail the tool over it.
-
-    The viewer lookup is a separate GraphQL call that can fail (auth quirks,
-    network) independently of the data request, so a failure must not break the
-    tool -- analytics identity is best-effort.
-    """
-    try:
-        return WandBApiManager.get_api().viewer
-    except Exception:
-        return None
-
-
 def _truncate_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Trim the largest list field so the serialized response fits the budget.
 
@@ -151,7 +138,7 @@ def _agents_request(tool_name: str, path: str, body: Dict[str, Any], track_param
     }
     data = json.dumps(_drop_none(body))
 
-    with track_tool_execution(tool_name, _best_effort_viewer(), track_params) as ctx:
+    with track_tool_execution(tool_name, None, track_params) as ctx:
         # Only the HTTP round-trip can raise here, so the try wraps just that;
         # the status-code branching below is plain control flow and stays outside.
         try:

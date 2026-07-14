@@ -116,7 +116,7 @@ def diagnose_run(
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "diagnose_run",
-        api.viewer,
+        None,
         {"entity_name": entity_name, "project_name": project_name, "run_id": run_id},
     ) as ctx:
         try:

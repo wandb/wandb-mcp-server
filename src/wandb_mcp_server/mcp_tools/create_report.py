@@ -266,10 +266,9 @@ def create_report(
         logger.warning("No API key available for W&B")
         raise Exception("No W&B API key available")
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "create_report",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,

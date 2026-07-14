@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
 from wandb_mcp_server.config import WANDB_BASE_URL
+from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
 
 # Import Weave for tracing MCP tool calls
 try:
@@ -113,6 +114,7 @@ __all__ = [
     "initialize_weave_tracing",
     "create_mcp_server",
     "register_tools",
+    "InstrumentedFastMCP",
     "ServerMCPArgs",
     "cli",
 ]
@@ -1172,10 +1174,14 @@ def create_mcp_server(transport: str, host: str = "localhost", port: Optional[in
         - HTTP transport: Clients provide W&B API key as Bearer token
           Set MCP_AUTH_DISABLED=true to disable auth (development only)
     """
+    from wandb_mcp_server.analytics import configure_analytics_runtime
+
+    configure_analytics_runtime(transport)
+
     if transport == "http":
         port = port if port is not None else 8080
         logger.info(f"Configuring HTTP server on {host}:{port}")
-        mcp = FastMCP("weave-mcp-server", host=host, port=port, stateless_http=True)
+        mcp = InstrumentedFastMCP("weave-mcp-server", host=host, port=port, stateless_http=True)
 
         # Log authentication status for HTTP
         if os.environ.get("MCP_AUTH_DISABLED", "false").lower() == "true":
@@ -1185,7 +1191,7 @@ def create_mcp_server(transport: str, host: str = "localhost", port: Optional[in
 
     elif transport == "stdio":
         logger.info("Configuring stdio server")
-        mcp = FastMCP("weave-mcp-server")
+        mcp = InstrumentedFastMCP("weave-mcp-server")
         logger.info("STDIO transport uses environment variable authentication")
     else:
         raise ValueError(f"Invalid transport type: {transport}. Must be 'stdio' or 'http'")
@@ -1264,14 +1270,6 @@ def cli():
             # No need to reset since STDIO runs for the whole session
             WandBApiManager.set_context_api_key(api_key)
             logger.info("API key set in context for STDIO session")
-
-            try:
-                api = WandBApiManager.get_api()
-                viewer = api.viewer
-                viewer_id = getattr(viewer, "username", None) or getattr(viewer, "entity", None) or "<unknown>"
-                logger.info(f"Authenticated W&B viewer: {viewer_id}")
-            except Exception as viewer_err:
-                logger.warning(f"Could not fetch W&B viewer: {viewer_err}")
 
     # Initialize Weave tracing for MCP tool calls
     initialize_weave_tracing()

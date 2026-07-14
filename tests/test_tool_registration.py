@@ -3,7 +3,8 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 
-from wandb_mcp_server.server import register_tools
+from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
+from wandb_mcp_server.server import create_mcp_server, register_tools
 
 
 WEAVE_TOOLS = {
@@ -162,3 +163,18 @@ def test_read_only_mode_is_independent_of_weave_and_agent_gates():
     assert AGENT_TOOLS.issubset(names)
     assert NON_WEAVE_TOOLS.issubset(names)
     assert "query_wandb_tool" in names
+
+
+def test_constructed_servers_use_public_boundary_instrumentation(monkeypatch):
+    monkeypatch.delenv("MCP_TRANSPORT", raising=False)
+    import wandb_mcp_server.analytics as analytics
+
+    monkeypatch.setattr(analytics, "_configured_transport", None)
+
+    stdio = create_mcp_server("stdio")
+    assert isinstance(stdio, InstrumentedFastMCP)
+    assert analytics._resolve_transport() == "stdio"
+
+    http = create_mcp_server("http")
+    assert isinstance(http, InstrumentedFastMCP)
+    assert analytics._resolve_transport() == "http"

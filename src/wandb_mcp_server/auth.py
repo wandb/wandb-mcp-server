@@ -156,20 +156,19 @@ async def mcp_auth_middleware(request: Request, call_next):
 
     api_key_token = WandBApiManager.set_context_api_key(wandb_api_key)
 
+    # Authentication already established possession of a W&B API key. Do not
+    # add a separate viewer request solely for telemetry attribution.
     viewer = None
-    try:
-        api = WandBApiManager.get_api()
-        viewer = api.viewer
-        viewer_id = getattr(viewer, "username", None) or getattr(viewer, "entity", None) or "<unknown>"
-        logger.info(f"Authenticated W&B viewer: {viewer_id}")
-    except Exception as viewer_err:
-        logger.warning(f"Could not fetch W&B viewer: {viewer_err}")
 
     # --- Session management -----------------------------------------------
     # Finalize session_id *before* setting the contextvar so that
     # reset() always restores the original value (None), not a
     # stale/stolen session ID from a mismatch recovery path.
-    from wandb_mcp_server.session_manager import SessionCapacityError, current_session_id
+    from wandb_mcp_server.session_manager import (
+        SessionCapacityError,
+        current_api_key_hash,
+        current_session_id,
+    )
 
     session_id, is_new_session = _resolve_session_id(request, wandb_api_key)
     session_was_created = False
@@ -209,6 +208,8 @@ async def mcp_auth_middleware(request: Request, call_next):
 
     request.state.session_id = session_id
     session_ctx_token = current_session_id.set(session_id)
+    api_key_hash = hashlib.sha256(wandb_api_key.encode()).hexdigest()
+    api_key_hash_token = current_api_key_hash.set(api_key_hash)
 
     # --- Analytics: session event -----------------------------------------
     if session_was_created:
@@ -218,7 +219,7 @@ async def mcp_auth_middleware(request: Request, call_next):
             get_analytics_tracker().track_user_session(
                 session_id=session_id,
                 viewer_info=viewer,
-                api_key_hash=hashlib.sha256(wandb_api_key.encode()).hexdigest(),
+                api_key_hash=api_key_hash,
             )
         except Exception as analytics_err:
             logger.debug(f"Analytics tracking failed (non-fatal): {analytics_err}")
@@ -234,6 +235,7 @@ async def mcp_auth_middleware(request: Request, call_next):
     finally:
         WandBApiManager.reset_context_api_key(api_key_token)
         current_session_id.reset(session_ctx_token)
+        current_api_key_hash.reset(api_key_hash_token)
 
     if is_new_session:
         response.headers["Mcp-Session-Id"] = session_id
