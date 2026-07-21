@@ -44,10 +44,10 @@ jobs:
 
     steps:
       - name: Checkout wandb-mcp-server
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Checkout WandBAgentFactory
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: wandb/WandBAgentFactory
           ref: main
@@ -55,7 +55,7 @@ jobs:
           path: wbaf
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
 
       - name: Set up Python
         working-directory: wbaf
@@ -126,7 +126,7 @@ jobs:
 
       - name: Upload results summary
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: results-${{ matrix.variant }}
           path: wbaf/results-summary.json
