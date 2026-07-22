@@ -50,6 +50,7 @@ class TestLogAnalysis:
         mock_wandb.Api.assert_called_once_with(
             api_key="test-key",
             overrides={"base_url": mock_wandb.Api.call_args[1]["overrides"]["base_url"]},
+            timeout=20,
         )
         mock_api.create_run.assert_called_once_with(entity="test", project="proj")
         mock_run.summary.update.assert_called_once()
