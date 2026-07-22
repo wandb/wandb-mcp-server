@@ -31,7 +31,6 @@ from wandb_mcp_server.utils import get_rich_logger
 logger = get_rich_logger(__name__)
 
 _DATADOG_EVENT_PREFIX = "mcp"
-_DATADOG_PARAM_PRIVACY_LEVEL_DEFAULT = "standard"
 
 
 def _build_retry_session() -> requests.Session:
@@ -48,39 +47,18 @@ def _build_retry_session() -> requests.Session:
     return session
 
 
-def _datadog_safe_params(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Return Datadog-safe analytics params.
-
-    Cloud Run keeps MCP_LOG_PRIVACY_LEVEL=off for product analytics, but Datadog
-    is an operational sink. Use standard redaction by default so free text is
-    summarized, secrets are redacted, and structured dimensions remain useful.
-    """
-    params = event.get("params")
-    if not params:
-        return {}
-
-    from wandb_mcp_server.analytics import AnalyticsTracker
-
-    privacy_level = os.environ.get(
-        "MCP_DATADOG_PARAM_PRIVACY_LEVEL",
-        _DATADOG_PARAM_PRIVACY_LEVEL_DEFAULT,
-    )
-    return AnalyticsTracker._sanitise_params(params, level=privacy_level)
-
-
 def _datadog_safe_labels(event: Dict[str, Any]) -> Dict[str, str]:
     """Return low-cardinality labels safe for Datadog attributes."""
     labels: Dict[str, str] = {"event_type": str(event.get("event_type", "unknown"))}
     for key in (
         "tool_name",
-        "mcp_tool_name",
         "success",
         "runtime_surface",
         "transport",
         "deployment_type",
-        "mcp_client_family",
-        "mcp_client_app",
-        "mcp_client_source",
+        "agent_harness",
+        "client_vendor",
+        "call_type",
     ):
         value = event.get(key)
         if value is not None:
@@ -108,7 +86,7 @@ def map_to_datadog_log(
     Args:
         event: Internal analytics event dict (as emitted by AnalyticsTracker).
         dd_env: Datadog environment tag (e.g. "staging", "production").
-        dd_version: Service version tag (e.g. "0.3.0").
+        dd_version: Service version attribute (e.g. "0.3.0").
         dd_service: Service name tag.
 
     Returns:
@@ -121,14 +99,13 @@ def map_to_datadog_log(
     tags = [
         f"env:{dd_env}",
         f"service:{dd_service}",
-        f"version:{dd_version}",
         f"event_type:{event_type}",
     ]
     for key in ("runtime_surface", "transport", "deployment_type", "environment"):
         value = event.get(key)
         if value is not None:
             tags.append(f"{key}:{value}")
-    for key in ("mcp_client_family", "mcp_client_app", "mcp_client_source"):
+    for key in ("agent_harness", "call_type"):
         value = event.get(key)
         if value is not None:
             tags.append(f"{key}:{value}")
@@ -136,15 +113,20 @@ def map_to_datadog_log(
     if tool_name:
         tags.append(f"tool_name:{tool_name}")
     mcp_tool_name = event.get("mcp_tool_name")
-    if mcp_tool_name:
-        tags.append(f"mcp_tool_name:{mcp_tool_name}")
     success = event.get("success")
     if success is not None:
         tags.append(f"success:{str(success).lower()}")
+    error_str = event.get("error")
+    error_kind = None
+    if error_str:
+        parts = str(error_str).split(": ", 1)
+        error_kind = parts[0] if len(parts) > 1 else "Error"
+        tags.append(f"error_kind:{error_kind}")
 
     attributes: Dict[str, Any] = {
         "event_type": event_type,
-        "schema_version": event.get("schema_version", "1.0"),
+        "schema_version": event.get("schema_version", "1.1"),
+        "service_version": dd_version,
     }
     if success is not None:
         attributes["success"] = success
@@ -183,6 +165,8 @@ def map_to_datadog_log(
 
     mcp_client_attrs: Dict[str, Any] = {}
     for event_key, attr_key in (
+        ("agent_harness", "agent_harness"),
+        ("client_vendor", "vendor"),
         ("mcp_client_family", "family"),
         ("mcp_client_app", "app"),
         ("mcp_client_source", "source"),
@@ -192,6 +176,7 @@ def map_to_datadog_log(
             mcp_client_attrs[attr_key] = value
     mcp_protocol_attrs: Dict[str, Any] = {}
     for event_key, attr_key in (
+        ("call_type", "call_type"),
         ("mcp_protocol_version", "version"),
         ("mcp_jsonrpc_method", "jsonrpc_method"),
     ):
@@ -206,22 +191,23 @@ def map_to_datadog_log(
             mcp_attrs["protocol"] = mcp_protocol_attrs
         attributes["mcp"] = mcp_attrs
 
-    error_str = event.get("error")
     if error_str:
-        parts = str(error_str).split(": ", 1)
         attributes["error"] = {
-            "kind": parts[0] if len(parts) > 1 else "Error",
-            "message": parts[-1][:1000],
+            "kind": error_kind,
+            "message": str(error_str).split(": ", 1)[-1][:1000],
         }
 
-    user_id = event.get("user_id")
+    actor_id = event.get("actor_id")
+    user_id = event.get("user_id") or actor_id
     if user_id:
         attributes["user_id"] = user_id
         attributes["usr"] = {"id": user_id}
+    if actor_id:
+        attributes["actor_id"] = actor_id
 
-    safe_params = _datadog_safe_params(event)
-    if safe_params:
-        attributes["params"] = safe_params
+    usage_dimensions = event.get("usage_dimensions")
+    if usage_dimensions:
+        attributes["usage_dimensions"] = usage_dimensions
 
     labels = _datadog_safe_labels(event)
     if labels:
@@ -336,7 +322,7 @@ class DatadogForwarder:
       (same pattern as the HMAC session key).
     - ``DD_SITE``: Datadog site (default ``datadoghq.com``).
     - ``DD_ENV``: environment tag (default ``production``).
-    - ``DD_VERSION``: version tag (default ``0.0.0``).
+    - ``DD_VERSION``: version attribute (default ``0.0.0``).
     - ``DD_SERVICE``: service name tag (default ``wandb-mcp-server``).
 
     Live POSTs run in a daemon thread so they never block the MCP request path.

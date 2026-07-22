@@ -343,10 +343,9 @@ def query_traces(
             timeout=request_timeout,
         )
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "query_traces",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,
@@ -462,10 +461,9 @@ async def query_paginated_weave_traces(
             retries=retries,
         )
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "query_paginated_weave_traces",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,

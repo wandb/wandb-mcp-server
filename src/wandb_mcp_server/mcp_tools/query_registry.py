@@ -75,7 +75,7 @@ def list_registries(
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "list_registries",
-        api.viewer,
+        None,
         {"organization": organization, "filter": filter, "max_items": max_items},
     ) as ctx:
         max_items = min(max_items, MAX_ITEMS_CEILING)
@@ -167,7 +167,7 @@ def list_registry_collections(
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "list_registry_collections",
-        api.viewer,
+        None,
         {
             "registry_name": registry_name,
             "organization": organization,

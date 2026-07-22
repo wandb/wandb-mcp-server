@@ -11,6 +11,7 @@ Key features:
 - Validation to prevent cross-tenant leakage
 """
 
+import base64
 import hashlib
 import hmac
 import os
@@ -28,6 +29,30 @@ from wandb_mcp_server.utils import get_rich_logger, get_session_prefix_from_sess
 from wandb_mcp_server.secrets_resolver import get_secrets_resolver_from_env
 
 logger = get_rich_logger(__name__)
+
+_PORTABLE_SESSION_PREFIX = "sess2_"
+_HARNESS_CODES = {
+    "unknown": "u",
+    "codex": "c",
+    "claude_code": "k",
+    "claude_desktop": "d",
+    "claude_ai": "a",
+    "cursor": "r",
+    "gemini_cli": "g",
+    "lechat": "l",
+    "linear": "n",
+    "vscode": "v",
+    "mcp_inspector": "i",
+    "load_test": "t",
+}
+_HARNESSES_BY_CODE = {value: key for key, value in _HARNESS_CODES.items()}
+_PROTOCOL_CODES = {
+    "unknown": "u",
+    "2024-11-05": "a",
+    "2025-03-26": "b",
+    "2025-06-18": "c",
+}
+_PROTOCOLS_BY_CODE = {value: key for key, value in _PROTOCOL_CODES.items()}
 
 
 # Context variables for session management
@@ -69,6 +94,7 @@ class MultiTenantSessionManager:
         session_ttl_seconds: int = 3600,  # 1 hour default
         max_sessions_per_key: int = 10,
         enable_hmac_sha256_sessions: bool = False,
+        hmac_sha256_key: Optional[bytes] = None,
     ):
         """
         Initialize the session manager.
@@ -87,7 +113,10 @@ class MultiTenantSessionManager:
         self._hmac_sha256_key: Optional[bytes] = None
 
         # Initialize HMAC-SHA256 key if enabled
-        if self._enable_hmac_sha256_sessions:
+        if self._enable_hmac_sha256_sessions and hmac_sha256_key:
+            self._hmac_sha256_key = hmac_sha256_key
+            logger.info("HMAC-SHA256 sessions enabled")
+        elif self._enable_hmac_sha256_sessions:
             try:
                 resolver = get_secrets_resolver_from_env()
                 if resolver is None:
@@ -123,7 +152,101 @@ class MultiTenantSessionManager:
             return hmac.new(self._hmac_sha256_key, api_key_bytes, hashlib.sha256).hexdigest()
         return hashlib.sha256(api_key_bytes).hexdigest()
 
-    def create_session(self, api_key: str, session_id: Optional[str] = None) -> str:
+    @staticmethod
+    def _urlsafe_encode(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _urlsafe_decode(value: str) -> bytes:
+        return base64.urlsafe_b64decode(value + ("=" * (-len(value) % 4)))
+
+    def _portable_session_id(
+        self,
+        api_key_hash: str,
+        metadata: Optional[Dict[str, Any]],
+    ) -> str:
+        if self._hmac_sha256_key is None:
+            raise RuntimeError("portable sessions require an HMAC key")
+        metadata = metadata or {}
+        harness = str(metadata.get("agent_harness") or metadata.get("mcp_client_app") or "unknown").lower()
+        protocol = str(metadata.get("mcp_protocol_version") or "unknown").lower()
+        session_event_code = "e" if metadata.get("session_event_emitted") is True else "p"
+        issued_at = format(int(time.time()), "x")
+        payload = "|".join(
+            (
+                "v1",
+                issued_at,
+                uuid.uuid4().hex[:16],
+                api_key_hash[:24],
+                _HARNESS_CODES.get(harness, "u"),
+                _PROTOCOL_CODES.get(protocol, "u"),
+                session_event_code,
+            )
+        ).encode("ascii")
+        signature = hmac.new(self._hmac_sha256_key, payload, hashlib.sha256).digest()[:12]
+        return f"{_PORTABLE_SESSION_PREFIX}{self._urlsafe_encode(payload)}_{self._urlsafe_encode(signature)}"
+
+    def restore_portable_session(self, session_id: str, api_key: str) -> Dict[str, Any]:
+        """Verify a portable session and return its safe cross-worker metadata.
+
+        Legacy ``sess_`` IDs return an empty mapping for one session TTL.  Their
+        identity is intentionally not trusted because it was not signed.
+        """
+        if not session_id.startswith(_PORTABLE_SESSION_PREFIX):
+            return {}
+        if self._hmac_sha256_key is None:
+            raise ValueError("Portable session cannot be verified")
+        try:
+            encoded = session_id[len(_PORTABLE_SESSION_PREFIX) :]
+            # A 12-byte signature is always 16 unpadded base64url characters.
+            # Parse by fixed width because '_' is itself part of base64url.
+            if len(encoded) <= 17 or encoded[-17] != "_":
+                raise ValueError("invalid portable session framing")
+            encoded_payload = encoded[:-17]
+            encoded_signature = encoded[-16:]
+            payload = self._urlsafe_decode(encoded_payload)
+            signature = self._urlsafe_decode(encoded_signature)
+        except Exception as exc:
+            raise ValueError("Malformed portable session") from exc
+        expected = hmac.new(self._hmac_sha256_key, payload, hashlib.sha256).digest()[:12]
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError("Portable session signature mismatch")
+        try:
+            parts = payload.decode("ascii").split("|")
+            if len(parts) == 6:
+                version, issued_hex, _nonce, key_prefix, harness_code, protocol_code = parts
+                session_event_code = "p"
+            else:
+                version, issued_hex, _nonce, key_prefix, harness_code, protocol_code, session_event_code = parts
+            issued_at = int(issued_hex, 16)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError("Malformed portable session payload") from exc
+        if version != "v1":
+            raise ValueError("Unsupported portable session version")
+        if session_event_code not in {"e", "p"}:
+            raise ValueError("Unsupported portable session event state")
+        now = int(time.time())
+        if issued_at > now + 300 or now - issued_at > self._session_ttl:
+            raise ValueError("Portable session expired")
+        api_key_hash = self._hash_api_key(api_key)
+        if not hmac.compare_digest(key_prefix, api_key_hash[:24]):
+            raise ValueError("Portable session API key mismatch")
+        harness = _HARNESSES_BY_CODE.get(harness_code, "unknown")
+        protocol = _PROTOCOLS_BY_CODE.get(protocol_code, "unknown")
+        return {
+            "agent_harness": harness,
+            "mcp_client_app": harness,
+            "mcp_protocol_version": protocol,
+            "mcp_client_source": "portable_session",
+            "session_event_emitted": session_event_code == "e",
+        }
+
+    def create_session(
+        self,
+        api_key: str,
+        session_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """
         Create a new session for an API key.
 
@@ -140,9 +263,19 @@ class MultiTenantSessionManager:
         with self._lock:
             api_key_hash = self._hash_api_key(api_key)
 
-            # Generate session ID if not provided
+            # Generate a signed, cross-worker session when HMAC is configured.
+            generated_session = not session_id
             if not session_id:
-                session_id = f"sess_{uuid.uuid4().hex}"
+                if self._hmac_sha256_key is not None:
+                    session_id = self._portable_session_id(api_key_hash, metadata)
+                else:
+                    session_id = f"sess_{uuid.uuid4().hex}"
+
+            restored_metadata: Dict[str, Any] = {}
+            if session_id.startswith(_PORTABLE_SESSION_PREFIX):
+                restored_metadata = self.restore_portable_session(session_id, api_key)
+            elif generated_session and metadata:
+                restored_metadata = dict(metadata)
 
             _session_prefix = get_session_prefix_from_session(session_id)
             _log = logging.LoggerAdapter(
@@ -180,6 +313,7 @@ class MultiTenantSessionManager:
                 api_key_hash=api_key_hash,
                 created_at=datetime.now(),
                 last_accessed=datetime.now(),
+                metadata=restored_metadata,
             )
 
             self._sessions[session_id] = session

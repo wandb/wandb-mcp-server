@@ -3,7 +3,6 @@
 import json
 from typing import Any, Dict, List, Optional
 
-from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.mcp_tools.query_weave import get_trace_service
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
@@ -93,10 +92,9 @@ def summarize_evaluation(
     include_per_task: bool = False,
 ) -> str:
     """Summarize Weave evaluation results."""
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "summarize_evaluation",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,
