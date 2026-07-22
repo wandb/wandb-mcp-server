@@ -34,7 +34,7 @@ jobs:
           only-fixed: true
           output-format: table
           output-file: grype-report.txt
-          grype-version: "0.112.0"
+          grype-version: "v0.112.0"
 
       - name: Upload dependency scan report
         if: always()
