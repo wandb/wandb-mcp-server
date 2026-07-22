@@ -808,6 +808,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         order: str = "-created_at",
         limit: int = 50,
         include: Optional[List[str]] = None,
+        summary_keys: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         return query_wandb(
             entity_name=entity_name,
@@ -820,6 +821,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             order=order,
             limit=limit,
             include=include,
+            summary_keys=summary_keys,
         )
 
     if WANDB_MCP_ENABLE_RAW_GRAPHQL:

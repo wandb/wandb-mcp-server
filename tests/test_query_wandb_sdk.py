@@ -10,6 +10,7 @@ import pytest
 from wandb.apis.public import Api, Project
 
 from wandb_mcp_server.mcp_tools import query_wandb as sdk_query
+from wandb_mcp_server.server import create_mcp_server
 
 
 @contextmanager
@@ -213,6 +214,54 @@ def test_run_collection_can_select_summary_keys_without_full_summary(fake_api):
     )
 
     assert result["items"][0]["summary"] == {"accuracy": 0.9, "loss": 0.2}
+
+
+@pytest.mark.asyncio
+async def test_public_mcp_schema_dispatches_targeted_summary_keys(fake_api, monkeypatch):
+    monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
+    server = create_mcp_server("stdio")
+    query_tool = next(tool for tool in await server.list_tools() if tool.name == "query_wandb_tool")
+
+    assert "summary_keys" in query_tool.inputSchema["properties"]
+
+    await server.call_tool(
+        "query_wandb_tool",
+        {
+            "entity_name": "entity",
+            "project_name": "project",
+            "resource": "runs",
+            "limit": 1,
+            "summary_keys": ["accuracy"],
+        },
+    )
+
+    assert fake_api.calls[0][0:2] == ("runs", "entity/project")
+
+
+@pytest.mark.asyncio
+async def test_public_mcp_dispatch_enforces_hosted_summary_limit(monkeypatch):
+    monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
+    monkeypatch.setattr(sdk_query, "MCP_HOSTED_MODE", True)
+    monkeypatch.setattr(
+        sdk_query.WandBApiManager,
+        "get_api",
+        lambda: pytest.fail("API must not be created for an unbounded hosted request"),
+    )
+    server = create_mcp_server("http")
+
+    result = await server.call_tool(
+        "query_wandb_tool",
+        {
+            "entity_name": "entity",
+            "project_name": "project",
+            "resource": "runs",
+            "limit": 50,
+            "include": ["summary"],
+        },
+    )
+
+    assert "invalid_request" in str(result)
+    assert "limit&lt;=3" in str(result) or "limit<=3" in str(result)
 
 
 def test_hosted_full_collection_summary_is_rejected_before_api(monkeypatch):
