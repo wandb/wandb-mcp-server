@@ -18,7 +18,8 @@ This module provides:
 - Automatic integration with ``AnalyticsTracker._emit()`` via singleton.
 
 Enable dry-run logging with ``MCP_SEGMENT_DRY_RUN=true``.
-Enable live forwarding with ``MCP_SEGMENT_FORWARD=true`` + ``WANDB_BASE_URL``.
+Enable live forwarding with ``MCP_SEGMENT_FORWARD=true``. Server-side delivery
+uses ``WANDB_INTERNAL_BASE_URL`` when configured, otherwise ``WANDB_BASE_URL``.
 """
 
 import logging
@@ -149,18 +150,22 @@ class SegmentForwarder:
     Modes (controlled by env vars):
     - Off (default): does nothing.
     - Dry-run (``MCP_SEGMENT_DRY_RUN=true``): logs mapped payloads without sending.
-    - Live (``MCP_SEGMENT_FORWARD=true``): POSTs to ``{WANDB_BASE_URL}/analytics/t``.
+    - Live (``MCP_SEGMENT_FORWARD=true``): POSTs to the resolved W&B API URL.
 
     Live POSTs run in a daemon thread so they never block the MCP request path.
 
     Args:
-        base_url: Override for WANDB_BASE_URL. If None, reads from env.
+        base_url: Explicit API URL override. If None, internal then public env wins.
     """
 
     def __init__(self, base_url: Optional[str] = None):
         self.dry_run = os.environ.get("MCP_SEGMENT_DRY_RUN", "false").lower() == "true"
         self.live = os.environ.get("MCP_SEGMENT_FORWARD", "false").lower() == "true"
-        self.base_url = (base_url or os.environ.get("WANDB_BASE_URL", "https://api.wandb.ai")).rstrip("/")
+        self.base_url = (
+            base_url
+            or os.environ.get("WANDB_INTERNAL_BASE_URL")
+            or os.environ.get("WANDB_BASE_URL", "https://api.wandb.ai")
+        ).rstrip("/")
         self._segment_logger = logging.getLogger("wandb_mcp_server.segment_dryrun")
         self._segment_logger.setLevel(logging.INFO)
         self._forwarded_payloads: List[Dict[str, Any]] = []

@@ -20,8 +20,14 @@ def _env_int(name: str, default: int) -> int:
 # Centralized configuration for base URLs used across the project.
 # Values are read from environment variables with production defaults.
 
-# W&B Public API base URL
-WANDB_BASE_URL: str = os.getenv("WANDB_BASE_URL") or "https://api.wandb.ai"
+# Public W&B URL used for customer-visible links and local credential lookup.
+WANDB_BASE_URL: str = (os.getenv("WANDB_BASE_URL") or "https://api.wandb.ai").rstrip("/")
+
+# Optional in-cluster URL for server-to-server W&B API traffic. When configured,
+# failures remain failures; callers must never retry through the public ingress.
+_internal_base_url = (os.getenv("WANDB_INTERNAL_BASE_URL") or "").strip().rstrip("/")
+WANDB_INTERNAL_BASE_URL: str | None = _internal_base_url or None
+WANDB_API_BASE_URL: str = WANDB_INTERNAL_BASE_URL or WANDB_BASE_URL
 
 # Weave Trace server URL used by the Weave API client and services
 WF_TRACE_SERVER_URL: str = (

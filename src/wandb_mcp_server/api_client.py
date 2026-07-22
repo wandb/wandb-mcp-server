@@ -9,7 +9,7 @@ from typing import Optional, Any
 from contextvars import ContextVar
 import wandb
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_BASE_URL
+from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_API_BASE_URL
 
 logger = get_rich_logger(__name__)
 
@@ -70,7 +70,7 @@ class WandBApiManager:
         # According to docs: https://docs.wandb.ai/ref/python/public-api/
         return wandb.Api(
             api_key=api_key,
-            overrides={"base_url": WANDB_BASE_URL},
+            overrides={"base_url": WANDB_API_BASE_URL},
             timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
         )
 

@@ -17,6 +17,7 @@ from wandb_mcp_server.config import (
 )
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.wandb_urls import publicize_wandb_url
 
 logger = get_rich_logger(__name__)
 
@@ -127,28 +128,39 @@ def _serialize_user(user: Any) -> Any:
 
 
 def _serialize_project(project: Any) -> Dict[str, Any]:
+    entity = getattr(project, "entity", None)
+    name = getattr(project, "name", None)
     return {
         "id": _json_safe(getattr(project, "id", None)),
-        "name": _json_safe(getattr(project, "name", None)),
-        "entity": _json_safe(getattr(project, "entity", None)),
+        "name": _json_safe(name),
+        "entity": _json_safe(entity),
         "description": _json_safe(getattr(project, "description", None)),
         "visibility": _json_safe(getattr(project, "visibility", None)),
         "created_at": _json_safe(getattr(project, "created_at", None)),
         "updated_at": _json_safe(getattr(project, "updated_at", None)),
         "tags": _json_safe(getattr(project, "tags", [])),
-        "url": _json_safe(getattr(project, "url", None)),
+        "url": publicize_wandb_url(
+            getattr(project, "url", None),
+            fallback_segments=(entity, name),
+        ),
     }
 
 
 def _serialize_sweep(sweep: Any, include: frozenset[str]) -> Dict[str, Any]:
+    entity = getattr(sweep, "entity", None)
+    project = getattr(sweep, "project", None)
+    sweep_id = getattr(sweep, "id", None) or getattr(sweep, "name", None)
     result = {
         "id": _json_safe(getattr(sweep, "id", None)),
         "name": _json_safe(getattr(sweep, "name", None)),
         "state": _json_safe(getattr(sweep, "state", None)),
-        "entity": _json_safe(getattr(sweep, "entity", None)),
-        "project": _json_safe(getattr(sweep, "project", None)),
+        "entity": _json_safe(entity),
+        "project": _json_safe(project),
         "expected_run_count": _json_safe(getattr(sweep, "expected_run_count", None)),
-        "url": _json_safe(getattr(sweep, "url", None)),
+        "url": publicize_wandb_url(
+            getattr(sweep, "url", None),
+            fallback_segments=(entity, project, "sweeps", sweep_id),
+        ),
     }
     if "config" in include:
         result["config"] = _json_safe(getattr(sweep, "config", {}))
@@ -179,13 +191,19 @@ def _serialize_run(
     summary_keys: Optional[List[str]],
     include_summary: bool,
 ) -> Dict[str, Any]:
+    entity = getattr(run, "entity", None)
+    project = getattr(run, "project", None)
+    run_id = getattr(run, "id", None)
     result = {
-        "id": _json_safe(getattr(run, "id", None)),
+        "id": _json_safe(run_id),
         "display_name": _json_safe(getattr(run, "name", None)),
         "state": _json_safe(getattr(run, "state", None)),
-        "entity": _json_safe(getattr(run, "entity", None)),
-        "project": _json_safe(getattr(run, "project", None)),
-        "url": _json_safe(getattr(run, "url", None)),
+        "entity": _json_safe(entity),
+        "project": _json_safe(project),
+        "url": publicize_wandb_url(
+            getattr(run, "url", None),
+            fallback_segments=(entity, project, "runs", run_id),
+        ),
         "created_at": _json_safe(getattr(run, "created_at", None)),
         "heartbeat_at": _json_safe(getattr(run, "heartbeat_at", None)),
         "duration": _json_safe(getattr(run, "duration", None)),
@@ -215,7 +233,7 @@ def _serialize_report(report: Any, include: frozenset[str]) -> Dict[str, Any]:
         "user": _serialize_user(getattr(report, "user", None)),
         "created_at": _json_safe(getattr(report, "created_at", None)),
         "updated_at": _json_safe(getattr(report, "updated_at", None)),
-        "url": _json_safe(getattr(report, "url", None)),
+        "url": publicize_wandb_url(getattr(report, "url", None)),
     }
     if "spec" in include:
         result["spec"] = _json_safe(getattr(report, "spec", {}))

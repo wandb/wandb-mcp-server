@@ -26,7 +26,7 @@ import wandb
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
-from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_BASE_URL
+from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_API_BASE_URL
 from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
 
 # Import Weave for tracing MCP tool calls
@@ -312,7 +312,7 @@ def validate_api_key(api_key: str) -> bool:
         # This validates the key without setting any global state
         api = wandb.Api(
             api_key=api_key,
-            overrides={"base_url": WANDB_BASE_URL},
+            overrides={"base_url": WANDB_API_BASE_URL},
             timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
         )
         viewer = api.viewer  # This will fail if the key is invalid
@@ -396,7 +396,7 @@ def configure_wandb_logging() -> None:
             settings=wandb.Settings(
                 silent=True,
                 console="off",
-                base_url=WANDB_BASE_URL,
+                base_url=WANDB_API_BASE_URL,
                 x_graphql_timeout_seconds=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
             )
         )
