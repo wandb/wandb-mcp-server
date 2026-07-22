@@ -8,13 +8,20 @@ history() (sampled) as last resort.
 from __future__ import annotations
 
 import json
-import random
 from typing import Any, Dict, List, Optional
 
 import wandb
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.config import MCP_HOSTED_MODE, MCP_MAX_HISTORY_SAMPLES, WANDB_BASE_URL
+from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
+from wandb_mcp_server.config import (
+    MCP_HOSTED_MODE,
+    MCP_MAX_HISTORY_KEYS,
+    MCP_MAX_HISTORY_RANGE_STEPS,
+    MCP_MAX_HISTORY_SAMPLES,
+    MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+    WANDB_BASE_URL,
+)
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -49,7 +56,8 @@ run_id : str
     not the display name.
 keys : list of str, optional
     Specific metric keys to retrieve (e.g., ["loss", "val_loss", "accuracy"]).
-    If empty, returns all logged keys (can be large).
+    Hosted deployments require 1-20 explicit keys to prevent accidental retrieval
+    of extremely high-cardinality histories.
 samples : int, optional
     Number of evenly-spaced sample points to return. Defaults to 500.
     Use fewer samples for quick overviews, more for detailed analysis.
@@ -88,6 +96,24 @@ def get_run_history(
 ) -> str:
     """Fetch sampled metric history for a W&B run."""
 
+    if isinstance(samples, bool) or not isinstance(samples, int) or samples < 1:
+        raise ValueError("samples must be a positive integer")
+    if keys is not None and (
+        not isinstance(keys, list)
+        or not all(isinstance(key, str) and key.strip() for key in keys)
+        or len(keys) > MCP_MAX_HISTORY_KEYS
+    ):
+        raise ValueError(f"keys must contain at most {MCP_MAX_HISTORY_KEYS} non-empty strings")
+    if MCP_HOSTED_MODE and not keys:
+        raise ValueError("Hosted MCP requires explicit history keys (1-20 metrics).")
+    if min_step is not None and max_step is not None:
+        if max_step < min_step:
+            raise ValueError("max_step must be greater than or equal to min_step")
+        if max_step - min_step + 1 > MCP_MAX_HISTORY_RANGE_STEPS:
+            raise ValueError(f"history step range cannot exceed {MCP_MAX_HISTORY_RANGE_STEPS} steps")
+    elif MCP_HOSTED_MODE and (min_step is not None or max_step is not None):
+        raise ValueError("Hosted MCP step-range queries require both min_step and max_step")
+
     with track_tool_execution(
         "get_run_history",
         None,
@@ -104,7 +130,11 @@ def get_run_history(
             raise ValueError("W&B API key is required to fetch run history.")
 
         try:
-            wandb_api = wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
+            wandb_api = wandb.Api(
+                api_key=api_key,
+                overrides={"base_url": WANDB_BASE_URL},
+                timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+            )
             run_path = f"{entity_name}/{project_name}/{run_id}"
             run = wandb_api.run(run_path)
         except wandb.errors.CommError as e:
@@ -196,7 +226,18 @@ def _fetch_step_range(
         scan_kwargs["min_step"] = min_step
     if max_step is not None:
         scan_kwargs["max_step"] = max_step
-    rows = _reservoir_sample(run.scan_history(**scan_kwargs), clamped_samples)
+    scan_limit = MCP_MAX_HISTORY_RANGE_STEPS
+    if min_step is not None and max_step is not None:
+        scan_limit = min(scan_limit, max_step - min_step + 1)
+    scan_kwargs["page_size"] = min(1000, scan_limit)
+    scanned_rows: List[Dict[str, Any]] = []
+    for index, row in enumerate(run.scan_history(**scan_kwargs)):
+        if index >= scan_limit:
+            break
+        if index % 100 == 0:
+            raise_if_tool_deadline_exceeded()
+        scanned_rows.append(row)
+    rows = _evenly_sample(scanned_rows, clamped_samples)
     if rows:
         return rows
 
@@ -217,18 +258,15 @@ def _fetch_step_range(
     return rows
 
 
-def _reservoir_sample(iterator: Any, max_rows: int) -> List[Dict[str, Any]]:
-    """Single-pass reservoir sampling over an iterator of dicts."""
-    rows: List[Dict[str, Any]] = []
-    for idx, row in enumerate(iterator):
-        if idx < max_rows:
-            rows.append(row)
-        else:
-            j = random.randint(0, idx)
-            if j < max_rows:
-                rows[j] = row
-    rows.sort(key=lambda r: r.get("_step", 0))
-    return rows
+def _evenly_sample(rows: List[Dict[str, Any]], max_rows: int) -> List[Dict[str, Any]]:
+    """Return an ordered, evenly spaced sample from an already bounded scan."""
+    if len(rows) <= max_rows:
+        return rows
+    if max_rows == 1:
+        return [rows[0]]
+    last_index = len(rows) - 1
+    indexes = [round(position * last_index / (max_rows - 1)) for position in range(max_rows)]
+    return [rows[index] for index in indexes]
 
 
 def _enforce_row_budget(rows: List[Dict[str, Any]], budget_chars: int) -> List[Dict[str, Any]]:

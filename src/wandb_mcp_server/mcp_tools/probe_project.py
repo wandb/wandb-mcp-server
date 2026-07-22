@@ -11,13 +11,13 @@ logger = get_rich_logger(__name__)
 
 PROBE_PROJECT_TOOL_DESCRIPTION = """Probe a W&B project to discover its structure before querying.
 
-Samples runs to discover available metric keys, config keys, tags, groups,
+Samples one run to discover available metric keys, config keys, tags, groups,
 and provides recommended query strategies. This is the run-side equivalent
 of infer_trace_schema_tool (which is for Weave traces).
 
 <when_to_use>
-Call FIRST when working with a new project to understand what data is available
-before making specific queries. Essential for:
+Use when you need a lightweight schema hint for an unfamiliar project. It samples
+at most one run and intentionally does not count or scan the project. Useful for:
 - Discovering which metrics are logged (loss, accuracy, custom metrics)
 - Finding config keys (learning_rate, model, batch_size)
 - Understanding project scale (run count, typical step counts)
@@ -36,15 +36,16 @@ entity_name : str
 project_name : str
     W&B project name.
 sample_runs : int, optional
-    Number of runs to sample for key discovery. Default: 5.
+    Requested sample size. The workload guardrail clamps this to one run.
 
 Returns
 -------
-JSON with run_count, metric_keys, config_keys, has_history, typical_steps,
+JSON with sampled_runs, metric_keys, config_keys, has_history, typical_steps,
 tags, groups, and recommendations.
 """
 
 DEFAULT_SAMPLE_RUNS = 5
+MAX_PROBE_RUNS = 1
 
 
 def probe_project(
@@ -53,6 +54,8 @@ def probe_project(
     sample_runs: int = DEFAULT_SAMPLE_RUNS,
 ) -> str:
     """Probe a W&B project to discover its structure."""
+    if isinstance(sample_runs, bool) or not isinstance(sample_runs, int) or sample_runs < 1:
+        raise ValueError("sample_runs must be a positive integer")
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "probe_project",
@@ -62,12 +65,12 @@ def probe_project(
         path = f"{entity_name}/{project_name}"
 
         try:
-            runs_iter = api.runs(path, per_page=sample_runs)
+            applied_samples = min(max(1, sample_runs), MAX_PROBE_RUNS)
+            runs_iter = api.runs(path, per_page=applied_samples, lazy=True)
         except Exception as e:
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "project_not_found", "message": str(e)[:500]})
 
-        run_count = 0
         metric_keys: Dict[str, str] = {}
         config_keys: Dict[str, Any] = {}
         all_tags: List[str] = []
@@ -78,9 +81,8 @@ def probe_project(
 
         try:
             for run in runs_iter:
-                run_count += 1
-                if sampled >= sample_runs:
-                    continue
+                if sampled >= applied_samples:
+                    break
 
                 state = getattr(run, "state", "unknown")
                 states[state] = states.get(state, 0) + 1
@@ -120,10 +122,6 @@ def probe_project(
         typical_steps = int(sum(step_counts) / len(step_counts)) if step_counts else 0
 
         recommendations = []
-        if run_count > 100:
-            recommendations.append(
-                f"Large project ({run_count} runs) -- use filters in query_wandb_tool to narrow results."
-            )
         if typical_steps > 10000:
             recommendations.append(
                 f"Long runs (~{typical_steps} steps) -- use keys=[...] and samples parameter in get_run_history_tool."
@@ -143,7 +141,8 @@ def probe_project(
             {
                 "entity": entity_name,
                 "project": project_name,
-                "run_count": run_count,
+                "run_count": None,
+                "run_count_note": "Not counted to avoid scanning the project.",
                 "sampled_runs": sampled,
                 "run_states": states,
                 "metric_keys": metric_keys,

@@ -116,8 +116,11 @@ async def test_public_success_reaches_both_sinks_once() -> None:
     assert segment[0]["properties"]["success"] is True
     assert "error" not in segment[0]["properties"]
     assert segment[0]["properties"]["usage_dimensions"] == {
+        "admission_outcome": "disabled",
+        "cost_class": "heavy",
         "include_files": True,
         "max_items_bucket": "26-50",
+        "queue_ms_bucket": "0",
     }
     expected_actor = f"wandb_key:{hashlib.sha256(('k' * 40).encode()).hexdigest()[:24]}"
     assert segment[0]["userId"] == expected_actor
@@ -125,8 +128,11 @@ async def test_public_success_reaches_both_sinks_once() -> None:
     assert "private query text" not in str(segment[0])
     assert datadog[0]["attributes"]["tool"]["name"] == "query_public_tool"
     assert datadog[0]["attributes"]["usage_dimensions"] == {
+        "admission_outcome": "disabled",
+        "cost_class": "heavy",
         "include_files": True,
         "max_items_bucket": "26-50",
+        "queue_ms_bucket": "0",
     }
     assert "params" not in datadog[0]["attributes"]
 

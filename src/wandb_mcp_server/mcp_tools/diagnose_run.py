@@ -5,6 +5,7 @@ import math
 from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.config import MCP_MAX_HISTORY_KEYS, MCP_MAX_HISTORY_SAMPLES
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -42,7 +43,7 @@ JSON with diagnosis (converged/diverging/plateaued/insufficient_data),
 overfit_signal, nan_warnings, tail_stats, and recommendations.
 """
 
-DIAGNOSIS_SAMPLES = 500
+DIAGNOSIS_SAMPLES = min(500, MCP_MAX_HISTORY_SAMPLES)
 
 
 def _auto_detect_key(keys: List[str], patterns: List[str]) -> Optional[str]:
@@ -125,8 +126,39 @@ def diagnose_run(
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "run_not_found", "message": str(e)[:500]})
 
+        summary = dict(run.summary) if getattr(run, "summary", None) else {}
+        summary_keys = sorted(
+            key for key, value in summary.items() if not key.startswith("_") and isinstance(value, (int, float))
+        )[:MCP_MAX_HISTORY_KEYS]
+
+        if loss_key is None:
+            loss_key = _auto_detect_key(summary_keys, ["train_loss", "train/loss", "loss"])
+        if val_loss_key is None:
+            val_loss_key = _auto_detect_key(
+                summary_keys, ["val_loss", "val/loss", "eval_loss", "eval/loss", "validation_loss"]
+            )
+
+        requested_keys = list(dict.fromkeys([key for key in (loss_key, val_loss_key, *summary_keys) if key]))[
+            :MCP_MAX_HISTORY_KEYS
+        ]
+        if not requested_keys:
+            return json.dumps(
+                {
+                    "diagnosis": "no_loss_key",
+                    "message": "No bounded numeric metric set was available; provide loss_key and val_loss_key.",
+                    "run_id": run_id,
+                    "run_name": getattr(run, "name", run_id),
+                }
+            )
+
         try:
-            history_rows = list(run.scan_history(page_size=DIAGNOSIS_SAMPLES))[:DIAGNOSIS_SAMPLES]
+            history_rows = list(
+                run.history(
+                    samples=DIAGNOSIS_SAMPLES,
+                    keys=requested_keys,
+                    pandas=False,
+                )
+            )
         except Exception as e:
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "history_fetch_failed", "message": str(e)[:500]})
@@ -141,17 +173,9 @@ def diagnose_run(
                 }
             )
 
-        all_keys = set()
-        for row in history_rows[:10]:
-            all_keys.update(k for k in row.keys() if not k.startswith("_"))
-        all_keys = sorted(all_keys)
-
-        if loss_key is None:
-            loss_key = _auto_detect_key(all_keys, ["train_loss", "train/loss", "loss"])
-        if val_loss_key is None:
-            val_loss_key = _auto_detect_key(
-                all_keys, ["val_loss", "val/loss", "eval_loss", "eval/loss", "validation_loss"]
-            )
+        all_keys = sorted(
+            {key for row in history_rows[:10] for key in row if not key.startswith("_") and key in requested_keys}
+        )
 
         # NaN detection
         nan_warnings = {}

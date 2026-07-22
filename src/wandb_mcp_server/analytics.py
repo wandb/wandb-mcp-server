@@ -54,6 +54,8 @@ _USAGE_ENUM_VALUES: Dict[str, frozenset[str]] = {
     "source": frozenset({"project", "registry"}),
     "kind": frozenset({"slack", "webhook"}),
     "mode": frozenset({"sampled", "scan", "full"}),
+    "cost_class": frozenset({"light", "expensive", "heavy"}),
+    "admission_outcome": frozenset({"disabled", "admitted", "rejected"}),
 }
 
 _USAGE_COUNTABLE_NUMBER_KEYS = frozenset(
@@ -71,6 +73,7 @@ _USAGE_COUNTABLE_NUMBER_KEYS = frozenset(
         "top_n_values",
         "max_file_diff_entries",
         "request_timeout",
+        "queue_ms",
     }
 )
 

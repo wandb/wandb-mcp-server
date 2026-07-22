@@ -191,11 +191,48 @@ def test_runs_pass_sdk_filters_order_and_bound_collection(fake_api):
         "order": "-summary_metrics.accuracy",
         "per_page": 3,
         "include_sweeps": True,
-        "lazy": False,
+        "lazy": True,
     }
     assert result["count"] == 2
     assert result["truncated"] is True
     assert [item["id"] for item in result["items"]] == ["run-1", "run-2"]
+    assert all("summary" not in item for item in result["items"])
+
+
+def test_run_collection_can_select_summary_keys_without_full_summary(fake_api):
+    run = _run("run-1")
+    run.summary = {"accuracy": 0.9, "loss": 0.2, **{f"metric_{index}": index for index in range(24_000)}}
+    fake_api.runs = lambda path, **kwargs: iter([run])
+
+    result = sdk_query.query_wandb(
+        "entity",
+        "project",
+        "runs",
+        limit=1,
+        summary_keys=["accuracy", "loss"],
+    )
+
+    assert result["items"][0]["summary"] == {"accuracy": 0.9, "loss": 0.2}
+
+
+def test_hosted_full_collection_summary_is_rejected_before_api(monkeypatch):
+    monkeypatch.setattr(sdk_query, "MCP_HOSTED_MODE", True)
+    monkeypatch.setattr(
+        sdk_query.WandBApiManager,
+        "get_api",
+        lambda: pytest.fail("API must not be created for an unbounded hosted request"),
+    )
+
+    result = sdk_query.query_wandb(
+        "entity",
+        "project",
+        "runs",
+        limit=50,
+        include=["summary"],
+    )
+
+    assert result["error"] == "invalid_request"
+    assert "limit<=3" in result["message"]
 
 
 def test_collection_limit_is_clamped_to_deployment_ceiling(fake_api, monkeypatch):

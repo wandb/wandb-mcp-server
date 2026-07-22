@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Literal, Optional
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.config import (
     MAX_RESPONSE_TOKENS,
+    MCP_HOSTED_MODE,
     MCP_MAX_WANDB_QUERY_ITEMS,
     MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE,
     structured_error,
@@ -64,9 +65,13 @@ order : str, optional
 limit : int, optional
     Maximum collection items to return. Default: 50; deployment limits apply.
 include : list[str], optional
-    Additional resource details. run/runs accept config, system_metrics, and sweep;
-    sweep/sweeps accept config; reports accepts spec. Run summary metrics are always
-    returned without needing an include value.
+    Additional resource details. run/runs accept summary, config, system_metrics,
+    and sweep; sweep/sweeps accept config; reports accepts spec. Individual runs
+    include summary metrics by default; run collections return metadata by default.
+summary_keys : list[str], optional
+    Specific summary metrics to include for run/runs. Supplying keys implies
+    include=["summary"] and avoids loading unrelated metrics. Hosted collections
+    require targeted keys or a limit of at most 3 for full summaries.
 
 Returns
 -------
@@ -81,13 +86,15 @@ query_wandb_graphql_tool with WANDB_MCP_ENABLE_RAW_GRAPHQL=true.
 
 _INCLUDE_FIELDS = {
     "project": frozenset(),
-    "run": frozenset({"config", "system_metrics", "sweep"}),
-    "runs": frozenset({"config", "system_metrics", "sweep"}),
+    "run": frozenset({"summary", "config", "system_metrics", "sweep"}),
+    "runs": frozenset({"summary", "config", "system_metrics", "sweep"}),
     "sweep": frozenset({"config"}),
     "sweeps": frozenset({"config"}),
     "reports": frozenset({"spec"}),
 }
-_OPTIONAL_RESPONSE_FIELDS = ("system_metrics", "config", "spec", "sweep")
+_OPTIONAL_RESPONSE_FIELDS = ("system_metrics", "config", "spec", "sweep", "summary")
+_HOSTED_FULL_DETAIL_LIMIT = 3
+_MAX_SUMMARY_KEYS = 100
 
 
 class WandBQueryValidationError(ValueError):
@@ -148,7 +155,30 @@ def _serialize_sweep(sweep: Any, include: frozenset[str]) -> Dict[str, Any]:
     return result
 
 
-def _serialize_run(run: Any, include: frozenset[str]) -> Dict[str, Any]:
+def _serialize_summary(run: Any, summary_keys: Optional[List[str]]) -> Dict[str, Any]:
+    summary = getattr(run, "summary", None)
+    if not summary:
+        return {}
+    if summary_keys is None:
+        return _json_safe(summary)
+    selected: Dict[str, Any] = {}
+    for key in summary_keys:
+        try:
+            value = summary.get(key)
+        except (AttributeError, TypeError):
+            value = None
+        if value is not None:
+            selected[key] = _json_safe(value)
+    return selected
+
+
+def _serialize_run(
+    run: Any,
+    include: frozenset[str],
+    *,
+    summary_keys: Optional[List[str]],
+    include_summary: bool,
+) -> Dict[str, Any]:
     result = {
         "id": _json_safe(getattr(run, "id", None)),
         "display_name": _json_safe(getattr(run, "name", None)),
@@ -163,8 +193,9 @@ def _serialize_run(run: Any, include: frozenset[str]) -> Dict[str, Any]:
         "job_type": _json_safe(getattr(run, "job_type", None)),
         "tags": _json_safe(getattr(run, "tags", [])),
         "user": _serialize_user(getattr(run, "user", None)),
-        "summary": _json_safe(getattr(run, "summary", {})),
     }
+    if include_summary:
+        result["summary"] = _serialize_summary(run, summary_keys)
     if "config" in include:
         result["config"] = _json_safe(getattr(run, "config", {}))
     if "system_metrics" in include:
@@ -258,6 +289,7 @@ def _validate_request(
     order: str,
     limit: int,
     include: Optional[List[str]],
+    summary_keys: Optional[List[str]],
 ) -> frozenset[str]:
     if not isinstance(entity_name, str) or not entity_name.strip():
         raise WandBQueryValidationError("entity_name must be a non-empty string")
@@ -285,14 +317,32 @@ def _validate_request(
         raise WandBQueryValidationError("report_name is supported only for resource='reports'")
     if include is not None and (not isinstance(include, list) or not all(isinstance(item, str) for item in include)):
         raise WandBQueryValidationError("include must be a list of strings")
+    if summary_keys is not None and (
+        not isinstance(summary_keys, list)
+        or not summary_keys
+        or len(summary_keys) > _MAX_SUMMARY_KEYS
+        or not all(isinstance(item, str) and item.strip() for item in summary_keys)
+    ):
+        raise WandBQueryValidationError(f"summary_keys must contain 1-{_MAX_SUMMARY_KEYS} non-empty strings")
+    if summary_keys is not None and resource not in {"run", "runs"}:
+        raise WandBQueryValidationError("summary_keys are supported only for resource='run' or resource='runs'")
 
     requested = frozenset(include or [])
+    if summary_keys is not None:
+        requested = requested | {"summary"}
     unsupported = requested - _INCLUDE_FIELDS[resource]
     if unsupported:
         allowed = sorted(_INCLUDE_FIELDS[resource])
         raise WandBQueryValidationError(
             f"unsupported include value(s) for resource={resource!r}: {sorted(unsupported)}; allowed: {allowed}"
         )
+    if MCP_HOSTED_MODE and resource in {"runs", "sweeps", "reports"} and limit > _HOSTED_FULL_DETAIL_LIMIT:
+        untargeted_summary = "summary" in requested and summary_keys is None
+        unbounded_details = requested & {"config", "system_metrics", "spec"}
+        if untargeted_summary or unbounded_details:
+            raise WandBQueryValidationError(
+                "hosted collection details require limit<=3; use summary_keys for targeted run metrics"
+            )
     return requested
 
 
@@ -349,6 +399,7 @@ def query_wandb(
     order: str = "-created_at",
     limit: int = 50,
     include: Optional[List[str]] = None,
+    summary_keys: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Execute a structured read using only public W&B SDK operations."""
     try:
@@ -363,6 +414,7 @@ def query_wandb(
             order,
             limit,
             include,
+            summary_keys,
         )
     except WandBQueryValidationError as exc:
         return structured_error("invalid_request", str(exc), source="wandb_sdk", resource=resource)
@@ -375,7 +427,7 @@ def query_wandb(
 
     with track_tool_execution(
         "query_wandb",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,
@@ -391,7 +443,17 @@ def query_wandb(
 
             if resource == "run":
                 run = api.run(f"{path}/{run_id}")
-                return _single_envelope(resource, entity_name, project_name, _serialize_run(run, include_fields))
+                return _single_envelope(
+                    resource,
+                    entity_name,
+                    project_name,
+                    _serialize_run(
+                        run,
+                        include_fields,
+                        summary_keys=summary_keys,
+                        include_summary=True,
+                    ),
+                )
 
             if resource == "runs":
                 runs = api.runs(
@@ -400,11 +462,19 @@ def query_wandb(
                     order=order,
                     per_page=per_page,
                     include_sweeps="sweep" in include_fields,
-                    lazy=False,
+                    lazy=True,
                 )
                 page = list(islice(runs, applied_limit + 1))
                 has_more = len(page) > applied_limit or requested_limit > applied_limit
-                items = [_serialize_run(run, include_fields) for run in page[:applied_limit]]
+                items = [
+                    _serialize_run(
+                        run,
+                        include_fields,
+                        summary_keys=summary_keys,
+                        include_summary="summary" in include_fields,
+                    )
+                    for run in page[:applied_limit]
+                ]
                 return _collection_envelope(resource, entity_name, project_name, items, applied_limit, has_more)
 
             if resource == "sweep":
