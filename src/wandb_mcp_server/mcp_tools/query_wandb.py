@@ -437,7 +437,6 @@ def query_wandb(
     except WandBQueryValidationError as exc:
         return structured_error("invalid_request", str(exc), source="wandb_sdk", resource=resource)
 
-    api = WandBApiManager.get_api()
     requested_limit = limit
     applied_limit = min(limit, MCP_MAX_WANDB_QUERY_ITEMS)
     per_page = min(applied_limit + 1, MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE)
@@ -455,6 +454,7 @@ def query_wandb(
         mcp_tool_name="query_wandb_tool",
     ) as ctx:
         try:
+            api = WandBApiManager.get_api()
             if resource == "project":
                 project = api.project(project_name, entity=entity_name)
                 return _single_envelope(resource, entity_name, project_name, _serialize_project(project))

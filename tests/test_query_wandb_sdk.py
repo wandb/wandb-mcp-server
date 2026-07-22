@@ -371,6 +371,23 @@ def test_malformed_collection_filter_returns_sdk_query_error(fake_api):
     assert result["message"] == "invalid filters"
 
 
+def test_sdk_client_initialization_failure_returns_structured_error(monkeypatch):
+    def fail_initialization():
+        raise RuntimeError("temporary initialization failure")
+
+    monkeypatch.setattr(
+        sdk_query.WandBApiManager,
+        "get_api",
+        fail_initialization,
+    )
+    monkeypatch.setattr(sdk_query, "track_tool_execution", _tracking)
+
+    result = sdk_query.query_wandb("entity", "project", "project")
+
+    assert result["error"] == "sdk_query_failed"
+    assert result["message"] == "temporary initialization failure"
+
+
 def test_supported_sdk_exposes_every_public_query_operation():
     for method_name in ("project", "run", "runs", "sweep", "reports"):
         assert callable(getattr(Api, method_name))
