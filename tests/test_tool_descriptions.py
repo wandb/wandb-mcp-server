@@ -4,7 +4,8 @@ import pytest
 
 from wandb_mcp_server.mcp_tools.query_weave import QUERY_WEAVE_TRACES_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.count_traces import COUNT_WEAVE_TRACES_TOOL_DESCRIPTION
-from wandb_mcp_server.mcp_tools.query_wandb_gql import QUERY_WANDB_GQL_TOOL_DESCRIPTION
+from wandb_mcp_server.mcp_tools.query_wandb import QUERY_WANDB_TOOL_DESCRIPTION
+from wandb_mcp_server.mcp_tools.query_wandb_gql import QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.create_report import CREATE_WANDB_REPORT_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.list_wandb_entities_projects import LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.query_wandbot import WANDBOT_TOOL_DESCRIPTION
@@ -35,7 +36,8 @@ from wandb_mcp_server.mcp_tools.agents import (
 ALL_DESCRIPTIONS = {
     "query_weave_traces": QUERY_WEAVE_TRACES_TOOL_DESCRIPTION,
     "count_weave_traces": COUNT_WEAVE_TRACES_TOOL_DESCRIPTION,
-    "query_wandb_gql": QUERY_WANDB_GQL_TOOL_DESCRIPTION,
+    "query_wandb": QUERY_WANDB_TOOL_DESCRIPTION,
+    "query_wandb_graphql": QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION,
     "create_wandb_report": CREATE_WANDB_REPORT_TOOL_DESCRIPTION,
     "list_entity_projects": LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION,
     "query_wandb_support_bot": WANDBOT_TOOL_DESCRIPTION,
@@ -111,19 +113,19 @@ class TestQueryWandbSdkRouting:
             "list_wandb_integrations_tool",
         ],
     )
-    def test_recommends_existing_sdk_backed_tools(self, tool_name):
-        assert tool_name in QUERY_WANDB_GQL_TOOL_DESCRIPTION
-
-    @pytest.mark.parametrize(
-        "removed_example",
-        ["GetRunHistoryKeys", "GetRunHistorySampled", "GetArtifactDetails", "GetViewerInfo"],
-    )
-    def test_redundant_graphql_examples_are_removed(self, removed_example):
-        assert f"name={removed_example}" not in QUERY_WANDB_GQL_TOOL_DESCRIPTION
+    def test_sdk_query_description_routes_dedicated_resources(self, tool_name):
+        assert tool_name in QUERY_WANDB_TOOL_DESCRIPTION
 
     def test_documents_remaining_raw_graphql_use_cases(self):
-        for use_case in ("filtering", "sorting", "custom project fields", "sweeps", "reports", "introspection"):
-            assert use_case in QUERY_WANDB_GQL_TOOL_DESCRIPTION
+        for use_case in ("introspection", "unmodeled", "cross-resource", "aliases", "exact GraphQL response shape"):
+            assert use_case in QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION
+
+    @pytest.mark.parametrize(
+        "sdk_resource",
+        ["projects", "run lookup", "sweeps", "reports", "artifacts", "registries", "automations", "integrations"],
+    )
+    def test_raw_graphql_description_rejects_sdk_parity_use_cases(self, sdk_resource):
+        assert sdk_resource in QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION
 
 
 class TestPanelsInCreateReport:

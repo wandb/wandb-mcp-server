@@ -72,8 +72,8 @@ def _drop_none(body: Dict[str, Any]) -> Dict[str, Any]:
 def _best_effort_viewer() -> Any:
     """Fetch the W&B viewer for analytics attribution; never fail the tool over it.
 
-    The viewer lookup is a separate GraphQL call that can fail (auth quirks,
-    network) independently of the data request, so a failure must not break the
+    The SDK viewer lookup can fail (auth quirks, network) independently of the
+    data request, so a failure must not break the
     tool -- analytics identity is best-effort.
     """
     try:
