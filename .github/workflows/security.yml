@@ -33,6 +33,17 @@ jobs:
           severity-cutoff: high
           only-fixed: true
           output-format: table
+          output-file: grype-report.txt
+          grype-version: "0.112.0"
+
+      - name: Upload dependency scan report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: grype-dependency-report
+          path: grype-report.txt
+          if-no-files-found: error
+          retention-days: 30
 
   source-scan:
     name: Python source security
