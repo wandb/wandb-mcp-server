@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -236,6 +237,18 @@ async def test_public_mcp_schema_dispatches_targeted_summary_keys(fake_api, monk
     )
 
     assert fake_api.calls[0][0:2] == ("runs", "entity/project")
+
+
+@pytest.mark.asyncio
+async def test_public_query_tools_run_sync_sdk_work_off_event_loop(fake_api, monkeypatch):
+    monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
+    monkeypatch.setattr("wandb_mcp_server.config.WANDB_MCP_ENABLE_RAW_GRAPHQL", True)
+    server = create_mcp_server("stdio")
+
+    for name in ("query_wandb_tool", "query_wandb_graphql_tool"):
+        registered = server._tool_manager.get_tool(name).fn
+        assert inspect.iscoroutinefunction(registered)
+        assert not inspect.iscoroutinefunction(inspect.unwrap(registered))
 
 
 @pytest.mark.asyncio

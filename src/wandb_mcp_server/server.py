@@ -797,7 +797,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         )
 
     @mcp_instance.tool(description=QUERY_WANDB_TOOL_DESCRIPTION)
-    async def query_wandb_tool(
+    def query_wandb_tool(
         entity_name: str,
         project_name: str,
         resource: Literal["project", "run", "runs", "sweep", "sweeps", "reports"],
@@ -831,7 +831,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         )
 
         @mcp_instance.tool(description=QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION)
-        async def query_wandb_graphql_tool(
+        def query_wandb_graphql_tool(
             query: str,
             variables: Optional[Dict[str, Any]] = None,
             max_items: int = 100,
