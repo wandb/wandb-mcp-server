@@ -543,9 +543,10 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_MCP_ENABLE_WEAVE_TOOLS` | Enable Weave trace tools (default: `true`; set `false` for installs without a trace backend) | No |
 | `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS` | Enable Weave Agents (OTel/GenAI) tools (default: `false`) | No |
 | `WANDB_MCP_READ_ONLY` | Omit report creation and analysis logging write tools (default: `false`) | No |
-| `MCP_HOSTED_MODE` | Enable stricter collection/history limits intended for shared HTTP deployments (default: `false`) | No |
-| `MCP_ADMISSION_CONTROL_ENABLED` | Enable actor-aware weighted tool admission (defaults to the value of `MCP_HOSTED_MODE`) | No |
-| `MCP_ADMISSION_ACTOR_CAPACITY` | Maximum concurrent cost units per API-key actor (default: `4`) | No |
+| `MCP_HOSTED_MODE` | Marks an HTTP deployment as hosted; defaults the workload profile to `shared` | No |
+| `MCP_WORKLOAD_PROFILE` | Bounded defaults for `shared`, `dedicated`, or `local` workloads (default: `shared` when hosted, otherwise `local`) | No |
+| `MCP_ADMISSION_CONTROL_ENABLED` | Enable actor-aware weighted tool admission (default: enabled except for the `local` profile) | No |
+| `MCP_ADMISSION_ACTOR_CAPACITY` | Maximum concurrent cost units per API-key actor (profile default: shared `4`, dedicated `8`, local `16`) | No |
 | `MCP_ADMISSION_PROCESS_CAPACITY` | Maximum concurrent cost units per server process (default: `16`) | No |
 | `MCP_ADMISSION_WAIT_MS` | Maximum queue wait before returning retryable `server_busy` (default: `2000`) | No |
 | `MCP_TOOL_TIMEOUT_SECONDS` | Hosted public-tool execution deadline (default: `30`) | No |

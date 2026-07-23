@@ -4,7 +4,7 @@ import json
 import sys
 from unittest.mock import patch
 
-
+import pytest
 from wandb_mcp_server.config import MAX_ACCUMULATED_BYTES
 
 
@@ -123,4 +123,54 @@ class TestHostedLimitConfig:
         with patch.dict(os.environ, {"MCP_HOSTED_MODE": "true", "MCP_MAX_QUERY_LIMIT": "42"}, clear=False):
             importlib.reload(cfg)
             assert cfg.MCP_MAX_QUERY_LIMIT == 42
+        importlib.reload(cfg)
+
+    def test_dedicated_profile_uses_larger_bounded_defaults(self):
+        import importlib
+        import os
+        import wandb_mcp_server.config as cfg
+
+        with patch.dict(
+            os.environ,
+            {"MCP_HOSTED_MODE": "true", "MCP_WORKLOAD_PROFILE": "dedicated"},
+            clear=False,
+        ):
+            importlib.reload(cfg)
+            assert cfg.MCP_MAX_WANDB_QUERY_ITEMS == 250
+            assert cfg.MCP_MAX_FULL_DETAIL_ITEMS == 10
+            assert cfg.MCP_MAX_HISTORY_SAMPLES == 1_500
+            assert cfg.MCP_MAX_HISTORY_KEYS == 50
+            assert cfg.MCP_ADMISSION_ACTOR_CAPACITY == 8
+            assert cfg.MCP_ADMISSION_PROCESS_CAPACITY == 16
+        importlib.reload(cfg)
+
+    def test_local_profile_disables_admission_by_default(self):
+        import importlib
+        import os
+        import wandb_mcp_server.config as cfg
+
+        with patch.dict(
+            os.environ,
+            {
+                "MCP_HOSTED_MODE": "false",
+                "MCP_WORKLOAD_PROFILE": "local",
+                "MCP_ADMISSION_CONTROL_ENABLED": "",
+            },
+            clear=False,
+        ):
+            os.environ.pop("MCP_ADMISSION_CONTROL_ENABLED")
+            importlib.reload(cfg)
+            assert cfg.MCP_MAX_WANDB_QUERY_ITEMS == 1_000
+            assert cfg.MCP_MAX_HISTORY_SAMPLES == 5_000
+            assert cfg.MCP_ADMISSION_CONTROL_ENABLED is False
+        importlib.reload(cfg)
+
+    def test_invalid_profile_is_rejected(self):
+        import importlib
+        import os
+        import wandb_mcp_server.config as cfg
+
+        with patch.dict(os.environ, {"MCP_WORKLOAD_PROFILE": "unbounded"}, clear=False):
+            with pytest.raises(ValueError, match="MCP_WORKLOAD_PROFILE"):
+                importlib.reload(cfg)
         importlib.reload(cfg)

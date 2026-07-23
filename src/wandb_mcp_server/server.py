@@ -809,6 +809,8 @@ def register_tools(mcp_instance: FastMCP) -> None:
         limit: int = 50,
         include: Optional[List[str]] = None,
         summary_keys: Optional[List[str]] = None,
+        config_keys: Optional[List[str]] = None,
+        response_mode: Literal["items", "count"] = "items",
     ) -> Dict[str, Any]:
         return query_wandb(
             entity_name=entity_name,
@@ -822,6 +824,8 @@ def register_tools(mcp_instance: FastMCP) -> None:
             limit=limit,
             include=include,
             summary_keys=summary_keys,
+            config_keys=config_keys,
+            response_mode=response_mode,
         )
 
     if WANDB_MCP_ENABLE_RAW_GRAPHQL:
@@ -1165,13 +1169,17 @@ def register_tools(mcp_instance: FastMCP) -> None:
     def probe_project_tool(
         entity_name: str,
         project_name: str,
-        sample_runs: int = 5,
+        sample_runs: int = 6,
+        field_pattern: Optional[str] = None,
+        include_artifacts: bool = False,
     ) -> str:
         """Probe a W&B project to discover its structure."""
         return probe_project(
             entity_name=entity_name,
             project_name=project_name,
             sample_runs=sample_runs,
+            field_pattern=field_pattern,
+            include_artifacts=include_artifacts,
         )
 
     # ----- Weave Agents (OTel/GenAI) tools -----

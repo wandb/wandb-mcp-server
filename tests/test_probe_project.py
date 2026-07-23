@@ -1,181 +1,249 @@
-"""Tests for the probe_project tool."""
+"""Tests for bounded project probing."""
 
+from contextlib import contextmanager
 import json
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 
+import pytest
 
-from wandb_mcp_server.mcp_tools.probe_project import (
-    _safe_sample_value,
-    probe_project,
+from wandb_mcp_server.mcp_tools import probe_project as probe_module
+from wandb_mcp_server.wandb_selective_reads import (
+    ProjectFieldPage,
+    ProjectedRunPage,
+    SelectiveReadUnavailable,
 )
 
 
-class TestSafeSampleValue:
-    def test_short_string(self):
-        assert _safe_sample_value("hello") == "hello"
-
-    def test_long_string_truncated(self):
-        long = "x" * 200
-        result = _safe_sample_value(long)
-        assert result.endswith("...")
-        assert len(result) == 103
-
-    def test_int_passthrough(self):
-        assert _safe_sample_value(42) == 42
-
-    def test_list_representation(self):
-        result = _safe_sample_value([1, 2, 3])
-        assert "list" in result
-        assert "len=3" in result
-
-    def test_dict_representation(self):
-        result = _safe_sample_value({"a": 1, "b": 2})
-        assert "dict" in result
-        assert "keys=2" in result
+@contextmanager
+def _tracking(*args, **kwargs):
+    yield SimpleNamespace(mark_error=lambda error: None)
 
 
-class TestProbeProject:
-    def _make_mock_run(
-        self, *, config=None, summary=None, state="finished", tags=None, group=None, lastHistoryStep=100
-    ):
-        run = MagicMock()
-        run.config = config or {}
-        run.summary = summary or {}
-        run.state = state
-        run.tags = tags or []
-        run.group = group
-        run.lastHistoryStep = lastHistoryStep
-        return run
+@pytest.fixture
+def probe_fakes(monkeypatch):
+    api = SimpleNamespace(runs=lambda *args, **kwargs: pytest.fail("SDK fallback must not run"))
+    monkeypatch.setattr(probe_module.WandBApiManager, "get_api", lambda: api)
+    monkeypatch.setattr(probe_module, "track_tool_execution", _tracking)
+    monkeypatch.setattr(
+        probe_module,
+        "fetch_project_counts",
+        lambda *args, **kwargs: {
+            "all": 12_345,
+            "finished": 12_000,
+            "failed": 100,
+            "crashed": 45,
+            "running": 200,
+        },
+    )
+    monkeypatch.setattr(
+        probe_module,
+        "fetch_project_fields",
+        lambda *args, **kwargs: ProjectFieldPage(
+            items=[
+                {"path": "config.learning_rate", "type": "number"},
+                {"path": "config.model.name", "type": "string"},
+                {"path": "summary_metrics.validation/loss", "type": "number"},
+                {"path": "summaryMetrics.accuracy", "type": "number"},
+                {"path": "summary._runtime", "type": "number"},
+            ],
+            has_more=False,
+            requests=1,
+        ),
+    )
 
-    @patch("wandb_mcp_server.mcp_tools.probe_project.WandBApiManager")
-    def test_key_extraction(self, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-
-        run1 = self._make_mock_run(
-            config={"lr": 0.01, "model": "bert"},
-            summary={"loss": 0.5, "accuracy": 0.9},
+    def projected(*args, order, limit, **kwargs):
+        suffix = "new" if order.startswith("-") else "old"
+        return ProjectedRunPage(
+            items=[
+                {
+                    "id": f"{suffix}-{index}",
+                    "state": "finished",
+                    "group": "baseline",
+                    "tags": ["production"],
+                    "history_line_count": 100,
+                }
+                for index in range(limit)
+            ],
+            total_count=12_345,
+            has_more=True,
+            requests=1,
         )
-        run2 = self._make_mock_run(
-            config={"lr": 0.001, "batch_size": 32},
-            summary={"loss": 0.3, "f1": 0.85},
+
+    monkeypatch.setattr(probe_module, "fetch_projected_runs", projected)
+    return api
+
+
+def test_probe_uses_exact_counts_indexed_fields_and_recent_oldest_samples(probe_fakes):
+    result = json.loads(probe_module.probe_project("entity", "project", sample_runs=6))
+
+    assert result["run_count"] == 12_345
+    assert result["state_counts"] == {
+        "finished": 12_000,
+        "failed": 100,
+        "crashed": 45,
+        "running": 200,
+    }
+    assert result["sampled_runs"] == 6
+    assert {row["id"].split("-", 1)[0] for row in result["run_samples"]} == {"new", "old"}
+    assert result["summary_fields"] == [
+        {"path": "validation/loss", "type": "number"},
+        {"path": "accuracy", "type": "number"},
+    ]
+    assert result["config_fields"] == [
+        {"path": "learning_rate", "type": "number"},
+        {"path": "model.name", "type": "string"},
+    ]
+    assert result["sample_scope"]["project_exhaustive"] is False
+    assert result["field_inventory"]["project_exhaustive"] is True
+    assert result["has_history_in_sample"] is True
+    assert result["recommended_next_calls"][0]["tool"] == "query_wandb_tool"
+
+
+def test_probe_forwards_field_pattern_and_caps_inventory(monkeypatch, probe_fakes):
+    captured = {}
+
+    def fields(*args, **kwargs):
+        captured.update(kwargs)
+        return ProjectFieldPage(
+            items=[{"path": f"summary_metrics.metric_{index}", "type": "number"} for index in range(500)],
+            has_more=True,
+            requests=3,
         )
 
-        mock_api_mgr.get_api.return_value.runs.return_value = iter([run1, run2])
+    monkeypatch.setattr(probe_module, "fetch_project_fields", fields)
+    monkeypatch.setattr(probe_module, "MCP_MAX_PROJECT_FIELDS", 500)
 
-        result = json.loads(probe_project("ent", "proj"))
+    result = json.loads(probe_module.probe_project("entity", "project", field_pattern="validation"))
 
-        assert "lr" in result["config_keys"]
-        assert "model" in result["config_keys"]
-        assert "batch_size" not in result["config_keys"]
-        assert "loss" in result["metric_keys"]
-        assert "accuracy" in result["metric_keys"]
-        assert "f1" not in result["metric_keys"]
-        assert result["run_count"] is None
-        assert result["sampled_runs"] == 1
-        mock_api_mgr.get_api.return_value.runs.assert_called_once_with("ent/proj", per_page=1, lazy=True)
+    assert captured["pattern"] == "validation"
+    assert captured["limit"] == 500
+    assert result["summary_field_count_returned"] == 500
+    assert len(result["summary_fields"]) == 200
+    assert result["field_inventory"]["has_more"] is True
+    assert result["field_inventory"]["response_truncated"] is True
 
-    @patch("wandb_mcp_server.mcp_tools.probe_project.WandBApiManager")
-    def test_empty_project(self, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-        mock_api_mgr.get_api.return_value.runs.return_value = iter([])
 
-        result = json.loads(probe_project("ent", "empty-proj"))
+def test_probe_caps_requested_run_samples(monkeypatch, probe_fakes):
+    monkeypatch.setattr(probe_module, "MCP_MAX_PROBE_RUNS", 4)
 
-        assert result["run_count"] is None
-        assert result["metric_keys"] == {}
-        assert result["config_keys"] == {}
-        assert result["has_history"] is False
-        assert any("Small project" in r for r in result["recommendations"])
+    result = json.loads(probe_module.probe_project("entity", "project", sample_runs=100))
 
-    @patch("wandb_mcp_server.mcp_tools.probe_project.WandBApiManager")
-    def test_large_project_is_not_scanned_or_counted(self, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
+    assert result["sampled_runs"] == 4
+    assert result["sample_scope"] == {
+        "strategy": "recent_and_oldest",
+        "requested": 100,
+        "effective": 4,
+        "cap_applied": True,
+        "project_exhaustive": False,
+    }
 
-        runs = [
-            self._make_mock_run(
-                config={"lr": 0.01},
-                summary={"loss": 0.5},
-            )
-            for _ in range(150)
-        ]
-        mock_api_mgr.get_api.return_value.runs.return_value = iter(runs)
 
-        result = json.loads(probe_project("ent", "big-proj", sample_runs=5))
+def test_probe_optional_artifact_inventory(monkeypatch, probe_fakes):
+    monkeypatch.setattr(
+        probe_module,
+        "fetch_artifact_inventory",
+        lambda *args, **kwargs: {
+            "types": [{"type": "model", "collection_count": 3}],
+            "returned_count": 1,
+            "has_more": False,
+        },
+    )
 
-        assert result["run_count"] is None
-        assert result["sampled_runs"] == 1
-        assert not any("Large project" in r for r in result["recommendations"])
+    result = json.loads(probe_module.probe_project("entity", "project", include_artifacts=True))
 
-    @patch("wandb_mcp_server.mcp_tools.probe_project.WandBApiManager")
-    def test_tag_and_group_collection(self, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
+    assert result["artifact_inventory"]["types"][0]["type"] == "model"
 
-        run1 = self._make_mock_run(tags=["baseline", "v1"], group="experiment-1")
-        run2 = self._make_mock_run(tags=["tuned", "v1"], group="experiment-2")
 
-        mock_api_mgr.get_api.return_value.runs.return_value = iter([run1, run2])
+def test_probe_uses_bounded_non_lazy_sdk_fallback(monkeypatch):
+    calls = []
 
-        result = json.loads(probe_project("ent", "proj"))
+    class FakeRuns:
+        def __init__(self, rows, total):
+            self.rows = rows
+            self.total = total
 
-        assert "baseline" in result["tags"]
-        assert "tuned" not in result["tags"]
-        assert "v1" in result["tags"]
-        assert "experiment-1" in result["groups"]
-        assert "experiment-2" not in result["groups"]
-        assert any("Tags in use" in r for r in result["recommendations"])
-        assert any("Run groups found" in r for r in result["recommendations"])
+        def __iter__(self):
+            return iter(self.rows)
 
-    @patch("wandb_mcp_server.mcp_tools.probe_project.WandBApiManager")
-    def test_filters_internal_keys(self, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
+        def __len__(self):
+            return self.total
 
-        run = self._make_mock_run(
-            config={"lr": 0.01, "_wandb": {}, "wandb_version": "0.1"},
-            summary={"loss": 0.5, "_runtime": 100, "wandb/cpu": 0.8},
-        )
-        mock_api_mgr.get_api.return_value.runs.return_value = iter([run])
+    run = SimpleNamespace(
+        id="run-1",
+        name="Run 1",
+        state="finished",
+        entity="entity",
+        project="project",
+        created_at="2026-01-01",
+        group="group",
+        job_type="train",
+        tags=["tag"],
+        lastHistoryStep=100,
+        url="https://wandb.ai/entity/project/runs/run-1",
+        config={"learning_rate": 0.1},
+        summary={"loss": 0.2},
+    )
 
-        result = json.loads(probe_project("ent", "proj"))
+    def runs(path, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("lazy") is False:
+            return FakeRuns([run], 1)
+        state = (kwargs.get("filters") or {}).get("state")
+        return FakeRuns([], 1 if state == "finished" else 10 if state is None else 0)
 
-        assert "_wandb" not in result["config_keys"]
-        assert "wandb_version" not in result["config_keys"]
-        assert "lr" in result["config_keys"]
-        assert "_runtime" not in result["metric_keys"]
-        assert "wandb/cpu" not in result["metric_keys"]
-        assert "loss" in result["metric_keys"]
+    api = SimpleNamespace(runs=runs)
+    monkeypatch.setattr(probe_module.WandBApiManager, "get_api", lambda: api)
+    monkeypatch.setattr(probe_module, "track_tool_execution", _tracking)
+    monkeypatch.setattr(
+        probe_module,
+        "fetch_project_counts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(SelectiveReadUnavailable("project fields unsupported")),
+    )
 
-    @patch("wandb_mcp_server.mcp_tools.probe_project.WandBApiManager")
-    def test_project_not_found_error(self, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-        mock_api_mgr.get_api.return_value.runs.side_effect = Exception("Project not found")
+    result = json.loads(probe_module.probe_project("entity", "project", sample_runs=2))
 
-        result = json.loads(probe_project("ent", "no-such-proj"))
+    assert result["source"] == "wandb_sdk_fallback"
+    assert result["run_count"] == 10
+    assert result["config_fields"] == [{"path": "learning_rate", "type": "float"}]
+    assert result["summary_fields"] == [{"path": "loss", "type": "float"}]
+    assert "bounded hydrated SDK runs" in result["compatibility_caveat"]
+    assert any(call.get("lazy") is False for call in calls)
 
-        assert result["error"] == "project_not_found"
-        assert "Project not found" in result["message"]
 
-    @patch("wandb_mcp_server.mcp_tools.probe_project.WandBApiManager")
-    def test_typical_steps_calculation(self, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
+def test_probe_returns_structured_error(monkeypatch):
+    monkeypatch.setattr(
+        probe_module.WandBApiManager,
+        "get_api",
+        lambda: (_ for _ in ()).throw(ValueError("project not found")),
+    )
+    monkeypatch.setattr(probe_module, "track_tool_execution", _tracking)
 
-        run1 = self._make_mock_run(lastHistoryStep=1000)
-        run2 = self._make_mock_run(lastHistoryStep=2000)
-        mock_api_mgr.get_api.return_value.runs.return_value = iter([run1, run2])
+    result = json.loads(probe_module.probe_project("entity", "missing"))
 
-        result = json.loads(probe_project("ent", "proj"))
+    assert result == {"error": "project_probe_failed", "message": "project not found"}
 
-        assert result["has_history"] is True
-        assert result["typical_steps"] == 1000
 
-    @patch("wandb_mcp_server.mcp_tools.probe_project.WandBApiManager")
-    def test_run_states_counted(self, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"entity_name": "", "project_name": "project"},
+        {"entity_name": "entity", "project_name": ""},
+        {"entity_name": "entity", "project_name": "project", "sample_runs": 0},
+        {"entity_name": "entity", "project_name": "project", "field_pattern": ""},
+        {"entity_name": "entity", "project_name": "project", "include_artifacts": "yes"},
+    ],
+)
+def test_probe_validates_before_creating_api(monkeypatch, kwargs):
+    monkeypatch.setattr(
+        probe_module.WandBApiManager,
+        "get_api",
+        lambda: pytest.fail("API must not be constructed"),
+    )
 
-        run1 = self._make_mock_run(state="finished")
-        run2 = self._make_mock_run(state="finished")
-        run3 = self._make_mock_run(state="crashed")
-        mock_api_mgr.get_api.return_value.runs.return_value = iter([run1, run2, run3])
+    with pytest.raises(ValueError):
+        probe_module.probe_project(**kwargs)
 
-        result = json.loads(probe_project("ent", "proj"))
 
-        assert result["run_states"] == {"finished": 1}
+def test_safe_sample_value_compatibility_helper():
+    assert probe_module._safe_sample_value("x" * 200).endswith("...")
+    assert probe_module._safe_sample_value([1, 2]) == "[list, len=2]"
