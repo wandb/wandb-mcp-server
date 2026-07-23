@@ -181,6 +181,25 @@ class TestInferTraceSchema:
         assert "id" in field_paths
         assert "op_name" in field_paths
 
+    @patch("wandb_mcp_server.mcp_tools.infer_schema.MCP_MAX_SCHEMA_SAMPLE_ROWS", 3)
+    @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
+    def test_profile_cap_and_non_exhaustive_scope_are_explicit(self, mock_count):
+        mock_count.side_effect = [10, 4]
+        mock_service = self._make_mock_service([{"id": f"t-{index}"} for index in range(3)])
+
+        with patch("wandb_mcp_server.mcp_tools.query_weave.get_trace_service", return_value=mock_service):
+            result = json.loads(infer_trace_schema("e", "p", sample_size=50))
+
+        scope = result["sample_scope"]
+        assert scope["requested_count"] == 50
+        assert scope["applied_limit"] == 3
+        assert scope["returned_count"] == 3
+        assert scope["total_count"] == 10
+        assert scope["has_more"] is True
+        assert scope["project_exhaustive"] is False
+        assert scope["coverage"] == 0.3
+        assert mock_service.query_traces.call_args.kwargs["limit"] == 3
+
 
 class TestInferSchemaToolDescription:
     def test_has_when_to_use(self):

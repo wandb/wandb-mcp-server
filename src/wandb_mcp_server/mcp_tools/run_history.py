@@ -45,9 +45,10 @@ that provides step-by-step metric history -- query_wandb_tool returns run-level
 summary metrics but not the full training history.
 
 Typical workflow:
-1. Use query_wandb_tool to find runs and their summary metrics.
-2. Use get_run_history_tool to drill into a specific run's training curves.
-3. Use create_wandb_report_tool to visualize the results.
+1. For an unfamiliar project, use probe_project_tool to discover indexed keys.
+2. Use query_wandb_tool with summary_keys/config_keys to select runs.
+3. Use get_run_history_tool with explicit keys and x_axis for targeted curves.
+4. Use create_wandb_report_tool to visualize the results.
 </when_to_use>
 
 Parameters

@@ -66,6 +66,7 @@ _PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
         "project_fields": 500,
         "probe_runs": 6,
         "evaluation_rows": 500,
+        "schema_rows": 100,
         "actor_capacity": 4,
         "process_capacity": 16,
     },
@@ -78,6 +79,7 @@ _PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
         "project_fields": 2_000,
         "probe_runs": 12,
         "evaluation_rows": 2_000,
+        "schema_rows": 250,
         "actor_capacity": 8,
         "process_capacity": 16,
     },
@@ -90,6 +92,7 @@ _PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
         "project_fields": 5_000,
         "probe_runs": 24,
         "evaluation_rows": 5_000,
+        "schema_rows": 500,
         "actor_capacity": 16,
         "process_capacity": 16,
     },
@@ -141,6 +144,10 @@ MCP_MAX_PROBE_RUNS: int = _env_int(
 MCP_MAX_EVALUATION_ROWS: int = _env_int(
     "MCP_MAX_EVALUATION_ROWS",
     _profile_defaults["evaluation_rows"],
+)
+MCP_MAX_SCHEMA_SAMPLE_ROWS: int = _env_int(
+    "MCP_MAX_SCHEMA_SAMPLE_ROWS",
+    _profile_defaults["schema_rows"],
 )
 MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE: int = _env_int(
     "MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE",

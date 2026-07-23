@@ -113,6 +113,7 @@ class TestHostedLimitConfig:
             assert cfg.MCP_MAX_QUERY_LIMIT == 100
             assert cfg.MCP_MAX_FULL_TRACE_LIMIT == 25
             assert cfg.MCP_MAX_HISTORY_SAMPLES == 500
+            assert cfg.MCP_MAX_SCHEMA_SAMPLE_ROWS == 100
         importlib.reload(cfg)
 
     def test_hosted_limits_are_configurable(self):
@@ -140,6 +141,7 @@ class TestHostedLimitConfig:
             assert cfg.MCP_MAX_FULL_DETAIL_ITEMS == 10
             assert cfg.MCP_MAX_HISTORY_SAMPLES == 1_500
             assert cfg.MCP_MAX_HISTORY_KEYS == 50
+            assert cfg.MCP_MAX_SCHEMA_SAMPLE_ROWS == 250
             assert cfg.MCP_ADMISSION_ACTOR_CAPACITY == 8
             assert cfg.MCP_ADMISSION_PROCESS_CAPACITY == 16
         importlib.reload(cfg)
@@ -162,6 +164,7 @@ class TestHostedLimitConfig:
             importlib.reload(cfg)
             assert cfg.MCP_MAX_WANDB_QUERY_ITEMS == 1_000
             assert cfg.MCP_MAX_HISTORY_SAMPLES == 5_000
+            assert cfg.MCP_MAX_SCHEMA_SAMPLE_ROWS == 500
             assert cfg.MCP_ADMISSION_CONTROL_ENABLED is False
         importlib.reload(cfg)
 

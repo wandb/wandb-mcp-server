@@ -9,14 +9,15 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
 from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.config import MCP_MAX_WANDB_QUERY_ITEMS
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
 
 DEFAULT_MAX_ITEMS = 50
-MAX_ITEMS_CEILING = 200
 
 
 # ---------------------------------------------------------------------------
@@ -54,14 +55,14 @@ organization : str, optional
 filter : dict, optional
     MongoDB-style filter dict (e.g., {"name": {"$regex": "model.*"}}).
 max_items : int, optional
-    Maximum registries to return. Default: 50, max: 200.
+    Maximum registries to return. Default: 50; workload-profile limits apply.
 
 Returns
 -------
 JSON with:
   - registries: list of registry objects with name, description, visibility, etc.
-  - count: number of registries returned
-  - truncated: whether more registries exist beyond max_items
+  - returned_count / total_count: returned and exact totals when known
+  - has_more / project_exhaustive: explicit pagination scope
 """
 
 
@@ -72,27 +73,25 @@ def list_registries(
 ) -> str:
     """List W&B registries for an organization."""
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "list_registries",
         None,
         {"organization": organization, "filter": filter, "max_items": max_items},
     ) as ctx:
-        max_items = min(max_items, MAX_ITEMS_CEILING)
-
         try:
-            kwargs: Dict[str, Any] = {"per_page": min(max_items, 100)}
+            if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 1:
+                return json.dumps({"error": "invalid_input", "message": "max_items must be a positive integer"})
+            max_items = min(max_items, MCP_MAX_WANDB_QUERY_ITEMS)
+            api = WandBApiManager.get_api()
+            kwargs: Dict[str, Any] = {"per_page": min(max_items + 1, 100)}
             if organization is not None:
                 kwargs["organization"] = organization
             if filter is not None:
                 kwargs["filter"] = filter
 
+            page, has_more = _bounded_page(api.registries(**kwargs), max_items)
             registries: List[Dict[str, Any]] = []
-            truncated = False
-            for reg in api.registries(**kwargs):
-                if len(registries) >= max_items:
-                    truncated = True
-                    break
+            for reg in page:
                 registries.append(
                     {
                         "name": getattr(reg, "name", None),
@@ -107,7 +106,20 @@ def list_registries(
                     }
                 )
 
-            return json.dumps({"registries": registries, "count": len(registries), "truncated": truncated})
+            total_count = None if has_more else len(registries)
+            return json.dumps(
+                {
+                    "items": registries,
+                    "registries": registries,
+                    "returned_count": len(registries),
+                    "total_count": total_count,
+                    "has_more": has_more,
+                    "limit": max_items,
+                    "project_exhaustive": not has_more,
+                    "count": len(registries),
+                    "truncated": has_more,
+                }
+            )
 
         except Exception as e:
             logger.error(f"Error in list_registries: {e}", exc_info=True)
@@ -144,15 +156,15 @@ organization : str, optional
 filter : dict, optional
     MongoDB-style filter (e.g., {"tag": "production"}).
 max_items : int, optional
-    Maximum collections to return. Default: 50, max: 200.
+    Maximum collections to return. Default: 50; workload-profile limits apply.
 
 Returns
 -------
 JSON with:
   - registry: the queried registry name
   - collections: list of collection objects with name, type, tags, aliases, etc.
-  - count: number of collections returned
-  - truncated: whether more collections exist beyond max_items
+  - returned_count / total_count: returned and exact totals when known
+  - has_more / project_exhaustive: explicit pagination scope
 """
 
 
@@ -164,7 +176,6 @@ def list_registry_collections(
 ) -> str:
     """List collections within a W&B registry."""
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "list_registry_collections",
         None,
@@ -175,24 +186,29 @@ def list_registry_collections(
             "max_items": max_items,
         },
     ) as ctx:
-        max_items = min(max_items, MAX_ITEMS_CEILING)
-
         try:
+            if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 1:
+                return json.dumps({"error": "invalid_input", "message": "max_items must be a positive integer"})
+            max_items = min(max_items, MCP_MAX_WANDB_QUERY_ITEMS)
+            api = WandBApiManager.get_api()
             reg_kwargs: Dict[str, Any] = {}
             if organization is not None:
                 reg_kwargs["organization"] = organization
             registry = api.registry(registry_name, **reg_kwargs)
 
-            coll_kwargs: Dict[str, Any] = {"per_page": min(max_items, 100)}
+            coll_kwargs: Dict[str, Any] = {"per_page": min(max_items + 1, 100)}
             if filter is not None:
                 coll_kwargs["filter"] = filter
 
+            collection_iter = registry.collections(**coll_kwargs)
+            exact_total: int | None = None
+            try:
+                exact_total = len(collection_iter)
+            except (TypeError, NotImplementedError):
+                pass
+            page, has_more = _bounded_page(collection_iter, max_items)
             collections: List[Dict[str, Any]] = []
-            truncated = False
-            for coll in registry.collections(**coll_kwargs):
-                if len(collections) >= max_items:
-                    truncated = True
-                    break
+            for coll in page:
                 collections.append(
                     {
                         "name": getattr(coll, "name", None),
@@ -209,9 +225,15 @@ def list_registry_collections(
             return json.dumps(
                 {
                     "registry": registry_name,
+                    "items": collections,
                     "collections": collections,
+                    "returned_count": len(collections),
+                    "total_count": exact_total if exact_total is not None else (None if has_more else len(collections)),
+                    "has_more": has_more,
+                    "limit": max_items,
+                    "project_exhaustive": not has_more,
                     "count": len(collections),
-                    "truncated": truncated,
+                    "truncated": has_more,
                 }
             )
 
@@ -219,3 +241,16 @@ def list_registry_collections(
             logger.error(f"Error in list_registry_collections: {e}", exc_info=True)
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "api_error", "message": str(e)[:500]})
+
+
+def _bounded_page(values: Any, limit: int) -> tuple[list[Any], bool]:
+    """Consume at most limit-plus-one values from a lazy SDK collection."""
+    rows: list[Any] = []
+    iterator = iter(values)
+    for _ in range(limit + 1):
+        raise_if_tool_deadline_exceeded()
+        try:
+            rows.append(next(iterator))
+        except StopIteration:
+            break
+    return rows[:limit], len(rows) > limit

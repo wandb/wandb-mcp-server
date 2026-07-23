@@ -12,6 +12,8 @@ from wandb_mcp_server.wandb_selective_reads import (
     PROJECTED_RUN_QUERY,
     PROJECT_COUNTS_QUERY,
     PROJECT_FIELDS_QUERY,
+    REGISTRY_ARTIFACT_VERSIONS_QUERY,
+    fetch_registry_artifact_versions,
     fetch_project_counts,
     fetch_project_fields,
     fetch_metric_value_steps,
@@ -101,6 +103,37 @@ class FakeServiceApi:
             }
         if "MCPMetricValueSteps" in query:
             return {"project": {"run": {"stepsForMetricValues": [42, None]}}}
+        if "MCPRegistryArtifactVersions" in query:
+            return {
+                "organization": {
+                    "orgEntity": {
+                        "artifactMemberships": {
+                            "edges": [
+                                {
+                                    "cursor": "version-1",
+                                    "node": {
+                                        "versionIndex": 7,
+                                        "aliases": [{"alias": "production"}],
+                                        "artifactCollection": {"name": "my-model"},
+                                        "artifact": {
+                                            "id": "artifact-7",
+                                            "state": "COMMITTED",
+                                            "description": "candidate",
+                                            "size": 123,
+                                            "fileCount": 2,
+                                            "createdAt": "2026-01-01T00:00:00Z",
+                                            "updatedAt": "2026-01-02T00:00:00Z",
+                                            "digest": "digest-7",
+                                            "tags": [{"name": "approved"}],
+                                        },
+                                    },
+                                }
+                            ],
+                            "pageInfo": {"endCursor": "version-1", "hasNextPage": False},
+                        }
+                    }
+                }
+            }
         raise AssertionError("unexpected query")
 
 
@@ -117,6 +150,7 @@ def test_every_application_owned_document_is_query_only():
         PROJECT_FIELDS_QUERY,
         ARTIFACT_INVENTORY_QUERY,
         METRIC_VALUE_STEPS_QUERY,
+        REGISTRY_ARTIFACT_VERSIONS_QUERY,
     ):
         validate_read_only_graphql(document)
 
@@ -206,3 +240,38 @@ def test_metric_value_lookup_returns_candidate_steps_for_caller_verification():
     assert "stepsForMetricValues" in query
     assert variables["metric"] == "validation/step"
     assert variables["values"] == [1000.0, 2000.0]
+
+
+def test_registry_artifact_versions_use_fixed_ordered_query():
+    api = FakeApi()
+
+    result = fetch_registry_artifact_versions(
+        api,
+        organization="my-org",
+        registry_name="models",
+        collection_name="my-model",
+        order="-createdAt",
+        scan_limit=10,
+    )
+
+    assert result.requests == 1
+    assert result.has_more is False
+    assert result.items == [
+        {
+            "version": "v7",
+            "name": "my-model",
+            "aliases": ["production"],
+            "tags": ["approved"],
+            "state": "COMMITTED",
+            "size": 123,
+            "file_count": 2,
+            "description": "candidate",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:00Z",
+            "digest": "digest-7",
+        }
+    ]
+    _, variables = api._service_api.calls[0]
+    assert json.loads(variables["registryFilter"]) == {"name": "wandb-registry-models"}
+    assert json.loads(variables["collectionFilter"]) == {"name": "my-model"}
+    assert variables["order"] == "-createdAt"

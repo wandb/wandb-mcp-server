@@ -72,6 +72,7 @@ class TestListRegistries:
         assert call_kwargs["filter"] == filt
 
     @patch("wandb_mcp_server.mcp_tools.query_registry.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.query_registry.MCP_MAX_WANDB_QUERY_ITEMS", 200)
     def test_max_items_ceiling(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
@@ -83,6 +84,9 @@ class TestListRegistries:
 
         assert result["count"] == 200
         assert result["truncated"] is True
+        assert result["returned_count"] == 200
+        assert result["total_count"] is None
+        assert result["has_more"] is True
 
     @patch("wandb_mcp_server.mcp_tools.query_registry.WandBApiManager")
     def test_api_error_returns_json(self, mock_api_mgr):
@@ -129,6 +133,9 @@ class TestListRegistryCollections:
 
         assert result["registry"] == "my-registry"
         assert result["count"] == 2
+        assert result["returned_count"] == 2
+        assert result["total_count"] == 2
+        assert result["project_exhaustive"] is True
         assert result["collections"][0]["name"] == "model-a"
         assert result["collections"][1]["name"] == "model-b"
 

@@ -132,7 +132,6 @@ LIGHT_TOOLS = frozenset(
     {
         "list_entities_tool",
         "query_wandb_entity_projects",
-        "list_artifact_versions_tool",
         "get_artifact_details_tool",
         "list_registries_tool",
         "list_registry_collections_tool",
@@ -188,6 +187,10 @@ def tool_cost(name: str, arguments: Mapping[str, Any] | None = None) -> tuple[st
         return "expensive", 2
     if name == "get_artifact_details_tool" and arguments.get("include_files"):
         return "heavy", 4
+    if name == "list_artifact_versions_tool":
+        if arguments.get("created_after") or arguments.get("created_before"):
+            return "heavy", 4
+        return "expensive", 2
     if name == "count_weave_traces_tool":
         return "light", 1
     if name in LIGHT_TOOLS:
