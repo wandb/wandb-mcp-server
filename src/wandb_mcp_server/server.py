@@ -987,6 +987,10 @@ def register_tools(mcp_instance: FastMCP) -> None:
         samples: int = 500,
         min_step: Optional[int] = None,
         max_step: Optional[int] = None,
+        x_axis: str = "_step",
+        target_x: Optional[float] = None,
+        tolerance: Optional[float] = None,
+        stream: Literal["default", "system"] = "default",
     ) -> str:
         """Retrieve sampled time-series metric data from a W&B run."""
         try:
@@ -998,6 +1002,10 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 samples=samples,
                 min_step=min_step,
                 max_step=max_step,
+                x_axis=x_axis,
+                target_x=target_x,
+                tolerance=tolerance,
+                stream=stream,
             )
         except Exception as e:
             logger.error(f"Error in get_run_history_tool: {e}")
@@ -1104,6 +1112,9 @@ def register_tools(mcp_instance: FastMCP) -> None:
         include_history_overlap: bool = False,
         history_keys: Optional[List[str]] = None,
         history_samples: int = 50,
+        config_keys: Optional[List[str]] = None,
+        summary_keys: Optional[List[str]] = None,
+        x_axis: str = "_step",
     ) -> str:
         """Compare two W&B runs side-by-side."""
         return compare_runs(
@@ -1114,6 +1125,9 @@ def register_tools(mcp_instance: FastMCP) -> None:
             include_history_overlap=include_history_overlap,
             history_keys=history_keys,
             history_samples=history_samples,
+            config_keys=config_keys,
+            summary_keys=summary_keys,
+            x_axis=x_axis,
         )
 
     from wandb_mcp_server.mcp_tools.summarize_evaluation import (
@@ -1150,6 +1164,10 @@ def register_tools(mcp_instance: FastMCP) -> None:
         run_id: str,
         loss_key: Optional[str] = None,
         val_loss_key: Optional[str] = None,
+        config_keys: Optional[List[str]] = None,
+        summary_keys: Optional[List[str]] = None,
+        x_axis: str = "_step",
+        samples: int = 500,
     ) -> str:
         """Diagnose a W&B run's training health."""
         return diagnose_run(
@@ -1158,6 +1176,10 @@ def register_tools(mcp_instance: FastMCP) -> None:
             run_id=run_id,
             loss_key=loss_key,
             val_loss_key=val_loss_key,
+            config_keys=config_keys,
+            summary_keys=summary_keys,
+            x_axis=x_axis,
+            samples=samples,
         )
 
     from wandb_mcp_server.mcp_tools.probe_project import (

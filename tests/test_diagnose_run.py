@@ -182,3 +182,49 @@ class TestDiagnoseRun:
 
         assert result["diagnosis"] == "diverging"
         assert any("learning rate" in r for r in result["recommendations"])
+
+    @patch("wandb_mcp_server.mcp_tools.diagnose_run.fetch_projected_run")
+    @patch(
+        "wandb_mcp_server.mcp_tools.diagnose_run._indexed_diagnosis_keys",
+        return_value=(["learning_rate"], ["train/loss", "validation/loss"], False),
+    )
+    @patch("wandb_mcp_server.mcp_tools.diagnose_run.WandBApiManager")
+    def test_uses_indexed_bounded_keys_and_discloses_sampling(
+        self,
+        mock_api_mgr,
+        _mock_keys,
+        mock_projected,
+    ):
+        rows = [
+            {
+                "epoch": float(index),
+                "train/loss": 10.0 / (index + 1),
+                "validation/loss": 11.0 / (index + 1),
+            }
+            for index in range(20)
+        ]
+        run = self._make_mock_run(history_rows=rows)
+        mock_api_mgr.get_api.return_value.run.return_value = run
+        mock_projected.return_value = {
+            "id": "r1",
+            "display_name": "test-run",
+            "state": "finished",
+            "config": {"learning_rate": 0.01},
+            "summary": {"train/loss": rows[-1]["train/loss"]},
+        }
+
+        result = json.loads(diagnose_run("ent", "proj", "r1", x_axis="epoch", samples=20))
+
+        assert result["selection"]["source"] == "project_field_index"
+        assert result["selection"]["config_keys"] == ["learning_rate"]
+        assert result["coverage"] == {
+            "sampled": True,
+            "requested_samples": 20,
+            "effective_samples": 20,
+            "returned_rows": 20,
+            "x_axis": "epoch",
+            "project_exhaustive": False,
+            "conclusions_apply_to_sample": True,
+        }
+        assert run.history.call_args.kwargs["keys"] == ["train/loss", "validation/loss"]
+        assert run.history.call_args.kwargs["x_axis"] == "epoch"

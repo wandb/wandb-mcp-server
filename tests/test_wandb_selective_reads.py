@@ -7,12 +7,14 @@ import json
 from wandb_mcp_server.wandb_graphql import validate_read_only_graphql
 from wandb_mcp_server.wandb_selective_reads import (
     ARTIFACT_INVENTORY_QUERY,
+    METRIC_VALUE_STEPS_QUERY,
     PROJECTED_RUNS_QUERY,
     PROJECTED_RUN_QUERY,
     PROJECT_COUNTS_QUERY,
     PROJECT_FIELDS_QUERY,
     fetch_project_counts,
     fetch_project_fields,
+    fetch_metric_value_steps,
     fetch_projected_run,
     fetch_projected_runs,
 )
@@ -97,6 +99,8 @@ class FakeServiceApi:
                     "running": 12,
                 }
             }
+        if "MCPMetricValueSteps" in query:
+            return {"project": {"run": {"stepsForMetricValues": [42, None]}}}
         raise AssertionError("unexpected query")
 
 
@@ -112,6 +116,7 @@ def test_every_application_owned_document_is_query_only():
         PROJECT_COUNTS_QUERY,
         PROJECT_FIELDS_QUERY,
         ARTIFACT_INVENTORY_QUERY,
+        METRIC_VALUE_STEPS_QUERY,
     ):
         validate_read_only_graphql(document)
 
@@ -182,3 +187,22 @@ def test_project_field_index_and_counts_are_server_side():
         "running": 12,
     }
     assert api._service_api.calls[0][1]["pattern"] == "validation"
+
+
+def test_metric_value_lookup_returns_candidate_steps_for_caller_verification():
+    api = FakeApi()
+
+    steps = fetch_metric_value_steps(
+        api,
+        entity="entity",
+        project="project",
+        run_id="run-1",
+        metric="validation/step",
+        values=[1000.0, 2000.0],
+    )
+
+    assert steps == [42, None]
+    query, variables = api._service_api.calls[0]
+    assert "stepsForMetricValues" in query
+    assert variables["metric"] == "validation/step"
+    assert variables["values"] == [1000.0, 2000.0]

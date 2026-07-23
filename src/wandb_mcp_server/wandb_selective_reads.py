@@ -165,6 +165,22 @@ query MCPArtifactInventory($entity: String!, $project: String!, $first: Int!) {
 }
 """
 
+METRIC_VALUE_STEPS_QUERY = """
+query MCPMetricValueSteps(
+  $entity: String!
+  $project: String!
+  $run: String!
+  $metric: String!
+  $values: [Float!]!
+) {
+  project(name: $project, entityName: $entity) {
+    run(name: $run) {
+      stepsForMetricValues(metric: $metric, values: $values)
+    }
+  }
+}
+"""
+
 
 @dataclass(frozen=True)
 class ProjectedRunPage:
@@ -489,8 +505,46 @@ def fetch_artifact_inventory(
     }
 
 
+def fetch_metric_value_steps(
+    api: Any,
+    *,
+    entity: str,
+    project: str,
+    run_id: str,
+    metric: str,
+    values: Sequence[float],
+) -> list[int | None]:
+    """Resolve monotonic metric values to candidate internal history steps.
+
+    The backend resolver returns candidate steps rather than proof that a target
+    value was logged. Callers must read and compare the returned history rows.
+    """
+    try:
+        data = execute_graphql(
+            api,
+            METRIC_VALUE_STEPS_QUERY,
+            {
+                "entity": entity,
+                "project": project,
+                "run": run_id,
+                "metric": metric,
+                "values": [float(value) for value in values],
+            },
+        )
+    except Exception as exc:
+        raise SelectiveReadUnavailable(f"metric value step lookup unavailable: {type(exc).__name__}") from exc
+    node = _project_payload(data).get("run")
+    if not isinstance(node, Mapping):
+        raise ValueError("W&B run was not found or is not accessible")
+    steps = node.get("stepsForMetricValues")
+    if not isinstance(steps, list):
+        raise SelectiveReadUnavailable("metric value step lookup returned no step list")
+    return [int(step) if isinstance(step, (int, float)) else None for step in steps]
+
+
 __all__ = [
     "ARTIFACT_INVENTORY_QUERY",
+    "METRIC_VALUE_STEPS_QUERY",
     "PROJECTED_RUNS_QUERY",
     "PROJECTED_RUN_QUERY",
     "PROJECT_COUNTS_QUERY",
@@ -499,6 +553,7 @@ __all__ = [
     "ProjectedRunPage",
     "SelectiveReadUnavailable",
     "fetch_artifact_inventory",
+    "fetch_metric_value_steps",
     "fetch_project_counts",
     "fetch_project_fields",
     "fetch_projected_run",

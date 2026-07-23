@@ -7,7 +7,7 @@ import time
 from collections import defaultdict, deque
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Deque
+from typing import Any, Deque, Mapping
 
 
 current_tool_deadline: ContextVar[float | None] = ContextVar("mcp_tool_deadline", default=None)
@@ -143,24 +143,57 @@ LIGHT_TOOLS = frozenset(
 
 EXPENSIVE_TOOLS = frozenset(
     {
-        "query_wandb_tool",
-        "get_run_history_tool",
-        "probe_project_tool",
-        "compare_runs_tool",
-        "diagnose_run_tool",
-        "count_weave_traces_tool",
-        "infer_trace_schema_tool",
         "resolve_trace_roots_tool",
         "create_wandb_report_tool",
         "log_analysis_to_wandb",
     }
 )
 
+HEAVY_TOOLS = frozenset(
+    {
+        "probe_project_tool",
+        "compare_runs_tool",
+        "diagnose_run_tool",
+        "infer_trace_schema_tool",
+        "summarize_evaluation_tool",
+        "query_weave_traces_tool",
+        "query_wandb_graphql_tool",
+        "compare_artifact_versions_tool",
+    }
+)
 
-def tool_cost(name: str) -> tuple[str, int]:
-    """Return the stable telemetry cost class and admission weight for a tool."""
+
+def tool_cost(name: str, arguments: Mapping[str, Any] | None = None) -> tuple[str, int]:
+    """Return the request-aware telemetry cost class and admission weight."""
+    arguments = arguments or {}
+    if name == "query_wandb_tool":
+        if arguments.get("response_mode") == "count":
+            return "light", 1
+        resource = arguments.get("resource")
+        include = set(arguments.get("include") or [])
+        full_summary = "summary" in include and not arguments.get("summary_keys")
+        full_config = "config" in include and not arguments.get("config_keys")
+        if full_summary or full_config or include & {"system_metrics", "spec"}:
+            return "heavy", 4
+        if resource in {"project", "run", "sweep"} and not include:
+            return "light", 1
+        return "expensive", 2
+    if name == "get_run_history_tool":
+        if (
+            arguments.get("target_x") is not None
+            or arguments.get("min_step") is not None
+            or arguments.get("max_step") is not None
+        ):
+            return "heavy", 4
+        return "expensive", 2
+    if name == "get_artifact_details_tool" and arguments.get("include_files"):
+        return "heavy", 4
+    if name == "count_weave_traces_tool":
+        return "light", 1
     if name in LIGHT_TOOLS:
         return "light", 1
+    if name in HEAVY_TOOLS:
+        return "heavy", 4
     if name in EXPENSIVE_TOOLS:
         return "expensive", 2
     return "heavy", 4

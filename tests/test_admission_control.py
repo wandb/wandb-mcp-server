@@ -126,6 +126,18 @@ async def test_cancelled_waiter_does_not_leak_queue_or_capacity() -> None:
 def test_tool_costs_are_stable_and_unknown_is_heavy() -> None:
     assert tool_cost("list_entities_tool") == ("light", 1)
     assert tool_cost("get_run_history_tool") == ("expensive", 2)
+    assert tool_cost("get_run_history_tool", {"target_x": 100}) == ("heavy", 4)
+    assert tool_cost("get_run_history_tool", {"min_step": 0, "max_step": 100}) == ("heavy", 4)
+    assert tool_cost("query_wandb_tool", {"resource": "runs", "response_mode": "count"}) == ("light", 1)
+    assert tool_cost(
+        "query_wandb_tool",
+        {"resource": "runs", "summary_keys": ["loss"]},
+    ) == ("expensive", 2)
+    assert tool_cost(
+        "query_wandb_tool",
+        {"resource": "runs", "include": ["summary"]},
+    ) == ("heavy", 4)
+    assert tool_cost("probe_project_tool") == ("heavy", 4)
     assert tool_cost("query_wandb_graphql_tool") == ("heavy", 4)
     assert tool_cost("future_unclassified_tool") == ("heavy", 4)
 
