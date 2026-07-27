@@ -89,10 +89,12 @@ class TestAutoDetectKey:
 
 class TestDiagnoseRun:
     def _make_mock_run(self, name="test-run", state="finished", history_rows=None):
+        rows = history_rows or []
         run = MagicMock()
         run.name = name
         run.state = state
-        run.scan_history.return_value = history_rows or []
+        run.summary = {key: value for key, value in (rows[-1] if rows else {}).items() if not key.startswith("_")}
+        run.history.return_value = rows
         return run
 
     @patch("wandb_mcp_server.mcp_tools.diagnose_run.WandBApiManager")
@@ -112,9 +114,19 @@ class TestDiagnoseRun:
         run = self._make_mock_run(history_rows=[])
         mock_api_mgr.get_api.return_value.run.return_value = run
 
-        result = json.loads(diagnose_run("ent", "proj", "r1"))
+        result = json.loads(diagnose_run("ent", "proj", "r1", loss_key="loss"))
 
         assert result["diagnosis"] == "no_history"
+
+    @patch("wandb_mcp_server.mcp_tools.diagnose_run.WandBApiManager")
+    def test_missing_metric_keys_does_not_fetch_unbounded_history(self, mock_api_mgr):
+        run = self._make_mock_run(history_rows=[])
+        mock_api_mgr.get_api.return_value.run.return_value = run
+
+        result = json.loads(diagnose_run("ent", "proj", "r1"))
+
+        assert result["diagnosis"] == "no_loss_key"
+        run.history.assert_not_called()
 
     @patch("wandb_mcp_server.mcp_tools.diagnose_run.WandBApiManager")
     def test_converging_run(self, mock_api_mgr):

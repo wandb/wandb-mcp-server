@@ -13,7 +13,7 @@ import wandb_workspaces.reports.v2.interface as wr_interface
 
 import wandb
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.config import WANDB_BASE_URL
+from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 
 logger = get_rich_logger(__name__)
@@ -33,7 +33,11 @@ def _get_api_from_context():
     try:
         # Uses explicit api_key from contextvar, not singleton
         # and points to the configured base URL
-        return wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
+        return wandb.Api(
+            api_key=api_key,
+            overrides={"base_url": WANDB_BASE_URL},
+            timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+        )
     except wandb.errors.UsageError as e:
         raise Exception("Not logged in to W&B, check API key") from e
 

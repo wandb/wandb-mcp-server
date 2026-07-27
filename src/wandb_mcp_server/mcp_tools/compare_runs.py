@@ -5,6 +5,7 @@ import math
 from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.config import MCP_MAX_HISTORY_KEYS, MCP_MAX_HISTORY_SAMPLES
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -100,6 +101,15 @@ def compare_runs(
     history_samples: int = DEFAULT_HISTORY_SAMPLES,
 ) -> str:
     """Compare two W&B runs."""
+    if isinstance(history_samples, bool) or not isinstance(history_samples, int) or history_samples < 1:
+        raise ValueError("history_samples must be a positive integer")
+    history_samples = min(history_samples, MCP_MAX_HISTORY_SAMPLES)
+    if history_keys is not None and (
+        not isinstance(history_keys, list)
+        or not all(isinstance(key, str) and key.strip() for key in history_keys)
+        or len(history_keys) > MCP_MAX_HISTORY_KEYS
+    ):
+        raise ValueError(f"history_keys must contain at most {MCP_MAX_HISTORY_KEYS} non-empty strings")
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "compare_runs",
@@ -160,19 +170,21 @@ def compare_runs(
 
         if include_history_overlap:
             try:
-                hist_a = list(run_a.scan_history(keys=history_keys, page_size=history_samples))[:history_samples]
-                hist_b = list(run_b.scan_history(keys=history_keys, page_size=history_samples))[:history_samples]
-
                 if history_keys is None:
-                    keys_a = set()
-                    keys_b = set()
-                    for row in hist_a[:5]:
-                        keys_a.update(k for k in row.keys() if not k.startswith("_"))
-                    for row in hist_b[:5]:
-                        keys_b.update(k for k in row.keys() if not k.startswith("_"))
-                    common_keys = sorted(keys_a & keys_b)
+                    common_keys = sorted(
+                        key
+                        for key in summary_a.keys() & summary_b.keys()
+                        if isinstance(summary_a[key], (int, float)) and isinstance(summary_b[key], (int, float))
+                    )[:MCP_MAX_HISTORY_KEYS]
                 else:
                     common_keys = history_keys
+
+                hist_a = (
+                    list(run_a.history(keys=common_keys, samples=history_samples, pandas=False)) if common_keys else []
+                )
+                hist_b = (
+                    list(run_b.history(keys=common_keys, samples=history_samples, pandas=False)) if common_keys else []
+                )
 
                 result["history_comparison"] = {
                     "keys": common_keys,

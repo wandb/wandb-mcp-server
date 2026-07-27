@@ -542,6 +542,13 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_MCP_ENABLE_WEAVE_TOOLS` | Enable Weave trace tools (default: `true`; set `false` for installs without a trace backend) | No |
 | `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS` | Enable Weave Agents (OTel/GenAI) tools (default: `false`) | No |
 | `WANDB_MCP_READ_ONLY` | Omit report creation and analysis logging write tools (default: `false`) | No |
+| `MCP_HOSTED_MODE` | Enable stricter collection/history limits intended for shared HTTP deployments (default: `false`) | No |
+| `MCP_ADMISSION_CONTROL_ENABLED` | Enable actor-aware weighted tool admission (defaults to the value of `MCP_HOSTED_MODE`) | No |
+| `MCP_ADMISSION_ACTOR_CAPACITY` | Maximum concurrent cost units per API-key actor (default: `4`) | No |
+| `MCP_ADMISSION_PROCESS_CAPACITY` | Maximum concurrent cost units per server process (default: `16`) | No |
+| `MCP_ADMISSION_WAIT_MS` | Maximum queue wait before returning retryable `server_busy` (default: `2000`) | No |
+| `MCP_TOOL_TIMEOUT_SECONDS` | Hosted public-tool execution deadline (default: `30`) | No |
+| `MCP_WANDB_REQUEST_TIMEOUT_SECONDS` | Timeout for public W&B SDK requests (default: `20`) | No |
 | `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events. Useful as a workaround for older stdio builds that wrote analytics to stdout. | No |
 | `MCP_REQUEST_SUCCESS_SAMPLE_RATE` | Deterministic sample rate for successful HTTP request telemetry (default: `0.10`; failures and requests over two seconds are always retained). | No |
 | `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |

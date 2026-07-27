@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 import wandb
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.config import WANDB_BASE_URL
+from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -110,7 +110,11 @@ def log_analysis(
         if not data:
             raise ValueError("data must be a non-empty list of dicts")
 
-        wandb_api = wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
+        wandb_api = wandb.Api(
+            api_key=api_key,
+            overrides={"base_url": WANDB_BASE_URL},
+            timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+        )
         run = wandb_api.create_run(entity=entity_name, project=project_name)
 
         try:

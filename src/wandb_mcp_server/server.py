@@ -26,7 +26,7 @@ import wandb
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
-from wandb_mcp_server.config import WANDB_BASE_URL
+from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_BASE_URL
 from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
 
 # Import Weave for tracing MCP tool calls
@@ -310,7 +310,11 @@ def validate_api_key(api_key: str) -> bool:
     try:
         # Try to create an API instance and fetch the viewer
         # This validates the key without setting any global state
-        api = wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
+        api = wandb.Api(
+            api_key=api_key,
+            overrides={"base_url": WANDB_BASE_URL},
+            timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+        )
         viewer = api.viewer  # This will fail if the key is invalid
         viewer_id = getattr(viewer, "username", None) or getattr(viewer, "entity", None) or "<unknown>"
         logger.info(f"W&B API key validated successfully. Viewer: {viewer_id}")
@@ -388,7 +392,14 @@ def configure_wandb_logging() -> None:
 
     # Configure W&B to suppress console output
     try:
-        wandb.setup(settings=wandb.Settings(silent=True, console="off", base_url=WANDB_BASE_URL))
+        wandb.setup(
+            settings=wandb.Settings(
+                silent=True,
+                console="off",
+                base_url=WANDB_BASE_URL,
+                x_graphql_timeout_seconds=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+            )
+        )
         logger.debug("W&B configured for silent operation")
     except Exception as e:
         logger.warning(f"Could not apply wandb.setup settings: {e}")
@@ -786,7 +797,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         )
 
     @mcp_instance.tool(description=QUERY_WANDB_TOOL_DESCRIPTION)
-    async def query_wandb_tool(
+    def query_wandb_tool(
         entity_name: str,
         project_name: str,
         resource: Literal["project", "run", "runs", "sweep", "sweeps", "reports"],
@@ -797,6 +808,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         order: str = "-created_at",
         limit: int = 50,
         include: Optional[List[str]] = None,
+        summary_keys: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         return query_wandb(
             entity_name=entity_name,
@@ -809,6 +821,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             order=order,
             limit=limit,
             include=include,
+            summary_keys=summary_keys,
         )
 
     if WANDB_MCP_ENABLE_RAW_GRAPHQL:
@@ -818,7 +831,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         )
 
         @mcp_instance.tool(description=QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION)
-        async def query_wandb_graphql_tool(
+        def query_wandb_graphql_tool(
             query: str,
             variables: Optional[Dict[str, Any]] = None,
             max_items: int = 100,
