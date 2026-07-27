@@ -20,7 +20,7 @@ from wandb_mcp_server.config import (
     MCP_MAX_HISTORY_RANGE_STEPS,
     MCP_MAX_HISTORY_SAMPLES,
     MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
-    WANDB_BASE_URL,
+    WANDB_API_BASE_URL,
 )
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
@@ -132,7 +132,7 @@ def get_run_history(
         try:
             wandb_api = wandb.Api(
                 api_key=api_key,
-                overrides={"base_url": WANDB_BASE_URL},
+                overrides={"base_url": WANDB_API_BASE_URL},
                 timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
             )
             run_path = f"{entity_name}/{project_name}/{run_id}"

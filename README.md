@@ -532,7 +532,8 @@ When running the server locally, you can customize its behavior with command lin
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `WANDB_API_KEY` | Your W&B API key (alternative to `--wandb_api_key` flag) | Yes |
-| `WANDB_BASE_URL` | Custom W&B instance URL (for dedicated/on-prem instances) | No |
+| `WANDB_BASE_URL` | Public W&B instance URL used for credentials and user-facing links | No |
+| `WANDB_INTERNAL_BASE_URL` | Optional server-side W&B API URL; Dedicated charts set this to the in-cluster API service | No |
 | `MCP_SERVER_LOG_LEVEL` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` | No |
 | `WANDB_SILENT` | Set to `"False"` to suppress W&B output | No |
 | `WEAVE_SILENT` | Set to `"False"` to suppress Weave output | No |

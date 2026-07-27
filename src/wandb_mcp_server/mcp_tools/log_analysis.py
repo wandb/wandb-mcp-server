@@ -15,8 +15,9 @@ from typing import Any, Dict, List, Optional
 import wandb
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_BASE_URL
+from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_API_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.wandb_urls import public_wandb_url
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -112,7 +113,7 @@ def log_analysis(
 
         wandb_api = wandb.Api(
             api_key=api_key,
-            overrides={"base_url": WANDB_BASE_URL},
+            overrides={"base_url": WANDB_API_BASE_URL},
             timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
         )
         run = wandb_api.create_run(entity=entity_name, project=project_name)
@@ -154,7 +155,7 @@ def log_analysis(
             raise
 
         run_id = run.id
-        run_url = f"https://wandb.ai/{entity_name}/{project_name}/runs/{run_id}"
+        run_url = public_wandb_url(entity_name, project_name, "runs", run_id)
 
         logger.info(f"Logged analysis '{analysis_name}' to run {run_id}")
 
