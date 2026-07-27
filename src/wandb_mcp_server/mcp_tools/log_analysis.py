@@ -96,10 +96,9 @@ def log_analysis(
     if not api_key:
         raise Exception("No W&B API key available")
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "log_analysis_to_wandb",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,

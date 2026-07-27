@@ -56,7 +56,7 @@ def probe_project(
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "probe_project",
-        api.viewer,
+        None,
         {"entity_name": entity_name, "project_name": project_name, "sample_runs": sample_runs},
     ) as ctx:
         path = f"{entity_name}/{project_name}"

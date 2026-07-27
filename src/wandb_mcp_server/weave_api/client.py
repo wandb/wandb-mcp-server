@@ -100,8 +100,8 @@ class WeaveApiClient:
 
         # Demote the raw-body log to DEBUG at standard+ privacy levels. The body
         # is a customer-supplied Weave filter expression that may contain PII-ish
-        # run/project identifiers or inline values; BigQuery/Segment get a
-        # sanitised view via the analytics tool_call event emitted upstream.
+        # run/project identifiers or inline values; product analytics receives
+        # only bounded usage dimensions from the public tool boundary.
         from wandb_mcp_server.analytics import is_verbose_log_site_gated
 
         if is_verbose_log_site_gated():

@@ -45,9 +45,9 @@ _EVENT_NAME_MAP: Dict[str, str] = {
 
 _SESSION_PROPERTY_KEYS: List[str] = [
     "session_id",
-    "email_domain",
-    "api_key_hash",
     "metadata",
+    "mcp_client_version",
+    "mcp_client_confidence",
 ]
 
 _BASE_PROPERTY_KEYS: List[str] = [
@@ -59,6 +59,9 @@ _BASE_PROPERTY_KEYS: List[str] = [
     "environment",
     "hosted_mode",
     "wandb_base_host",
+    "agent_harness",
+    "client_vendor",
+    "call_type",
     "mcp_client_family",
     "mcp_client_app",
     "mcp_client_source",
@@ -70,7 +73,7 @@ _TOOL_CALL_PROPERTY_KEYS: List[str] = [
     "session_id",
     "tool_name",
     "mcp_tool_name",
-    "params",
+    "usage_dimensions",
     "success",
     "error",
     "duration_ms",
@@ -93,7 +96,7 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not segment_event_name:
         return None
 
-    user_id = event.get("user_id") or "anonymous"
+    user_id = event.get("actor_id") or event.get("user_id") or "anonymous"
 
     property_keys = {
         "user_session": _SESSION_PROPERTY_KEYS,
@@ -101,11 +104,11 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }.get(event_type, [])
 
     properties: Dict[str, Any] = {
-        "schema_version": event.get("schema_version", "1.0"),
+        "schema_version": event.get("schema_version", "1.1"),
         "source": "wandb-mcp-server",
     }
     for key in [*_BASE_PROPERTY_KEYS, *property_keys]:
-        if key in event:
+        if key in event and event[key] not in (None, "", {}, []):
             properties[key] = event[key]
 
     track_payload: Dict[str, Any] = {

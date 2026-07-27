@@ -80,7 +80,7 @@ itself. When `DD_AGENT_HOST` is also set (agent mode is active) this is logged a
 | `DD_TRACE_AGENT_HOSTNAME` | unset | agent | Same as `DD_AGENT_HOST`, for trace-agent clients that read this name. |
 | `DD_SERVICE` | `wandb-mcp-server` | both | UST service name. Chart and Cloud Run deploy both set this. |
 | `DD_ENV` | `production` | both | UST environment tag. |
-| `DD_VERSION` | image tag | both | UST version tag. |
+| `DD_VERSION` | image tag | both | Service version; the in-app forwarder keeps it as an attribute rather than a high-cardinality tag. |
 | `DD_SITE` | `datadoghq.com` | forwarder | Datadog site; controls the intake URL. |
 | `DD_API_KEY` | unset | forwarder | DD API key. Workload must not hold this in agent mode. |
 | `MCP_SERVER_SECRETS_PROVIDER` | unset | forwarder | Set to `gcp` to resolve `DD_API_KEY` (and other secrets) from GCP Secret Manager. |
@@ -149,17 +149,16 @@ on Cloud Run staging revision `wandb-mcp-server-staging-00084-p8s`.
 
 ## Privacy levels: `MCP_LOG_PRIVACY_LEVEL`
 
-`MCP_LOG_PRIVACY_LEVEL` controls how aggressively customer-supplied content
-is redacted before it reaches any log sink (Cloud Logging, Segment, Datadog
-forwarder). Applied uniformly by `AnalyticsTracker._sanitise_params`, by the
-identity-hashing helper in `analytics.py`, and by verbose-log-site gates in
-`tools_utils.py` and `weave_api/client.py`.
+`MCP_LOG_PRIVACY_LEVEL` controls verbose application logs and the remaining
+identity compatibility fields. Product telemetry never contains raw tool
+arguments at any level. Public tool events contain only allowlisted
+`usage_dimensions` such as booleans, stable enums, counts, and numeric buckets.
 
-| Level | Free-text params (`query`, `prompt`, `description`, ...) | Identifiers (`entity_name`, `project_name`, `run_id`, `user_id`, `email_domain`) | Verbose `ToolCall` / raw-body logs |
+| Level | Product tool telemetry | Identity compatibility fields | Verbose request-body logs |
 |---|---|---|---|
-| `off` (default) | pass-through | pass-through | INFO |
-| `standard` | redacted -> `<redacted: text len=N>` | pass-through | demoted to DEBUG |
-| `strict` | redacted -> `<redacted: text len=N>` | hashed -> `<h:sha256_prefix>` | demoted to DEBUG |
+| `off` (default) | compact `usage_dimensions` only | pass-through | INFO |
+| `standard` | compact `usage_dimensions` only | pass-through | demoted to DEBUG |
+| `strict` | compact `usage_dimensions` only | hashed -> `<h:sha256_prefix>` | demoted to DEBUG |
 
 Sensitive key-name redaction (`api_key`, `token`, `secret`, `password`,
 `credential`, `auth`) runs at every level. Truncation of strings >200 chars
@@ -177,33 +176,22 @@ runs at every level.
 ### Why the split
 
 Cloud Run's analytics logger emits directly to GCP Cloud Logging, which pipes
-to BigQuery for product analytics. That pipeline depends on plaintext
-`user_id`, `email_domain`, and `params` fields for cohort analysis. `off`
-preserves this byte-for-byte.
+to BigQuery for product analytics. Schema 1.1 uses a pseudonymous `actor_id`
+derived from the API-key digest and compact usage dimensions, so cohort and
+adoption analysis no longer requires raw customer identifiers or arguments.
 
 Customer K8s installs do NOT feed W&B's BigQuery; their analytics logger goes
-to the container log stream for the local Datadog Agent to collect into the customer's own
-Datadog tenant. There's no business need to retain plaintext free-text
-params there, and redaction reduces legal exposure if customer logs are
-subpoenaed, exported, or retained longer than needed. `standard` is the safe
-default. `strict` goes one step further for regulated customers.
+to the container log stream for the local Datadog Agent to collect into the
+customer's own Datadog tenant. Compact dimensions reduce storage and indexing
+cost in either topology. `standard` remains the safe application-log default;
+`strict` also hashes legacy identity fields for regulated customers.
 
-### Datadog params privacy
+### Datadog product dimensions
 
-Cloud Run uses `MCP_LOG_PRIVACY_LEVEL=off` so the W&B-managed BigQuery product
-analytics sink keeps its historical cohort fields. The Datadog HTTP forwarder is
-an operational sink, so it applies a separate params privacy level:
-`MCP_DATADOG_PARAM_PRIVACY_LEVEL`, defaulting to `standard`.
-
-This gives Cloud Run Datadog logs semantic parity with Helm/agent-ingested
-`ANALYTICS_EVENT` logs without forwarding raw free text. Cloud Run Datadog
-payloads include sanitized fields under `attributes.params.*`, corresponding to
-Helm's `custom.params.*` fields. Free-text values such as GraphQL queries,
-prompts, descriptions, report text, and messages are redacted to
-`<redacted: text len=N>` by default; secret-like keys are always redacted.
-
-Only use `MCP_DATADOG_PARAM_PRIVACY_LEVEL=off` for short-lived debugging in a
-controlled environment. Do not set it as a production default.
+Datadog receives the same bounded `usage_dimensions` as the canonical event and
+never receives `params`. Only deployment, harness, method, public tool, success,
+and error class are tags. Actor IDs, session IDs, versions, durations, and error
+messages remain attributes to avoid high-cardinality indexing costs.
 
 ## MCP client harness dimensions
 
@@ -214,12 +202,17 @@ signals such as `initialize.params.clientInfo`, session metadata, and
 be used for authentication, authorization, rate-limit bypasses, or protocol
 branching.
 
-Default fields:
+Schema 1.1 canonical fields:
 
 | Field | Purpose |
 |---|---|
-| `mcp_client_family` | Broad client bucket, such as `claude`, `cursor`, `openai`, `mistral`, `gemini`, `linear`, or `unknown`. |
-| `mcp_client_app` | More specific client bucket, such as `claude_code`, `codex_cli`, `cursor`, `lechat`, or `gemini_cli`. |
+| `agent_harness` | Exact detected product, such as `codex`, `claude_code`, `cursor`, `lechat`, or `gemini_cli`. |
+| `client_vendor` | Vendor bucket, such as `openai`, `anthropic`, `cursor`, `google`, or `mistral`. |
+| `call_type` | Exact MCP JSON-RPC method, such as `initialize`, `tools/list`, or `tools/call`. |
+| `tool_name` | Public MCP tool name; emitted exactly once per public invocation. |
+| `actor_id` | Pseudonymous `wandb_key:<24 hex chars>` cohort identifier. |
+| `mcp_client_family` | One-release compatibility alias for the previous family field. |
+| `mcp_client_app` | One-release compatibility alias for the previous app field. |
 | `mcp_client_source` | Signal used for classification: `initialize_client_info`, `meta_client_info`, `session_metadata`, `user_agent`, or `unknown`. |
 | `mcp_protocol_version` | MCP protocol version observed on the request. |
 | `mcp_jsonrpc_method` | JSON-RPC method such as `initialize`, `tools.list`, or `tools.call`. |
@@ -231,16 +224,16 @@ dashboards.
 
 Recommended Datadog views:
 
-- Request error rate by `mcp_client_app`.
-- Tool error rate by `mcp_client_app` and `tool_name`.
-- p95 latency by `mcp_client_app` and `tool_name`.
+- Request error rate by `agent_harness`.
+- Tool error rate by `agent_harness` and `tool_name`.
+- p95 latency by `agent_harness` and `tool_name`.
 - Unknown-client rate by `mcp_client_source`.
-- Initialize failures by `mcp_protocol_version` and `mcp_client_app`.
+- Initialize failures by `mcp_protocol_version` and `agent_harness`.
 
 Recommended Hex analyses:
 
-- Daily active users, sessions, and tool calls by `mcp_client_family` and
-  `mcp_client_app`.
+- Daily active actors, sessions, and tool calls by `client_vendor` and
+  `agent_harness`.
 - Tool adoption and tool mix by client app.
 - Success rate, error rate, and latency by client app and tool.
 - Initialize to tools/list to tools/call funnel health by client app.
@@ -251,8 +244,9 @@ Recommended Hex analyses:
 
 `<h:sha256_prefix>` uses the first 12 hex chars of `sha256(value)`.
 Deterministic (the same entity name always hashes to the same digest), so
-cohort analytics (tool adoption by entity, error rates by project) still
-work. Not reversible without a rainbow table over known W&B entity names,
+legacy identity joins remain possible during the schema transition. New
+product dashboards should use `actor_id` and `usage_dimensions`. The hash is
+not reversible without a rainbow table over known W&B entity names,
 which is out of scope for legal defensibility (the retained data is no
 longer plaintext customer identifiers).
 

@@ -10,7 +10,6 @@ import json
 from collections import Counter, defaultdict
 from typing import Any, Dict
 
-from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -108,10 +107,9 @@ def infer_trace_schema(
     if sample_size > 500:
         logger.warning(f"Large sample_size={sample_size} for schema inference; consider using a smaller value")
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "infer_trace_schema",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,

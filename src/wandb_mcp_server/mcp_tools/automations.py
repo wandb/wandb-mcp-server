@@ -196,7 +196,7 @@ def list_automations(
     params = locals()  # Must be first so it only picks up the function args
 
     api = WandBApiManager.get_api()
-    with track_tool_execution("list_automations", api.viewer, params) as ctx:
+    with track_tool_execution("list_automations", None, params) as ctx:
         max_items = _clamp(max_items, 1, MAX_ITEMS_CEIL)
 
         try:
@@ -299,7 +299,7 @@ def list_integrations(
     params = locals()  # Must be first so it only picks up the function args
 
     api = WandBApiManager.get_api()
-    with track_tool_execution("list_integrations", api.viewer, params) as ctx:
+    with track_tool_execution("list_integrations", None, params) as ctx:
         max_items = _clamp(max_items, 1, MAX_ITEMS_CEIL)
 
         if kind is not None and kind not in _VALID_INTEGRATION_KINDS:

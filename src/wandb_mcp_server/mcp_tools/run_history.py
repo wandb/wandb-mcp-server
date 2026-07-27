@@ -88,10 +88,9 @@ def get_run_history(
 ) -> str:
     """Fetch sampled metric history for a W&B run."""
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "get_run_history",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,
