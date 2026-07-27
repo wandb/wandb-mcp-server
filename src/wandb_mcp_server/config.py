@@ -48,30 +48,109 @@ try:
 except (ValueError, TypeError):
     MAX_ACCUMULATED_BYTES: int = 1024 * 1024 * 1024  # 1GB
 
-# Hosted-mode limits let Cloud Run deployments use stricter guardrails without
-# changing local/stdio defaults for users running the package themselves.
+# Workload profiles keep the common deployment choices simple while retaining
+# the existing per-setting environment overrides for advanced operators.
 MCP_HOSTED_MODE: bool = _env_bool("MCP_HOSTED_MODE", False)
+_default_workload_profile = "shared" if MCP_HOSTED_MODE else "local"
+MCP_WORKLOAD_PROFILE: str = (os.getenv("MCP_WORKLOAD_PROFILE") or _default_workload_profile).strip().lower()
+if MCP_WORKLOAD_PROFILE not in {"shared", "dedicated", "local"}:
+    raise ValueError("MCP_WORKLOAD_PROFILE must be one of: shared, dedicated, local")
+
+_PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
+    "shared": {
+        "collection_items": 100,
+        "full_detail_items": 3,
+        "history_samples": 500,
+        "history_keys": 20,
+        "history_range_steps": 5_000,
+        "project_fields": 500,
+        "probe_runs": 6,
+        "evaluation_rows": 500,
+        "actor_capacity": 4,
+        "process_capacity": 16,
+    },
+    "dedicated": {
+        "collection_items": 250,
+        "full_detail_items": 10,
+        "history_samples": 1_500,
+        "history_keys": 50,
+        "history_range_steps": 20_000,
+        "project_fields": 2_000,
+        "probe_runs": 12,
+        "evaluation_rows": 2_000,
+        "actor_capacity": 8,
+        "process_capacity": 16,
+    },
+    "local": {
+        "collection_items": 1_000,
+        "full_detail_items": 25,
+        "history_samples": 5_000,
+        "history_keys": 100,
+        "history_range_steps": 100_000,
+        "project_fields": 5_000,
+        "probe_runs": 24,
+        "evaluation_rows": 5_000,
+        "actor_capacity": 16,
+        "process_capacity": 16,
+    },
+}
+_profile_defaults = _PROFILE_DEFAULTS[MCP_WORKLOAD_PROFILE]
+
 MCP_TOOL_TIMEOUT_SECONDS: int = _env_int("MCP_TOOL_TIMEOUT_SECONDS", 30)
 MCP_WANDB_REQUEST_TIMEOUT_SECONDS: int = _env_int("MCP_WANDB_REQUEST_TIMEOUT_SECONDS", 20)
-MCP_ADMISSION_CONTROL_ENABLED: bool = _env_bool("MCP_ADMISSION_CONTROL_ENABLED", MCP_HOSTED_MODE)
-MCP_ADMISSION_ACTOR_CAPACITY: int = _env_int("MCP_ADMISSION_ACTOR_CAPACITY", 4)
-MCP_ADMISSION_PROCESS_CAPACITY: int = _env_int("MCP_ADMISSION_PROCESS_CAPACITY", 16)
+MCP_ADMISSION_CONTROL_ENABLED: bool = _env_bool(
+    "MCP_ADMISSION_CONTROL_ENABLED",
+    MCP_WORKLOAD_PROFILE != "local",
+)
+MCP_ADMISSION_ACTOR_CAPACITY: int = _env_int(
+    "MCP_ADMISSION_ACTOR_CAPACITY",
+    _profile_defaults["actor_capacity"],
+)
+MCP_ADMISSION_PROCESS_CAPACITY: int = _env_int(
+    "MCP_ADMISSION_PROCESS_CAPACITY",
+    _profile_defaults["process_capacity"],
+)
 MCP_ADMISSION_WAIT_MS: int = _env_int("MCP_ADMISSION_WAIT_MS", 2000)
-MCP_MAX_QUERY_LIMIT: int = _env_int("MCP_MAX_QUERY_LIMIT", 100 if MCP_HOSTED_MODE else 1000)
-MCP_MAX_FULL_TRACE_LIMIT: int = _env_int("MCP_MAX_FULL_TRACE_LIMIT", 25 if MCP_HOSTED_MODE else 1000)
-MCP_MAX_HISTORY_SAMPLES: int = _env_int("MCP_MAX_HISTORY_SAMPLES", 500 if MCP_HOSTED_MODE else 2000)
-MCP_MAX_HISTORY_KEYS: int = _env_int("MCP_MAX_HISTORY_KEYS", 20 if MCP_HOSTED_MODE else 100)
+MCP_MAX_QUERY_LIMIT: int = _env_int("MCP_MAX_QUERY_LIMIT", _profile_defaults["collection_items"])
+MCP_MAX_FULL_TRACE_LIMIT: int = _env_int(
+    "MCP_MAX_FULL_TRACE_LIMIT",
+    25 if MCP_WORKLOAD_PROFILE == "shared" else _profile_defaults["collection_items"],
+)
+MCP_MAX_HISTORY_SAMPLES: int = _env_int("MCP_MAX_HISTORY_SAMPLES", _profile_defaults["history_samples"])
+MCP_MAX_HISTORY_KEYS: int = _env_int("MCP_MAX_HISTORY_KEYS", _profile_defaults["history_keys"])
 MCP_MAX_HISTORY_RANGE_STEPS: int = _env_int(
     "MCP_MAX_HISTORY_RANGE_STEPS",
-    5000 if MCP_HOSTED_MODE else 100_000,
+    _profile_defaults["history_range_steps"],
 )
-MCP_MAX_WANDB_QUERY_ITEMS: int = _env_int("MCP_MAX_WANDB_QUERY_ITEMS", 100 if MCP_HOSTED_MODE else 1000)
+MCP_MAX_WANDB_QUERY_ITEMS: int = _env_int(
+    "MCP_MAX_WANDB_QUERY_ITEMS",
+    _profile_defaults["collection_items"],
+)
+MCP_MAX_FULL_DETAIL_ITEMS: int = _env_int(
+    "MCP_MAX_FULL_DETAIL_ITEMS",
+    _profile_defaults["full_detail_items"],
+)
+MCP_MAX_PROJECT_FIELDS: int = _env_int(
+    "MCP_MAX_PROJECT_FIELDS",
+    _profile_defaults["project_fields"],
+)
+MCP_MAX_PROBE_RUNS: int = _env_int(
+    "MCP_MAX_PROBE_RUNS",
+    _profile_defaults["probe_runs"],
+)
+MCP_MAX_EVALUATION_ROWS: int = _env_int(
+    "MCP_MAX_EVALUATION_ROWS",
+    _profile_defaults["evaluation_rows"],
+)
 MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE: int = _env_int(
     "MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE",
-    50 if MCP_HOSTED_MODE else 200,
+    50 if MCP_WORKLOAD_PROFILE == "shared" else 200,
 )
-MCP_MAX_GQL_ITEMS: int = _env_int("MCP_MAX_GQL_ITEMS", 100 if MCP_HOSTED_MODE else 1000)
-MCP_MAX_GQL_ITEMS_PER_PAGE: int = _env_int("MCP_MAX_GQL_ITEMS_PER_PAGE", 50 if MCP_HOSTED_MODE else 200)
+MCP_MAX_GQL_ITEMS: int = _env_int("MCP_MAX_GQL_ITEMS", _profile_defaults["collection_items"])
+MCP_MAX_GQL_ITEMS_PER_PAGE: int = _env_int(
+    "MCP_MAX_GQL_ITEMS_PER_PAGE",
+    50 if MCP_WORKLOAD_PROFILE == "shared" else 200,
+)
 WANDB_MCP_ENABLE_WEAVE_TOOLS: bool = _env_bool("WANDB_MCP_ENABLE_WEAVE_TOOLS", True)
 WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS: bool = _env_bool(
     "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",

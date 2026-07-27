@@ -1,172 +1,378 @@
-"""Probe a W&B project: discover run structure, metric keys, config keys, and recommended strategies."""
+"""Bounded W&B project structure and scale discovery."""
 
+from __future__ import annotations
+
+from collections import Counter
+from itertools import islice
 import json
-from typing import Any, Dict, List
+import re
+from typing import Any, Mapping
 
 from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.config import MCP_MAX_PROBE_RUNS, MCP_MAX_PROJECT_FIELDS, MCP_WORKLOAD_PROFILE
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.wandb_selective_reads import (
+    SelectiveReadUnavailable,
+    fetch_artifact_inventory,
+    fetch_project_counts,
+    fetch_project_fields,
+    fetch_projected_runs,
+)
+from wandb_mcp_server.wandb_urls import publicize_wandb_url
 
 logger = get_rich_logger(__name__)
 
-PROBE_PROJECT_TOOL_DESCRIPTION = """Probe a W&B project to discover its structure before querying.
+PROBE_PROJECT_TOOL_DESCRIPTION = """Probe a W&B project before issuing detailed queries.
 
-Samples one run to discover available metric keys, config keys, tags, groups,
-and provides recommended query strategies. This is the run-side equivalent
-of infer_trace_schema_tool (which is for Weave traces).
-
-<when_to_use>
-Use when you need a lightweight schema hint for an unfamiliar project. It samples
-at most one run and intentionally does not count or scan the project. Useful for:
-- Discovering which metrics are logged (loss, accuracy, custom metrics)
-- Finding config keys (learning_rate, model, batch_size)
-- Understanding project scale (run count, typical step counts)
-- Getting query strategy recommendations
+Use this read-only tool first for an unfamiliar or large project. It returns
+exact run/state counts, indexed config and summary field names, and bounded
+recent/oldest run samples without loading every run summary.
 
 Typical workflow:
-1. probe_project_tool to discover structure
-2. query_wandb_tool or get_run_history_tool with the discovered keys
-3. create_wandb_report_tool to visualize
-</when_to_use>
+1. probe_project_tool to discover field names and project scale
+2. query_wandb_tool with summary_keys/config_keys for projected run rows
+3. get_run_history_tool with explicit keys and x_axis for time-series values
 
 Parameters
 ----------
 entity_name : str
-    W&B entity (username or team).
+    W&B entity or team.
 project_name : str
-    W&B project name.
+    W&B project.
 sample_runs : int, optional
-    Requested sample size. The workload guardrail clamps this to one run.
+    Total recent/oldest metadata rows to sample. The active workload profile
+    applies a protective cap.
+field_pattern : str, optional
+    Server-side field-name pattern for narrowing very wide schemas.
+include_artifacts : bool, optional
+    Include a compact project artifact type/collection inventory.
 
 Returns
 -------
-JSON with sampled_runs, metric_keys, config_keys, has_history, typical_steps,
-tags, groups, and recommendations.
+JSON containing exact counts, bounded field inventory, run samples,
+sample_scope, exhaustiveness metadata, and compact recommended next calls.
 """
 
-DEFAULT_SAMPLE_RUNS = 5
-MAX_PROBE_RUNS = 1
+DEFAULT_SAMPLE_RUNS = 6
+_FIELD_RESPONSE_LIMIT = 200
+
+
+def _field_family(path: str) -> str:
+    stripped = re.sub(r"^(config|summary_metrics|summaryMetrics|summary)[./]", "", path)
+    return re.split(r"[/.]", stripped, maxsplit=1)[0]
+
+
+def _field_category(path: str) -> tuple[str | None, str]:
+    for prefix, category in (
+        ("config.", "config"),
+        ("config/", "config"),
+        ("summary_metrics.", "summary"),
+        ("summary_metrics/", "summary"),
+        ("summaryMetrics.", "summary"),
+        ("summaryMetrics/", "summary"),
+        ("summary.", "summary"),
+        ("summary/", "summary"),
+    ):
+        if path.startswith(prefix):
+            return category, path[len(prefix) :]
+    return None, path
+
+
+def _sample_item_from_sdk(run: Any) -> dict[str, Any]:
+    entity = getattr(run, "entity", None)
+    project = getattr(run, "project", None)
+    run_id = getattr(run, "id", None)
+    return {
+        "id": run_id,
+        "display_name": getattr(run, "name", None),
+        "state": getattr(run, "state", None),
+        "created_at": getattr(run, "created_at", None),
+        "group": getattr(run, "group", None),
+        "job_type": getattr(run, "job_type", None),
+        "tags": list(getattr(run, "tags", []) or []),
+        "history_line_count": getattr(run, "lastHistoryStep", None),
+        "url": publicize_wandb_url(
+            getattr(run, "url", None),
+            fallback_segments=(entity, project, "runs", run_id),
+        ),
+    }
+
+
+def _sdk_count(api: Any, path: str, filters: Mapping[str, Any] | None = None) -> int:
+    runs = api.runs(
+        path,
+        filters=dict(filters or {}),
+        per_page=1,
+        include_sweeps=False,
+        lazy=True,
+    )
+    return len(runs)
+
+
+def _sdk_fallback(
+    api: Any,
+    *,
+    entity_name: str,
+    project_name: str,
+    applied_samples: int,
+) -> tuple[dict[str, int], list[dict[str, str]], list[dict[str, Any]]]:
+    """Use bounded hydrated SDK pages when the indexed read API is unavailable."""
+    path = f"{entity_name}/{project_name}"
+    counts = {
+        "all": _sdk_count(api, path),
+        **{state: _sdk_count(api, path, {"state": state}) for state in ("finished", "failed", "crashed", "running")},
+    }
+    recent_count = max(1, (applied_samples + 1) // 2)
+    oldest_count = max(0, applied_samples - recent_count)
+    sampled_runs: list[Any] = list(
+        islice(
+            api.runs(
+                path,
+                order="-created_at",
+                per_page=recent_count,
+                include_sweeps=False,
+                lazy=False,
+            ),
+            recent_count,
+        )
+    )
+    if oldest_count:
+        sampled_runs.extend(
+            islice(
+                api.runs(
+                    path,
+                    order="+created_at",
+                    per_page=oldest_count,
+                    include_sweeps=False,
+                    lazy=False,
+                ),
+                oldest_count,
+            )
+        )
+
+    deduped: dict[str, Any] = {}
+    fields: dict[tuple[str, str], str] = {}
+    for run in sampled_runs:
+        run_id = str(getattr(run, "id", ""))
+        if run_id:
+            deduped[run_id] = run
+        for key, value in dict(getattr(run, "config", {}) or {}).items():
+            if not str(key).startswith(("_", "wandb")):
+                fields[("config", str(key))] = type(value).__name__
+        for key, value in dict(getattr(run, "summary", {}) or {}).items():
+            if not str(key).startswith(("_", "wandb/")):
+                fields[("summary", str(key))] = type(value).__name__
+    return (
+        counts,
+        [{"path": f"{category}.{name}", "type": field_type} for (category, name), field_type in sorted(fields.items())],
+        [_sample_item_from_sdk(run) for run in deduped.values()],
+    )
+
+
+def _safe_sample_value(value: Any) -> Any:
+    """Retained compatibility helper for callers that imported it directly."""
+    if isinstance(value, (str, int, float, bool)):
+        if isinstance(value, str) and len(value) > 100:
+            return value[:100] + "..."
+        return value
+    if isinstance(value, (list, tuple)):
+        return f"[{type(value).__name__}, len={len(value)}]"
+    if isinstance(value, dict):
+        return f"{{dict, keys={len(value)}}}"
+    return str(value)[:50]
 
 
 def probe_project(
     entity_name: str,
     project_name: str,
     sample_runs: int = DEFAULT_SAMPLE_RUNS,
+    field_pattern: str | None = None,
+    include_artifacts: bool = False,
 ) -> str:
-    """Probe a W&B project to discover its structure."""
+    """Return a bounded, explicit project-scale and schema snapshot."""
+    if not isinstance(entity_name, str) or not entity_name.strip():
+        raise ValueError("entity_name must be a non-empty string")
+    if not isinstance(project_name, str) or not project_name.strip():
+        raise ValueError("project_name must be a non-empty string")
     if isinstance(sample_runs, bool) or not isinstance(sample_runs, int) or sample_runs < 1:
         raise ValueError("sample_runs must be a positive integer")
-    api = WandBApiManager.get_api()
+    if field_pattern is not None and (not isinstance(field_pattern, str) or not field_pattern.strip()):
+        raise ValueError("field_pattern must be a non-empty string when supplied")
+    if not isinstance(include_artifacts, bool):
+        raise ValueError("include_artifacts must be a boolean")
+
+    applied_samples = min(sample_runs, MCP_MAX_PROBE_RUNS)
     with track_tool_execution(
         "probe_project",
         None,
-        {"entity_name": entity_name, "project_name": project_name, "sample_runs": sample_runs},
+        {
+            "entity_name": entity_name,
+            "project_name": project_name,
+            "sample_runs": applied_samples,
+            "has_field_pattern": field_pattern is not None,
+            "include_artifacts": include_artifacts,
+        },
+        mcp_tool_name="probe_project_tool",
     ) as ctx:
-        path = f"{entity_name}/{project_name}"
-
         try:
-            applied_samples = min(max(1, sample_runs), MAX_PROBE_RUNS)
-            runs_iter = api.runs(path, per_page=applied_samples, lazy=True)
-        except Exception as e:
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "project_not_found", "message": str(e)[:500]})
+            api = WandBApiManager.get_api()
+            fallback_caveat: str | None = None
+            try:
+                counts = fetch_project_counts(api, entity=entity_name, project=project_name)
+                fields_page = fetch_project_fields(
+                    api,
+                    entity=entity_name,
+                    project=project_name,
+                    limit=MCP_MAX_PROJECT_FIELDS,
+                    pattern=field_pattern,
+                )
+                recent_count = max(1, (applied_samples + 1) // 2)
+                oldest_count = max(0, applied_samples - recent_count)
+                recent = fetch_projected_runs(
+                    api,
+                    entity=entity_name,
+                    project=project_name,
+                    filters=None,
+                    order="-created_at",
+                    limit=recent_count,
+                    page_size=recent_count + 1,
+                ).items
+                oldest = (
+                    fetch_projected_runs(
+                        api,
+                        entity=entity_name,
+                        project=project_name,
+                        filters=None,
+                        order="+created_at",
+                        limit=oldest_count,
+                        page_size=oldest_count + 1,
+                    ).items
+                    if oldest_count
+                    else []
+                )
+                fields = fields_page.items
+                field_has_more = fields_page.has_more
+                run_samples = list(
+                    {
+                        str(item.get("id")): {
+                            **item,
+                            "url": publicize_wandb_url(
+                                item.get("url"),
+                                fallback_segments=(
+                                    entity_name,
+                                    project_name,
+                                    "runs",
+                                    item.get("id"),
+                                ),
+                            ),
+                        }
+                        for item in [*recent, *oldest]
+                        if item.get("id")
+                    }.values()
+                )
+            except SelectiveReadUnavailable as exc:
+                logger.warning("Project selective read unavailable; using bounded SDK fallback: %s", exc)
+                counts, fields, run_samples = _sdk_fallback(
+                    api,
+                    entity_name=entity_name,
+                    project_name=project_name,
+                    applied_samples=applied_samples,
+                )
+                field_has_more = True
+                fallback_caveat = (
+                    f"{exc}; field inventory was derived from {len(run_samples)} bounded hydrated SDK runs"
+                )
 
-        metric_keys: Dict[str, str] = {}
-        config_keys: Dict[str, Any] = {}
-        all_tags: List[str] = []
-        all_groups: List[str] = []
-        step_counts: List[int] = []
-        states: Dict[str, int] = {}
-        sampled = 0
+            categorized: dict[str, list[dict[str, str]]] = {"config": [], "summary": []}
+            for field in fields:
+                category, name = _field_category(str(field.get("path") or ""))
+                if category and name and not name.startswith(("_", "wandb/")):
+                    categorized[category].append({"path": name, "type": str(field.get("type") or "unknown")})
 
-        try:
-            for run in runs_iter:
-                if sampled >= applied_samples:
-                    break
-
-                state = getattr(run, "state", "unknown")
-                states[state] = states.get(state, 0) + 1
-
-                summary = dict(run.summary) if run.summary else {}
-                for k, v in summary.items():
-                    if k.startswith("_") or k.startswith("wandb/"):
-                        continue
-                    if k not in metric_keys:
-                        metric_keys[k] = type(v).__name__
-
-                config = dict(run.config) if run.config else {}
-                for k, v in config.items():
-                    if k.startswith("_") or k.startswith("wandb"):
-                        continue
-                    if k not in config_keys:
-                        config_keys[k] = _safe_sample_value(v)
-
-                tags = getattr(run, "tags", [])
-                if tags:
-                    all_tags.extend(tags)
-
-                group = getattr(run, "group", None)
-                if group and group not in all_groups:
-                    all_groups.append(group)
-
-                last_step = getattr(run, "lastHistoryStep", 0)
-                if last_step and last_step > 0:
-                    step_counts.append(last_step)
-
-                sampled += 1
-        except Exception as e:
-            logger.warning(f"Error iterating runs: {e}")
-
-        unique_tags = sorted(set(all_tags))
-        has_history = len(step_counts) > 0
-        typical_steps = int(sum(step_counts) / len(step_counts)) if step_counts else 0
-
-        recommendations = []
-        if typical_steps > 10000:
-            recommendations.append(
-                f"Long runs (~{typical_steps} steps) -- use keys=[...] and samples parameter in get_run_history_tool."
+            config_fields = categorized["config"]
+            summary_fields = categorized["summary"]
+            metric_families = Counter(_field_family(item["path"]) for item in summary_fields)
+            tags = sorted({tag for item in run_samples for tag in item.get("tags") or []})
+            groups = sorted({str(item["group"]) for item in run_samples if item.get("group")})
+            has_history = any(
+                isinstance(item.get("history_line_count"), (int, float)) and item["history_line_count"] > 0
+                for item in run_samples
             )
-        if len(metric_keys) > 20:
-            recommendations.append(f"Many metrics ({len(metric_keys)}) -- specify keys to avoid large responses.")
-        if unique_tags:
-            recommendations.append(
-                f"Tags in use: {unique_tags[:10]}. Filter by tag in query_wandb_tool for focused analysis."
-            )
-        if all_groups:
-            recommendations.append(f"Run groups found: {all_groups[:5]}. Group-based comparison may be useful.")
-        if not recommendations:
-            recommendations.append("Small project -- standard queries should work well.")
 
-        return json.dumps(
-            {
+            recommendations = [
+                {
+                    "tool": "query_wandb_tool",
+                    "reason": "Fetch only the run rows and selected fields needed for analysis.",
+                    "parameters": {
+                        "resource": "runs",
+                        "summary_keys": [item["path"] for item in summary_fields[:5]],
+                        "config_keys": [item["path"] for item in config_fields[:5]],
+                    },
+                }
+            ]
+            if summary_fields:
+                recommendations.append(
+                    {
+                        "tool": "get_run_history_tool",
+                        "reason": "Retrieve a bounded time-series after choosing a run.",
+                        "parameters": {"keys": [item["path"] for item in summary_fields[:5]]},
+                    }
+                )
+
+            result: dict[str, Any] = {
+                "source": "wandb_selective_read" if fallback_caveat is None else "wandb_sdk_fallback",
                 "entity": entity_name,
                 "project": project_name,
-                "run_count": None,
-                "run_count_note": "Not counted to avoid scanning the project.",
-                "sampled_runs": sampled,
-                "run_states": states,
-                "metric_keys": metric_keys,
-                "metric_count": len(metric_keys),
-                "config_keys": config_keys,
-                "config_count": len(config_keys),
-                "has_history": has_history,
-                "typical_steps": typical_steps,
-                "tags": unique_tags[:20],
-                "groups": all_groups[:10],
-                "recommendations": recommendations,
-            },
-            default=str,
-        )
+                "workload_profile": MCP_WORKLOAD_PROFILE,
+                "run_count": counts["all"],
+                "state_counts": {state: counts[state] for state in ("finished", "failed", "crashed", "running")},
+                "sampled_runs": len(run_samples),
+                "run_samples": run_samples,
+                "sample_scope": {
+                    "strategy": "recent_and_oldest",
+                    "requested": sample_runs,
+                    "effective": applied_samples,
+                    "cap_applied": applied_samples < sample_runs,
+                    "project_exhaustive": counts["all"] <= len(run_samples),
+                },
+                "config_field_count_returned": len(config_fields),
+                "summary_field_count_returned": len(summary_fields),
+                "config_fields": config_fields[:_FIELD_RESPONSE_LIMIT],
+                "summary_fields": summary_fields[:_FIELD_RESPONSE_LIMIT],
+                "metric_families": dict(metric_families.most_common(50)),
+                "field_inventory": {
+                    "pattern": field_pattern,
+                    "returned_count": len(fields),
+                    "has_more": field_has_more,
+                    "project_exhaustive": not field_has_more,
+                    "response_truncated": (
+                        len(config_fields) > _FIELD_RESPONSE_LIMIT or len(summary_fields) > _FIELD_RESPONSE_LIMIT
+                    ),
+                },
+                "has_history_in_sample": has_history,
+                "tags_in_sample": tags[:20],
+                "groups_in_sample": groups[:20],
+                "recommended_next_calls": recommendations,
+            }
+            if fallback_caveat:
+                result["compatibility_caveat"] = fallback_caveat
+            if include_artifacts:
+                try:
+                    result["artifact_inventory"] = fetch_artifact_inventory(
+                        api,
+                        entity=entity_name,
+                        project=project_name,
+                    )
+                except SelectiveReadUnavailable as exc:
+                    result["artifact_inventory"] = {
+                        "error": "artifact_inventory_unavailable",
+                        "message": str(exc),
+                    }
+            return json.dumps(result, default=str)
+        except Exception as exc:
+            ctx.mark_error(f"{type(exc).__name__}: {exc}")
+            return json.dumps({"error": "project_probe_failed", "message": str(exc)[:500]})
 
 
-def _safe_sample_value(v: Any) -> Any:
-    """Return a JSON-safe sample value for display."""
-    if isinstance(v, (str, int, float, bool)):
-        if isinstance(v, str) and len(v) > 100:
-            return v[:100] + "..."
-        return v
-    if isinstance(v, (list, tuple)):
-        return f"[{type(v).__name__}, len={len(v)}]"
-    if isinstance(v, dict):
-        return f"{{dict, keys={len(v)}}}"
-    return str(v)[:50]
+__all__ = ["DEFAULT_SAMPLE_RUNS", "PROBE_PROJECT_TOOL_DESCRIPTION", "_safe_sample_value", "probe_project"]

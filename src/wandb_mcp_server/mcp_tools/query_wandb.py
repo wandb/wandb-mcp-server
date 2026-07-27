@@ -1,4 +1,4 @@
-"""Structured, read-only W&B Models queries through the public SDK."""
+"""Structured, read-only W&B Models queries with bounded field projection."""
 
 from __future__ import annotations
 
@@ -11,23 +11,36 @@ from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.config import (
     MAX_RESPONSE_TOKENS,
     MCP_HOSTED_MODE,
+    MCP_MAX_FULL_DETAIL_ITEMS,
+    MCP_MAX_HISTORY_KEYS,
     MCP_MAX_WANDB_QUERY_ITEMS,
     MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE,
+    MCP_WORKLOAD_PROFILE,
     structured_error,
 )
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.wandb_urls import publicize_wandb_url
+from wandb_mcp_server.wandb_selective_reads import (
+    SelectiveReadUnavailable,
+    fetch_projected_run,
+    fetch_projected_runs,
+)
+from wandb_mcp_server.wandb_urls import public_wandb_url, publicize_wandb_url
 
 logger = get_rich_logger(__name__)
 
 WandBResource = Literal["project", "run", "runs", "sweep", "sweeps", "reports"]
+WandBResponseMode = Literal["items", "count"]
 
-QUERY_WANDB_TOOL_DESCRIPTION = """Query W&B Models data through the public W&B Python SDK.
+QUERY_WANDB_TOOL_DESCRIPTION = """Query W&B Models data through bounded W&B read APIs.
 
 Use this read-only tool for project metadata, individual runs, filtered or sorted
 run collections, sweeps, and reports. For run history, artifacts, registries,
 automations, and integrations, prefer the dedicated MCP tools.
+
+For an unfamiliar project, call probe_project_tool first. Then pass only the
+returned summary_keys/config_keys needed for the question. This avoids loading
+every metric from wide runs and usually answers the question in one request.
 
 Prefer the existing specialized tools when they match the request:
 - entity/project discovery: list_entities_tool and query_wandb_entity_projects
@@ -71,14 +84,19 @@ include : list[str], optional
     include summary metrics by default; run collections return metadata by default.
 summary_keys : list[str], optional
     Specific summary metrics to include for run/runs. Supplying keys implies
-    include=["summary"] and avoids loading unrelated metrics. Hosted collections
-    require targeted keys or a limit of at most 3 for full summaries.
+    include=["summary"] and uses a server-side field projection.
+config_keys : list[str], optional
+    Specific config values to include for run/runs. Supplying keys implies
+    include=["config"] and uses a server-side field projection.
+response_mode : "items" | "count", optional
+    "items" returns bounded resources. "count" is supported for resource="runs"
+    and returns only the exact server-side matching count.
 
 Returns
 -------
 dict
-    A stable JSON-safe envelope with source="wandb_sdk". Collection results use
-    items/count/limit/truncated; single-resource results use item.
+    Collection results include returned_count, total_count, has_more, limit, and
+    project_exhaustive. Single-resource results use item.
 
 For schema introspection, unmodeled fields, aliases, cross-resource nesting, or an
 exact GraphQL response shape, an administrator may explicitly enable the separate
@@ -94,8 +112,6 @@ _INCLUDE_FIELDS = {
     "reports": frozenset({"spec"}),
 }
 _OPTIONAL_RESPONSE_FIELDS = ("system_metrics", "config", "spec", "sweep", "summary")
-_HOSTED_FULL_DETAIL_LIMIT = 3
-_MAX_SUMMARY_KEYS = 100
 
 
 class WandBQueryValidationError(ValueError):
@@ -167,29 +183,30 @@ def _serialize_sweep(sweep: Any, include: frozenset[str]) -> Dict[str, Any]:
     return result
 
 
+def _select_mapping_values(value: Any, keys: Optional[List[str]]) -> Dict[str, Any]:
+    if not value:
+        return {}
+    if keys is None:
+        return _json_safe(value)
+    try:
+        mapping = dict(value)
+    except (TypeError, ValueError):
+        return {}
+    return {key: _json_safe(mapping[key]) for key in keys if key in mapping and mapping[key] is not None}
+
+
 def _serialize_summary(run: Any, summary_keys: Optional[List[str]]) -> Dict[str, Any]:
     summary = getattr(run, "summary", None)
-    if not summary:
-        return {}
-    if summary_keys is None:
-        return _json_safe(summary)
-    selected: Dict[str, Any] = {}
-    for key in summary_keys:
-        try:
-            value = summary.get(key)
-        except (AttributeError, TypeError):
-            value = None
-        if value is not None:
-            selected[key] = _json_safe(value)
-    return selected
+    return _select_mapping_values(summary, summary_keys)
 
 
 def _serialize_run(
     run: Any,
     include: frozenset[str],
     *,
-    summary_keys: Optional[List[str]],
-    include_summary: bool,
+    summary_keys: Optional[List[str]] = None,
+    config_keys: Optional[List[str]] = None,
+    include_summary: bool = False,
 ) -> Dict[str, Any]:
     entity = getattr(run, "entity", None)
     project = getattr(run, "project", None)
@@ -215,7 +232,7 @@ def _serialize_run(
     if include_summary:
         result["summary"] = _serialize_summary(run, summary_keys)
     if "config" in include:
-        result["config"] = _json_safe(getattr(run, "config", {}))
+        result["config"] = _select_mapping_values(getattr(run, "config", {}), config_keys)
     if "system_metrics" in include:
         result["system_metrics"] = _json_safe(getattr(run, "system_metrics", {}))
     if "sweep" in include:
@@ -265,7 +282,10 @@ def _fit_collection_to_budget(payload: Dict[str, Any]) -> Dict[str, Any]:
         dropped_items += 1
 
     if omitted_fields or dropped_items:
+        payload["returned_count"] = len(payload["items"])
         payload["count"] = len(payload["items"])
+        payload["has_more"] = True
+        payload["project_exhaustive"] = False
         payload["truncated"] = True
         payload["truncation"] = {
             "applied": True,
@@ -308,6 +328,8 @@ def _validate_request(
     limit: int,
     include: Optional[List[str]],
     summary_keys: Optional[List[str]],
+    config_keys: Optional[List[str]],
+    response_mode: str,
 ) -> frozenset[str]:
     if not isinstance(entity_name, str) or not entity_name.strip():
         raise WandBQueryValidationError("entity_name must be a non-empty string")
@@ -333,33 +355,53 @@ def _validate_request(
         raise WandBQueryValidationError("sweep_id is supported only for resource='sweep'")
     if resource != "reports" and report_name is not None:
         raise WandBQueryValidationError("report_name is supported only for resource='reports'")
+    if response_mode not in {"items", "count"}:
+        raise WandBQueryValidationError("response_mode must be 'items' or 'count'")
+    if response_mode == "count" and resource != "runs":
+        raise WandBQueryValidationError("response_mode='count' is supported only for resource='runs'")
     if include is not None and (not isinstance(include, list) or not all(isinstance(item, str) for item in include)):
         raise WandBQueryValidationError("include must be a list of strings")
     if summary_keys is not None and (
         not isinstance(summary_keys, list)
         or not summary_keys
-        or len(summary_keys) > _MAX_SUMMARY_KEYS
+        or len(summary_keys) > MCP_MAX_HISTORY_KEYS
         or not all(isinstance(item, str) and item.strip() for item in summary_keys)
     ):
-        raise WandBQueryValidationError(f"summary_keys must contain 1-{_MAX_SUMMARY_KEYS} non-empty strings")
+        raise WandBQueryValidationError(f"summary_keys must contain 1-{MCP_MAX_HISTORY_KEYS} non-empty strings")
     if summary_keys is not None and resource not in {"run", "runs"}:
         raise WandBQueryValidationError("summary_keys are supported only for resource='run' or resource='runs'")
+    if config_keys is not None and (
+        not isinstance(config_keys, list)
+        or not config_keys
+        or len(config_keys) > MCP_MAX_HISTORY_KEYS
+        or not all(isinstance(item, str) and item.strip() for item in config_keys)
+    ):
+        raise WandBQueryValidationError(f"config_keys must contain 1-{MCP_MAX_HISTORY_KEYS} non-empty strings")
+    if config_keys is not None and resource not in {"run", "runs"}:
+        raise WandBQueryValidationError("config_keys are supported only for resource='run' or resource='runs'")
+    if response_mode == "count" and (include or summary_keys or config_keys):
+        raise WandBQueryValidationError("response_mode='count' does not accept include, summary_keys, or config_keys")
 
     requested = frozenset(include or [])
     if summary_keys is not None:
         requested = requested | {"summary"}
+    if config_keys is not None:
+        requested = requested | {"config"}
     unsupported = requested - _INCLUDE_FIELDS[resource]
     if unsupported:
         allowed = sorted(_INCLUDE_FIELDS[resource])
         raise WandBQueryValidationError(
             f"unsupported include value(s) for resource={resource!r}: {sorted(unsupported)}; allowed: {allowed}"
         )
-    if MCP_HOSTED_MODE and resource in {"runs", "sweeps", "reports"} and limit > _HOSTED_FULL_DETAIL_LIMIT:
+    full_detail_limit = 3 if MCP_HOSTED_MODE and MCP_WORKLOAD_PROFILE == "local" else MCP_MAX_FULL_DETAIL_ITEMS
+    if resource in {"runs", "sweeps", "reports"} and limit > full_detail_limit:
         untargeted_summary = "summary" in requested and summary_keys is None
-        unbounded_details = requested & {"config", "system_metrics", "spec"}
-        if untargeted_summary or unbounded_details:
+        untargeted_config = "config" in requested and config_keys is None
+        unbounded_details = requested & {"system_metrics", "spec"}
+        if untargeted_summary or untargeted_config or unbounded_details:
             raise WandBQueryValidationError(
-                "hosted collection details require limit<=3; use summary_keys for targeted run metrics"
+                f"{MCP_WORKLOAD_PROFILE} collection details require "
+                f"limit<={full_detail_limit}; use summary_keys/config_keys for projected run fields"
             )
     return requested
 
@@ -370,21 +412,30 @@ def _collection_envelope(
     project_name: str,
     items: List[Dict[str, Any]],
     limit: int,
-    truncated: bool,
+    has_more: bool,
+    total_count: Optional[int],
+    *,
+    source: str = "wandb_sdk",
+    compatibility_caveat: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return _fit_collection_to_budget(
-        {
-            "source": "wandb_sdk",
-            "resource": resource,
-            "entity": entity_name,
-            "project": project_name,
-            "items": items,
-            "count": len(items),
-            "limit": limit,
-            "truncated": truncated,
-            "truncation": {"applied": False},
-        }
-    )
+    payload: Dict[str, Any] = {
+        "source": source,
+        "resource": resource,
+        "entity": entity_name,
+        "project": project_name,
+        "items": items,
+        "returned_count": len(items),
+        "count": len(items),
+        "total_count": total_count,
+        "has_more": has_more,
+        "limit": limit,
+        "project_exhaustive": not has_more,
+        "truncated": has_more,
+        "truncation": {"applied": False},
+    }
+    if compatibility_caveat:
+        payload["compatibility_caveat"] = compatibility_caveat
+    return _fit_collection_to_budget(payload)
 
 
 def _single_envelope(
@@ -392,18 +443,36 @@ def _single_envelope(
     entity_name: str,
     project_name: str,
     item: Dict[str, Any],
+    *,
+    source: str = "wandb_sdk",
+    compatibility_caveat: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return _fit_single_to_budget(
-        {
-            "source": "wandb_sdk",
-            "resource": resource,
-            "entity": entity_name,
-            "project": project_name,
-            "item": item,
-            "truncated": False,
-            "truncation": {"applied": False},
-        }
-    )
+    payload: Dict[str, Any] = {
+        "source": source,
+        "resource": resource,
+        "entity": entity_name,
+        "project": project_name,
+        "item": item,
+        "truncated": False,
+        "truncation": {"applied": False},
+    }
+    if compatibility_caveat:
+        payload["compatibility_caveat"] = compatibility_caveat
+    return _fit_single_to_budget(payload)
+
+
+def _collection_total_count(collection: Any) -> Optional[int]:
+    try:
+        return len(collection)
+    except (TypeError, AttributeError, NotImplementedError):
+        return None
+
+
+def _decorate_projected_run(item: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = item.get("id")
+    if run_id:
+        item["url"] = public_wandb_url(item.get("entity"), item.get("project"), "runs", run_id)
+    return _json_safe(item)
 
 
 def query_wandb(
@@ -418,8 +487,10 @@ def query_wandb(
     limit: int = 50,
     include: Optional[List[str]] = None,
     summary_keys: Optional[List[str]] = None,
+    config_keys: Optional[List[str]] = None,
+    response_mode: WandBResponseMode = "items",
 ) -> Dict[str, Any]:
-    """Execute a structured read using only public W&B SDK operations."""
+    """Execute a structured, bounded W&B read."""
     try:
         include_fields = _validate_request(
             entity_name,
@@ -433,6 +504,8 @@ def query_wandb(
             limit,
             include,
             summary_keys,
+            config_keys,
+            response_mode,
         )
     except WandBQueryValidationError as exc:
         return structured_error("invalid_request", str(exc), source="wandb_sdk", resource=resource)
@@ -450,6 +523,9 @@ def query_wandb(
             "project_name": project_name,
             "resource": resource,
             "limit": applied_limit,
+            "response_mode": response_mode,
+            "projected_summary_keys": len(summary_keys or []),
+            "projected_config_keys": len(config_keys or []),
         },
         mcp_tool_name="query_wandb_tool",
     ) as ctx:
@@ -460,6 +536,45 @@ def query_wandb(
                 return _single_envelope(resource, entity_name, project_name, _serialize_project(project))
 
             if resource == "run":
+                use_projection = bool(summary_keys or config_keys) and not (
+                    include_fields & {"system_metrics", "sweep"} or ("config" in include_fields and config_keys is None)
+                )
+                if use_projection:
+                    try:
+                        item = fetch_projected_run(
+                            api,
+                            entity=entity_name,
+                            project=project_name,
+                            run_id=str(run_id),
+                            summary_keys=summary_keys or (),
+                            config_keys=config_keys or (),
+                        )
+                    except SelectiveReadUnavailable as exc:
+                        run = api.run(f"{path}/{run_id}")
+                        return _single_envelope(
+                            resource,
+                            entity_name,
+                            project_name,
+                            _serialize_run(
+                                run,
+                                include_fields,
+                                summary_keys=summary_keys,
+                                config_keys=config_keys,
+                                include_summary=True,
+                            ),
+                            compatibility_caveat=(
+                                f"{exc}; used one bounded full SDK run because projected fields were unavailable"
+                            ),
+                        )
+                    if item is None:
+                        raise ValueError(f"run not found: {run_id}")
+                    return _single_envelope(
+                        resource,
+                        entity_name,
+                        project_name,
+                        _decorate_projected_run(item),
+                        source="wandb_selective_read",
+                    )
                 run = api.run(f"{path}/{run_id}")
                 return _single_envelope(
                     resource,
@@ -469,19 +584,87 @@ def query_wandb(
                         run,
                         include_fields,
                         summary_keys=summary_keys,
+                        config_keys=config_keys,
                         include_summary=True,
                     ),
                 )
 
             if resource == "runs":
+                if response_mode == "count":
+                    runs = api.runs(
+                        path,
+                        filters=filters,
+                        order=order,
+                        per_page=1,
+                        include_sweeps=False,
+                        lazy=True,
+                    )
+                    total_count = len(runs)
+                    return {
+                        "source": "wandb_sdk",
+                        "resource": resource,
+                        "entity": entity_name,
+                        "project": project_name,
+                        "response_mode": "count",
+                        "total_count": total_count,
+                        "project_exhaustive": True,
+                    }
+
+                use_projection = bool(summary_keys or config_keys) and not (
+                    include_fields & {"system_metrics", "sweep"}
+                    or ("summary" in include_fields and summary_keys is None)
+                    or ("config" in include_fields and config_keys is None)
+                )
+                if use_projection:
+                    try:
+                        projected = fetch_projected_runs(
+                            api,
+                            entity=entity_name,
+                            project=project_name,
+                            filters=filters,
+                            order=order,
+                            limit=applied_limit,
+                            page_size=MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE,
+                            summary_keys=summary_keys or (),
+                            config_keys=config_keys or (),
+                        )
+                    except SelectiveReadUnavailable as exc:
+                        if applied_limit > MCP_MAX_FULL_DETAIL_ITEMS:
+                            return structured_error(
+                                "selective_read_unavailable",
+                                (
+                                    f"{exc}; this backend cannot project selected fields and the requested "
+                                    f"limit exceeds the safe SDK fallback of {MCP_MAX_FULL_DETAIL_ITEMS}"
+                                ),
+                                source="wandb_sdk",
+                                resource=resource,
+                            )
+                        compatibility_caveat = (
+                            f"{exc}; used a bounded full-page SDK fallback without per-run lazy loads"
+                        )
+                    else:
+                        return _collection_envelope(
+                            resource,
+                            entity_name,
+                            project_name,
+                            [_decorate_projected_run(item) for item in projected.items],
+                            applied_limit,
+                            projected.has_more or requested_limit > applied_limit,
+                            projected.total_count,
+                            source="wandb_selective_read",
+                        )
+                else:
+                    compatibility_caveat = None
+
                 runs = api.runs(
                     path,
                     filters=filters,
                     order=order,
                     per_page=per_page,
                     include_sweeps="sweep" in include_fields,
-                    lazy=True,
+                    lazy=not bool(include_fields & {"summary", "config", "system_metrics"}),
                 )
+                total_count = _collection_total_count(runs)
                 page = list(islice(runs, applied_limit + 1))
                 has_more = len(page) > applied_limit or requested_limit > applied_limit
                 items = [
@@ -489,11 +672,23 @@ def query_wandb(
                         run,
                         include_fields,
                         summary_keys=summary_keys,
+                        config_keys=config_keys,
                         include_summary="summary" in include_fields,
                     )
                     for run in page[:applied_limit]
                 ]
-                return _collection_envelope(resource, entity_name, project_name, items, applied_limit, has_more)
+                if total_count is None and not has_more:
+                    total_count = len(items)
+                return _collection_envelope(
+                    resource,
+                    entity_name,
+                    project_name,
+                    items,
+                    applied_limit,
+                    has_more,
+                    total_count,
+                    compatibility_caveat=compatibility_caveat,
+                )
 
             if resource == "sweep":
                 sweep = api.sweep(f"{path}/{sweep_id}")
@@ -501,16 +696,38 @@ def query_wandb(
 
             if resource == "sweeps":
                 sweeps = api.project(project_name, entity=entity_name).sweeps(per_page=per_page)
+                total_count = _collection_total_count(sweeps)
                 page = list(islice(sweeps, applied_limit + 1))
                 has_more = len(page) > applied_limit or requested_limit > applied_limit
                 items = [_serialize_sweep(sweep, include_fields) for sweep in page[:applied_limit]]
-                return _collection_envelope(resource, entity_name, project_name, items, applied_limit, has_more)
+                if total_count is None and not has_more:
+                    total_count = len(items)
+                return _collection_envelope(
+                    resource,
+                    entity_name,
+                    project_name,
+                    items,
+                    applied_limit,
+                    has_more,
+                    total_count,
+                )
 
             reports = api.reports(path, name=report_name, per_page=per_page)
+            total_count = _collection_total_count(reports)
             page = list(islice(reports, applied_limit + 1))
             has_more = len(page) > applied_limit or requested_limit > applied_limit
             items = [_serialize_report(report, include_fields) for report in page[:applied_limit]]
-            return _collection_envelope(resource, entity_name, project_name, items, applied_limit, has_more)
+            if total_count is None and not has_more:
+                total_count = len(items)
+            return _collection_envelope(
+                resource,
+                entity_name,
+                project_name,
+                items,
+                applied_limit,
+                has_more,
+                total_count,
+            )
         except (ValueError, KeyError, IndexError) as exc:
             if resource in {"project", "run", "sweep"}:
                 ctx.mark_error(f"resource_not_found: {exc}")

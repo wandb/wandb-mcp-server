@@ -12,6 +12,7 @@ from wandb.apis.public import Api, Project
 
 from wandb_mcp_server.mcp_tools import query_wandb as sdk_query
 from wandb_mcp_server.server import create_mcp_server
+from wandb_mcp_server.wandb_selective_reads import ProjectedRunPage
 
 
 @contextmanager
@@ -201,20 +202,45 @@ def test_runs_pass_sdk_filters_order_and_bound_collection(fake_api):
     assert all("summary" not in item for item in result["items"])
 
 
-def test_run_collection_can_select_summary_keys_without_full_summary(fake_api):
-    run = _run("run-1")
-    run.summary = {"accuracy": 0.9, "loss": 0.2, **{f"metric_{index}": index for index in range(24_000)}}
-    fake_api.runs = lambda path, **kwargs: iter([run])
+def test_run_collection_can_select_fields_without_full_summary(fake_api, monkeypatch):
+    fake_api.runs = lambda *args, **kwargs: pytest.fail("projected reads must not hydrate SDK runs")
+    projected_calls = []
+
+    def projected(*args, **kwargs):
+        projected_calls.append(kwargs)
+        return ProjectedRunPage(
+            items=[
+                {
+                    "id": "run-1",
+                    "entity": "entity",
+                    "project": "project",
+                    "summary": {"accuracy": 0.9, "loss": 0.2},
+                    "config": {"learning_rate": 0.01},
+                }
+            ],
+            total_count=24_000,
+            has_more=True,
+            requests=1,
+        )
+
+    monkeypatch.setattr(sdk_query, "fetch_projected_runs", projected)
 
     result = sdk_query.query_wandb(
         "entity",
         "project",
         "runs",
-        limit=1,
+        limit=50,
         summary_keys=["accuracy", "loss"],
+        config_keys=["learning_rate"],
     )
 
     assert result["items"][0]["summary"] == {"accuracy": 0.9, "loss": 0.2}
+    assert result["items"][0]["config"] == {"learning_rate": 0.01}
+    assert result["total_count"] == 24_000
+    assert result["returned_count"] == 1
+    assert result["source"] == "wandb_selective_read"
+    assert projected_calls[0]["summary_keys"] == ["accuracy", "loss"]
+    assert projected_calls[0]["config_keys"] == ["learning_rate"]
 
 
 @pytest.mark.asyncio
@@ -223,7 +249,11 @@ async def test_public_mcp_schema_dispatches_targeted_summary_keys(fake_api, monk
     server = create_mcp_server("stdio")
     query_tool = next(tool for tool in await server.list_tools() if tool.name == "query_wandb_tool")
 
-    assert "summary_keys" in query_tool.inputSchema["properties"]
+    assert {
+        "summary_keys",
+        "config_keys",
+        "response_mode",
+    } <= query_tool.inputSchema["properties"].keys()
 
     await server.call_tool(
         "query_wandb_tool",
@@ -233,10 +263,34 @@ async def test_public_mcp_schema_dispatches_targeted_summary_keys(fake_api, monk
             "resource": "runs",
             "limit": 1,
             "summary_keys": ["accuracy"],
+            "config_keys": ["learning_rate"],
         },
     )
 
     assert fake_api.calls[0][0:2] == ("runs", "entity/project")
+
+
+def test_count_mode_uses_public_sdk_without_iterating(fake_api):
+    class CountOnlyRuns:
+        def __len__(self):
+            return 42
+
+        def __iter__(self):
+            raise AssertionError("count mode must not iterate runs")
+
+    fake_api.runs = lambda path, **kwargs: CountOnlyRuns()
+
+    result = sdk_query.query_wandb(
+        "entity",
+        "project",
+        "runs",
+        filters={"state": "finished"},
+        response_mode="count",
+    )
+
+    assert result["total_count"] == 42
+    assert result["response_mode"] == "count"
+    assert result["project_exhaustive"] is True
 
 
 @pytest.mark.asyncio
