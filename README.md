@@ -555,6 +555,15 @@ When running the server locally, you can customize its behavior with command lin
 | `MCP_REQUEST_SUCCESS_SAMPLE_RATE` | Deterministic sample rate for successful HTTP request telemetry (default: `0.10`; failures and requests over two seconds are always retained). | No |
 | `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |
 
+Workload profiles provide one deployment-level choice while preserving the
+individual `MCP_MAX_*` overrides for advanced operators:
+
+| Profile | Collection rows | History samples | Metric keys | Range scan rows | Full-detail rows | Eval detail rows | Schema sample rows | Actor/process cost |
+|---------|----------------:|----------------:|------------:|----------------:|-----------------:|-----------------:|-------------------:|-------------------:|
+| `shared` | 100 | 500 | 20 | 5,000 | 3 | 500 | 100 | 4 / 16 |
+| `dedicated` | 250 | 1,500 | 50 | 20,000 | 10 | 2,000 | 250 | 8 / 16 |
+| `local` | 1,000 | 5,000 | 100 | 100,000 | 25 | 5,000 | 500 | admission disabled |
+
 #### Usage Examples
 
 **STDIO Transport (default for desktop clients):**

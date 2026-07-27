@@ -1051,6 +1051,10 @@ def register_tools(mcp_instance: FastMCP) -> None:
         type_name: Optional[str] = None,
         source: str = "project",
         max_items: int = 50,
+        order: str = "-created_at",
+        tags: Optional[List[str]] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
     ) -> str:
         """List versions of an artifact collection."""
         return list_artifact_versions(
@@ -1062,6 +1066,10 @@ def register_tools(mcp_instance: FastMCP) -> None:
             type_name=type_name,
             source=source,
             max_items=max_items,
+            order=order,
+            tags=tags,
+            created_after=created_after,
+            created_before=created_before,
         )
 
     @mcp_instance.tool(description=GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION)

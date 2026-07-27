@@ -10,6 +10,7 @@ import json
 from collections import Counter, defaultdict
 from typing import Any, Dict
 
+from wandb_mcp_server.config import MCP_MAX_SCHEMA_SAMPLE_ROWS, MCP_WORKLOAD_PROFILE
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -17,9 +18,9 @@ logger = get_rich_logger(__name__)
 
 INFER_TRACE_SCHEMA_TOOL_DESCRIPTION = """Discover the schema of Weave traces in a project.
 
-Returns field names, data types, and the most common values for each field,
-plus total and root trace counts. Use this tool BEFORE querying traces to
-understand what fields are available and what values to filter on.
+Returns field names, data types, and the most common values from a bounded,
+recent sample, plus exact total and root trace counts. Sampling scope and
+exhaustiveness are explicit.
 
 <when_to_use>
 Call this tool FIRST when working with a new project's Weave traces.
@@ -34,7 +35,8 @@ entity_name : str
 project_name : str
     The Weights & Biases project name.
 sample_size : int, optional
-    Number of recent traces to sample for schema inference. Defaults to 20.
+    Number of recent traces to sample for schema inference. Defaults to 20;
+    the active workload profile applies a hard cap.
 top_n_values : int, optional
     Number of most common values to return per field. Defaults to 5.
 
@@ -45,6 +47,7 @@ JSON with:
   - total_traces: total trace count in the project
   - root_traces: root-level trace count
   - sample_size: how many traces were sampled
+  - sample_scope: requested/applied limits, coverage, and exhaustiveness
 
 Examples
 --------
@@ -104,8 +107,13 @@ def infer_trace_schema(
     from wandb_mcp_server.mcp_tools.count_traces import count_traces
     from wandb_mcp_server.mcp_tools.query_weave import get_trace_service
 
-    if sample_size > 500:
-        logger.warning(f"Large sample_size={sample_size} for schema inference; consider using a smaller value")
+    if isinstance(sample_size, bool) or not isinstance(sample_size, int) or sample_size < 1:
+        return json.dumps({"error": "invalid_input", "message": "sample_size must be a positive integer"})
+    if isinstance(top_n_values, bool) or not isinstance(top_n_values, int) or top_n_values < 1:
+        return json.dumps({"error": "invalid_input", "message": "top_n_values must be a positive integer"})
+    requested_sample_size = sample_size
+    effective_sample_size = min(sample_size, MCP_MAX_SCHEMA_SAMPLE_ROWS)
+    effective_top_n = min(top_n_values, 20)
 
     with track_tool_execution(
         "infer_trace_schema",
@@ -127,7 +135,7 @@ def infer_trace_schema(
                 filters={},
                 sort_by="started_at",
                 sort_direction="desc",
-                limit=sample_size,
+                limit=effective_sample_size,
                 include_costs=False,
                 include_feedback=False,
                 columns=[],
@@ -149,6 +157,18 @@ def infer_trace_schema(
                     "total_traces": total_traces,
                     "root_traces": root_traces,
                     "sample_size": 0,
+                    "sample_scope": {
+                        "strategy": "most_recent",
+                        "requested_count": requested_sample_size,
+                        "applied_limit": effective_sample_size,
+                        "profile": MCP_WORKLOAD_PROFILE,
+                        "profile_cap": MCP_MAX_SCHEMA_SAMPLE_ROWS,
+                        "returned_count": 0,
+                        "total_count": total_traces,
+                        "has_more": total_traces > 0,
+                        "project_exhaustive": total_traces == 0,
+                        "coverage": 1.0 if total_traces == 0 else 0.0,
+                    },
                     "note": "No traces found in this project.",
                 }
             )
@@ -180,7 +200,7 @@ def infer_trace_schema(
         for path in sorted(field_types.keys()):
             type_counts = field_types[path]
             dominant_type = type_counts.most_common(1)[0][0]
-            top_vals = [v for v, _ in field_values[path].most_common(top_n_values)]
+            top_vals = [v for v, _ in field_values[path].most_common(effective_top_n)]
             fields.append(
                 {
                     "path": path,
@@ -196,6 +216,18 @@ def infer_trace_schema(
                 "total_traces": total_traces,
                 "root_traces": root_traces,
                 "sample_size": len(traces),
+                "sample_scope": {
+                    "strategy": "most_recent",
+                    "requested_count": requested_sample_size,
+                    "applied_limit": effective_sample_size,
+                    "profile": MCP_WORKLOAD_PROFILE,
+                    "profile_cap": MCP_MAX_SCHEMA_SAMPLE_ROWS,
+                    "returned_count": len(traces),
+                    "total_count": total_traces,
+                    "has_more": total_traces > len(traces),
+                    "project_exhaustive": total_traces <= len(traces),
+                    "coverage": round(len(traces) / total_traces, 4) if total_traces else 1.0,
+                },
             }
         )
 

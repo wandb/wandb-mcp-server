@@ -24,9 +24,10 @@ Call when the user asks "what changed between run A and B?", "which run is bette
 or wants to understand why two runs have different performance.
 
 Typical workflow:
-1. query_wandb_tool or get_run_history_tool to identify the two runs
-2. compare_runs_tool to see what differs
-3. create_wandb_report_tool to visualize the comparison
+1. probe_project_tool for indexed fields when the project is unfamiliar
+2. query_wandb_tool with projected keys to identify the two runs
+3. compare_runs_tool to see what differs
+4. get_run_history_tool for targeted custom-axis detail when needed
 </when_to_use>
 
 Parameters

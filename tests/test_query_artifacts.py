@@ -1,7 +1,10 @@
 """Tests for artifact tools (list_artifact_versions, get_artifact_details, compare_artifact_versions)."""
 
+import asyncio
 import json
 from unittest.mock import MagicMock, PropertyMock, patch
+
+from mcp.server.fastmcp import FastMCP
 
 from wandb_mcp_server.mcp_tools.query_artifacts import (
     COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
@@ -11,6 +14,7 @@ from wandb_mcp_server.mcp_tools.query_artifacts import (
     get_artifact_details,
     list_artifact_versions,
 )
+from wandb_mcp_server.server import register_tools
 
 
 def _make_artifact(**overrides):
@@ -65,6 +69,14 @@ def _make_file(name="model.pt", size=1000000, digest="aaa111"):
 
 
 class TestListArtifactVersions:
+    def test_public_schema_exposes_order_and_filters(self):
+        mcp = FastMCP("artifact-schema")
+        register_tools(mcp)
+        tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+
+        properties = tools["list_artifact_versions_tool"].inputSchema["properties"]
+        assert {"order", "tags", "created_after", "created_before"} <= properties.keys()
+
     @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
     def test_project_source(self, mock_api_mgr):
         mock_api = MagicMock()
@@ -80,14 +92,18 @@ class TestListArtifactVersions:
         result = json.loads(list_artifact_versions("team/project/my-model", type_name="model", source="project"))
 
         assert result["count"] == 2
+        assert result["returned_count"] == 2
+        assert result["project_exhaustive"] is True
         assert result["source"] == "project"
         assert result["versions"][0]["version"] == "v1"
+        assert mock_api.artifacts.call_args.kwargs["order"] == "-createdAt"
 
     @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
     def test_registry_source(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
         mock_registry = MagicMock()
+        mock_registry.organization = "my-org"
         mock_collections = MagicMock()
         mock_collections.versions.return_value = iter(
             [
@@ -102,6 +118,50 @@ class TestListArtifactVersions:
 
         assert result["count"] == 1
         assert result["source"] == "registry"
+        assert "compatibility_caveat" in result
+
+    @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
+    def test_project_filters_order_and_limit_plus_one(self, mock_api_mgr):
+        mock_api = MagicMock()
+        mock_api.artifacts.return_value = iter(
+            [
+                _make_artifact(version="v3", tags=["production"], created_at="2025-03-01T00:00:00Z"),
+                _make_artifact(version="v2", tags=["production"], created_at="2025-02-01T00:00:00Z"),
+                _make_artifact(version="v1", tags=["production"], created_at="2025-01-01T00:00:00Z"),
+            ]
+        )
+        mock_api_mgr.get_api.return_value = mock_api
+
+        result = json.loads(
+            list_artifact_versions(
+                "team/project/my-model",
+                type_name="model",
+                max_items=1,
+                order="+version",
+                tags=["production"],
+                created_after="2025-01-15T00:00:00Z",
+            )
+        )
+
+        assert result["returned_count"] == 1
+        assert result["has_more"] is True
+        assert result["project_exhaustive"] is False
+        assert result["items"][0]["version"] == "v3"
+        assert mock_api.artifacts.call_args.kwargs["order"] == "+versionIndex"
+        assert mock_api.artifacts.call_args.kwargs["tags"] == ["production"]
+
+    @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
+    def test_invalid_filters_do_not_construct_api(self, mock_api_mgr):
+        result = json.loads(
+            list_artifact_versions(
+                "team/project/my-model",
+                type_name="model",
+                created_after="not-a-date",
+            )
+        )
+
+        assert result["error"] == "invalid_input"
+        mock_api_mgr.get_api.assert_not_called()
 
     @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
     def test_project_source_requires_type_name(self, mock_api_mgr):

@@ -181,6 +181,59 @@ query MCPMetricValueSteps(
 }
 """
 
+REGISTRY_ARTIFACT_VERSIONS_QUERY = """
+query MCPRegistryArtifactVersions(
+  $organization: String!
+  $registryFilter: JSONString!
+  $collectionFilter: JSONString!
+  $order: String!
+  $first: Int!
+  $after: String
+) {
+  organization(name: $organization) {
+    orgEntity {
+      artifactMemberships(
+        projectFilters: $registryFilter
+        collectionFilters: $collectionFilter
+        order: $order
+        first: $first
+        after: $after
+      ) {
+        edges {
+          cursor
+          node {
+            versionIndex
+            aliases {
+              alias
+            }
+            artifactCollection {
+              name
+            }
+            artifact {
+              id
+              state
+              description
+              size
+              fileCount
+              createdAt
+              updatedAt
+              digest
+              tags {
+                name
+              }
+            }
+          }
+        }
+        pageInfo {
+          endCursor
+          hasNextPage
+        }
+      }
+    }
+  }
+}
+"""
+
 
 @dataclass(frozen=True)
 class ProjectedRunPage:
@@ -197,6 +250,15 @@ class ProjectFieldPage:
     """One bounded project-field inventory."""
 
     items: list[dict[str, str]]
+    has_more: bool
+    requests: int
+
+
+@dataclass(frozen=True)
+class ArtifactVersionPage:
+    """One bounded, ordered registry artifact-version scan."""
+
+    items: list[dict[str, Any]]
     has_more: bool
     requests: int
 
@@ -542,8 +604,104 @@ def fetch_metric_value_steps(
     return [int(step) if isinstance(step, (int, float)) else None for step in steps]
 
 
+def fetch_registry_artifact_versions(
+    api: Any,
+    *,
+    organization: str,
+    registry_name: str,
+    collection_name: str,
+    order: str,
+    scan_limit: int,
+    page_size: int = 100,
+) -> ArtifactVersionPage:
+    """Fetch an ordered, bounded registry-version page.
+
+    W&B 0.28's public Registry versions iterator does not expose its query's
+    ordering parameter. This fixed query-only adapter fills only that parity
+    gap; filtering remains bounded and explicit in the caller.
+    """
+    target = max(1, scan_limit)
+    items: list[dict[str, Any]] = []
+    cursor: str | None = None
+    requests = 0
+    has_next_page = False
+    registry_filter = json.dumps({"name": f"wandb-registry-{registry_name}"}, separators=(",", ":"))
+    collection_filter = json.dumps({"name": collection_name}, separators=(",", ":"))
+
+    while len(items) < target:
+        raise_if_tool_deadline_exceeded()
+        try:
+            data = execute_graphql(
+                api,
+                REGISTRY_ARTIFACT_VERSIONS_QUERY,
+                {
+                    "organization": organization,
+                    "registryFilter": registry_filter,
+                    "collectionFilter": collection_filter,
+                    "order": order,
+                    "first": min(max(1, page_size), target - len(items)),
+                    "after": cursor,
+                },
+            )
+        except Exception as exc:
+            raise SelectiveReadUnavailable(
+                f"ordered registry artifact query unavailable: {type(exc).__name__}"
+            ) from exc
+        requests += 1
+        organization_payload = data.get("organization")
+        org_entity = organization_payload.get("orgEntity") if isinstance(organization_payload, Mapping) else None
+        connection = org_entity.get("artifactMemberships") if isinstance(org_entity, Mapping) else None
+        if not isinstance(connection, Mapping):
+            raise SelectiveReadUnavailable("ordered registry artifact query returned no version connection")
+
+        for edge in connection.get("edges") or []:
+            membership = edge.get("node") if isinstance(edge, Mapping) else None
+            artifact = membership.get("artifact") if isinstance(membership, Mapping) else None
+            if not isinstance(membership, Mapping) or not isinstance(artifact, Mapping):
+                continue
+            version_index = membership.get("versionIndex")
+            collection = membership.get("artifactCollection") or {}
+            items.append(
+                {
+                    "version": f"v{version_index}" if version_index is not None else None,
+                    "name": collection.get("name"),
+                    "aliases": [
+                        alias.get("alias")
+                        for alias in membership.get("aliases") or []
+                        if isinstance(alias, Mapping) and alias.get("alias")
+                    ],
+                    "tags": [
+                        tag.get("name")
+                        for tag in artifact.get("tags") or []
+                        if isinstance(tag, Mapping) and tag.get("name")
+                    ],
+                    "state": artifact.get("state"),
+                    "size": artifact.get("size"),
+                    "file_count": artifact.get("fileCount"),
+                    "description": artifact.get("description"),
+                    "created_at": artifact.get("createdAt"),
+                    "updated_at": artifact.get("updatedAt"),
+                    "digest": artifact.get("digest"),
+                }
+            )
+            if len(items) >= target:
+                break
+        page_info = connection.get("pageInfo") or {}
+        has_next_page = bool(page_info.get("hasNextPage"))
+        cursor = page_info.get("endCursor")
+        if not has_next_page or not cursor:
+            break
+
+    return ArtifactVersionPage(
+        items=items,
+        has_more=has_next_page,
+        requests=requests,
+    )
+
+
 __all__ = [
     "ARTIFACT_INVENTORY_QUERY",
+    "REGISTRY_ARTIFACT_VERSIONS_QUERY",
     "METRIC_VALUE_STEPS_QUERY",
     "PROJECTED_RUNS_QUERY",
     "PROJECTED_RUN_QUERY",
@@ -551,9 +709,11 @@ __all__ = [
     "PROJECT_FIELDS_QUERY",
     "ProjectFieldPage",
     "ProjectedRunPage",
+    "ArtifactVersionPage",
     "SelectiveReadUnavailable",
     "fetch_artifact_inventory",
     "fetch_metric_value_steps",
+    "fetch_registry_artifact_versions",
     "fetch_project_counts",
     "fetch_project_fields",
     "fetch_projected_run",
