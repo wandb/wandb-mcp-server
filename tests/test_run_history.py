@@ -1,16 +1,19 @@
 """Tests for the get_run_history_tool."""
 
+import asyncio
 import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 import wandb
+from mcp.server.fastmcp import FastMCP
 
 from wandb_mcp_server.mcp_tools.run_history import (
     GET_RUN_HISTORY_TOOL_DESCRIPTION,
     MAX_HISTORY_ROWS,
     get_run_history,
 )
+from wandb_mcp_server.server import register_tools
 
 
 class TestRunHistoryDescription:
@@ -21,6 +24,20 @@ class TestRunHistoryDescription:
     def test_mentions_training_curves(self):
         desc_lower = GET_RUN_HISTORY_TOOL_DESCRIPTION.lower()
         assert "training curves" in desc_lower or "metric trends" in desc_lower
+
+    def test_public_schema_exposes_custom_axis_and_stream_controls(self):
+        mcp = FastMCP("history-schema")
+        register_tools(mcp)
+        tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+
+        properties = tools["get_run_history_tool"].inputSchema["properties"]
+
+        assert {"x_axis", "target_x", "tolerance", "stream"} <= properties.keys()
+        assert properties["stream"]["enum"] == ["default", "system"]
+        compare_properties = tools["compare_runs_tool"].inputSchema["properties"]
+        diagnose_properties = tools["diagnose_run_tool"].inputSchema["properties"]
+        assert {"config_keys", "summary_keys", "x_axis"} <= compare_properties.keys()
+        assert {"config_keys", "summary_keys", "x_axis", "samples"} <= diagnose_properties.keys()
 
 
 class TestGetRunHistory:
@@ -154,7 +171,7 @@ class TestGetRunHistory:
         mock_run.scan_history.assert_called_once()
         call_kwargs = mock_run.scan_history.call_args[1]
         assert call_kwargs["min_step"] == 50
-        assert call_kwargs["max_step"] == 200
+        assert call_kwargs["max_step"] == 201
         mock_run.history.assert_not_called()
         assert result["sampled_points"] == 3
 
@@ -290,7 +307,7 @@ class TestGetRunHistory:
 
         mock_run.scan_history.assert_called_once()
         call_kwargs = mock_run.scan_history.call_args[1]
-        assert call_kwargs["max_step"] == 200
+        assert call_kwargs["max_step"] == 201
         assert "min_step" not in call_kwargs
 
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
@@ -528,7 +545,7 @@ class TestTieredStepRangeFetch:
         call_kwargs = mock_run.scan_history.call_args[1]
         assert call_kwargs["keys"] == ["loss"]
         assert call_kwargs["min_step"] == 10
-        assert call_kwargs["max_step"] == 100
+        assert call_kwargs["max_step"] == 101
 
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
@@ -547,3 +564,140 @@ class TestTieredStepRangeFetch:
         result = json.loads(get_run_history("e", "p", "run1", min_step=5000, max_step=6000))
         mock_run.history.assert_not_called()
         assert result["sampled_points"] == 0
+
+
+class TestCustomAxisHistory:
+    @patch("wandb_mcp_server.mcp_tools.run_history.fetch_metric_value_steps", return_value=[42])
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_exact_custom_axis_target_is_verified_from_history(
+        self,
+        mock_wandb_mod,
+        mock_api_mgr,
+        mock_steps,
+    ):
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+        run = MagicMock(name="run")
+        run.name = "custom-axis"
+        run.lastHistoryStep = 100
+        run.scan_history.return_value = [{"_step": 42, "validation/step": 1000.0, "validation/loss": 0.2}]
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(
+            get_run_history(
+                "e",
+                "p",
+                "run1",
+                keys=["validation/loss"],
+                x_axis="validation/step",
+                target_x=1000,
+            )
+        )
+
+        assert result["exact"] is True
+        assert result["sampled"] is False
+        assert result["retrieval_method"] == "steps_for_metric_values"
+        assert result["rows"] == [{"_step": 42, "validation/step": 1000.0, "validation/loss": 0.2}]
+        assert result["rows_scanned"] == 1
+        mock_steps.assert_called_once()
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.fetch_metric_value_steps", return_value=[42])
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_missing_exact_custom_axis_target_is_honest(
+        self,
+        mock_wandb_mod,
+        mock_api_mgr,
+        _mock_steps,
+    ):
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+        run = MagicMock()
+        run.name = "custom-axis"
+        run.scan_history.return_value = [{"_step": 42, "validation/step": 999.5}]
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(
+            get_run_history(
+                "e",
+                "p",
+                "run1",
+                keys=["validation/loss"],
+                x_axis="validation/step",
+                target_x=1000,
+            )
+        )
+
+        assert result["error"] == "target_not_logged"
+        assert result["exact"] is False
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.fetch_metric_value_steps", return_value=[42])
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_tolerance_permits_bounded_nearest_refinement(
+        self,
+        mock_wandb_mod,
+        mock_api_mgr,
+        _mock_steps,
+    ):
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+        run = MagicMock()
+        run.name = "custom-axis"
+        run.lastHistoryStep = 100
+        run.scan_history.return_value = [
+            {"_step": 40, "validation/step": 997.0},
+            {"_step": 41, "validation/step": 999.75, "validation/loss": 0.21},
+            {"_step": 42, "validation/step": 1001.0},
+        ]
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(
+            get_run_history(
+                "e",
+                "p",
+                "run1",
+                keys=["validation/loss"],
+                x_axis="validation/step",
+                target_x=1000,
+                tolerance=0.5,
+            )
+        )
+
+        assert result["exact"] is False
+        assert result["sampled"] is False
+        assert result["rows"][0]["validation/step"] == 999.75
+        assert result["rows_scanned"] == 3
+        scan_kwargs = run.scan_history.call_args.kwargs
+        assert scan_kwargs["min_step"] == 40
+        assert scan_kwargs["max_step"] == 45
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_system_stream_uses_public_sdk_sampling(self, mock_wandb_mod, mock_api_mgr):
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+        run = MagicMock()
+        run.name = "system"
+        run.lastHistoryStep = 10
+        run.history.return_value = [{"_timestamp": 10, "system.cpu": 40.0}]
+        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=run))
+        mock_wandb_mod.errors = wandb.errors
+
+        result = json.loads(
+            get_run_history(
+                "e",
+                "p",
+                "run1",
+                keys=["system.cpu"],
+                x_axis="_timestamp",
+                stream="system",
+                samples=10,
+            )
+        )
+
+        assert result["stream"] == "system"
+        assert result["retrieval_method"] == "sdk_sample"
+        assert result["sampled"] is True
+        assert run.history.call_args.kwargs["stream"] == "system"
+        assert run.history.call_args.kwargs["x_axis"] == "_timestamp"

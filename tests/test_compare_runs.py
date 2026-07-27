@@ -193,3 +193,45 @@ class TestCompareRuns:
         assert result["run_a"]["name"] == "alpha"
         assert result["run_b"]["id"] == "id-b"
         assert result["run_b"]["name"] == "beta"
+
+    @patch("wandb_mcp_server.mcp_tools.compare_runs.fetch_projected_run")
+    @patch(
+        "wandb_mcp_server.mcp_tools.compare_runs._indexed_comparison_keys",
+        return_value=(["learning_rate"], ["validation/loss"], False),
+    )
+    @patch("wandb_mcp_server.mcp_tools.compare_runs.WandBApiManager")
+    def test_indexed_projection_avoids_full_sdk_runs_and_discloses_scope(
+        self,
+        mock_api_mgr,
+        _mock_keys,
+        mock_projected_run,
+    ):
+        api = mock_api_mgr.get_api.return_value
+        mock_projected_run.side_effect = [
+            {
+                "id": "a",
+                "display_name": "A",
+                "state": "finished",
+                "config": {"learning_rate": 0.01},
+                "summary": {"validation/loss": 0.4},
+            },
+            {
+                "id": "b",
+                "display_name": "B",
+                "state": "finished",
+                "config": {"learning_rate": 0.001},
+                "summary": {"validation/loss": 0.2},
+            },
+        ]
+
+        result = json.loads(compare_runs("ent", "proj", "a", "b"))
+
+        api.run.assert_not_called()
+        assert result["selection"] == {
+            "source": "project_field_index",
+            "config_keys": ["learning_rate"],
+            "summary_keys": ["validation/loss"],
+            "field_index_exhaustive": False,
+        }
+        assert result["coverage"]["full_run_fields_exhaustive"] is False
+        assert result["summary_diff"]["changed"]["validation/loss"]["delta"] == -0.2

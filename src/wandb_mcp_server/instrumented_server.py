@@ -146,7 +146,7 @@ class InstrumentedFastMCP(FastMCP):
         error: str | None = None
         lease = None
         deadline_token = None
-        cost_class, weight = tool_cost(name)
+        cost_class, weight = tool_cost(name, arguments)
         admission_outcome = "disabled"
         queue_ms = 0.0
         try:
