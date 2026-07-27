@@ -26,6 +26,9 @@ on:
         default: "15"
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   eval:
     name: "Eval (${{ matrix.variant }})"
@@ -36,26 +39,25 @@ jobs:
       matrix:
         variant: ${{ fromJson(inputs.agents || '["claude-mcp"]') }}
 
-    env:
-      WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-
     steps:
       - name: Checkout wandb-mcp-server
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Checkout WandBAgentFactory
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: wandb/WandBAgentFactory
           ref: main
           token: ${{ secrets.WBAF_PAT }}
           path: wbaf
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          version: "0.11.27"
 
       - name: Set up Python
         working-directory: wbaf
@@ -72,10 +74,15 @@ jobs:
 
       - name: Run evaluation
         working-directory: wbaf
+        env:
+          AGENT: ${{ matrix.variant }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVAL_CONFIG: ${{ inputs.eval_config || 'data/evals/mcp-nightly.yaml' }}
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          PARALLELISM: ${{ inputs.parallelism || '15' }}
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         run: |
-          PARALLELISM="${{ inputs.parallelism || '15' }}"
-          AGENT="${{ matrix.variant }}"
-          EVAL_CONFIG="${{ inputs.eval_config || 'data/evals/mcp-nightly.yaml' }}"
           echo "Agent: $AGENT"
           echo "Config: $EVAL_CONFIG"
           echo "Parallelism: $PARALLELISM"
@@ -91,7 +98,7 @@ jobs:
         working-directory: wbaf
         run: |
           python3 -c "
-          import re, json, sys
+          import ast, json, re
 
           log = open('eval-output.log').read()
 
@@ -100,7 +107,7 @@ jobs:
               m = re.match(r'^[\w-]+:\s*(\{.+\})\s*$', line)
               if m:
                   try:
-                      summary = eval(m.group(1))
+                      summary = ast.literal_eval(m.group(1))
                   except Exception:
                       pass
 
@@ -126,7 +133,7 @@ jobs:
 
       - name: Upload results summary
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: results-${{ matrix.variant }}
           path: wbaf/results-summary.json
