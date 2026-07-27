@@ -45,6 +45,7 @@ def _reset_tool_gate_env() -> None:
     os.environ.pop("WANDB_MCP_ENABLE_WEAVE_TOOLS", None)
     os.environ.pop("WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS", None)
     os.environ.pop("WANDB_MCP_READ_ONLY", None)
+    os.environ.pop("WANDB_MCP_ENABLE_RAW_GRAPHQL", None)
 
 
 def _registered_tool_names() -> set[str]:
@@ -64,6 +65,29 @@ def test_weave_tools_registered_by_default():
     assert NON_WEAVE_TOOLS.issubset(names)
     assert WRITE_TOOLS.issubset(names)
     assert AGENT_TOOLS.isdisjoint(names)
+    assert "query_wandb_graphql_tool" not in names
+
+
+def test_raw_graphql_tool_is_opt_in_and_independent():
+    _reset_tool_gate_env()
+    os.environ["WANDB_MCP_ENABLE_RAW_GRAPHQL"] = "true"
+    os.environ["WANDB_MCP_READ_ONLY"] = "true"
+    os.environ["WANDB_MCP_ENABLE_WEAVE_TOOLS"] = "false"
+    os.environ["WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS"] = "true"
+    import wandb_mcp_server.config as cfg
+
+    try:
+        importlib.reload(cfg)
+        names = _registered_tool_names()
+    finally:
+        _reset_tool_gate_env()
+        importlib.reload(cfg)
+
+    assert "query_wandb_tool" in names
+    assert "query_wandb_graphql_tool" in names
+    assert WRITE_TOOLS.isdisjoint(names)
+    assert WEAVE_TOOLS.isdisjoint(names)
+    assert AGENT_TOOLS.issubset(names)
 
 
 def test_weave_tools_can_be_disabled():

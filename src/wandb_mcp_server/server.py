@@ -5,7 +5,7 @@ Weights & Biases MCP Server - A Model Context Protocol server for querying Weigh
 This server provides tools for:
 - Querying Weave traces and evaluations
 - Counting traces efficiently
-- Executing GraphQL queries against W&B experiment data
+- Querying W&B experiment data through the public SDK
 - Creating shareable reports with visualizations
 - Getting help via wandbot support agent
 - Discovering available entities and projects
@@ -20,7 +20,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, List, Optional, Union
+from typing import Any, Callable, Collection, Dict, List, Literal, Optional, Union
 
 import wandb
 from dotenv import load_dotenv
@@ -74,9 +74,9 @@ from wandb_mcp_server.mcp_tools.query_registry import (
     list_registries,
     list_registry_collections,
 )
-from wandb_mcp_server.mcp_tools.query_wandb_gql import (
-    QUERY_WANDB_GQL_TOOL_DESCRIPTION,
-    query_paginated_wandb_gql,
+from wandb_mcp_server.mcp_tools.query_wandb import (
+    QUERY_WANDB_TOOL_DESCRIPTION,
+    query_wandb,
 )
 
 # wandbot removed -- zero usage across 400+ benchmark runs, superseded by search_wandb_docs_tool
@@ -467,7 +467,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
     - query_weave_traces_tool: Query LLM traces with filtering and pagination
     - count_weave_traces_tool: Efficiently count traces without returning data
     - resolve_trace_roots_tool: Batch-resolve root spans for child trace_ids
-    - query_wandb_tool: Execute GraphQL queries against W&B experiment data
+    - query_wandb_tool: Query W&B experiment data through the public SDK
     - create_wandb_report_tool: Create shareable reports with visualizations
     - log_analysis_to_wandb: Log analysis results as W&B runs
     - list_entities_tool: List W&B entities (user + teams)
@@ -503,7 +503,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
     Args:
         mcp_instance: The FastMCP instance to register tools on
     """
-    from wandb_mcp_server.config import WANDB_MCP_READ_ONLY
+    from wandb_mcp_server.config import WANDB_MCP_ENABLE_RAW_GRAPHQL, WANDB_MCP_READ_ONLY
 
     @mcp_instance.tool(description=QUERY_WEAVE_TRACES_TOOL_DESCRIPTION)
     async def query_weave_traces_tool(
@@ -785,14 +785,46 @@ def register_tools(mcp_instance: FastMCP) -> None:
             trace_ids=trace_ids,
         )
 
-    @mcp_instance.tool(description=QUERY_WANDB_GQL_TOOL_DESCRIPTION)
+    @mcp_instance.tool(description=QUERY_WANDB_TOOL_DESCRIPTION)
     async def query_wandb_tool(
-        query: str,
-        variables: Optional[Dict[str, Any]] = None,
-        max_items: int = 100,
-        items_per_page: int = 20,
+        entity_name: str,
+        project_name: str,
+        resource: Literal["project", "run", "runs", "sweep", "sweeps", "reports"],
+        run_id: Optional[str] = None,
+        sweep_id: Optional[str] = None,
+        report_name: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        order: str = "-created_at",
+        limit: int = 50,
+        include: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        return query_paginated_wandb_gql(query, variables, max_items, items_per_page)
+        return query_wandb(
+            entity_name=entity_name,
+            project_name=project_name,
+            resource=resource,
+            run_id=run_id,
+            sweep_id=sweep_id,
+            report_name=report_name,
+            filters=filters,
+            order=order,
+            limit=limit,
+            include=include,
+        )
+
+    if WANDB_MCP_ENABLE_RAW_GRAPHQL:
+        from wandb_mcp_server.mcp_tools.query_wandb_gql import (
+            QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION,
+            query_paginated_wandb_gql,
+        )
+
+        @mcp_instance.tool(description=QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION)
+        async def query_wandb_graphql_tool(
+            query: str,
+            variables: Optional[Dict[str, Any]] = None,
+            max_items: int = 100,
+            items_per_page: int = 20,
+        ) -> Dict[str, Any]:
+            return query_paginated_wandb_gql(query, variables, max_items, items_per_page)
 
     if not WANDB_MCP_READ_ONLY:
 

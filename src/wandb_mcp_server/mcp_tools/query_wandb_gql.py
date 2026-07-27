@@ -21,409 +21,37 @@ from wandb_mcp_server.wandb_graphql import (
 logger = get_rich_logger(__name__)
 
 
-QUERY_WANDB_GQL_TOOL_DESCRIPTION = """Execute a read-only GraphQL query against the W&B Models API.
+QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION = """Execute an advanced, query-only GraphQL document against W&B Models.
 
-Use for read-only W&B Models queries that need GraphQL-specific filtering, sorting,
-nested selections, custom fields, sweeps, reports, or schema introspection.
-For LLM traces or Weave evaluations, use query_weave_traces_tool instead.
-
-Prefer the existing SDK-backed tools when they provide the requested operation:
-- entity/project discovery: list_entities_tool and query_wandb_entity_projects
-- sampled or scanned run history: get_run_history_tool
-- artifact reads: list_artifact_versions_tool and get_artifact_details_tool
-- registry reads: list_registries_tool and list_registry_collections_tool
-- automations and integrations: list_wandb_automations_tool and list_wandb_integrations_tool
-
-Keep this raw GraphQL tool for general run filtering/sorting, custom project fields,
-sweeps, reports, introspection, and arbitrary nested selections where the exact
-response shape is not available from an existing tool. Do not translate arbitrary
-GraphQL into SDK calls: aliases, field selection, and nesting are part of its contract.
+This opt-in escape hatch is only for reads without public W&B SDK parity:
+- schema introspection
+- unmodeled or custom fields
+- cross-resource nested selections
+- aliases or an exact GraphQL response shape
 
 <when_to_use>
-Call when a read requires GraphQL-only filtering, sorting, nesting, custom fields,
-sweeps, reports, introspection, or an exact response shape not covered by an existing tool.
+Use only when the requested read cannot be represented by the public W&B SDK and
+the deployment administrator has deliberately enabled raw GraphQL access.
 </when_to_use>
 
-<query_analysis_step>
-**STEP 1: ANALYZE THE USER QUERY FIRST!**
-Before constructing the GraphQL query, determine how the user is referring to W&B entities, especially runs:
-  - Is the user providing a short, 8-character **Run ID** (e.g., `gtng2y4l`, `h0fm5qp5`)?
-  - Or are they providing a longer, human-readable **Display Name** (e.g., `transformer_train_run_123`, `eval_on_benchmark_v2`)?
-Your choice of query structure depends heavily on this analysis (see Key Concepts and Examples below).
-</query_analysis_step>
+Do not use this tool for projects, run lookup/filtering/sorting, sweeps, reports,
+artifacts, registries, automations, integrations, or run history. Those operations
+have SDK-backed MCP tools and should use them instead.
 
-<key_concepts>
-**KEY CONCEPTS - READ CAREFULLY:**
-
-*   **Run ID vs. Display Name:**
-    *   To fetch a **single, specific run** using its unique 8-character ID (e.g., `gtng2y4l`), \
-use the `run(name: $runId)` field. The variable `$runId` MUST be the ID, not the display name.
-    *   To **find runs based on their human-readable `displayName`** (e.g., `my-cool-experiment-1`), \
-use the `runs` collection field with a `filters` argument like: `runs(filters: "{\\"displayName\\":\
-{\\"$eq\\":\\"my-cool-experiment-1\\"}}")`. This might return multiple runs if display names are not unique.
-*   **Filters require JSON Strings:** When using the `filters` argument (e.g., for `runs`, `artifacts`), \
-the value provided in the `variables` dictionary MUST be a JSON formatted *string*. Use `json.dumps()` in Python to create it.
-*   **Collections Require Pagination Structure:** Queries fetching lists/collections (like `project.runs`, \
-`artifact.files`) MUST include the `edges { node { ... } } pageInfo { endCursor hasNextPage }` pattern.
-*   **Summary Metrics:** Use the `summaryMetrics` field (returns a JSON string) to access a run's summary \
-dictionary, not the deprecated `summary` field.
-</key_concepts>
-
-This function allows interaction with W&B data (Projects, Runs, Artifacts, Sweeps, Reports, etc.)
-using the GraphQL query language.
+Only GraphQL query operations are accepted. Mutations, subscriptions, and mixed
+documents are rejected before a W&B request. Collection pagination requires the
+W&B edges/node/pageInfo connection shape.
 
 Parameters
 ----------
 query : str
-    The GraphQL query string. Only query operations are accepted; mutations and
-    subscriptions are rejected before any request is sent to W&B.
-variables : dict[str, Any] | None, optional
-    A dictionary of variables to pass to the query.
-                                            Keys should match variable names defined in the query
-                                            (e.g., $entity, $project). Values should match the
-                                            expected types (String, Int, Float, Boolean, ID, JSONString).
-                                            **Crucially, complex arguments like `filters` MUST be provided
-                                            as a JSON formatted *string*. Use `json.dumps()` in Python
-                                            to create this string.**
+    A complete read-only GraphQL query document.
+variables : dict, optional
+    Variables referenced by the document.
 max_items : int, optional
-    Maximum number of items to fetch across all pages. Default is 100.
+    Maximum items accumulated across pages. Default: 100.
 items_per_page : int, optional
-    Number of items to request per page. Default is 50.
-
-Returns
--------
-Dict[str, Any]
-    The aggregated GraphQL response dictionary.
-
-<critical_warning>
-**⚠️ CRITICAL WARNING: Run ID vs. Display Name ⚠️**
-If the user query mentions a run using its **long, human-readable name** (Display Name), you **MUST** use the `runs(filters: ...)` approach shown in the examples.
-**DO NOT** use `run(name: ...)` with a Display Name; it will fail because `name` expects the short Run ID. Use `run(name: ...)` **ONLY** when the user provides the 8-character Run ID.
-Review the "Minimal Example: Run ID vs Display Name" and "Get Run by Display Name" examples carefully.
-</critical_warning>
-
-<required_pagination_structure>
-**⚠️ REQUIRED PAGINATION STRUCTURE ⚠️**
-
-All collection queries MUST include the complete W&B connection pattern with these elements:
-1. `edges` array containing nodes
-2. `node` objects inside edges containing your data fields
-3. `pageInfo` object with:
-    - `endCursor` field (to enable pagination)
-    - `hasNextPage` field (to determine if more data exists)
-
-This is a strict requirement enforced by the pagination system. Queries without this
-structure will fail with the error "Query doesn't follow the W&B connection pattern."
-
-Example of required pagination structure for any collection:
-```graphql
-query PaginatedRuns($entity: String!, $project: String!) {
-  project(name: $project, entityName: $entity) {
-  runs(first: 10) {  # or artifacts, files, etc.
-    edges {
-    node {
-        id
-        name
-        # ... other fields you need
-    }
-    # cursor # Optional: include cursor if needed for specific pagination logic
-    }
-    pageInfo {
-    endCursor
-    hasNextPage
-    }
-  }
-  }
-}
-```
-</required_pagination_structure>
-
-<llm_context_window_management>
-**LLM CONTEXT WINDOW MANAGEMENT**
-
-The results of this tool are returned to a LLM. Be mindful of the context window of the LLM!
-
-<warning_about_open_ended_queries>
-**WARNING: AVOID OPEN-ENDED QUERIES!**
-
-Open-ended queries should be strictly avoided when:
-- There are a lot of runs in the project (e.g., hundreds or thousands)
-- There are runs with large amounts of data (e.g., many metrics, large configs, etc.)
-
-Examples of problematic open-ended queries:
-- Requesting all runs in a project without limits
-- Requesting complete run histories without filtering specific metrics
-- Requesting all files from artifacts without specifying names/types
-
-Instead, always:
-- Use the `first` parameter to limit the number of items returned (start small, e.g., 5-10)
-- Apply specific filters to narrow down results (e.g., state, creation time, metrics)
-- Request only the specific fields needed, avoid selecting everything
-- Consider paginating results if necessary (don't request everything at once)
-
-Bad:
-```graphql
-query AllRuns($entity: String!, $project: String!) {
-    project(name: $project, entityName: $entity) {
-    # Potentially huge response: requests all fields for all runs
-    runs {
-        edges {
-        node {
-            id
-            name
-            state
-            history
-            summaryMetrics
-            config
-            files { edges { node { name size } } }
-        }
-        }
-    }
-    }
-}
-```
-
-Good:
-```graphql
-query LimitedRuns($entity: String!, $project: String!) {
-    project(name: $project, entityName: $entity) {
-    # Limits runs, specifies filters, and selects only necessary fields
-    runs(first: 5, filters: "{\\"state\\":\\"finished\\"}") {
-        edges {
-        node {
-            id
-            name
-            createdAt
-            summaryMetrics # Get summary JSON, parse later if needed
-        }
-        }
-        pageInfo { endCursor hasNextPage } # Always include pageInfo for collections
-    }
-    }
-}
-```
-</warning_about_open_ended_queries>
-
-Some tactics to consider to avoid exceeding the context window of the LLM when using this tool:
-    - First return just metadata about the wandb project or run you will be returning.
-    - Select only a subset of the data such as just particular columns or rows.
-    - If you need to return a large amount of data consider using the `query_wandb_tool` in a loop
-    - Break up the query into smaller chunks.
-
-If you are returning just a sample subset of the data warn the user that this is a sample and that they should
-use the tool again with additional filters or pagination to get a more complete view.
-</llm_context_window_management>
-
-**Constructing GraphQL Queries:**
-
-1.  **Operation Type:** Start with `query`. This tool is read-only and rejects `mutation` and `subscription` operations.
-2.  **Operation Name:** (Optional but recommended) A descriptive name (e.g., `ProjectInfo`).
-3.  **Variables Definition:** Define variables used in the query with their types (e.g., `($entity: String!, $project: String!)`). `!` means required.
-4.  **Selection Set:** Specify the fields you want to retrieve, nesting as needed based on the W&B schema.
-
-**W&B Schema Overview:**
-
-*   **Core Types:** `Entity`, `Project`, `Run`, `Artifact`, `Sweep`, `Report`, `User`, `Team`.
-*   **Relationships:** Entities contain Projects. Projects contain Runs, Sweeps, Artifacts. Runs use/are used by Artifacts. Sweeps contain Runs.
-*   **Common Fields:** `id`, `name`, `description`, `createdAt`, `config` (JSONString), `summaryMetrics` (JSONString - **Note:** use this field,
-        not `summary`, to access the run's summary dictionary as a JSON string), `historyKeys` (List of String), etc.
-*   **Connections (Lists):** Many lists (like `project.runs`, `artifact.files`) use a connection pattern:
-    ```graphql
-    query PaginatedRuns($entity: String!, $project: String!, $first: Int, $after: String, $filters: JSONString, $order: String) {
-      project(name: $project, entityName: $entity) {
-      runs(first: $first, after: $after, filters: $filters, order: $order) {
-        edges { node { id name } cursor }
-        pageInfo { hasNextPage endCursor }
-      }
-      }
-    }
-    ```
-    Use `first` for limit, `after` with `pageInfo.endCursor` for pagination, `filters` (as a JSON string) for complex filtering, and `order` for sorting.
-*   **Field Type Handling:**
-    - Some fields require subfield selection (e.g., `tags { name }`) while others are scalar (e.g., `historyKeys`).
-    - Check the schema if you get errors like "must have a selection of subfields" or "must not have a selection".
-
-**Query Examples:**
-
-<!-- WANDB_GQL_EXAMPLE_START name=MinimalRunIdVsDisplayName -->
-*   **Minimal Example: Run ID vs Display Name:**
-    *   **A) User provides Run ID (e.g., "get info for run h0fm5qp5"):**
-        ```graphql
-        query GetRunById($entity: String!, $project: String!, $runId: String!) {
-          project(name: $project, entityName: $entity) {
-            # Use run(name: ...) with the Run ID
-            run(name: $runId) {
-              id
-              name # This will be the Run ID
-              displayName # This is the human-readable name
-            }
-          }
-        }
-        ```
-        ```python
-        variables = {"entity": "...", "project": "...", "runId": "h0fm5qp5"}
-        ```
-    *   **B) User provides Display Name (e.g., "get info for run transformer_train_123"):**
-        ```graphql
-        # Note: Querying *runs* collection and filtering
-        query GetRunByDisplayNameMinimal($project: String!, $entity: String!, $displayNameFilter: JSONString) {
-          project(name: $project, entityName: $entity) {
-            # Use runs(filters: ...) with the Display Name
-            runs(first: 1, filters: $displayNameFilter) {
-              edges {
-                node {
-                  id
-                  name # Run ID
-                  displayName # Display Name provided by user
-                }
-              }
-              pageInfo { endCursor hasNextPage } # Required for collections
-            }
-          }
-        }
-        ```
-        ```python
-        import json
-        variables = {
-            "entity": "...",
-            "project": "...",
-            "displayNameFilter": json.dumps({"displayName": {"$eq": "transformer_train_123"}})
-        }
-        ```
-<!-- WANDB_GQL_EXAMPLE_END name=MinimalRunIdVsDisplayName -->
-
-<!-- WANDB_GQL_EXAMPLE_START name=GetProjectInfo -->
-*   **Get Project Info:** (Doesn't retrieve a collection, no pagination needed)
-    ```graphql
-    query ProjectInfo($entity: String!, $project: String!) {
-        project(name: $project, entityName: $entity) {
-        id
-        name
-        entityName
-        description
-        runCount
-        }
-    }
-    ```
-    ```python
-    variables = {"entity": "my-entity", "project": "my-project"}
-    ```
-<!-- WANDB_GQL_EXAMPLE_END name=GetProjectInfo -->
-
-<!-- WANDB_GQL_EXAMPLE_START name=GetSortedRuns -->
-*   **Get Sorted Runs:** (Retrieves a collection, requires pagination structure)
-    ```graphql
-    query SortedRuns($project: String!, $entity: String!, $limit: Int, $order: String) {
-        project(name: $project, entityName: $entity) {
-        runs(first: $limit, order: $order) {
-            edges {
-            node { id name displayName state createdAt summaryMetrics }
-            cursor # Optional cursor
-            }
-            pageInfo { # Required for collections
-            hasNextPage
-            endCursor
-            }
-        }
-        }
-    }
-    ```
-    ```python
-    variables = {
-        "entity": "my-entity",
-        "project": "my-project",
-        "limit": 10,
-        "order": "+summary_metrics.accuracy"  # Ascending order by accuracy
-        # Use "-createdAt" for newest first (default if order omitted)
-        # Use "+createdAt" for oldest first
-    }
-    ```
-<!-- WANDB_GQL_EXAMPLE_END name=GetSortedRuns -->
-
-<!-- WANDB_GQL_EXAMPLE_START name=GetFilteredRuns -->
-*   **Get Runs with Pagination and Filtering:** (Requires pagination structure)
-    ```graphql
-    query FilteredRuns($project: String!, $entity: String!, $limit: Int, $cursor: String, $filters: JSONString, $order: String) {
-        project(name: $project, entityName: $entity) {
-        runs(first: $limit, after: $cursor, filters: $filters, order: $order) {
-            edges {
-            node { id name state createdAt summaryMetrics }
-            cursor # Optional cursor
-            }
-            pageInfo { endCursor hasNextPage } # Required
-        }
-        }
-    }
-    ```
-    ```python
-    # Corrected: Show filters as the required escaped JSON string
-    variables = {
-        "entity": "my-entity",
-        "project": "my-project",
-        "limit": 10,
-        "order": "-summary_metrics.accuracy",  # Optional: sort
-        "filters": "{\"state\": \"finished\", \"summary_metrics.accuracy\": {\"$gt\": 0.9}}", # Escaped JSON string
-        # "cursor": previous_pageInfo_endCursor # Optional for next page
-    }
-    # Note: The *content* of the `filters` JSON string must adhere to the specific
-    # filtering syntax supported by the W&B API (e.g., using operators like `$gt`, `$eq`, `$in`).
-    # Refer to W&B documentation for the full filter specification.
-    ```
-<!-- WANDB_GQL_EXAMPLE_END name=GetFilteredRuns -->
-
-<!-- WANDB_GQL_EXAMPLE_START name=GetRunByDisplayName -->
-*   **Get Run by Display Name:** (Requires filtering and pagination structure)
-    ```graphql
-    # Note: Querying *runs* collection and filtering, not the singular run(name:...) field
-    query GetRunByDisplayName($project: String!, $entity: String!, $displayNameFilter: JSONString) {
-        project(name: $project, entityName: $entity) {
-        # Filter the runs collection by displayName
-        runs(first: 1, filters: $displayNameFilter) {
-            edges {
-            # Select desired fields from the node (the run)
-            node { id name displayName state createdAt summaryMetrics }
-            }
-            # Required pageInfo for collections
-            pageInfo { endCursor hasNextPage }
-        }
-        }
-    }
-    ```
-    ```python
-    # Use json.dumps for the filters argument
-    import json
-    target_display_name = "my-experiment-run-123"
-    variables = {
-        "entity": "my-entity",
-        "project": "my-project",
-        # Filter for the specific display name
-        "displayNameFilter": json.dumps({"displayName": {"$eq": target_display_name}})
-        # W&B filter syntax might vary slightly, check docs if needed. Common is {"field": "value"} or {"field": {"$operator": "value"}}
-    }
-    # Note: This finds runs where displayName *exactly* matches.
-    # It might return multiple runs if display names are not unique.
-    # The `name` field (often the run ID like 'gtng2y4l') is guaranteed unique per project.
-    # Use `run(name: $runId)` if you know the unique run ID ('name').
-    ```
-<!-- WANDB_GQL_EXAMPLE_END name=GetRunByDisplayName -->
-
-**Troubleshooting Common Errors:**
-
-*   `"Cannot query field 'summary' on type 'Run'"`: Use the `summaryMetrics` field instead of `summary`. It returns a JSON string containing the summary dictionary.
-*   `"Argument 'filters' has invalid value ... Expected type 'JSONString'"`: Ensure the `filters` argument in your `variables` is a JSON formatted *string*, likely created using `json.dumps()`. Also check the *content* of the filter string for valid W&B filter syntax.
-*   `"400 Client Error: Bad Request"` (especially when using filters): Double-check the *syntax* inside your `filters` JSON string. Ensure operators (`$eq`, `$gt`, etc.) and structure are valid for the W&B API. Invalid field names or operators within the filter string can cause this.
-*   `"Unknown argument 'direction' on field 'runs'"`: Control sort direction using `+` (ascending) or `-` (descending) prefixes in the `order` argument string (e.g., `order: "-createdAt"`), not with a separate `direction` argument.
-*   For run history keys or time-series values, use `get_run_history_tool`; it provides sampled or scanned history through the supported SDK path.
-*   `"Query doesn't follow the W&B connection pattern"`: Ensure any field returning a list/collection (like `runs`, `files`, `artifacts`, etc.) includes the full `edges { node { ... } } pageInfo { endCursor hasNextPage }` structure. This is mandatory for pagination.
-*   `"Field must not have a selection"` / `"Field must have a selection"`: Check if the field you are querying is a scalar type (like `String`, `Int`, `JSONString`, `[String!]`) which cannot have sub-fields selected, or an object type which requires you to select sub-fields.
-*   `"Cannot query field 'step' on type 'Run'"`: The `Run` type does not have a direct `step` field. To find the maximum step count or total steps logged, query the `summaryMetrics` field (look for a key like `_step` or similar in the returned JSON string) or use the `historyLineCount` field which indicates the total number of history rows logged (often corresponding to steps).
-
-**Notes:**
-*   Refer to the official W&B GraphQL schema (via introspection or documentation) for the most up-to-date field names, types, and available filters/arguments.
-*   Structure your query to request only the necessary data fields to minimize response size and improve performance.
-*   **Sorting:** Use the `order` parameter string. Prefix with `+` for ascending, `-` for descending (default).
-        Common sortable fields: `createdAt`, `updatedAt`, `heartbeatAt`, `config.*`, `summary_metrics.*`.
-*   Handle potential errors in the returned dictionary (e.g., check for an 'errors' key in the response).
+    Requested collection page size. Default: 20.
 """
 
 
@@ -634,6 +262,7 @@ def query_paginated_wandb_gql(
             "max_items": max_items,
             "items_per_page": items_per_page,
         },
+        mcp_tool_name="query_wandb_graphql_tool",
     ) as ctx:
         try:
             from wandb_mcp_server.config import (

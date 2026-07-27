@@ -15,7 +15,8 @@ class GraphQLReadOnlyViolation(ValueError):
         self.operation_types = tuple(sorted(operation_types))
         joined_types = ", ".join(self.operation_types)
         super().__init__(
-            f"query_wandb_tool accepts GraphQL query operations only; rejected operation type(s): {joined_types}."
+            "query_wandb_graphql_tool accepts GraphQL query operations only; "
+            f"rejected operation type(s): {joined_types}."
         )
 
 
@@ -46,6 +47,7 @@ def execute_graphql(
     execute = getattr(service_api, "execute_graphql", None)
     if not callable(execute):
         raise RuntimeError(
-            "W&B SDK compatibility error: query_wandb_tool requires wandb>=0.28.0 with ServiceApi.execute_graphql."
+            "W&B SDK compatibility error: query_wandb_graphql_tool requires "
+            "wandb>=0.28.0 with ServiceApi.execute_graphql."
         )
     return execute(query, variables=variables_dict)

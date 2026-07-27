@@ -1,7 +1,7 @@
 """Log computed analysis data to W&B for visualization in reports.
 
 Creates a lightweight W&B run via the PublicApi (no wandb.init()),
-logs scalar summary metrics via GraphQL UpsertBucket, and returns
+logs scalar summary metrics through the SDK, and returns
 the run_id for use in create_wandb_report_tool panels.
 
 Security: Uses wandb.Api(api_key=...) per-request, same pattern as
