@@ -12,13 +12,33 @@ Query and analyze your Weights & Biases data using natural language through the 
 <div align="center">
   <a href="https://cursor.com/en/install-mcp?name=wandb&config=eyJ0cmFuc3BvcnQiOiJodHRwIiwidXJsIjoiaHR0cHM6Ly9tY3Aud2l0aHdhbmRiLmNvbS9tY3AiLCJoZWFkZXJzIjp7IkF1dGhvcml6YXRpb24iOiJCZWFyZXIge3tXQU5EQl9BUElfS0VZfX0iLCJBY2NlcHQiOiJhcHBsaWNhdGlvbi9qc29uLCB0ZXh0L2V2ZW50LXN0cmVhbSJ9fQ%3D%3D"><img src="https://cursor.com/deeplink/mcp-install-dark.svg" alt="Cursor" height="28"/></a>
   <a href="#claude-desktop"><img src="https://img.shields.io/badge/Claude-6B5CE6?logo=anthropic&logoColor=white" alt="Claude" height="28"/></a>
-  <a href="#openai"><img src="https://img.shields.io/badge/OpenAI-412991?logo=openai&logoColor=white" alt="OpenAI" height="28"/></a>
+  <a href="#openai-response-api"><img src="https://img.shields.io/badge/OpenAI-412991?logo=openai&logoColor=white" alt="OpenAI" height="28"/></a>
   <a href="#gemini-cli"><img src="https://img.shields.io/badge/Gemini-4285F4?logo=google&logoColor=white" alt="Gemini" height="28"/></a>
-  <a href="#mistral-lechat"><img src="https://img.shields.io/badge/LeChat-FF6B6B?logo=mistralai&logoColor=white" alt="LeChat" height="28"/></a>
+  <a href="#mistral-chat"><img src="https://img.shields.io/badge/LeChat-FF6B6B?logo=mistralai&logoColor=white" alt="LeChat" height="28"/></a>
   <a href="#vscode"><img src="https://img.shields.io/badge/VSCode-007ACC?logo=visualstudiocode&logoColor=white" alt="VSCode" height="28"/></a>
 </div>
 
 ---
+
+## v0.4.0 Release Highlights
+
+Version 0.4.0 makes W&B reads SDK-first, bounded, and workload-aware:
+
+- Run collections return lightweight metadata by default and support targeted
+  `summary_keys` and `config_keys` instead of loading every metric.
+- Shared and Dedicated workload profiles bound collection, history, evaluation,
+  and schema reads. Overloaded hosted servers return a retryable `server_busy`
+  response instead of creating unbounded W&B API traffic.
+- Dedicated and Self-Managed deployments can send backend API traffic over an
+  internal Kubernetes service with `WANDB_INTERNAL_BASE_URL`, while public links
+  continue to use `WANDB_BASE_URL`.
+- Raw GraphQL is disabled by default and remains query-only when explicitly
+  enabled. Mutations and subscriptions are rejected.
+- Tool telemetry is bounded, excludes raw arguments and API keys, and correctly
+  attributes supported clients such as Codex, Claude Code, and Cursor.
+
+See the [v0.4.0 release notes](docs/releases/v0.4.0.md) for migration guidance,
+deployment settings, and the complete customer-visible summary.
 
 ## What Can This Server Do?
 
@@ -40,11 +60,17 @@ Query and analyze your Weights & Biases data using natural language through the 
 | **infer_trace_schema_tool** | Discover field names, types, and sample values | *"What fields are in my traces?"* |
 | **query_weave_traces_tool** | Analyze LLM traces with `detail_level` control | *"Show failed traces with full data"* |
 | **count_weave_traces_tool** | Count traces and get storage metrics | *"How many traces failed?"* |
+| **resolve_trace_roots_tool** | Resolve spans to their root traces | *"Find the root traces for these calls"* |
 | **query_wandb_tool** | Query projects, runs, sweeps, and reports through the W&B SDK | *"Show me runs with loss < 0.1"* |
+| **probe_project_tool** | Discover useful project fields and bounded samples | *"What metrics and config fields are available?"* |
 | **get_run_history_tool** | Sampled time-series metric data | *"Show loss curve for run abc123"* |
+| **compare_runs_tool** | Compare selected metrics and configuration across runs | *"Compare these three training runs"* |
+| **diagnose_run_tool** | Diagnose a run using bounded metadata and history reads | *"Why did this run diverge?"* |
+| **summarize_evaluation_tool** | Summarize bounded evaluation results with coverage metadata | *"Summarize this evaluation"* |
 | **create_wandb_report_tool** | Create reports with markdown, charts, and panels | *"Create a report with loss plots"* |
 | **log_analysis_to_wandb** | Log analysis metrics to W&B as a run | *"Log these latency stats to W&B"* |
 | **search_wandb_docs_tool** | Search official W&B documentation | *"How do I create a Weave scorer?"* |
+| **list_entities_tool** | List entities accessible to the current API key | *"Which W&B teams can I access?"* |
 | **query_wandb_entity_projects** | List projects for an entity | *"What projects exist?"* |
 | **list_registries_tool** | List model registries in an organization | *"What registries are available?"* |
 | **list_registry_collections_tool** | List collections within a registry | *"What models are in the prod registry?"* |
@@ -104,8 +130,11 @@ LLMs are not mind readers, ensure you specify the W&B Entity and W&B Project to 
 **→ Avoid asking overly broad questions**
 Questions such as "what is my best evaluation?" are probably overly broad and you'll get to an answer faster by refining your question to be more specific such as: "what eval had the highest f1 score?"
 
-**→ Ensure all data was retrieved**
-When asking broad, general questions such as "what are my best performing runs/evaluations?" it's always a good idea to ask the LLM to check that it retrieved all the available runs. The MCP tools are designed to fetch the correct amount of data, but sometimes there can be a tendency from the LLMs to only retrieve the latest runs or the last N runs.
+**→ Check result coverage for broad questions**
+Collection and evaluation tools report fields such as `total_count`,
+`returned_count`, `has_more`, `project_exhaustive`, `sampled`, and `truncated`.
+For broad questions, ask the client to explain these fields rather than assuming
+that a bounded result represents the entire project.
 
 </details>
 
@@ -113,11 +142,13 @@ When asking broad, general questions such as "what are my best performing runs/e
 
 ## Quick Start
 
-We recommend using our **hosted server** at `https://mcp.withwandb.com` - no installation required! <br>
+We recommend using our **hosted server** at `https://mcp.withwandb.com/mcp` - no installation required! <br>
 
 > 🔑 Get your API key from [wandb.ai/authorize](https://wandb.ai/authorize) <br>
 
-> 🌐 To connect to a **W&B Dedicated / On-Prem Instance** currently only the **local** MCP configuration can be used with an additional `WANDB_BASE_URL` env variable (the default is `api.wandb.ai`)
+> 🌐 For **W&B Dedicated / Self-Managed**, use the instance MCP endpoint when
+> enabled by your operator chart (`https://<your-instance>/mcp`). Local STDIO
+> remains available by setting `WANDB_BASE_URL=https://<your-instance>`.
 
 ### Cursor
 <details>
@@ -227,8 +258,6 @@ For local installation, see [Option 2](#general-installation-guide) below.
 <details>
 <summary>Configuration setup</summary>
 
-Mistral Le Chat is currently the best supported chat assistant for API-key based MCP authentication.
-
 Use the **Custom MCP Connector** flow:
 
 1. Open Le Chat and go to **Connectors**.
@@ -239,14 +268,15 @@ Use the **Custom MCP Connector** flow:
 
 If the UI asks for a token value, paste the raw W&B API key. If it asks for the full `Authorization` header value, use `Bearer <your-wandb-api-key>`.
 
-If adding the W&B connector from the Le Chat connector directory returns an `integrations.addIntegrationFromStore` 500 error, use the Custom MCP Connector flow above. That error happens in Mistral's connector-store add flow before Le Chat reaches the W&B MCP endpoint.
 </details>
 
 ### Claude Desktop
 <details>
 <summary>Configuration setup</summary>
 
-Add to your Claude config file. Claude desktop currently doesn't support remote MCPs to be added so we're adding the local MCP. Be careful to add the full path to `uv` for the command because Claude Desktop potentially doesn't find your `uv` installation otherwise.
+For a local STDIO connection, add the server to the Claude Desktop
+configuration. Use the absolute path to `uvx` if the desktop application cannot
+resolve your shell `PATH`.
 
 ```bash
 # macOS
@@ -260,7 +290,7 @@ notepad %APPDATA%\Claude\claude_desktop_config.json
 {
   "mcpServers": {
     "wandb": {
-     "command": "/Users/niware_wb/.local/bin/uvx",
+      "command": "uvx",
       "args": [
         "--from",
         "git+https://github.com/wandb/wandb-mcp-server",
@@ -277,8 +307,6 @@ notepad %APPDATA%\Claude\claude_desktop_config.json
 Restart Claude Desktop to activate.
 </details>
 
-We're working on adding OAuth support so that we can integrate with ChatGPT.
-
 ---
 
 ## General Installation Guide
@@ -286,17 +314,19 @@ We're working on adding OAuth support so that we can integrate with ChatGPT.
 <details>
 <summary><strong>Option 1: Hosted Server (Recommended)</strong></summary>
 
-The hosted server provides a zero-configuration experience with enterprise-grade reliability. This server is maintained by the W&B team, automatically updated with new features, and scales to handle any workload. Perfect for teams and production use cases where you want to focus on your ML work rather than infrastructure.
+The hosted server provides a managed, zero-installation experience. It uses
+bounded workload profiles, request deadlines, and retryable overload responses
+to protect W&B while serving multiple users.
 
 ### Using the Public Server
 
-The easiest way is using our hosted server at `https://mcp.withwandb.com`.
+The easiest way is using our hosted server at `https://mcp.withwandb.com/mcp`.
 
 **Benefits:**
 - ✅ Zero installation
 - ✅ Always up-to-date
-- ✅ Automatic scaling
-- ✅ No maintenance
+- ✅ Managed workload limits
+- ✅ No server maintenance
 
 Simply use the configurations shown in [Quick Start](#quick-start).
 </details>
@@ -304,7 +334,12 @@ Simply use the configurations shown in [Quick Start](#quick-start).
 <details>
 <summary><strong>Option 2: Local Development (STDIO)</strong></summary>
 
-Run the MCP server locally for development, testing, or when you need full control over your data. The local server runs directly on your machine with STDIO transport for desktop clients or HTTP transport for web-based clients. Ideal for developers who want to customize the server or work in air-gapped environments. **See below for client specific installation**.
+Run the MCP server locally for development, testing, or when you need direct
+control over its configuration. The local server runs on your machine with
+STDIO transport for desktop clients or HTTP transport for web-based clients.
+It still requires network access to the configured W&B instance and any enabled
+documentation or telemetry endpoints. **See below for client-specific
+installation.**
 
 ### Running the Server Locally
 
@@ -313,10 +348,7 @@ Run the MCP server locally for development, testing, or when you need full contr
 # Install uv if needed
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install the server
-uv pip install git+https://github.com/wandb/wandb-mcp-server
-
-# Run with STDIO transport (for desktop clients)
+# Run the current server from GitHub with STDIO transport
 export WANDB_API_KEY="your-api-key"
 uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
 ```
@@ -338,7 +370,7 @@ Add to your MCP client config (for detailed client-specific configs see below):
       ],
       "env": {
         "WANDB_API_KEY": "YOUR_API_KEY",
-        "WANDB_BASE_URL": "YOUR_BASE_URL", #optional for dedicated or on-prem installations
+        "WANDB_BASE_URL": "https://your-wandb-instance.example.com"
       }
     }
   }
@@ -377,7 +409,7 @@ Manual local (dedicated or on-prem) config in `mcp.json`:
     ],
     "env": {
       "WANDB_API_KEY": "YOUR-API_KEY",
-      "WANDB_BASE_URL": "https://your-wandb-instance.example.com", # optional
+      "WANDB_BASE_URL": "https://your-wandb-instance.example.com"
     }
 }
 ```
@@ -411,7 +443,7 @@ notepad %APPDATA%\Claude\claude_desktop_config.json
 {
   "mcpServers": {
     "wandb": {
-     "command": "/Users/niware_wb/.local/bin/uvx",
+      "command": "uvx",
       "args": [
         "--from",
         "git+https://github.com/wandb/wandb-mcp-server",
@@ -419,7 +451,7 @@ notepad %APPDATA%\Claude\claude_desktop_config.json
       ],
       "env": {
         "WANDB_API_KEY": "<your-api-key>",
-        "WANDB_BASE_URL": "https://your-wandb-instance.example.com", # optional
+        "WANDB_BASE_URL": "https://your-wandb-instance.example.com"
       }
     }
   }
@@ -434,7 +466,9 @@ For clients like OpenAI and LeChat that require public URLs:
 
 ```bash
 # 1. Start HTTP server
-uvx wandb-mcp-server --transport http --port 8080
+uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
+  --transport http \
+  --port 8080
 
 # 2. Expose with ngrok
 ngrok http 8080
@@ -447,7 +481,10 @@ ngrok http 8080
 <details>
 <summary><strong>Option 3: Self-Hosted HTTP Server (Advanced)</strong></summary>
 
-This public repository focuses on the STDIO transport. If you need a fully managed HTTP deployment (Docker, Cloud Run, Hugging Face, etc.), start from this codebase and add your own HTTP entrypoint in a separate repo. The production-grade hosted server maintained by W&B now lives in a private repository built on top of this one.
+The public server supports both STDIO and Streamable HTTP transports. Operators
+running HTTP are responsible for TLS termination, authentication, scaling, and
+deployment-level limits. Do not expose a development server directly to the
+internet.
 
 ### Running HTTP Server Locally
 
@@ -455,10 +492,13 @@ For lightweight experimentation and testing, you can run the FastMCP HTTP transp
 
 ```bash
 # Basic HTTP server
-uvx wandb_mcp_server --transport http --host 0.0.0.0 --port 8080
+uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
+  --transport http \
+  --host 0.0.0.0 \
+  --port 8080
 
 # With Weave tracing enabled
-uvx wandb_mcp_server \
+uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
   --transport http \
   --host 0.0.0.0 \
   --port 8080 \
@@ -468,25 +508,30 @@ uvx wandb_mcp_server \
 
 > 📖 For all available command line options, see the [Command Line Reference](#command-line-reference) in the More Information section.
 
-**Note**: Clients must continue to provide their own W&B API key via Bearer token per the MCP spec.
+**Note**: HTTP clients must provide a W&B API key as a bearer token unless
+authentication is explicitly disabled for local development.
 </details>
 
 <details>
 <summary><strong>Option 4: Dedicated / On-Prem Deployment</strong></summary>
 
-For W&B Dedicated and On-Prem customers, the MCP server is available as an optional subchart in the `operator-wandb` Helm chart. Enable it with one line in your `WeightsAndBiases` CR:
+For W&B Dedicated and Self-Managed customers, the MCP server is available as an
+optional component in the `operator-wandb` Helm chart. Enable it in your
+`WeightsAndBiases` values:
 
 ```yaml
 mcp-server:
   install: true
 ```
 
-The server becomes accessible at `https://<your-instance>/mcp`. It automatically connects to your in-cluster Weave trace server and W&B API.
+The server becomes accessible at `https://<your-instance>/mcp`. The v0.4.0 chart
+configuration keeps this public URL for clients and user-facing links while
+routing server-side W&B API calls to the namespace-local API service.
 
 **Requirements:**
 - `weave-trace` must be installed (`weave-trace.install: true`)
-- Operator chart version >= 0.42.0
-- Image `wandb/mcp-server:0.3.0` or later
+- An `operator-wandb` release that includes MCP server v0.4.0 support
+- Published image `wandb/mcp-server:0.4.0`
 
 **Client configuration** for dedicated instances:
 
@@ -535,8 +580,8 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_BASE_URL` | Public W&B instance URL used for credentials and user-facing links | No |
 | `WANDB_INTERNAL_BASE_URL` | Optional server-side W&B API URL; Dedicated charts set this to the in-cluster API service | No |
 | `MCP_SERVER_LOG_LEVEL` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` | No |
-| `WANDB_SILENT` | Set to `"False"` to suppress W&B output | No |
-| `WEAVE_SILENT` | Set to `"False"` to suppress Weave output | No |
+| `WANDB_SILENT` | Set to `"True"` to suppress W&B SDK output (default: `true`) | No |
+| `WEAVE_SILENT` | Set to `"True"` to suppress Weave SDK output (default: `true`) | No |
 | `WANDB_DEBUG` | Set to `"true"` to enable detailed W&B logging | No |
 | `MCP_AUTH_DISABLED` | Disable HTTP authentication (development only) | No |
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
@@ -551,8 +596,9 @@ When running the server locally, you can customize its behavior with command lin
 | `MCP_ADMISSION_WAIT_MS` | Maximum queue wait before returning retryable `server_busy` (default: `2000`) | No |
 | `MCP_TOOL_TIMEOUT_SECONDS` | Hosted public-tool execution deadline (default: `30`) | No |
 | `MCP_WANDB_REQUEST_TIMEOUT_SECONDS` | Timeout for public W&B SDK requests (default: `20`) | No |
-| `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events. Useful as a workaround for older stdio builds that wrote analytics to stdout. | No |
+| `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events | No |
 | `MCP_REQUEST_SUCCESS_SAMPLE_RATE` | Deterministic sample rate for successful HTTP request telemetry (default: `0.10`; failures and requests over two seconds are always retained). | No |
+| `MCP_LOG_PRIVACY_LEVEL` | Telemetry privacy level: `off`, `standard`, or `strict` (default: `off`) | No |
 | `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |
 
 Workload profiles provide one deployment-level choice while preserving the
@@ -577,24 +623,27 @@ uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server --wand
 ```
 
 For stdio clients such as Claude Desktop, stdout is reserved for MCP JSON-RPC
-messages. The server routes logs and analytics to stderr in stdio mode so
-desktop clients do not parse diagnostics as protocol messages. If you are using
-an older version and see JSON-RPC parse warnings containing analytics fields
-such as `schema_version` or `event_type`, set `MCP_ANALYTICS_DISABLED=true` as
-a workaround.
+messages. The server routes logs and analytics to stderr so clients do not parse
+diagnostics as protocol messages.
 
 **HTTP Transport (for testing and development):**
 ```bash
 # Basic HTTP server on localhost:8080
-uvx wandb_mcp_server --transport http --host 127.0.0.1 --port 8080
+uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
+  --transport http \
+  --host 127.0.0.1 \
+  --port 8080
 
 # Bind to all interfaces with custom port
-uvx wandb_mcp_server --transport http --host 0.0.0.0 --port 9090
+uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
+  --transport http \
+  --host 0.0.0.0 \
+  --port 9090
 ```
 
 **With Weave Tracing (log MCP calls to W&B):**
 ```bash
-uvx wandb_mcp_server \
+uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
   --transport http \
   --port 8080 \
   --weave_entity my-team \
@@ -657,20 +706,22 @@ print(resp.output_text)
 Unit tests run without API keys or network access:
 
 ```bash
-pip install -e ".[test]"
-pytest tests/ -v
+uv sync --frozen --extra test --extra http
+uv run pytest tests/ -m "not integration" -v
 ```
 
 CI runs automatically on every push and PR via GitHub Actions.
 
-#### Two-Repo Model
+#### Repository Model
 
 | Repo | Visibility | Contains |
 |------|-----------|----------|
 | `wandb/wandb-mcp-server` | Public | Tool logic, core server, unit tests |
-| `wandb/wandb-mcp-server-internal` | Private | LLM evals, load tests, Dockerfile, Helm, CI/CD |
+| `wandb/wandb-mcp-server-test` | Private | Managed wrapper, load tests, image build, Cloud Run CI/CD |
+| `wandb/helm-charts` | Public | Dedicated and Self-Managed chart configuration |
 
-The internal repo installs the public repo as a pip dependency.
+The managed wrapper pins the public repository to an exact commit SHA. The Helm
+chart pins a published MCP image tag.
 
 ### Support
 
