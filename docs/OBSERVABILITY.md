@@ -21,24 +21,20 @@ A Datadog Agent DaemonSet on every node:
 - **Logs**: tails `/var/log/pods/**` (container stdout/stderr) via kubelet and forwards with
   `containerCollectAll: true`. Per-pod Unified Service Tagging labels
   (`tags.datadoghq.com/{service,env,version}`) auto-join logs to APM traces.
-- **APM traces**: the MCP server's `ddtrace` library sends spans to `$DD_AGENT_HOST:8126`
-  (node IP, via downward API). No app code change required.
-- **Metrics**: DogStatsD on `$DD_AGENT_HOST:8125`; system/container metrics via kubelet.
 
 The agent holds the single DD API key (typically from a `datadog-secrets` Secret in the
 `datadog` namespace, managed once by cluster infra). Workloads hold no DD credentials.
+This repository does not embed `ddtrace` or a DogStatsD client; APM and
+infrastructure metrics require separate cluster-level instrumentation.
 
-Configure via the helm chart (see
-[wandb/helm-charts operator-wandb 0.42.2+](https://github.com/wandb/helm-charts/tree/main/charts/operator-wandb)):
+Configure through the
+[`operator-wandb` chart](https://github.com/wandb/helm-charts/tree/main/charts/operator-wandb):
 
 ```yaml
 mcp-server:
   datadog:
-    enabled: true              # injects DD_SERVICE/ENV/VERSION + DD_AGENT_HOST + MCP_LOG_FORMAT=json
-    # mode: agent              # default; no MCP_DATADOG_FORWARD env, no workload DD_API_KEY
-    deploymentType: dedicated-cloud
-    customer: acme
-    extraTags: ["team:ml-platform", "region:us-west1"]
+    enabled: true
+    # Agent mode uses structured container logs and no workload DD_API_KEY.
 ```
 
 ### Forwarder mode (serverless only)
@@ -73,11 +69,9 @@ itself. When `DD_AGENT_HOST` is also set (agent mode is active) this is logged a
 
 | Variable | Default | Modes | Purpose |
 |---|---|---|---|
-| `MCP_LOG_FORMAT` | `rich` | both | `json` for structured one-line-per-record output (preferred in containers / behind DD Agent). `rich` for pretty local dev. Chart 0.42.2+ sets `json` when `datadog.enabled=true`. |
-| `MCP_DATADOG_ENABLED` | `false` | informational | Marker emitted by the chart; doesn't gate behavior today. |
+| `MCP_LOG_FORMAT` | `rich` | both | `json` for structured one-line-per-record output (preferred in containers / behind DD Agent). `rich` for pretty local dev. |
 | `MCP_DATADOG_FORWARD` | `false` | forwarder | Enable the in-app HTTP intake forwarder. |
-| `DD_AGENT_HOST` | unset | agent | Node IP where the DD Agent runs; used by `ddtrace` and DogStatsD. Chart sets from `status.hostIP`. |
-| `DD_TRACE_AGENT_HOSTNAME` | unset | agent | Same as `DD_AGENT_HOST`, for trace-agent clients that read this name. |
+| `DD_AGENT_HOST` | unset | agent | Optional deployment signal that a node-local Datadog Agent is present. The in-app forwarder uses it only to classify a missing workload API key as expected agent mode. |
 | `DD_SERVICE` | `wandb-mcp-server` | both | UST service name. Chart and Cloud Run deploy both set this. |
 | `DD_ENV` | `production` | both | UST environment tag. |
 | `DD_VERSION` | image tag | both | Service version; the in-app forwarder keeps it as an attribute rather than a high-cardinality tag. |
@@ -144,8 +138,7 @@ stream, and a minimal duplicate via the root `_JsonLogFormatter` on stderr.
 To prevent this, `configure_process_logging()` re-asserts
 `logging.getLogger("wandb_mcp_server.analytics").propagate = False` after the
 third-party logger reconfiguration loop. This guard runs only in JSON mode (rich
-mode returns early), so Cloud Run today is unaffected. Behavior was observed live
-on Cloud Run staging revision `wandb-mcp-server-staging-00084-p8s`.
+mode returns early).
 
 ## Privacy levels: `MCP_LOG_PRIVACY_LEVEL`
 
@@ -250,12 +243,10 @@ not reversible without a rainbow table over known W&B entity names,
 which is out of scope for legal defensibility (the retained data is no
 longer plaintext customer identifiers).
 
-## What about Cloud Run today?
+## Managed serverless deployments
 
-Cloud Run production (see [`deploy.sh`](https://github.com/wandb/wandb-mcp-server-test/blob/main/deploy.sh))
-sets `MCP_DATADOG_FORWARD=true`, `DD_SITE=us5.datadoghq.com`, `DD_SERVICE=wandb-mcp-server`,
-and pulls `DD_API_KEY` via `MCP_SERVER_SECRETS_PROVIDER=gcp` from the
-`mcp-server-datadog-api-key` secret in `wandb-mcp-production`. That configuration is
-unchanged by this PR: the forwarder path is preserved, `DD_AGENT_HOST` is not set
-(so the WARN behavior for a misconfigured forwarder-without-key stays on Cloud Run),
-and `MCP_LOG_FORMAT` defaults to `rich` until Cloud Run explicitly opts in.
+Managed serverless deployments use forwarder mode because they cannot run a
+node-local agent. The deployment supplies `MCP_DATADOG_FORWARD`, `DD_SITE`,
+`DD_SERVICE`, and a secret-backed `DD_API_KEY`. Environment names, project IDs,
+revision names, and secret resource names are deployment details and are
+intentionally not encoded in this durable application document.

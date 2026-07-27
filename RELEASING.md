@@ -1,57 +1,149 @@
 # Releasing the W&B MCP Server
 
-## Overview
+This document is the source of truth for the public server release. Managed
+Cloud Run deployment details live in the private
+[`wandb/wandb-mcp-server-test`](https://github.com/wandb/wandb-mcp-server-test)
+repository. Dedicated and Self-Managed packaging lives in
+[`wandb/helm-charts`](https://github.com/wandb/helm-charts).
 
-This repo contains the MCP server logic (tools, protocol handling, analytics). Deployment infrastructure lives in the private `wandb/wandb-mcp-server-test` repo. See that repo's [RELEASING.md](https://github.com/wandb/wandb-mcp-server-test/blob/main/RELEASING.md) for the full deployment pipeline.
+The three repositories produce separate artifacts:
 
-## Version Bumping
+1. `wandb-mcp-server`: reviewed Python source and release commit.
+2. `wandb-mcp-server-test`: container image and managed deployment.
+3. `helm-charts`: operator chart that pins a published image tag.
 
-Versions are tracked in `pyproject.toml`:
+Do not promote an artifact merely because another repository has merged. Record
+and verify the exact source SHA, image tag or digest, and chart version at every
+handoff.
 
-```toml
-[project]
-version = "0.3.0"
+## 1. Prepare the release branch
+
+Create `staging/<version>` from a refreshed `origin/main` and immediately open a
+draft `release: v<version>` PR to `main`.
+
+Set the version consistently in:
+
+- `pyproject.toml`
+- `src/wandb_mcp_server/__init__.py`
+- the root package entry in `uv.lock`
+
+Regenerate the lockfile with `uv lock`; never edit lock metadata by hand.
+
+Use semantic versioning:
+
+- Patch: compatible fixes and internal hardening.
+- Minor: additive public behavior or an intentional MCP tool/configuration
+  migration.
+- Major: broad compatibility break.
+
+## 2. Integrate component PRs
+
+Target each release component PR at the staging branch. Merge in dependency
+order with merge commits.
+
+Before every merge:
+
+1. Refresh the PR head against the current staging head.
+2. Reinspect the diff so cumulative branches contain only their intended layer.
+3. Resolve conflicts in the component branch.
+4. Run the relevant focused tests.
+5. Require the current-head CI and security checks to pass.
+6. Merge without an administrative branch-protection bypass.
+
+Keep the release PR draft while components are still being added. Do not delete
+stack branches until all dependent PRs are integrated.
+
+## 3. Validate the exact release candidate
+
+Record the final staging SHA and run:
+
+```bash
+uv lock --check
+uv sync --frozen --extra test --extra http --python 3.12
+uv run --no-sync ruff check src/ tests/
+uv run --no-sync ruff format --check src/ tests/
+uv run --no-sync pytest tests/ -m "not integration" -x -v --tb=short -q
+uv run --no-sync bandit -q -r src -ll
+uv build
 ```
 
-To release a new version:
+The release PR must also pass:
 
-1. Create a PR bumping the version in `pyproject.toml`
-2. Update `__init__.py` `__version__` to match
-3. Ensure all tests pass: `uv run pytest tests/ -v --tb=short`
-4. Ensure lint passes: `uv run ruff check src/ tests/`
-5. Merge to `main`
+- Full non-integration tests on Python 3.11 and 3.12.
+- A fresh-wheel import and server-construction smoke test.
+- Default and feature-gated tool-registration smoke tests.
+- Compatibility tests against the latest supported W&B SDK.
+- Grype, Bandit, and Socket Security.
 
-## What Happens After Merge
+Test counts are not release criteria; successful execution of the current suite
+is. Do not put fixed test or tool counts in durable release documentation.
 
-1. **Staging auto-deploys**: The test repo's `deploy-staging.yml` triggers on push to its `main`, resolves this repo's `main` to a SHA, and deploys to Cloud Run staging
-2. **Nightly eval runs**: `eval.yml` runs 7 CI smoke tasks via WandBAgentFactory and updates README badges
-3. **Manual promotion**: After staging is verified, a team member promotes to production via `promote-production.yml` in the test repo
+## 4. Validate managed staging
 
-## CI Workflows (this repo)
+The managed wrapper must pin the exact public release-candidate SHA. Deploy that
+wrapper to Cloud Run staging using the private repository procedure, then
+validate:
 
-| Workflow | Trigger | Purpose |
-|---|---|---|
-| `ci.yml` | Push to main/staging/*, PR to main | Ruff lint + pytest on Python 3.11 + 3.12 |
-| `eval.yml` | Nightly cron (7 AM UTC) + manual | Run MCP eval suite, update README badges |
+- Health and unauthenticated rejection.
+- Initialize, session continuity, `tools/list`, and representative tool calls.
+- Read-only and feature-gated registration.
+- Correct client/tool telemetry without raw arguments or credentials.
+- Rate limiting, admission control, deadlines, and retryable overload behavior.
+- Representative load without unexpected 5xx responses or material W&B
+  application degradation.
 
-## Release Checklist
+Do not substitute a moving branch name for the tested SHA.
 
-- [ ] Version bumped in `pyproject.toml`
-- [ ] `__init__.py` `__version__` matches
-- [ ] All 401 unit tests pass
-- [ ] CI green on PR
-- [ ] Staging auto-deployed and healthy (14 tools, `/health` returns 200)
-- [ ] Nightly eval passes (or manual eval triggered)
-- [ ] Production promoted via test repo workflow
-- [ ] On-prem image published via `publish-image.yml` in test repo
-- [ ] Helm chart `values.yaml` image tag updated in helm-charts PR
-- [ ] QA validated on at least one instance (17/17 deployment tests)
+## 5. Prepare the Helm release
 
-## Contacts
+Open a separate draft Helm PR that:
 
-| Area | Person |
-|---|---|
-| MCP server code | Anish Shah (@ash0ts) |
-| Code review | Nico (@NiWaRe) |
-| Helm chart | Zachary Blasczyk |
-| Infrastructure | Kevin Chen (@wandb-kc) |
+- Pins the eventual MCP image tag.
+- Renders the public `WANDB_BASE_URL`.
+- Renders a namespace-local `WANDB_INTERNAL_BASE_URL` for backend W&B traffic.
+- Selects the Dedicated workload profile and intended concurrency settings.
+- Passes dependency build, render, lint, schema, and snapshot tests.
+
+Do not install or upgrade a real cluster during repository-only validation.
+Keep the chart PR draft until the referenced image exists.
+
+## 6. Approve and publish
+
+Production actions require explicit approval:
+
+1. Mark the public release PR ready and obtain required review.
+2. Merge the release PR to `main`.
+3. Record the resulting `main` merge SHA.
+4. Build and publish the container from that exact SHA.
+5. Verify the immutable image digest.
+6. Update and merge the Helm chart PR with the published tag or digest.
+7. Promote managed Cloud Run from the tested staging artifact.
+8. Run post-deployment health, authentication, registration, telemetry, and
+   representative read checks.
+
+Never rebuild a different source state under an already validated release tag.
+
+## 7. Release communication
+
+Add customer-facing notes under `docs/releases/` and include:
+
+- The user-visible outcome.
+- Breaking changes and exact migration steps.
+- New operator settings and defaults.
+- Security and privacy changes.
+- Known limitations.
+- Availability by hosted, Dedicated, and Self-Managed deployment type.
+
+Do not announce production availability until the corresponding artifact has
+been published and verified.
+
+## Rollback
+
+Keep the previous known-good image digest and chart version available.
+
+- Managed: route production back to the previous verified revision.
+- Dedicated/Self-Managed: restore the previous image/chart pin.
+- Public source: fix forward through a reviewed PR; do not rewrite `main`.
+
+After rollback, preserve the failing SHA, workflow run, logs, and reproduction
+details for the incident review.
