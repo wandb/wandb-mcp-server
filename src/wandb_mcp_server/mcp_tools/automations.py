@@ -108,11 +108,9 @@ def _clamp(value: int, floor: int, ceil: int, /) -> int:
 def _jsonify_scope(scope: ProjectScope | ArtifactCollectionScope) -> dict[str, Any]:
     """Flatten an AutomationScope to ``{type, id, name}``.
 
-    The wandb GraphQL fragments only carry ``id`` and ``name`` on scopes
-    (see ``wandb/automations/_generated/fragments.py``: ProjectScopeFields,
-    ArtifactSequenceScopeFields, ArtifactPortfolioScopeFields). The public
+    The W&B SDK payloads only carry ``id`` and ``name`` on scopes. The public
     ``scope_type`` enum (PROJECT | ARTIFACT_COLLECTION) lets agents branch
-    on it without parsing GraphQL typename strings.
+    on it without parsing backend type-name strings.
     """
     return {"type": scope.scope_type.value, "id": scope.id, "name": scope.name}
 

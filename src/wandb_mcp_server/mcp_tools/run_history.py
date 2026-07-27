@@ -185,7 +185,7 @@ def _fetch_step_range(
     """Fetch history rows for a step range using a tiered strategy.
 
     Strategy order:
-      1. scan_history (parquet-backed when available, falls back to GraphQL;
+      1. scan_history (parquet-backed when available with SDK-managed fallback;
          fails silently when lastHistoryStep == -1)
       2. history() sampled fallback (always works, ignores step bounds)
     """

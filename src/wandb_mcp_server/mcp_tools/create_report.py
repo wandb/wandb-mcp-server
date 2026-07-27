@@ -193,7 +193,7 @@ reports such as H2 / markdown / panel-grid / H2 / markdown / panel-grid:
 }
 
 Runset scoping:
-- run_ids means W&B internal run keys (Python SDK run.id / GraphQL Run.name), not display names.
+- run_ids means W&B internal run keys (Python SDK run.id), not display names.
 - run_ids are converted to deterministic Reports v2 filters, for example name in ["run_a", "run_b"].
 - filters may be passed as a Reports v2 expression string and wins over generated run_ids filters.
 - runset_query may be passed for explicit search behavior. Do not use custom_chart query for run filtering.
