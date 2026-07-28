@@ -12,8 +12,8 @@ import wandb_workspaces.reports.v2 as wr
 import wandb_workspaces.reports.v2.interface as wr_interface
 
 import wandb
+from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_API_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.wandb_urls import publicize_wandb_url
 
@@ -32,13 +32,7 @@ def _get_api_from_context():
         raise Exception("No W&B API key available in context")
 
     try:
-        # Uses explicit api_key from contextvar, not singleton
-        # and points to the configured base URL
-        return wandb.Api(
-            api_key=api_key,
-            overrides={"base_url": WANDB_API_BASE_URL},
-            timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
-        )
+        return WandBApiManager.get_api(api_key)
     except wandb.errors.UsageError as e:
         raise Exception("Not logged in to W&B, check API key") from e
 
@@ -333,8 +327,9 @@ def create_report(
             return {"url": publicize_wandb_url(report.url)}
 
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             logger.error(f"Error creating report: {e}")
-            raise Exception(f"Error creating report: {e}")
+            raise Exception(f"Error creating report: {e}") from e
 
 
 def _build_panel_blocks(

@@ -7,7 +7,11 @@ from collections.abc import Mapping
 from itertools import islice
 from typing import Any, Dict, List, Literal, Optional
 
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import (
+    WandBApiManager,
+    raise_for_wandb_server_busy,
+    wandb_server_busy_from_exception,
+)
 from wandb_mcp_server.config import (
     MAX_RESPONSE_TOKENS,
     MCP_HOSTED_MODE,
@@ -550,6 +554,7 @@ def query_wandb(
                             config_keys=config_keys or (),
                         )
                     except SelectiveReadUnavailable as exc:
+                        raise_for_wandb_server_busy(exc)
                         run = api.run(f"{path}/{run_id}")
                         return _single_envelope(
                             resource,
@@ -629,6 +634,7 @@ def query_wandb(
                             config_keys=config_keys or (),
                         )
                     except SelectiveReadUnavailable as exc:
+                        raise_for_wandb_server_busy(exc)
                         if applied_limit > MCP_MAX_FULL_DETAIL_ITEMS:
                             return structured_error(
                                 "selective_read_unavailable",
@@ -729,6 +735,9 @@ def query_wandb(
                 total_count,
             )
         except (ValueError, KeyError, IndexError) as exc:
+            if busy := wandb_server_busy_from_exception(exc):
+                ctx.mark_error(f"server_busy: upstream HTTP {busy.status_code}")
+                return busy.as_dict()
             if resource in {"project", "run", "sweep"}:
                 ctx.mark_error(f"resource_not_found: {exc}")
                 return structured_error(
@@ -750,6 +759,9 @@ def query_wandb(
                 project=project_name,
             )
         except Exception as exc:
+            if busy := wandb_server_busy_from_exception(exc):
+                ctx.mark_error(f"server_busy: upstream HTTP {busy.status_code}")
+                return busy.as_dict()
             logger.error("W&B SDK query failed: %s", exc, exc_info=True)
             ctx.mark_error(f"sdk_query_failed: {exc}")
             return structured_error(

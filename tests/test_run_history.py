@@ -58,7 +58,7 @@ class TestGetRunHistory:
 
         mock_api = MagicMock()
         mock_api.run.return_value = mock_run
-        mock_wandb_mod.Api.return_value = mock_api
+        mock_api_mgr.get_api.return_value = mock_api
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("entity", "project", "abc12345", keys=["loss", "accuracy"]))
@@ -82,7 +82,7 @@ class TestGetRunHistory:
         mock_run.history.return_value = [
             {"_step": 0, "_wandb": {"internal": True}, "loss": 1.0},
         ]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1"))
@@ -103,7 +103,7 @@ class TestGetRunHistory:
         mock_run.history.return_value = [
             {"_step": 0, "loss": float("nan"), "accuracy": 0.5},
         ]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1"))
@@ -121,7 +121,7 @@ class TestGetRunHistory:
         mock_run.name = "r1"
         mock_run.lastHistoryStep = 10
         mock_run.history.return_value = []
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         get_run_history("e", "p", "run1", samples=99999)
@@ -134,7 +134,7 @@ class TestGetRunHistory:
         mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
         mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
 
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(side_effect=wandb.errors.CommError("Not found")))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(side_effect=wandb.errors.CommError("Not found")))
         mock_wandb_mod.errors = wandb.errors
 
         with pytest.raises(ValueError, match="Run not found"):
@@ -163,7 +163,7 @@ class TestGetRunHistory:
             {"_step": 100, "loss": 1.0},
             {"_step": 150, "loss": 0.7},
         ]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1", min_step=50, max_step=200))
@@ -186,7 +186,7 @@ class TestGetRunHistory:
         mock_run.name = "r1"
         mock_run.lastHistoryStep = 100
         mock_run.history.return_value = [{"_step": 0, "loss": 1.0}]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         get_run_history("e", "p", "run1", samples=100)
@@ -205,7 +205,7 @@ class TestGetRunHistory:
         mock_run.name = "r1"
         mock_run.lastHistoryStep = 10000
         mock_run.scan_history.return_value = [{"_step": i, "loss": float(i)} for i in range(5000)]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1", min_step=0, samples=500))
@@ -224,7 +224,7 @@ class TestGetRunHistory:
         mock_run.lastHistoryStep = 99
         rows = [{"_step": i, "loss": float(i)} for i in range(100)]
         mock_run.scan_history.return_value = rows
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1", min_step=0, max_step=99, samples=5))
@@ -252,7 +252,7 @@ class TestGetRunHistory:
         mock_run.name = "r1"
         mock_run.lastHistoryStep = total_rows - 1
         mock_run.scan_history.return_value = [{"_step": i, "loss": float(i)} for i in range(total_rows)]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         max_steps_seen = []
@@ -278,7 +278,7 @@ class TestGetRunHistory:
         mock_run.name = "r1"
         mock_run.lastHistoryStep = 500
         mock_run.scan_history.return_value = [{"_step": 100, "loss": 1.0}]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         get_run_history("e", "p", "run1", min_step=100)
@@ -300,7 +300,7 @@ class TestGetRunHistory:
         mock_run.name = "r1"
         mock_run.lastHistoryStep = 500
         mock_run.scan_history.return_value = [{"_step": 50, "loss": 1.0}]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         get_run_history("e", "p", "run1", max_step=200)
@@ -325,7 +325,7 @@ class TestGetRunHistory:
             {"_step": 1, "accuracy": 0.5},
             {"_step": 2, "loss": 0.5},
         ]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1"))
@@ -343,7 +343,7 @@ class TestGetRunHistory:
         mock_run.name = "r1"
         mock_run.lastHistoryStep = 10
         mock_run.history.return_value = [{"_step": 0, "loss": 1.0}]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1"))
@@ -361,7 +361,7 @@ class TestGetRunHistory:
         mock_run.name = "empty-run"
         mock_run.lastHistoryStep = 0
         mock_run.history.return_value = []
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1"))
@@ -385,7 +385,7 @@ class TestHistoryTruncation:
         mock_run.name = "big-run"
         mock_run.lastHistoryStep = 2000
         mock_run.history.return_value = rows
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         with patch("wandb_mcp_server.config.MAX_RESPONSE_TOKENS", 500):
@@ -406,7 +406,7 @@ class TestHistoryTruncation:
         mock_run.name = "small-run"
         mock_run.lastHistoryStep = 10
         mock_run.history.return_value = rows
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1", samples=10))
@@ -424,7 +424,7 @@ class TestHistoryTruncation:
         mock_run.name = "hosted-run"
         mock_run.lastHistoryStep = 2000
         mock_run.history.return_value = [{"_step": i, "loss": 0.5} for i in range(5)]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         with (
@@ -466,7 +466,7 @@ class TestHistoryTruncation:
         mock_run.name = "ordered-run"
         mock_run.lastHistoryStep = 2000
         mock_run.history.return_value = rows
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         with patch("wandb_mcp_server.config.MAX_RESPONSE_TOKENS", 500):
@@ -498,7 +498,7 @@ class TestTieredStepRangeFetch:
         mock_run.name = "scan-run"
         mock_run.lastHistoryStep = 100
         mock_run.scan_history.return_value = iter(scan_rows)
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1", min_step=0, max_step=100))
@@ -519,7 +519,7 @@ class TestTieredStepRangeFetch:
         mock_run.lastHistoryStep = -1
         mock_run.scan_history.return_value = iter([])
         mock_run.history.return_value = history_rows
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1", min_step=0, max_step=100))
@@ -538,7 +538,7 @@ class TestTieredStepRangeFetch:
         mock_run.name = "params-run"
         mock_run.lastHistoryStep = 200
         mock_run.scan_history.return_value = iter([{"_step": 10, "loss": 0.5}])
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         get_run_history("e", "p", "run1", keys=["loss"], min_step=10, max_step=100)
@@ -558,7 +558,7 @@ class TestTieredStepRangeFetch:
         mock_run.name = "normal-run"
         mock_run.lastHistoryStep = 1000
         mock_run.scan_history.return_value = iter([])
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(get_run_history("e", "p", "run1", min_step=5000, max_step=6000))
@@ -581,7 +581,7 @@ class TestCustomAxisHistory:
         run.name = "custom-axis"
         run.lastHistoryStep = 100
         run.scan_history.return_value = [{"_step": 42, "validation/step": 1000.0, "validation/loss": 0.2}]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(
@@ -615,7 +615,7 @@ class TestCustomAxisHistory:
         run = MagicMock()
         run.name = "custom-axis"
         run.scan_history.return_value = [{"_step": 42, "validation/step": 999.5}]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(
@@ -650,7 +650,7 @@ class TestCustomAxisHistory:
             {"_step": 41, "validation/step": 999.75, "validation/loss": 0.21},
             {"_step": 42, "validation/step": 1001.0},
         ]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(
@@ -681,7 +681,7 @@ class TestCustomAxisHistory:
         run.name = "system"
         run.lastHistoryStep = 10
         run.history.return_value = [{"_timestamp": 10, "system.cpu": 40.0}]
-        mock_wandb_mod.Api.return_value = MagicMock(run=MagicMock(return_value=run))
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=run))
         mock_wandb_mod.errors = wandb.errors
 
         result = json.loads(

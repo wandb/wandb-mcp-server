@@ -14,7 +14,11 @@ from typing import Any, Dict, List, Literal, Optional
 
 import wandb
 
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import (
+    WandBApiManager,
+    raise_for_wandb_server_busy,
+    wandb_server_busy_from_exception,
+)
 from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
 from wandb_mcp_server.config import (
     MCP_HOSTED_MODE,
@@ -22,8 +26,6 @@ from wandb_mcp_server.config import (
     MCP_MAX_HISTORY_RANGE_STEPS,
     MCP_MAX_HISTORY_SAMPLES,
     MCP_WORKLOAD_PROFILE,
-    MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
-    WANDB_API_BASE_URL,
 )
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
@@ -194,16 +196,16 @@ def get_run_history(
             raise ValueError("W&B API key is required to fetch run history.")
 
         try:
-            wandb_api = wandb.Api(
-                api_key=api_key,
-                overrides={"base_url": WANDB_API_BASE_URL},
-                timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
-            )
+            wandb_api = WandBApiManager.get_api(api_key)
             run_path = f"{entity_name}/{project_name}/{run_id}"
             run = wandb_api.run(run_path)
         except wandb.errors.CommError as e:
+            if busy := wandb_server_busy_from_exception(e):
+                raise busy from e
             raise ValueError(f"Run not found: {run_path}. Error: {e}")
         except Exception as e:
+            if busy := wandb_server_busy_from_exception(e):
+                raise busy from e
             raise ValueError(f"Failed to access run {entity_name}/{project_name}/{run_id}: {type(e).__name__}")
 
         profile_limit_applied = samples > MCP_MAX_HISTORY_SAMPLES
@@ -269,6 +271,7 @@ def get_run_history(
                     rows_scanned=len(rows),
                 )
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             raise ValueError(f"Failed to fetch history for run {run_id}: {e}")
 
         clean_rows = []
@@ -502,6 +505,7 @@ def _fetch_target_x(
             values=[target_x],
         )
     except SelectiveReadUnavailable as exc:
+        raise_for_wandb_server_busy(exc)
         rows, rows_scanned = _scan_history_rows(
             run,
             keys=requested_keys,

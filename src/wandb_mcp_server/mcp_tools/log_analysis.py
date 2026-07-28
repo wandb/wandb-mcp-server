@@ -4,18 +4,14 @@ Creates a lightweight W&B run via the PublicApi (no wandb.init()),
 logs scalar summary metrics through the SDK, and returns
 the run_id for use in create_wandb_report_tool panels.
 
-Security: Uses wandb.Api(api_key=...) per-request, same pattern as
-every other tool. No global state, no wandb.init(), no background
-processes, no disk artifacts beyond a temp directory.
+Security: Uses the shared actor-isolated W&B API client manager. No
+wandb.init(), background process, or persistent disk artifact is used.
 """
 
 import json
 from typing import Any, Dict, List, Optional
 
-import wandb
-
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_API_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.wandb_urls import public_wandb_url
 from wandb_mcp_server.utils import get_rich_logger
@@ -90,8 +86,8 @@ def log_analysis(
 ) -> Dict[str, Any]:
     """Log computed analysis data to W&B via the PublicApi.
 
-    Uses wandb.Api(api_key=...) for safe multi-tenant operation.
-    No wandb.init(), no global state, no background processes.
+    Uses the actor-isolated shared W&B API client manager.
+    No wandb.init() or background process is used.
     """
     api_key = WandBApiManager.get_api_key()
     if not api_key:
@@ -111,11 +107,7 @@ def log_analysis(
         if not data:
             raise ValueError("data must be a non-empty list of dicts")
 
-        wandb_api = wandb.Api(
-            api_key=api_key,
-            overrides={"base_url": WANDB_API_BASE_URL},
-            timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
-        )
+        wandb_api = WandBApiManager.get_api(api_key)
         run = wandb_api.create_run(entity=entity_name, project=project_name)
 
         try:

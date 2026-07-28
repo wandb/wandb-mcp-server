@@ -4,7 +4,9 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
+from wandb_mcp_server.api_client import WandBServerBusy
 from wandb_mcp_server.mcp_tools.compare_runs import (
     _diff_dicts,
     _safe_val,
@@ -176,6 +178,29 @@ class TestCompareRuns:
 
         assert result["error"] == "run_not_found"
         assert "bad-id" in result["message"]
+
+    @patch("wandb_mcp_server.mcp_tools.compare_runs.fetch_projected_run")
+    @patch(
+        "wandb_mcp_server.mcp_tools.compare_runs._indexed_comparison_keys",
+        return_value=(["learning_rate"], ["validation/loss"], False),
+    )
+    @patch("wandb_mcp_server.mcp_tools.compare_runs.WandBApiManager")
+    def test_overload_does_not_trigger_full_sdk_fallback(
+        self,
+        mock_api_mgr,
+        _mock_keys,
+        mock_projected_run,
+    ):
+        response = requests.Response()
+        response.status_code = 429
+        response.headers["Retry-After"] = "3"
+        mock_projected_run.side_effect = requests.HTTPError("HTTP 429", response=response)
+
+        with pytest.raises(WandBServerBusy) as exc_info:
+            compare_runs("ent", "proj", "a", "b")
+
+        assert exc_info.value.retry_after_ms == 3000
+        mock_api_mgr.get_api.return_value.run.assert_not_called()
 
     @patch("wandb_mcp_server.mcp_tools.compare_runs.WandBApiManager")
     def test_run_ids_in_result(self, mock_api_mgr):

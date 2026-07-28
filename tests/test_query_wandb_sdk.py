@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import requests
 from wandb.apis.public import Api, Project
 
 from wandb_mcp_server.mcp_tools import query_wandb as sdk_query
@@ -440,6 +441,28 @@ def test_sdk_client_initialization_failure_returns_structured_error(monkeypatch)
 
     assert result["error"] == "sdk_query_failed"
     assert result["message"] == "temporary initialization failure"
+
+
+@pytest.mark.parametrize("status_code", [429, 503])
+def test_sdk_overload_returns_retryable_server_busy(monkeypatch, status_code):
+    response = requests.Response()
+    response.status_code = status_code
+    response.headers["Retry-After"] = "4"
+
+    def fail_initialization():
+        raise requests.HTTPError(f"HTTP {status_code}", response=response)
+
+    monkeypatch.setattr(sdk_query.WandBApiManager, "get_api", fail_initialization)
+    monkeypatch.setattr(sdk_query, "track_tool_execution", _tracking)
+
+    result = sdk_query.query_wandb("entity", "project", "project")
+
+    assert result == {
+        "error": "server_busy",
+        "message": "The W&B service is busy; retry this tool call.",
+        "retryable": True,
+        "retry_after_ms": 4000,
+    }
 
 
 def test_supported_sdk_exposes_every_public_query_operation():

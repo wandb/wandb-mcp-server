@@ -248,7 +248,7 @@ def query_paginated_wandb_gql(
     except Exception as e:
         return {"errors": [{"message": f"Failed to validate initial query: {e}"}]}
 
-    from wandb_mcp_server.api_client import get_wandb_api
+    from wandb_mcp_server.api_client import get_wandb_api, wandb_server_busy_from_exception
 
     api = get_wandb_api()
     result_dict = {}
@@ -341,6 +341,9 @@ def query_paginated_wandb_gql(
                     ctx.mark_error("upstream_error: GraphQL errors in initial response")
                     return result_dict
             except Exception as e:
+                if busy := wandb_server_busy_from_exception(e):
+                    ctx.mark_error(f"server_busy: upstream HTTP {busy.status_code}")
+                    return busy.as_dict()
                 logger.error(f"Failed to execute initial GraphQL query: {e}", exc_info=True)
                 ctx.mark_error(f"upstream_error: {e}")
                 return {"errors": [{"message": f"Failed to execute initial query: {e}"}]}
@@ -523,6 +526,9 @@ def query_paginated_wandb_gql(
                         current_has_next = False
 
                 except Exception as e:
+                    if busy := wandb_server_busy_from_exception(e):
+                        ctx.mark_error(f"server_busy: upstream HTTP {busy.status_code}")
+                        return busy.as_dict()
                     logging.error(f"Execution failed for page {page_num}: {e}", exc_info=True)
                     current_has_next = False
 
@@ -537,6 +543,9 @@ def query_paginated_wandb_gql(
             return result_dict
 
         except Exception as e:
+            if busy := wandb_server_busy_from_exception(e):
+                ctx.mark_error(f"server_busy: upstream HTTP {busy.status_code}")
+                return busy.as_dict()
             error_message = f"Critical error in paginated GraphQL query function: {str(e)}\n{traceback.format_exc()}"
             logger.error(error_message)
             ctx.mark_error(f"query_failed: {e}")
