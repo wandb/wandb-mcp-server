@@ -3,10 +3,13 @@
 from collections import OrderedDict
 from concurrent.futures import Future
 from contextvars import ContextVar
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
+import re
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Iterator, Mapping, Optional
 
 import wandb
 
@@ -15,8 +18,139 @@ from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
 
+WANDB_WORKLOAD_HEADER = "X-WandB-Workload"
+WANDB_WORKLOAD = "mcp"
+_DEFAULT_RETRY_AFTER_MS = 1_000
+_MAX_RETRY_AFTER_MS = 60_000
+_OVERLOAD_STATUS_RE = re.compile(r"\b(?:HTTP\s*)?(429|503)\b", re.IGNORECASE)
+_wandb_setup_lock = threading.Lock()
+
 # Context variable for storing the current request's API key
 api_key_context: ContextVar[Optional[str]] = ContextVar("wandb_api_key", default=None)
+
+
+class WandBServerBusy(RuntimeError):
+    """Retryable W&B backend saturation surfaced to the MCP boundary."""
+
+    def __init__(self, *, status_code: int, retry_after_ms: int) -> None:
+        self.status_code = status_code
+        self.retry_after_ms = retry_after_ms
+        super().__init__("The W&B service is busy; retry this tool call.")
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the stable structured MCP error envelope."""
+        return {
+            "error": "server_busy",
+            "message": str(self),
+            "retryable": True,
+            "retry_after_ms": self.retry_after_ms,
+        }
+
+
+def wandb_workload_headers() -> dict[str, str]:
+    """Return a fresh copy of the self-demoting W&B workload marker."""
+    return {WANDB_WORKLOAD_HEADER: WANDB_WORKLOAD}
+
+
+def wandb_api_overrides() -> dict[str, object]:
+    """Return the shared W&B SDK transport configuration."""
+    return {
+        "base_url": WANDB_API_BASE_URL,
+        "x_extra_http_headers": wandb_workload_headers(),
+    }
+
+
+def configure_wandb_workload() -> None:
+    """Install the workload marker in W&B's shared HTTP settings.
+
+    W&B 0.28's public Api owns its User-Agent and builds its service transport
+    from the process setup settings rather than Api ``overrides``. Merge the
+    marker before client construction so login verification and later SDK
+    requests both carry it without replacing the SDK User-Agent.
+    """
+    with _wandb_setup_lock:
+        setup = wandb.setup()
+        headers = dict(setup.settings.x_extra_http_headers or {})
+        if headers.get(WANDB_WORKLOAD_HEADER) == WANDB_WORKLOAD:
+            return
+        headers[WANDB_WORKLOAD_HEADER] = WANDB_WORKLOAD
+        wandb.setup(settings=wandb.Settings(x_extra_http_headers=headers))
+
+
+def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    """Yield an exception and its wrapped causes without looping."""
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        for nested in (
+            getattr(current, "exc", None),
+            getattr(current, "__cause__", None),
+            getattr(current, "__context__", None),
+        ):
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+
+
+def _retry_after_ms(value: object) -> int:
+    if value is None:
+        return _DEFAULT_RETRY_AFTER_MS
+    raw = str(value).strip()
+    try:
+        seconds = max(0.0, float(raw))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(raw)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            seconds = max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return _DEFAULT_RETRY_AFTER_MS
+    return min(_MAX_RETRY_AFTER_MS, max(_DEFAULT_RETRY_AFTER_MS, round(seconds * 1_000)))
+
+
+def wandb_server_busy_from_exception(exc: BaseException) -> WandBServerBusy | None:
+    """Classify nested W&B SDK or HTTP overload errors without retrying."""
+    if isinstance(exc, WandBServerBusy):
+        return exc
+
+    status_code: int | None = None
+    retry_after: object = None
+    messages: list[str] = []
+    for current in _exception_chain(exc):
+        if isinstance(current, WandBServerBusy):
+            return current
+        messages.append(str(current))
+        response = getattr(current, "response", None)
+        candidate = getattr(response, "status_code", None)
+        if candidate in {429, 503}:
+            status_code = int(candidate)
+            headers = getattr(response, "headers", None)
+            if isinstance(headers, Mapping):
+                retry_after = headers.get("Retry-After") or headers.get("retry-after")
+            break
+
+    if status_code is None:
+        match = _OVERLOAD_STATUS_RE.search(" ".join(messages))
+        if match:
+            status_code = int(match.group(1))
+
+    if status_code not in {429, 503}:
+        return None
+    return WandBServerBusy(
+        status_code=status_code,
+        retry_after_ms=_retry_after_ms(retry_after),
+    )
+
+
+def raise_for_wandb_server_busy(exc: BaseException) -> None:
+    """Preserve overload backpressure across tool-specific fallback paths."""
+    if busy := wandb_server_busy_from_exception(exc):
+        raise busy from exc
 
 
 class WandBApiManager:
@@ -99,11 +233,7 @@ class WandBApiManager:
             return initialization.result()
 
         try:
-            api = wandb.Api(
-                api_key=api_key,
-                overrides={"base_url": WANDB_API_BASE_URL},
-                timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
-            )
+            api = cls._new_api(api_key)
         except BaseException as exc:
             with cls._api_cache_lock:
                 cls._api_initializations.pop(cache_key, None)
@@ -121,6 +251,16 @@ class WandBApiManager:
             cls._api_initializations.pop(cache_key, None)
         initialization.set_result(api)
         return api
+
+    @staticmethod
+    def _new_api(api_key: str) -> wandb.Api:
+        """Construct a public API client with the shared workload contract."""
+        configure_wandb_workload()
+        return wandb.Api(
+            api_key=api_key,
+            overrides=wandb_api_overrides(),
+            timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+        )
 
     @classmethod
     def _evict_expired(cls, now: float) -> None:

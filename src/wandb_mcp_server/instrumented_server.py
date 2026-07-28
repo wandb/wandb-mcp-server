@@ -20,6 +20,7 @@ from wandb_mcp_server.admission import (
     current_tool_deadline,
     tool_cost,
 )
+from wandb_mcp_server.api_client import wandb_server_busy_from_exception
 from wandb_mcp_server.config import (
     MCP_ADMISSION_ACTOR_CAPACITY,
     MCP_ADMISSION_CONTROL_ENABLED,
@@ -198,6 +199,10 @@ class InstrumentedFastMCP(FastMCP):
                     )
                 ) from exc
             except BaseException as exc:
+                if busy := wandb_server_busy_from_exception(exc):
+                    success = False
+                    error = f"server_busy: upstream HTTP {busy.status_code}"
+                    raise ToolError(json.dumps(busy.as_dict())) from exc
                 if success:
                     success = False
                     error = f"{type(exc).__name__}: {str(exc)[:500]}"

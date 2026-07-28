@@ -5,7 +5,7 @@ import math
 from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.admission import ToolDeadlineExceeded
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.config import MCP_MAX_HISTORY_KEYS, MCP_MAX_HISTORY_SAMPLES
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
@@ -231,9 +231,11 @@ def diagnose_run(
         except Exception as e:
             if isinstance(e, ToolDeadlineExceeded):
                 raise
+            raise_for_wandb_server_busy(e)
             try:
                 run = api.run(f"{entity_name}/{project_name}/{run_id}")
             except Exception as run_error:
+                raise_for_wandb_server_busy(run_error)
                 ctx.mark_error(f"{type(run_error).__name__}: {run_error}")
                 return json.dumps({"error": "run_not_found", "message": str(run_error)[:500]})
             summary = dict(getattr(run, "summary", {}) or {})
@@ -298,6 +300,7 @@ def diagnose_run(
                 )
             )
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "history_fetch_failed", "message": str(e)[:500]})
 

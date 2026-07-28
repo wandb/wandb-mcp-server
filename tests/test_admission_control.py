@@ -13,6 +13,7 @@ from wandb_mcp_server.admission import (
     WeightedAdmissionController,
     tool_cost,
 )
+from wandb_mcp_server.api_client import WandBServerBusy
 from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
 
 
@@ -168,6 +169,23 @@ async def test_public_boundary_returns_stable_busy_error(monkeypatch) -> None:
         await server.call_tool("list_entities_tool", {})
     finish.set()
     await first
+
+
+@pytest.mark.asyncio
+async def test_public_boundary_translates_upstream_busy_with_retry_after(monkeypatch) -> None:
+    monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
+    server = InstrumentedFastMCP("upstream-admission-test")
+
+    @server.tool(name="query_wandb_tool")
+    async def overloaded_tool() -> str:
+        raise WandBServerBusy(status_code=429, retry_after_ms=3000)
+
+    with pytest.raises(ToolError) as exc_info:
+        await server.call_tool("query_wandb_tool", {})
+
+    error = str(exc_info.value)
+    assert '"error": "server_busy"' in error
+    assert '"retry_after_ms": 3000' in error
 
 
 @pytest.mark.asyncio

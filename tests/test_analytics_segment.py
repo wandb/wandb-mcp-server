@@ -244,6 +244,10 @@ class TestSegmentForwarder:
         mock_session.post.assert_called_once()
         url_arg = mock_session.post.call_args.args[0]
         assert "analytics/t" in url_arg
+        assert mock_session.post.call_args.kwargs["headers"] == {
+            "Content-Type": "application/json",
+            "X-WandB-Workload": "mcp",
+        }
 
     @patch.dict("os.environ", {"MCP_SEGMENT_FORWARD": "true"})
     @patch("wandb_mcp_server.analytics_segment._build_retry_session")

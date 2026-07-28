@@ -26,6 +26,11 @@ import wandb
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
+from wandb_mcp_server.api_client import (
+    WandBApiManager,
+    configure_wandb_workload,
+    wandb_server_busy_from_exception,
+)
 from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_API_BASE_URL
 from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
 
@@ -310,16 +315,14 @@ def validate_api_key(api_key: str) -> bool:
     try:
         # Try to create an API instance and fetch the viewer
         # This validates the key without setting any global state
-        api = wandb.Api(
-            api_key=api_key,
-            overrides={"base_url": WANDB_API_BASE_URL},
-            timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
-        )
+        api = WandBApiManager.get_api(api_key)
         viewer = api.viewer  # This will fail if the key is invalid
         viewer_id = getattr(viewer, "username", None) or getattr(viewer, "entity", None) or "<unknown>"
         logger.info(f"W&B API key validated successfully. Viewer: {viewer_id}")
         return True
     except Exception as e:
+        if busy := wandb_server_busy_from_exception(e):
+            raise busy from e
         logger.error(f"Invalid W&B API key: {e}")
         return False
 
@@ -400,6 +403,7 @@ def configure_wandb_logging() -> None:
                 x_graphql_timeout_seconds=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
             )
         )
+        configure_wandb_workload()
         logger.debug("W&B configured for silent operation")
     except Exception as e:
         logger.warning(f"Could not apply wandb.setup settings: {e}")

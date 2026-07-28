@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,7 +48,10 @@ def test_api_manager_uses_resolved_internal_url_without_retrying_public(monkeypa
             WandBApiManager.get_api("k" * 40)
 
     api_constructor.assert_called_once()
-    assert api_constructor.call_args.kwargs["overrides"] == {"base_url": "http://wandb-api:8081"}
+    assert api_constructor.call_args.kwargs["overrides"] == {
+        "base_url": "http://wandb-api:8081",
+        "x_extra_http_headers": {"X-WandB-Workload": "mcp"},
+    }
 
 
 def test_segment_forwarder_prefers_internal_url(monkeypatch) -> None:
@@ -128,17 +132,35 @@ def test_structured_query_never_returns_internal_sdk_links(monkeypatch) -> None:
     assert "wandb-api" not in str(serialized)
 
 
-def test_backend_wandb_constructors_use_only_resolved_api_url() -> None:
+def test_backend_wandb_construction_is_centralized() -> None:
     package_root = Path(query_wandb.__file__).parents[1]
-    backend_modules = (
-        package_root / "api_client.py",
-        package_root / "server.py",
-        package_root / "mcp_tools" / "create_report.py",
-        package_root / "mcp_tools" / "log_analysis.py",
-        package_root / "mcp_tools" / "run_history.py",
-    )
+    constructor_locations: list[Path] = []
 
-    for module in backend_modules:
-        source = module.read_text()
-        assert "WANDB_API_BASE_URL" in source, module
-        assert "WANDB_BASE_URL" not in source, module
+    for module in package_root.rglob("*.py"):
+        tree = ast.parse(module.read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "wandb"
+                and node.func.attr == "Api"
+            ):
+                constructor_locations.append(module.relative_to(package_root))
+
+    assert constructor_locations == [Path("api_client.py")]
+
+
+def test_backend_call_sites_use_shared_api_manager() -> None:
+    package_root = Path(query_wandb.__file__).parents[1]
+    expected_boundary = {
+        "server.py": "WandBApiManager",
+        "mcp_tools/create_report.py": "WandBApiManager",
+        "mcp_tools/log_analysis.py": "WandBApiManager",
+        "mcp_tools/run_history.py": "WandBApiManager",
+        "mcp_tools/query_wandb.py": "WandBApiManager",
+        "mcp_tools/query_wandb_gql.py": "get_wandb_api",
+    }
+    for relative_path, boundary in expected_boundary.items():
+        source = (package_root / relative_path).read_text()
+        assert boundary in source, relative_path

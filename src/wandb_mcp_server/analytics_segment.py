@@ -33,6 +33,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from wandb_mcp_server.api_client import wandb_workload_headers
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -135,7 +136,7 @@ def _build_retry_session() -> requests.Session:
     retry = Retry(
         total=2,
         backoff_factor=0.3,
-        status_forcelist=(429, 500, 502, 503, 504),
+        status_forcelist=(502, 504),
         allowed_methods=["POST"],
     )
     adapter = HTTPAdapter(max_retries=retry)
@@ -219,7 +220,10 @@ class SegmentForwarder:
                 url,
                 json=payload,
                 timeout=5,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    **wandb_workload_headers(),
+                },
             )
             if resp.status_code != 200:
                 logger.warning(f"Segment forward failed: {resp.status_code} {resp.text[:200]}")

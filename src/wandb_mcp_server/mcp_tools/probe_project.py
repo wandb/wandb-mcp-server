@@ -8,7 +8,7 @@ import json
 import re
 from typing import Any, Mapping
 
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.config import MCP_MAX_PROBE_RUNS, MCP_MAX_PROJECT_FIELDS, MCP_WORKLOAD_PROFILE
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
@@ -272,6 +272,7 @@ def probe_project(
                     }.values()
                 )
             except SelectiveReadUnavailable as exc:
+                raise_for_wandb_server_busy(exc)
                 logger.warning("Project selective read unavailable; using bounded SDK fallback: %s", exc)
                 counts, fields, run_samples = _sdk_fallback(
                     api,
@@ -365,12 +366,14 @@ def probe_project(
                         project=project_name,
                     )
                 except SelectiveReadUnavailable as exc:
+                    raise_for_wandb_server_busy(exc)
                     result["artifact_inventory"] = {
                         "error": "artifact_inventory_unavailable",
                         "message": str(exc),
                     }
             return json.dumps(result, default=str)
         except Exception as exc:
+            raise_for_wandb_server_busy(exc)
             ctx.mark_error(f"{type(exc).__name__}: {exc}")
             return json.dumps({"error": "project_probe_failed", "message": str(exc)[:500]})
 
