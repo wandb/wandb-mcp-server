@@ -160,7 +160,13 @@ class TestSummarizeEvaluation:
         assert ev["coverage"] == 1.0
         assert ev["scores"]["correctness"]["true_fraction"] == 0.9
         assert mock_count.call_count == 2
+        child_count_kwargs = mock_count.call_args_list[1].kwargs
+        assert child_count_kwargs["filters"] == {
+            "parent_ids": ["eval-abc"],
+            "op_name_contains": "Evaluation.predict_and_score",
+        }
         child_kwargs = mock_service.query_traces.call_args_list[1].kwargs
+        assert child_kwargs["filters"] == child_count_kwargs["filters"]
         assert child_kwargs["columns"] == ["id", "exception", "summary"]
         assert child_kwargs["limit"] == 2
         assert child_kwargs["offset"] == 0
