@@ -5,6 +5,8 @@ on:
     branches: [main, "staging/**"]
   pull_request:
     branches: [main, "staging/**"]
+  schedule:
+    - cron: "17 8 * * 1"
 
 permissions:
   contents: read
@@ -12,6 +14,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -32,12 +35,14 @@ jobs:
         run: uv sync --frozen --extra test --python ${{ matrix.python-version }}
 
       - name: Smoke test package import
-        run: uv run --no-sync python -c "import wandb_mcp_server; print('ok')"
+        run: |
+          uv run --no-sync python -c "import wandb_mcp_server; print('ok')"
+          uv run --no-sync python -c "from importlib.metadata import version; assert version('mcp') == '1.29.0'; print('mcp', version('mcp'))"
 
       - name: Lint with ruff
         run: |
-          uv run --no-sync ruff check src/ tests/
-          uv run --no-sync ruff format --check src/ tests/
+          uv run --no-sync ruff check src/ tests/ scripts/mcp_stdio_smoke.py
+          uv run --no-sync ruff format --check src/ tests/ scripts/mcp_stdio_smoke.py
 
       - name: Run unit tests
         run: uv run --no-sync pytest tests/ -m "not integration" -x -v --tb=short -q
@@ -50,15 +55,22 @@ jobs:
           uv build
           SMOKE_ENV="$RUNNER_TEMP/wandb-mcp-install-smoke"
           uv venv "$SMOKE_ENV" --python ${{ matrix.python-version }}
-          uv pip install --python "$SMOKE_ENV/bin/python" dist/*.whl
+          uv pip install --python "$SMOKE_ENV/bin/python" --refresh-package mcp dist/*.whl
           "$SMOKE_ENV/bin/python" -c "import wandb_mcp_server; print('ok')"
+          "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; from packaging.version import Version; resolved = Version(version('mcp')); assert Version('1.28.1') <= resolved < Version('2'); print('fresh-wheel mcp', resolved)"
+          "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py --server-command "$SMOKE_ENV/bin/wandb_mcp_server"
           WANDB_MCP_ENABLE_RAW_GRAPHQL=true "$SMOKE_ENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; from wandb_mcp_server.server import register_tools; mcp = FastMCP('smoke'); register_tools(mcp); assert 'query_wandb_graphql_tool' in mcp._tool_manager._tools; print('raw graphql ok')"
+          uv pip install --python "$SMOKE_ENV/bin/python" "mcp[cli]==1.28.1"
+          uv pip check --python "$SMOKE_ENV/bin/python"
+          "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; assert version('mcp') == '1.28.1'; print('minimum mcp', version('mcp'))"
+          "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py --server-command "$SMOKE_ENV/bin/wandb_mcp_server"
         env:
           WANDB_SILENT: "True"
           WEAVE_SILENT: "True"
 
   wandb-latest-compatibility:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

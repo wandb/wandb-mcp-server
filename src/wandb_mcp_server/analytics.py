@@ -48,6 +48,7 @@ _DEFAULT_REQUEST_SUCCESS_SAMPLE_RATE = 0.10
 _SLOW_REQUEST_MS = 2_000.0
 
 _configured_transport: Optional[str] = None
+_analytics_startup_logged = False
 
 _USAGE_ENUM_VALUES: Dict[str, frozenset[str]] = {
     "resource": frozenset({"project", "run", "runs", "sweep", "sweeps", "reports"}),
@@ -278,22 +279,33 @@ def configure_analytics_logging(stream: Optional[str] = None) -> str:
 
 def configure_analytics_logging_for_transport(transport: str) -> str:
     """Configure analytics output for an MCP transport."""
-    if os.environ.get("MCP_ANALYTICS_LOG_STREAM"):
-        return configure_analytics_logging()
-    if transport == "stdio":
-        return configure_analytics_logging(_ANALYTICS_STREAM_STDERR)
-    return configure_analytics_logging(_ANALYTICS_STREAM_STDOUT)
+    normalized = transport.strip().lower()
+    if normalized == "stdio":
+        # STDIO stdout is the JSON-RPC wire. An environment override must never
+        # be allowed to inject analytics records into the protocol stream.
+        stream_name = configure_analytics_logging(_ANALYTICS_STREAM_STDERR)
+    elif os.environ.get("MCP_ANALYTICS_LOG_STREAM"):
+        stream_name = configure_analytics_logging()
+    else:
+        stream_name = configure_analytics_logging(_ANALYTICS_STREAM_STDOUT)
+    _log_analytics_startup_once()
+    return stream_name
 
 
-configure_analytics_logging()
+def _log_analytics_startup_once() -> None:
+    """Log analytics/privacy configuration after the transport is known."""
+    global _analytics_startup_logged
+    if _analytics_startup_logged:
+        return
+    _analytics_startup_logged = True
+    logger.info("Analytics ready: MCP_LOG_PRIVACY_LEVEL=%s", _resolve_privacy_level())
+
+
+# Before construction selects a transport, stderr is the only protocol-safe
+# destination. HTTP construction switches analytics back to stdout below.
+configure_analytics_logging(_ANALYTICS_STREAM_STDERR)
 
 _REQUIRED_BASE_FIELDS = frozenset({"schema_version", "event_type", "timestamp"})
-
-# Surface the active privacy level once at module import so operators can
-# verify their config by grepping pod logs (instead of needing kubectl describe).
-# Triggers _resolve_privacy_level()'s WARNING for invalid values, so an env-var
-# typo also lights up here at startup.
-logger.info("Analytics ready: MCP_LOG_PRIVACY_LEVEL=%s", _resolve_privacy_level())
 
 
 def _resolve_release_version() -> str:
@@ -341,6 +353,7 @@ def configure_analytics_runtime(transport: str) -> None:
     global _configured_transport
     normalized = transport.strip().lower()
     _configured_transport = "http" if normalized == "streamable-http" else normalized
+    configure_analytics_logging_for_transport(_configured_transport)
 
 
 def _safe_wandb_base_host() -> Optional[str]:

@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+import wandb_mcp_server.analytics as analytics_module
 from wandb_mcp_server.analytics import (
     SCHEMA_VERSION,
     AnalyticsTracker,
@@ -20,6 +21,7 @@ from wandb_mcp_server.analytics import (
     analytics_logger,
     configure_analytics_logging,
     configure_analytics_logging_for_transport,
+    configure_analytics_runtime,
     get_analytics_tracker,
     reset_analytics_tracker,
 )
@@ -29,6 +31,7 @@ from wandb_mcp_server.harness import HarnessContext, current_harness_context
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
     monkeypatch.setenv("MCP_REQUEST_SUCCESS_SAMPLE_RATE", "1")
+    monkeypatch.setattr(analytics_module, "_analytics_startup_logged", False)
     reset_analytics_tracker()
     configure_analytics_logging("stdout")
     yield
@@ -155,22 +158,51 @@ class TestAnalyticsLogStream:
         assert "ANALYTICS_EVENT" in stdout.getvalue()
         assert stderr.getvalue() == ""
 
-    def test_explicit_stream_env_overrides_transport(self, monkeypatch):
+    def test_stdio_ignores_unsafe_stdout_override(self, monkeypatch):
         stdout = io.StringIO()
         stderr = io.StringIO()
         monkeypatch.setattr("sys.stdout", stdout)
         monkeypatch.setattr("sys.stderr", stderr)
         monkeypatch.setenv("MCP_ANALYTICS_LOG_STREAM", "stdout")
 
-        assert configure_analytics_logging_for_transport("stdio") == "stdout"
+        assert configure_analytics_logging_for_transport("stdio") == "stderr"
         AnalyticsTracker(enabled=True).track_tool_call(
             tool_name="query_wandb_tool",
             session_id="s",
             viewer_info="viewer",
         )
 
-        assert "ANALYTICS_EVENT" in stdout.getvalue()
-        assert stderr.getvalue() == ""
+        assert stdout.getvalue() == ""
+        assert "ANALYTICS_EVENT" in stderr.getvalue()
+
+    def test_http_honors_explicit_stderr_override(self, monkeypatch):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        monkeypatch.setattr("sys.stdout", stdout)
+        monkeypatch.setattr("sys.stderr", stderr)
+        monkeypatch.setenv("MCP_ANALYTICS_LOG_STREAM", "stderr")
+
+        assert configure_analytics_logging_for_transport("http") == "stderr"
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_tool",
+            session_id="s",
+            viewer_info="viewer",
+        )
+
+        assert stdout.getvalue() == ""
+        assert "ANALYTICS_EVENT" in stderr.getvalue()
+
+    def test_runtime_selects_stream_before_startup_log_and_logs_once(self, monkeypatch):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        monkeypatch.setattr("sys.stdout", stdout)
+        monkeypatch.setattr("sys.stderr", stderr)
+
+        configure_analytics_runtime("stdio")
+        configure_analytics_runtime("stdio")
+
+        assert stdout.getvalue() == ""
+        assert stderr.getvalue().count("Analytics ready") == 1
 
     def test_reconfiguration_replaces_handler_instead_of_duplicating(self, monkeypatch):
         stdout = io.StringIO()
