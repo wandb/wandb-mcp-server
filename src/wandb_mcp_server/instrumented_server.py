@@ -24,7 +24,11 @@ from wandb_mcp_server.admission import (
     current_tool_deadline,
     tool_cost,
 )
-from wandb_mcp_server.api_client import wandb_server_busy_from_exception
+from wandb_mcp_server.api_client import (
+    wandb_report_creation_failed_from_exception,
+    wandb_write_outcome_unknown_from_exception,
+    wandb_server_busy_from_exception,
+)
 from wandb_mcp_server.config import (
     MCP_ADMISSION_ACTOR_CAPACITY,
     MCP_ADMISSION_CONTROL_ENABLED,
@@ -342,6 +346,33 @@ class InstrumentedFastMCP(FastMCP):
                     )
                 ) from exc
             except BaseException as exc:
+                if name in _NON_IDEMPOTENT_WRITE_TOOLS and wandb_write_outcome_unknown_from_exception(exc):
+                    success = False
+                    error = "outcome_unknown: W&B did not confirm the write result"
+                    raise ToolError(
+                        json.dumps(
+                            {
+                                "error": "outcome_unknown",
+                                "message": (
+                                    "W&B did not confirm whether the write completed. "
+                                    "Verify W&B state before deciding whether to retry."
+                                ),
+                                "retryable": False,
+                            }
+                        )
+                    ) from exc
+                if name == "create_wandb_report_tool" and wandb_report_creation_failed_from_exception(exc):
+                    success = False
+                    error = "report_creation_failed: W&B rejected the report write"
+                    raise ToolError(
+                        json.dumps(
+                            {
+                                "error": "report_creation_failed",
+                                "message": "The W&B report could not be created.",
+                                "retryable": False,
+                            }
+                        )
+                    ) from exc
                 if busy := wandb_server_busy_from_exception(exc):
                     success = False
                     if name in _NON_IDEMPOTENT_WRITE_TOOLS:

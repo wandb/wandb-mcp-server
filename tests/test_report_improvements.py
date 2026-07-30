@@ -2,8 +2,19 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 
+import wandb_mcp_server.mcp_tools.create_report as create_report_module
 from wandb_mcp_server.mcp_tools.create_report import _build_panel_blocks
+
+
+@pytest.fixture(autouse=True)
+def _stub_bounded_report_save(monkeypatch):
+    monkeypatch.setattr(
+        create_report_module,
+        "save_report_bounded",
+        lambda report, api: report,
+    )
 
 
 class TestSVGSupport:
