@@ -145,6 +145,9 @@ def infer_trace_schema(
                 metadata_only=False,
             )
         except Exception as e:
+            from wandb_mcp_server.api_client import raise_for_wandb_server_busy
+
+            raise_for_wandb_server_busy(e)
             logger.error(f"Failed to query traces for schema inference: {e}")
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": f"Failed to infer schema for {entity_name}/{project_name}: {type(e).__name__}"})

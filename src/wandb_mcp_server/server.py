@@ -15,6 +15,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
+import ipaddress
 import json
 import logging
 import os
@@ -26,8 +27,15 @@ import wandb
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
-from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_API_BASE_URL
-from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
+from wandb_mcp_server.config import (
+    MCP_COUNT_TOOL_WORKERS,
+    MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+    WANDB_API_BASE_URL,
+)
+from wandb_mcp_server.instrumented_server import (
+    InstrumentedFastMCP,
+    register_current_sync_future,
+)
 
 # Import Weave for tracing MCP tool calls
 try:
@@ -206,7 +214,7 @@ def _remove_registered_tools(mcp_instance: FastMCP, tool_names: Collection[str])
 
 
 _COUNT_EXECUTOR = ThreadPoolExecutor(
-    max_workers=int(os.environ.get("MCP_COUNT_TOOL_WORKERS", "8")),
+    max_workers=MCP_COUNT_TOOL_WORKERS,
     thread_name_prefix="mcp-count",
 )
 
@@ -248,7 +256,10 @@ async def _count_traces_with_deadline(
     deadline_seconds: int,
 ) -> int:
     """Run count_traces without letting executor shutdown extend wall time."""
-    request_timeout = max(1, deadline_seconds - 2)
+    request_timeout = min(
+        MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+        max(1, deadline_seconds - 2),
+    )
     loop = asyncio.get_running_loop()
     future = loop.run_in_executor(
         _COUNT_EXECUTOR,
@@ -262,10 +273,12 @@ async def _count_traces_with_deadline(
             request_timeout,
         ),
     )
+    register_current_sync_future(future)
     try:
-        return await asyncio.wait_for(future, timeout=deadline_seconds)
+        # Shield the asyncio wrapper so timeout does not mark it done while
+        # the underlying thread is still consuming physical capacity.
+        return await asyncio.wait_for(asyncio.shield(future), timeout=deadline_seconds)
     except asyncio.TimeoutError:
-        future.cancel()
         raise
 
 
@@ -287,7 +300,13 @@ async def _count_traces_or_none(
             filters,
             deadline_seconds,
         )
-    except Exception:
+    except Exception as exc:
+        # A preflight count is part of the same functional request. If W&B is
+        # already applying backpressure, do not immediately amplify it with
+        # the larger query that the count was intended to guard.
+        from wandb_mcp_server.api_client import raise_for_wandb_server_busy
+
+        raise_for_wandb_server_busy(exc)
         logger.info("count_traces skipped after timeout or error", exc_info=True)
         return None
 
@@ -328,8 +347,9 @@ def validate_and_get_api_key(args: ServerMCPArgs) -> Optional[str]:
     """
     Validate and retrieve the W&B API key from various sources.
 
-    For HTTP transport: API key is optional (clients provide their own)
-    For STDIO transport: API key is required from environment
+    The console entrypoint requires one server-side API key for both STDIO and
+    loopback-only HTTP development. Authenticated multi-user HTTP is provided
+    by the hosted wrapper and Helm image, not this standalone entrypoint.
 
     Priority order:
     1. Command-line argument (--wandb-api-key)
@@ -348,18 +368,10 @@ def validate_and_get_api_key(args: ServerMCPArgs) -> Optional[str]:
     """
     api_key = args.wandb_api_key or get_server_args().wandb_api_key
 
-    # For HTTP transport, API key is optional (clients provide their own)
-    if args.transport == "http":
-        if api_key:
-            logger.info("Server W&B API key configured (for server operations)")
-        else:
-            logger.info("No server W&B API key configured (clients will provide their own)")
-        return api_key
-
-    # For STDIO transport, API key is required
     if not api_key:
+        transport_label = "STDIO" if args.transport == "stdio" else "standalone http"
         raise ValueError(
-            "WANDB_API_KEY must be set for STDIO transport. Options:\n"
+            f"WANDB_API_KEY must be set for {transport_label} transport. Options:\n"
             "1. Command-line: --wandb-api-key YOUR_KEY\n"
             "2. Environment: export WANDB_API_KEY=YOUR_KEY\n"
             "3. .env file: WANDB_API_KEY=YOUR_KEY\n"
@@ -719,6 +731,9 @@ def register_tools(mcp_instance: FastMCP) -> None:
 
             if isinstance(e, HostedLimitExceeded):
                 return json.dumps(structured_error(e.error, str(e), **e.details))
+            from wandb_mcp_server.api_client import raise_for_wandb_server_busy
+
+            raise_for_wandb_server_busy(e)
             logger.error(f"Error in query_weave_traces_tool: {e}", exc_info=True)
             return json.dumps(
                 {
@@ -775,6 +790,9 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 )
             )
         except Exception as e:
+            from wandb_mcp_server.api_client import raise_for_wandb_server_busy
+
+            raise_for_wandb_server_busy(e)
             logger.error(f"Error in count_weave_traces_tool: {e}")
             return json.dumps({"error": f"Error counting traces: {str(e)}"})
 
@@ -848,7 +866,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
     if not WANDB_MCP_READ_ONLY:
 
         @mcp_instance.tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
-        async def create_wandb_report_tool(
+        def create_wandb_report_tool(
             entity_name: str,
             project_name: str,
             title: str,
@@ -869,8 +887,8 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 )
 
                 return f"The report was saved here: {result['url']}"
-            except Exception as e:
-                raise e
+            except Exception:
+                raise
 
         from wandb_mcp_server.mcp_tools.log_analysis import (
             LOG_ANALYSIS_TOOL_DESCRIPTION,
@@ -878,7 +896,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         )
 
         @mcp_instance.tool(description=LOG_ANALYSIS_TOOL_DESCRIPTION)
-        async def log_analysis_to_wandb(
+        def log_analysis_to_wandb(
             entity_name: str,
             project_name: str,
             analysis_name: str,
@@ -886,28 +904,20 @@ def register_tools(mcp_instance: FastMCP) -> None:
             charts: Optional[List[Dict[str, Any]]] = None,
             scalars: Optional[Dict[str, float]] = None,
         ) -> str:
-            from concurrent.futures import ThreadPoolExecutor
-
-            from wandb_mcp_server.api_client import WandBApiManager
-
             try:
-                api_key = WandBApiManager.get_api_key()
-
-                def _log_with_context():
-                    WandBApiManager.set_context_api_key(api_key)
-                    return log_analysis(
-                        entity_name=entity_name,
-                        project_name=project_name,
-                        analysis_name=analysis_name,
-                        data=data,
-                        charts=charts,
-                        scalars=scalars,
-                    )
-
-                with ThreadPoolExecutor(max_workers=1) as pool:
-                    result = await asyncio.get_event_loop().run_in_executor(pool, _log_with_context)
+                result = log_analysis(
+                    entity_name=entity_name,
+                    project_name=project_name,
+                    analysis_name=analysis_name,
+                    data=data,
+                    charts=charts,
+                    scalars=scalars,
+                )
                 return json.dumps(result)
             except Exception as e:
+                from wandb_mcp_server.api_client import raise_for_wandb_server_busy
+
+                raise_for_wandb_server_busy(e)
                 logger.error(f"Error in log_analysis_to_wandb: {e}", exc_info=True)
                 return json.dumps({"error": "log_failed", "message": str(e)[:500]})
 
@@ -1010,6 +1020,9 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 stream=stream,
             )
         except Exception as e:
+            from wandb_mcp_server.api_client import raise_for_wandb_server_busy
+
+            raise_for_wandb_server_busy(e)
             logger.error(f"Error in get_run_history_tool: {e}")
             return json.dumps({"error": str(e)})
 
@@ -1239,6 +1252,45 @@ def register_tools(mcp_instance: FastMCP) -> None:
 # ===============================================================================
 
 
+def _validate_standalone_transport(transport: str, host: str) -> str:
+    """Validate standalone transport safety and return the concrete bind host."""
+    if transport == "stdio":
+        return host
+    if transport != "http":
+        raise ValueError(f"Invalid transport type: {transport}. Must be 'stdio' or 'http'")
+
+    normalized_host = host.strip().strip("[]").rstrip(".").lower()
+    if normalized_host == "localhost":
+        # Avoid relying on mutable hostname resolution for the security
+        # boundary. A literal loopback address is passed to the socket binder.
+        bind_host = "127.0.0.1"
+    else:
+        try:
+            address = ipaddress.ip_address(normalized_host)
+        except ValueError:
+            address = None
+        if address is None or not address.is_loopback:
+            raise ValueError(
+                "Standalone --transport http is development-only and must bind "
+                "to a literal loopback host. Use the authenticated hosted wrapper "
+                "or Helm image for production HTTP."
+            )
+        bind_host = normalized_host
+
+    if os.environ.get("MCP_AUTH_DISABLED", "false").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        raise ValueError(
+            "Standalone --transport http has no bearer-authentication "
+            "middleware. Set MCP_AUTH_DISABLED=true for loopback development, "
+            "or use the authenticated hosted wrapper or Helm image."
+        )
+    return bind_host
+
+
 def create_mcp_server(transport: str, host: str = "localhost", port: Optional[int] = None) -> FastMCP:
     """
     Create and configure a FastMCP server for the specified transport.
@@ -1256,9 +1308,12 @@ def create_mcp_server(transport: str, host: str = "localhost", port: Optional[in
 
     Authentication:
         - STDIO transport: Uses environment variables (WANDB_API_KEY required)
-        - HTTP transport: Clients provide W&B API key as Bearer token
-          Set MCP_AUTH_DISABLED=true to disable auth (development only)
+        - Standalone HTTP transport: unauthenticated, loopback-only development
+          server. Set MCP_AUTH_DISABLED=true to acknowledge this explicitly.
+          Production HTTP uses the hosted wrapper or Helm deployment.
     """
+    host = _validate_standalone_transport(transport, host)
+
     from wandb_mcp_server.analytics import configure_analytics_runtime
 
     configure_analytics_runtime(transport)
@@ -1267,19 +1322,12 @@ def create_mcp_server(transport: str, host: str = "localhost", port: Optional[in
         port = port if port is not None else 8080
         logger.info(f"Configuring HTTP server on {host}:{port}")
         mcp = InstrumentedFastMCP("weave-mcp-server", host=host, port=port, stateless_http=True)
+        logger.warning("Standalone HTTP development server is unauthenticated and loopback-only")
 
-        # Log authentication status for HTTP
-        if os.environ.get("MCP_AUTH_DISABLED", "false").lower() == "true":
-            logger.warning("⚠️  MCP authentication is DISABLED - server is publicly accessible")
-        else:
-            logger.info("🔒 MCP authentication enabled - clients must provide W&B API key as Bearer token")
-
-    elif transport == "stdio":
+    else:
         logger.info("Configuring stdio server")
         mcp = InstrumentedFastMCP("weave-mcp-server")
         logger.info("STDIO transport uses environment variable authentication")
-    else:
-        raise ValueError(f"Invalid transport type: {transport}. Must be 'stdio' or 'http'")
 
     # Register all tools
     register_tools(mcp)
@@ -1306,12 +1354,12 @@ def cli():
         --wandb-api-key KEY         W&B API key (can also use env var)
 
     Environment Variables:
-        WANDB_API_KEY               W&B API key (required for STDIO, optional for HTTP)
+        WANDB_API_KEY               W&B API key (required for STDIO and development HTTP)
         MCP_SERVER_LOG_LEVEL        Server log level (DEBUG, INFO, WARNING, ERROR)
         WANDB_SILENT                Set to "False" to enable W&B output (default: True)
         WEAVE_SILENT                Set to "False" to enable Weave output (default: True)
         WANDB_DEBUG                 Set to "true" to enable W&B debug logging
-        MCP_AUTH_DISABLED           Set to "true" to disable HTTP auth (dev only)
+        MCP_AUTH_DISABLED           Must be "true" for loopback HTTP development
     """
     print("Starting W&B MCP Server...", file=sys.stderr)
 
@@ -1332,6 +1380,10 @@ def cli():
 
     args = simple_parsing.parse(ServerMCPArgs)
 
+    # Reject unsafe standalone HTTP before credential validation or any
+    # optional Weave initialization can perform network work.
+    bind_host = _validate_standalone_transport(args.transport, args.host)
+
     # Configure W&B logging behavior
     configure_wandb_logging()
 
@@ -1340,34 +1392,37 @@ def cli():
 
     # Validate API key if we have one (but don't set global state)
     if api_key:
-        validate_api_key(api_key)
+        from wandb_mcp_server.api_client import WandBApiManager
 
-        # For STDIO transport, set the API key in context for all operations
-        # This is essential since STDIO doesn't have per-request auth
-        if args.transport == "stdio":
-            from wandb_mcp_server.api_client import WandBApiManager
+        # Upstream SDK errors can echo request details. Make the candidate key
+        # available to the shared sanitizer while validation is in flight, then
+        # discard that temporary context regardless of the result.
+        validation_token = WandBApiManager.set_context_api_key(api_key)
+        try:
+            api_key_is_valid = validate_api_key(api_key)
+        finally:
+            WandBApiManager.reset_context_api_key(validation_token)
 
-            # Set the API key in context for the entire session
-            # No need to reset since STDIO runs for the whole session
-            WandBApiManager.set_context_api_key(api_key)
-            logger.info("API key set in context for STDIO session")
+        if not api_key_is_valid:
+            raise ValueError("WANDB_API_KEY validation failed")
+
+        # The console entrypoint is single-actor. Authenticated hosted HTTP
+        # supplies a per-request context in its wrapper instead.
+        WandBApiManager.set_context_api_key(api_key)
+        logger.info("API key set in context for standalone session")
 
     # Initialize Weave tracing for MCP tool calls
     initialize_weave_tracing()
 
     logger.info("Starting Weights & Biases MCP Server")
     logger.info(f"Transport: {args.transport}")
-    logger.info(f"API Key configured: {'Yes' if api_key else 'No (clients provide their own)'}")
-
-    # Validate transport type
-    if args.transport not in ["stdio", "http"]:
-        raise ValueError(f"Invalid transport type: {args.transport}. Must be 'stdio' or 'http'")
+    logger.info(f"API Key configured: {'Yes' if api_key else 'No'}")
 
     # Create and run the MCP server
-    server = create_mcp_server(args.transport, args.host, args.port)
+    server = create_mcp_server(args.transport, bind_host, args.port)
 
     if args.transport == "http":
-        logger.info(f"Starting HTTP server on {args.host}:{args.port or 8080}")
+        logger.info(f"Starting HTTP server on {bind_host}:{args.port or 8080}")
         server.run(transport="streamable-http")
     else:
         logger.info("Starting stdio server")

@@ -101,5 +101,8 @@ def resolve_trace_roots(
             )
 
         except Exception as e:
+            from wandb_mcp_server.api_client import raise_for_wandb_server_busy
+
+            raise_for_wandb_server_busy(e)
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "resolve_failed", "message": str(e)[:500]})

@@ -3,10 +3,13 @@
 from collections import OrderedDict
 from concurrent.futures import Future
 from contextvars import ContextVar
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
+import re
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Iterator, Mapping, Optional
 
 import wandb
 
@@ -15,8 +18,116 @@ from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
 
+_DEFAULT_RETRY_AFTER_MS = 1_000
+_MAX_RETRY_AFTER_MS = 60_000
+_OVERLOAD_STATUS_RE = re.compile(r"\b(?:HTTP\s*)?(429|503)\b", re.IGNORECASE)
+_OVERLOAD_HINT_RE = re.compile(
+    r"\b(overload(?:ed)?|busy|capacity|rate.?limit|service unavailable|"
+    r"temporar(?:y|ily)|too many requests|try again)\b",
+    re.IGNORECASE,
+)
+
 # Context variable for storing the current request's API key
 api_key_context: ContextVar[Optional[str]] = ContextVar("wandb_api_key", default=None)
+
+
+class WandBServerBusy(RuntimeError):
+    """Retryable W&B backend saturation surfaced to the MCP boundary."""
+
+    def __init__(self, *, status_code: int, retry_after_ms: int) -> None:
+        self.status_code = status_code
+        self.retry_after_ms = retry_after_ms
+        super().__init__("The W&B service is busy; retry this tool call.")
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "error": "server_busy",
+            "message": str(self),
+            "retryable": True,
+            "retry_after_ms": self.retry_after_ms,
+        }
+
+
+def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        for nested in (
+            getattr(current, "exc", None),
+            getattr(current, "__cause__", None),
+            getattr(current, "__context__", None),
+        ):
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+
+
+def _retry_after_ms(value: object) -> int:
+    if value is None:
+        return _DEFAULT_RETRY_AFTER_MS
+    raw = str(value).strip()
+    try:
+        seconds = max(0.0, float(raw))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(raw)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            seconds = max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return _DEFAULT_RETRY_AFTER_MS
+    return min(_MAX_RETRY_AFTER_MS, max(_DEFAULT_RETRY_AFTER_MS, round(seconds * 1_000)))
+
+
+def wandb_server_busy_from_exception(exc: BaseException) -> WandBServerBusy | None:
+    """Classify nested W&B overload errors without retry amplification."""
+    if isinstance(exc, WandBServerBusy):
+        return exc
+
+    status_code: int | None = None
+    retry_after: object = None
+    messages: list[str] = []
+    for current in _exception_chain(exc):
+        if isinstance(current, WandBServerBusy):
+            return current
+        messages.append(str(current))
+        response = getattr(current, "response", None)
+        candidate = getattr(response, "status_code", None)
+        if candidate in {429, 503}:
+            status_code = int(candidate)
+            headers = getattr(response, "headers", None)
+            if isinstance(headers, Mapping):
+                retry_after = headers.get("Retry-After") or headers.get("retry-after")
+            for attr in ("reason", "text"):
+                response_text = getattr(response, attr, None)
+                if response_text:
+                    messages.append(str(response_text))
+            break
+
+    combined_message = " ".join(messages)
+    if status_code is None:
+        match = _OVERLOAD_STATUS_RE.search(combined_message)
+        if match:
+            status_code = int(match.group(1))
+
+    if status_code == 503 and not _OVERLOAD_HINT_RE.search(combined_message):
+        return None
+    if status_code not in {429, 503}:
+        return None
+    return WandBServerBusy(
+        status_code=status_code,
+        retry_after_ms=_retry_after_ms(retry_after),
+    )
+
+
+def raise_for_wandb_server_busy(exc: BaseException) -> None:
+    """Preserve overload backpressure across tool-specific fallback paths."""
+    if busy := wandb_server_busy_from_exception(exc):
+        raise busy from exc
 
 
 class WandBApiManager:

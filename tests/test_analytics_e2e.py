@@ -48,6 +48,7 @@ def _enable_analytics(monkeypatch):
     reset_analytics_tracker()
     reset_segment_forwarder()
     reset_datadog_forwarder()
+    get_datadog_forwarder(capture_payloads=True)
     yield api_key
     WandBApiManager.reset_context_api_key(token)
 

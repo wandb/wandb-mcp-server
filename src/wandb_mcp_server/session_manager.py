@@ -14,7 +14,6 @@ Key features:
 import base64
 import hashlib
 import hmac
-import os
 import time
 import uuid
 from collections import defaultdict
@@ -520,22 +519,17 @@ def get_session_manager() -> MultiTenantSessionManager:
     with _session_manager_lock:
         if _session_manager is not None:
             return _session_manager
-        try:
-            ttl = int(os.environ.get("SESSION_TTL_SECONDS", "3600"))
-        except ValueError:
-            raise ValueError("SESSION_TTL_SECONDS must be an integer (got: %r)" % os.environ.get("SESSION_TTL_SECONDS"))
-        try:
-            max_sessions = int(os.environ.get("MAX_SESSIONS_PER_KEY", "10"))
-        except ValueError:
-            raise ValueError(
-                "MAX_SESSIONS_PER_KEY must be an integer (got: %r)" % os.environ.get("MAX_SESSIONS_PER_KEY")
-            )
-        enable_hmac_sessions = os.environ.get("MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS", "false").lower() == "true"
+        from wandb_mcp_server.config import (
+            MAX_SESSIONS_PER_KEY,
+            MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS,
+            SESSION_TTL_SECONDS,
+        )
+
         try:
             _session_manager = MultiTenantSessionManager(
-                session_ttl_seconds=ttl,
-                max_sessions_per_key=max_sessions,
-                enable_hmac_sha256_sessions=enable_hmac_sessions,
+                session_ttl_seconds=SESSION_TTL_SECONDS,
+                max_sessions_per_key=MAX_SESSIONS_PER_KEY,
+                enable_hmac_sha256_sessions=MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS,
             )
         except Exception as e:
             raise RuntimeError(f"Unable to initialize session manager: {e}") from e

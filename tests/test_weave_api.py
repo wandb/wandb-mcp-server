@@ -266,7 +266,7 @@ class TestWeaveApiClient(unittest.TestCase):
     def test_init_with_explicit_key(self):
         client = WeaveApiClient(api_key="test_key_12345")
         assert client.api_key == "test_key_12345"
-        assert client.retries == 3
+        assert client.retries == 0
         assert client.timeout == WeaveApiClient.DEFAULT_TIMEOUT
 
     def test_init_without_key_raises(self):
@@ -313,27 +313,28 @@ class TestWeaveApiClient(unittest.TestCase):
         with pytest.raises(Exception, match="Failed to query Weave traces"):
             list(client.query_traces({"project_id": "entity/project"}))
 
-    def test_retry_adapter_mounted(self):
-        """Verify retry adapter is mounted on the session for https and http."""
+    def test_functional_queries_never_mount_retry_adapter(self):
+        """Functional trace calls leave retry policy with the MCP caller."""
         client = WeaveApiClient(api_key="test_key")
         https_adapter = client.session.get_adapter("https://trace.wandb.ai")
         http_adapter = client.session.get_adapter("http://localhost:8080")
-        assert https_adapter.max_retries.total == 3
-        assert 429 in https_adapter.max_retries.status_forcelist
-        assert 503 in https_adapter.max_retries.status_forcelist
-        assert http_adapter.max_retries.total == 3
+        assert https_adapter.max_retries.total == 0
+        assert not https_adapter.max_retries.status_forcelist
+        assert http_adapter.max_retries.total == 0
 
     def test_custom_retries_and_timeout(self):
-        """Verify custom retries and timeout are applied."""
+        """Legacy retry input cannot re-enable amplification."""
         client = WeaveApiClient(api_key="test_key", retries=5, timeout=60)
         assert client.timeout == 60
+        assert client.retries == 0
         adapter = client.session.get_adapter("https://trace.wandb.ai")
-        assert adapter.max_retries.total == 5
+        assert adapter.max_retries.total == 0
 
-    def test_no_retry_on_client_error_status(self):
-        """Status codes like 400 should not be in the retry list."""
+    def test_no_status_code_is_retried(self):
         client = WeaveApiClient(api_key="test_key")
         adapter = client.session.get_adapter("https://trace.wandb.ai")
+        assert 429 not in adapter.max_retries.status_forcelist
+        assert 503 not in adapter.max_retries.status_forcelist
         assert 400 not in adapter.max_retries.status_forcelist
         assert 401 not in adapter.max_retries.status_forcelist
         assert 404 not in adapter.max_retries.status_forcelist

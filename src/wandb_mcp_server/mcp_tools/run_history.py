@@ -14,7 +14,11 @@ from typing import Any, Dict, List, Literal, Optional
 
 import wandb
 
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import (
+    WandBApiManager,
+    raise_for_wandb_server_busy,
+    wandb_server_busy_from_exception,
+)
 from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
 from wandb_mcp_server.config import (
     MCP_HOSTED_MODE,
@@ -202,8 +206,12 @@ def get_run_history(
             run_path = f"{entity_name}/{project_name}/{run_id}"
             run = wandb_api.run(run_path)
         except wandb.errors.CommError as e:
+            if busy := wandb_server_busy_from_exception(e):
+                raise busy from e
             raise ValueError(f"Run not found: {run_path}. Error: {e}")
         except Exception as e:
+            if busy := wandb_server_busy_from_exception(e):
+                raise busy from e
             raise ValueError(f"Failed to access run {entity_name}/{project_name}/{run_id}: {type(e).__name__}")
 
         profile_limit_applied = samples > MCP_MAX_HISTORY_SAMPLES
@@ -269,6 +277,7 @@ def get_run_history(
                     rows_scanned=len(rows),
                 )
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             raise ValueError(f"Failed to fetch history for run {run_id}: {e}")
 
         clean_rows = []
@@ -502,6 +511,7 @@ def _fetch_target_x(
             values=[target_x],
         )
     except SelectiveReadUnavailable as exc:
+        raise_for_wandb_server_busy(exc)
         rows, rows_scanned = _scan_history_rows(
             run,
             keys=requested_keys,

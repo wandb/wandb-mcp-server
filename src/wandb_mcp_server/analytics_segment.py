@@ -25,14 +25,17 @@ uses ``WANDB_INTERNAL_BASE_URL`` when configured, otherwise ``WANDB_BASE_URL``.
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
+from wandb_mcp_server.bounded_worker import BoundedWorkerQueue
+from wandb_mcp_server.config import (
+    MCP_ANALYTICS_QUEUE_CAPACITY,
+    MCP_ANALYTICS_TEST_BUFFER_CAPACITY,
+)
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -130,18 +133,12 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _build_retry_session() -> requests.Session:
-    """Build a requests session with retry logic for Gorilla POSTs."""
-    session = requests.Session()
-    retry = Retry(
-        total=2,
-        backoff_factor=0.3,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=["POST"],
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
+    """Build a single-attempt session for best-effort Gorilla analytics.
+
+    Analytics must not amplify W&B overloads. A failed event remains in the
+    canonical local log and is dropped after this one forwarding attempt.
+    """
+    return requests.Session()
 
 
 class SegmentForwarder:
@@ -168,8 +165,9 @@ class SegmentForwarder:
         ).rstrip("/")
         self._segment_logger = logging.getLogger("wandb_mcp_server.segment_dryrun")
         self._segment_logger.setLevel(logging.INFO)
-        self._forwarded_payloads: List[Dict[str, Any]] = []
-        self._executor: Optional[ThreadPoolExecutor] = None
+        self._forwarded_payloads: Deque[Dict[str, Any]] = deque(maxlen=MCP_ANALYTICS_TEST_BUFFER_CAPACITY)
+        self._executor: Optional[BoundedWorkerQueue[Dict[str, Any]]] = None
+        self._executor_lock = threading.Lock()
         self._thread_local = threading.local()
 
     @property
@@ -199,9 +197,8 @@ class SegmentForwarder:
             return payload
 
         if self.live:
-            if self._executor is None:
-                self._executor = ThreadPoolExecutor(max_workers=4)
-            self._executor.submit(self._post, payload)
+            executor = self._get_executor()
+            executor.submit(payload)
             return payload
 
         return None
@@ -236,21 +233,49 @@ class SegmentForwarder:
         """Clear the forwarded payloads buffer."""
         self._forwarded_payloads.clear()
 
+    @property
+    def dropped_count(self) -> int:
+        """Number of forwarding events dropped because the queue was full."""
+        return self._executor.dropped_count if self._executor is not None else 0
+
+    def _get_executor(self) -> BoundedWorkerQueue[Dict[str, Any]]:
+        if self._executor is None:
+            with self._executor_lock:
+                if self._executor is None:
+                    self._executor = BoundedWorkerQueue(
+                        self._post,
+                        capacity=MCP_ANALYTICS_QUEUE_CAPACITY,
+                        worker_count=4,
+                        on_drop=lambda count: logger.warning(
+                            "Segment forwarding queue full; dropped_count=%s",
+                            count,
+                        ),
+                        thread_name_prefix="mcp-segment",
+                    )
+        return self._executor
+
 
 # -- Singleton access -------------------------------------------------------
 
 _segment_forwarder: Optional[SegmentForwarder] = None
+_segment_forwarder_lock = threading.Lock()
 
 
 def get_segment_forwarder() -> SegmentForwarder:
     """Get or create the global SegmentForwarder singleton."""
     global _segment_forwarder
     if _segment_forwarder is None:
-        _segment_forwarder = SegmentForwarder()
+        with _segment_forwarder_lock:
+            if _segment_forwarder is None:
+                _segment_forwarder = SegmentForwarder()
     return _segment_forwarder
 
 
 def reset_segment_forwarder() -> None:
     """Reset the global SegmentForwarder (for testing)."""
     global _segment_forwarder
-    _segment_forwarder = None
+    with _segment_forwarder_lock:
+        previous = _segment_forwarder
+        _segment_forwarder = None
+    if previous is not None and previous._executor is not None:
+        previous._executor.shutdown(wait=False, cancel_futures=True)

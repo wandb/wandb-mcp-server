@@ -195,7 +195,8 @@ resp = client.responses.create(
 print(resp.output_text)
 ```
 
-> **Note**: OpenAI's MCP is server-side, so localhost URLs won't work. For local servers, see [Option 2](#general-installation-guide) with ngrok.
+> **Note**: OpenAI's MCP is server-side, so localhost URLs won't work. Use the
+> hosted W&B endpoint or an authenticated Helm deployment.
 </details>
 
 ### Claude Code
@@ -472,47 +473,35 @@ notepad %APPDATA%\Claude\claude_desktop_config.json
 
 Restart Claude Desktop to activate.
 
-### Testing with ngrok (for server-side clients)
-
-For clients like OpenAI and LeChat that require public URLs:
-
-```bash
-# 1. Start HTTP server
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
-  --transport http \
-  --port 8080
-
-# 2. Expose with ngrok
-ngrok http 8080
-
-# 3. Use the ngrok URL in your client configuration
-```
+The standalone HTTP entrypoint is intentionally loopback-only and must not be
+published through ngrok or another tunnel. Use the authenticated hosted wrapper
+or the `operator-wandb` Helm deployment for a remotely accessible endpoint.
 
 </details>
 
 <details>
-<summary><strong>Option 3: Self-Hosted HTTP Server (Advanced)</strong></summary>
+<summary><strong>Option 3: Local HTTP Development</strong></summary>
 
-The public server supports both STDIO and Streamable HTTP transports. Operators
-running HTTP are responsible for TLS termination, authentication, scaling, and
-deployment-level limits. Do not expose a development server directly to the
-internet.
+The package exposes an unauthenticated Streamable HTTP transport only for local
+development. It requires an explicit acknowledgement and accepts loopback binds
+only. Use the authenticated hosted wrapper or Helm image for production HTTP.
 
 ### Running HTTP Server Locally
 
 For lightweight experimentation and testing, you can run the FastMCP HTTP transport directly:
 
 ```bash
-# Basic HTTP server
+# Basic loopback HTTP server
+export MCP_AUTH_DISABLED=true
 uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
   --transport http \
-  --host 0.0.0.0 \
+  --host 127.0.0.1 \
   --port 8080
 
 # With Weave tracing enabled
 uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
   --transport http \
-  --host 0.0.0.0 \
+  --host 127.0.0.1 \
   --port 8080 \
   --weave_entity your-entity \
   --weave_project mcp-server-logs
@@ -520,8 +509,8 @@ uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
 
 > 📖 For all available command line options, see the [Command Line Reference](#command-line-reference) in the More Information section.
 
-**Note**: HTTP clients must provide a W&B API key as a bearer token unless
-authentication is explicitly disabled for local development.
+**Note**: This entrypoint has no bearer-authentication middleware. It uses the
+single server-side `WANDB_API_KEY` and refuses non-loopback binds.
 </details>
 
 <details>
@@ -595,7 +584,7 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_SILENT` | Set to `"True"` to suppress W&B SDK output (default: `true`) | No |
 | `WEAVE_SILENT` | Set to `"True"` to suppress Weave SDK output (default: `true`) | No |
 | `WANDB_DEBUG` | Set to `"true"` to enable detailed W&B logging | No |
-| `MCP_AUTH_DISABLED` | Disable HTTP authentication (development only) | No |
+| `MCP_AUTH_DISABLED` | Must be `true` to acknowledge unauthenticated loopback HTTP development | No |
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
 | `WANDB_MCP_ENABLE_WEAVE_TOOLS` | Enable Weave trace tools (default: `true`; set `false` for installs without a trace backend) | No |
 | `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS` | Enable Weave Agents (OTel/GenAI) tools (default: `false`) | No |
@@ -611,7 +600,9 @@ When running the server locally, you can customize its behavior with command lin
 | `MCP_ADMISSION_WAIT_MS` | Maximum queue wait before returning retryable `server_busy` (default: `2000`) | No |
 | `MCP_TOOL_TIMEOUT_SECONDS` | Hosted public-tool execution deadline (default: `30`) | No |
 | `MCP_WANDB_REQUEST_TIMEOUT_SECONDS` | Timeout for public W&B SDK requests (default: `20`) | No |
+| `MCP_SYNC_TOOL_WORKERS` | Bounded worker count for synchronous public tools (profile-derived default, capped at `16`) | No |
 | `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events | No |
+| `MCP_ANALYTICS_QUEUE_CAPACITY` | Maximum outstanding events per optional Segment or Datadog forwarder (default: `256`) | No |
 | `MCP_REQUEST_SUCCESS_SAMPLE_RATE` | Deterministic sample rate for successful HTTP request telemetry (default: `0.10`; failures and requests over two seconds are always retained). | No |
 | `MCP_LOG_PRIVACY_LEVEL` | Telemetry privacy level: `off`, `standard`, or `strict` (default: `off`) | No |
 | `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |
@@ -644,16 +635,11 @@ diagnostics as protocol messages.
 **HTTP Transport (for testing and development):**
 ```bash
 # Basic HTTP server on localhost:8080
+export MCP_AUTH_DISABLED=true
 uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
   --transport http \
   --host 127.0.0.1 \
   --port 8080
-
-# Bind to all interfaces with custom port
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
-  --transport http \
-  --host 0.0.0.0 \
-  --port 9090
 ```
 
 **With Weave Tracing (log MCP calls to W&B):**

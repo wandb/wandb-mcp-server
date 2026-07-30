@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, get_args
 from pydantic import PositiveInt
 from wandb.automations import EventType, SlackIntegration, WebhookIntegration
 
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -213,6 +213,7 @@ def list_automations(
             return json.dumps(result)
 
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             logger.error(f"Error in list_automations: {e}", exc_info=True)
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "api_error", "message": str(e)[:500]})
@@ -331,6 +332,7 @@ def list_integrations(
             return json.dumps(result)
 
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             logger.error(f"Error in list_integrations: {e}", exc_info=True)
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "api_error", "message": str(e)[:500]})

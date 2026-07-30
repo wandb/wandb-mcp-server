@@ -10,12 +10,9 @@ import json
 from typing import Any, Dict, Iterator, Optional
 
 import requests
-from requests.adapters import HTTPAdapter
-from requests.exceptions import RetryError
-from urllib3.util.retry import Retry
 
-from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.config import WF_TRACE_SERVER_URL
+from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
 
@@ -24,13 +21,12 @@ class WeaveApiClient:
     """Client for interacting with the Weights & Biases Weave API."""
 
     DEFAULT_TIMEOUT = 30
-    RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         server_url: Optional[str] = None,
-        retries: int = 3,
+        retries: int = 0,
         timeout: int = DEFAULT_TIMEOUT,
     ):
         """Initialize the WeaveApiClient.
@@ -38,22 +34,15 @@ class WeaveApiClient:
         Args:
             api_key: API key for authentication. If None, try to get from environment.
             server_url: Weave API server URL. Defaults to 'https://trace.wandb.ai'.
-            retries: Number of retries for failed requests.
+            retries: Retained for compatibility. Functional trace queries are
+                never retried automatically because the MCP caller owns retry
+                policy and upstream overload must be surfaced immediately.
             timeout: Request timeout in seconds.
 
         Raises:
             ValueError: If no API key is provided or found in environment.
         """
         self.session = requests.Session()
-        retry_strategy = Retry(
-            total=retries,
-            backoff_factor=1.0,
-            status_forcelist=self.RETRYABLE_STATUS_CODES,
-            allowed_methods=["POST", "GET"],
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
 
         # NO FALLBACKS! API key must be explicitly provided
         # For HTTP: Comes from auth middleware via TraceService
@@ -67,7 +56,11 @@ class WeaveApiClient:
 
         self.api_key = api_key
         self.server_url = server_url or WF_TRACE_SERVER_URL
-        self.retries = retries
+        # Automatic retries amplify 429/503 overload and consume an MCP
+        # admission permit for longer than one backend attempt. Keep the
+        # constructor argument for compatibility but make the effective policy
+        # explicit and invariant.
+        self.retries = 0
         self.timeout = timeout
 
     def _get_auth_headers(self) -> Dict[str, str]:
@@ -123,7 +116,9 @@ class WeaveApiClient:
             if response.status_code != 200:
                 error_msg = f"Error {response.status_code}: {response.text}"
                 logger.error(error_msg)
-                raise Exception(error_msg)
+                # Keep the response (including Retry-After) attached so the
+                # common MCP boundary can produce a stable server_busy result.
+                raise requests.HTTPError(error_msg, response=response)
 
             logger.info(f"Response status: {response.status_code}")
 
@@ -139,11 +134,7 @@ class WeaveApiClient:
             logger.error(
                 f"Error executing HTTP request to Weave server: {e}. Request body snippet: {str(query_params)[:1000]}"
             )
-            if isinstance(e, RetryError):
-                cause = e.__cause__
-                if cause and hasattr(cause, "reason"):
-                    logger.error(f"Specific reason for retry exhaustion: {cause.reason}")
-            raise Exception(f"Failed to query Weave traces due to network error: {e}")
+            raise Exception(f"Failed to query Weave traces due to network error: {e}") from e
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding JSON from Weave server: {e}")
             raise Exception(f"Failed to parse Weave API response: {e}")

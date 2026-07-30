@@ -4,8 +4,9 @@ from typing import Any, Dict
 
 import requests
 
+from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS
 from wandb_mcp_server.weave_api.query_builder import QueryBuilder
-from wandb_mcp_server.mcp_tools.tools_utils import get_retry_session
+from wandb_mcp_server.mcp_tools.tools_utils import get_no_retry_session
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
@@ -78,7 +79,7 @@ def count_traces(
     entity_name: str,
     project_name: str,
     filters: dict = None,
-    request_timeout: int = 30,
+    request_timeout: int = MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
 ) -> int:
     """Count the number of traces matching the given filters.
 
@@ -239,7 +240,10 @@ def count_traces(
             "Authorization": f"Basic {auth_token}",
         }
 
-        session = get_retry_session()
+        # Count is part of the same functional MCP call as the surrounding
+        # query. Do not multiply load when Weave is already rate-limited or
+        # overloaded; the MCP client receives retryable backpressure instead.
+        session = get_no_retry_session()
 
         logger.debug(f"Posting to {url} with body: {json.dumps(request_body)}")
 
@@ -257,18 +261,17 @@ def count_traces(
                 if "40 characters" in response.text:
                     logger.error("W&B API key does not meet length requirements.")
                 logger.debug(f"Failed request body: {json.dumps(request_body)}")
-                raise Exception(error_msg)
+                # Preserve status and Retry-After for the shared overload
+                # classifier at the public MCP dispatch boundary.
+                raise requests.HTTPError(error_msg, response=response)
 
             response_json = response.json()
             return response_json.get("count", 0)
 
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP Request failed for project {project_id}: {e}")
-            if isinstance(e, requests.exceptions.RetryError):
-                if e.__cause__ and hasattr(e.__cause__, "reason") and e.__cause__.reason:
-                    logger.error(f"Specific reason for retry exhaustion: {e.__cause__.reason}")
             logger.debug(f"Failed request body during exception for {project_id}: {json.dumps(request_body)}")
-            raise Exception(f"Failed to query Weave trace count for {project_id} due to network error: {e}")
+            raise Exception(f"Failed to query Weave trace count for {project_id} due to network error: {e}") from e
         except json.JSONDecodeError as e:
             logger.error(
                 f"Failed to decode JSON response for {project_id}: {e}. Response text: {response.text if 'response' in locals() else 'N/A'}"

@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+from wandb_mcp_server.config import MCP_REQUEST_SUCCESS_SAMPLE_RATE
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -44,7 +45,6 @@ _MAX_PARAM_KEYS = 20
 _MAX_PARAM_LIST_ITEMS = 20
 _MAX_USAGE_DIMENSIONS = 12
 _MAX_EVENT_BYTES = 4096
-_DEFAULT_REQUEST_SUCCESS_SAMPLE_RATE = 0.10
 _SLOW_REQUEST_MS = 2_000.0
 
 _configured_transport: Optional[str] = None
@@ -56,7 +56,7 @@ _USAGE_ENUM_VALUES: Dict[str, frozenset[str]] = {
     "kind": frozenset({"slack", "webhook"}),
     "mode": frozenset({"sampled", "scan", "full"}),
     "cost_class": frozenset({"light", "expensive", "heavy"}),
-    "admission_outcome": frozenset({"disabled", "admitted", "rejected"}),
+    "admission_outcome": frozenset({"disabled", "admitted", "rejected", "cancelled"}),
 }
 
 _USAGE_COUNTABLE_NUMBER_KEYS = frozenset(
@@ -451,6 +451,9 @@ def _compact_value(value: Any) -> Any:
 
 def _prepare_event(event: Dict[str, Any]) -> Dict[str, Any]:
     """Compact and hard-bound an analytics event to the 4 KiB contract."""
+    from wandb_mcp_server.error_sanitizer import sanitize_sensitive_value
+
+    event = sanitize_sensitive_value(event)
     compacted = _compact_value(event)
     if not isinstance(compacted, dict):
         return {}
@@ -604,14 +607,7 @@ def _request_should_be_emitted(
         return False
     if status_code >= 400 or (duration_ms is not None and duration_ms >= _SLOW_REQUEST_MS):
         return True
-    raw_rate = os.environ.get(
-        "MCP_REQUEST_SUCCESS_SAMPLE_RATE",
-        str(_DEFAULT_REQUEST_SUCCESS_SAMPLE_RATE),
-    )
-    try:
-        rate = min(1.0, max(0.0, float(raw_rate)))
-    except ValueError:
-        rate = _DEFAULT_REQUEST_SUCCESS_SAMPLE_RATE
+    rate = MCP_REQUEST_SUCCESS_SAMPLE_RATE
     if rate <= 0:
         return False
     if rate >= 1:
@@ -818,8 +814,14 @@ class AnalyticsTracker:
         The Segment and Datadog forwarders are called after Cloud Logging
         emission; each is gated by its own env vars and fails silently.
         """
+        from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text
+
         event = _prepare_event(event)
-        labels = {str(key): str(value) for key, value in labels.items() if value not in (None, "", {}, [])}
+        labels = {
+            sanitize_sensitive_text(key): sanitize_sensitive_text(value)
+            for key, value in labels.items()
+            if value not in (None, "", {}, [])
+        }
         missing = _REQUIRED_BASE_FIELDS - event.keys()
         if missing:
             logger.warning(f"Analytics event missing required fields: {missing}")

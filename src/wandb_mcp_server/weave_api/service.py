@@ -100,7 +100,7 @@ class TraceService:
         self,
         api_key: Optional[str] = None,
         server_url: Optional[str] = None,
-        retries: int = 3,
+        retries: int = 0,
         timeout: int = 10,
     ):
         """Initialize the TraceService.
@@ -108,7 +108,8 @@ class TraceService:
         Args:
             api_key: W&B API key. If not provided, uses WANDB_API_KEY env var.
             server_url: Weave API server URL. Defaults to env-driven config.
-            retries: Number of retries for failed requests.
+            retries: Retained for compatibility. Functional trace requests are
+                not retried automatically.
             timeout: Request timeout in seconds.
         """
         # If no API key provided, try to get from context only (no fallbacks!)
