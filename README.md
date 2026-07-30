@@ -61,7 +61,7 @@ deployment settings, and the complete customer-visible summary.
 | **query_weave_traces_tool** | Analyze LLM traces with `detail_level` control | *"Show failed traces with full data"* |
 | **count_weave_traces_tool** | Count traces and get storage metrics | *"How many traces failed?"* |
 | **resolve_trace_roots_tool** | Resolve spans to their root traces | *"Find the root traces for these calls"* |
-| **query_wandb_tool** | Query projects, runs, sweeps, and reports through the W&B SDK | *"Show me runs with loss < 0.1"* |
+| **query_wandb_tool** | Query projects, runs, sweeps, and reports through bounded W&B read APIs | *"Show me runs with loss < 0.1"* |
 | **probe_project_tool** | Discover useful project fields and bounded samples | *"What metrics and config fields are available?"* |
 | **get_run_history_tool** | Sampled time-series metric data | *"Show loss curve for run abc123"* |
 | **compare_runs_tool** | Compare selected metrics and configuration across runs | *"Compare these three training runs"* |
@@ -82,13 +82,25 @@ deployment settings, and the complete customer-visible summary.
 
 **Read-only deployment mode:** Set `WANDB_MCP_READ_ONLY=true` to omit the two write tools,
 `create_wandb_report_tool` and `log_analysis_to_wandb`, while keeping every existing read tool.
-`query_wandb_tool` uses read-only public SDK operations in every mode, regardless of this setting.
+`query_wandb_tool` is read-only in every mode. It normally uses documented W&B
+APIs and may use fixed, application-owned query-only projections to avoid
+per-result fan-out; callers cannot supply GraphQL to this tool.
 
 **Advanced raw GraphQL:** Raw GraphQL is not registered by default. Set
 `WANDB_MCP_ENABLE_RAW_GRAPHQL=true` to add the query-only `query_wandb_graphql_tool`
 for schema introspection, unmodeled fields, cross-resource nesting, aliases, or exact
-response shapes that the public SDK cannot represent. Mutations and subscriptions are
-always rejected, and this flag is independent of `WANDB_MCP_READ_ONLY`.
+response shapes that the typed tool cannot represent. It accepts exactly one bounded
+query operation; mutations and subscriptions are always rejected. This flag is
+independent of `WANDB_MCP_READ_ONLY`. See the
+[query capability matrix](docs/query-capabilities.md).
+
+Recommended deployment presets:
+
+| Deployment | Settings |
+|---|---|
+| Hosted production | `WANDB_MCP_READ_ONLY=false`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`, `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=false` |
+| Strict customer read-only | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=false` |
+| Trusted read-only compatibility | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=true`, `MCP_MAX_GQL_ITEMS=50`, `MCP_MAX_GQL_ITEMS_PER_PAGE=20` |
 
 **Migration from v0.3.7:** `query_wandb_tool` now accepts structured SDK parameters
 (`entity_name`, `project_name`, `resource`, filters, ordering, and identifiers) instead
@@ -577,6 +589,9 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_MCP_ENABLE_WEAVE_TOOLS` | Enable Weave trace tools (default: `true`; set `false` for installs without a trace backend) | No |
 | `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS` | Enable Weave Agents (OTel/GenAI) tools (default: `false`) | No |
 | `WANDB_MCP_READ_ONLY` | Omit report creation and analysis logging write tools (default: `false`) | No |
+| `WANDB_MCP_ENABLE_RAW_GRAPHQL` | Register the bounded query-only GraphQL compatibility tool (default: `false`) | No |
+| `MCP_MAX_GQL_ITEMS` | Maximum items returned by the opt-in raw GraphQL tool (profile default) | No |
+| `MCP_MAX_GQL_ITEMS_PER_PAGE` | Maximum raw GraphQL connection page size (profile default) | No |
 | `MCP_HOSTED_MODE` | Marks an HTTP deployment as hosted; defaults the workload profile to `shared` | No |
 | `MCP_WORKLOAD_PROFILE` | Bounded defaults for `shared`, `dedicated`, or `local` workloads (default: `shared` when hosted, otherwise `local`) | No |
 | `MCP_ADMISSION_CONTROL_ENABLED` | Enable actor-aware weighted tool admission (default: enabled except for the `local` profile) | No |

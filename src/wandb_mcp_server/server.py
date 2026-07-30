@@ -829,6 +829,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         summary_keys: Optional[List[str]] = None,
         config_keys: Optional[List[str]] = None,
         response_mode: Literal["items", "count"] = "items",
+        cursor: Optional[str] = None,
     ) -> Dict[str, Any]:
         return query_wandb(
             entity_name=entity_name,
@@ -844,6 +845,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             summary_keys=summary_keys,
             config_keys=config_keys,
             response_mode=response_mode,
+            cursor=cursor,
         )
 
     if WANDB_MCP_ENABLE_RAW_GRAPHQL:

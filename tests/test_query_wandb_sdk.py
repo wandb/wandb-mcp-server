@@ -12,7 +12,7 @@ from wandb.apis.public import Api, Project
 
 from wandb_mcp_server.mcp_tools import query_wandb as sdk_query
 from wandb_mcp_server.server import create_mcp_server
-from wandb_mcp_server.wandb_selective_reads import ProjectedRunPage
+from wandb_mcp_server.wandb_selective_reads import ProjectedResourcePage, ProjectedRunPage, SelectiveReadUnavailable
 
 
 @contextmanager
@@ -121,6 +121,7 @@ def fake_api(monkeypatch):
         ({"entity_name": "", "project_name": "project", "resource": "runs"}, "entity_name"),
         ({"entity_name": "entity", "project_name": "", "resource": "runs"}, "project_name"),
         ({"entity_name": "entity", "project_name": "project", "resource": "unknown"}, "unsupported resource"),
+        ({"entity_name": "entity", "project_name": "project", "resource": []}, "unsupported resource"),
         ({"entity_name": "entity", "project_name": "project", "resource": "run"}, "run_id is required"),
         (
             {"entity_name": "entity", "project_name": "project", "resource": "sweep"},
@@ -135,6 +136,24 @@ def fake_api(monkeypatch):
             "unsupported include",
         ),
         ({"entity_name": "entity", "project_name": "project", "resource": "runs", "limit": 0}, "limit"),
+        (
+            {"entity_name": "entity", "project_name": "project", "resource": "runs", "response_mode": []},
+            "response_mode",
+        ),
+        (
+            {"entity_name": "entity", "project_name": "project", "resource": "project", "cursor": "cursor-1"},
+            "cursor is supported only",
+        ),
+        (
+            {
+                "entity_name": "entity",
+                "project_name": "project",
+                "resource": "runs",
+                "cursor": "cursor-1",
+                "response_mode": "count",
+            },
+            "cursor is not supported",
+        ),
     ],
 )
 def test_invalid_requests_do_not_create_api(monkeypatch, kwargs, message):
@@ -176,7 +195,12 @@ def test_run_includes_summary_by_default_and_requested_details(fake_api):
     assert result["item"]["sweep"]["id"] == "sweep-1"
 
 
-def test_runs_pass_sdk_filters_order_and_bound_collection(fake_api):
+def test_runs_sdk_fallback_passes_filters_order_and_bounds_collection(fake_api, monkeypatch):
+    monkeypatch.setattr(
+        sdk_query,
+        "fetch_projected_runs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(SelectiveReadUnavailable("projection unavailable")),
+    )
     result = sdk_query.query_wandb(
         "entity",
         "project",
@@ -184,7 +208,6 @@ def test_runs_pass_sdk_filters_order_and_bound_collection(fake_api):
         filters={"summary_metrics.accuracy": {"$gt": 0.8}},
         order="-summary_metrics.accuracy",
         limit=2,
-        include=["sweep"],
     )
 
     call = fake_api.calls[0]
@@ -192,8 +215,8 @@ def test_runs_pass_sdk_filters_order_and_bound_collection(fake_api):
     assert call[2] == {
         "filters": {"summary_metrics.accuracy": {"$gt": 0.8}},
         "order": "-summary_metrics.accuracy",
-        "per_page": 3,
-        "include_sweeps": True,
+        "per_page": 2,
+        "include_sweeps": False,
         "lazy": True,
     }
     assert result["count"] == 2
@@ -225,10 +248,18 @@ def test_run_collection_can_select_fields_without_full_summary(fake_api, monkeyp
 
     monkeypatch.setattr(sdk_query, "fetch_projected_runs", projected)
 
+    filters = {
+        "$and": [
+            {"displayName": {"$regex": "cruise"}},
+            {"$or": [{"sweep": "sweep-1"}, {"name": "arbitrary-run-id"}]},
+        ]
+    }
     result = sdk_query.query_wandb(
         "entity",
         "project",
         "runs",
+        filters=filters,
+        order="-summary_metrics.accuracy",
         limit=50,
         summary_keys=["accuracy", "loss"],
         config_keys=["learning_rate"],
@@ -239,6 +270,8 @@ def test_run_collection_can_select_fields_without_full_summary(fake_api, monkeyp
     assert result["total_count"] == 24_000
     assert result["returned_count"] == 1
     assert result["source"] == "wandb_selective_read"
+    assert projected_calls[0]["filters"] == filters
+    assert projected_calls[0]["order"] == "-summary_metrics.accuracy"
     assert projected_calls[0]["summary_keys"] == ["accuracy", "loss"]
     assert projected_calls[0]["config_keys"] == ["learning_rate"]
 
@@ -253,6 +286,7 @@ async def test_public_mcp_schema_dispatches_targeted_summary_keys(fake_api, monk
         "summary_keys",
         "config_keys",
         "response_mode",
+        "cursor",
     } <= query_tool.inputSchema["properties"].keys()
 
     await server.call_tool(
@@ -363,7 +397,7 @@ def test_collection_limit_is_clamped_to_deployment_ceiling(fake_api, monkeypatch
 
 
 def test_response_budget_drops_optional_fields_before_items(fake_api, monkeypatch):
-    monkeypatch.setattr(sdk_query, "MAX_RESPONSE_TOKENS", 250)
+    monkeypatch.setattr(sdk_query, "MAX_RESPONSE_TOKENS", 500)
     runs = [_run("run-1"), _run("run-2")]
     for run in runs:
         run.config = {"large": "x" * 4000}
@@ -376,17 +410,86 @@ def test_response_budget_drops_optional_fields_before_items(fake_api, monkeypatc
     assert all("config" not in item for item in result["items"])
 
 
-def test_single_and_collection_sweeps_use_public_sdk(fake_api):
+def test_single_sweep_uses_sdk_and_collection_uses_projection_without_fanout(fake_api, monkeypatch):
     single = sdk_query.query_wandb("entity", "project", "sweep", sweep_id="sweep-1", include=["config"])
-
-    fake_api.project_result.sweeps = lambda per_page: iter([_sweep("sweep-1"), _sweep("sweep-2")])
+    monkeypatch.setattr(
+        sdk_query,
+        "fetch_projected_sweeps",
+        lambda *args, **kwargs: ProjectedResourcePage(
+            items=[
+                {
+                    "id": "sweep-1",
+                    "name": "display-sweep-1",
+                    "entity": "entity",
+                    "project": "project",
+                    "config": {"method": "bayes"},
+                }
+            ],
+            total_count=2,
+            has_more=True,
+            next_cursor="sweep-cursor",
+            requests=1,
+        ),
+    )
     collection = sdk_query.query_wandb("entity", "project", "sweeps", limit=1, include=["config"])
 
     assert single["item"]["config"] == {"method": "bayes"}
     assert ("sweep", "entity/project/sweep-1") in fake_api.calls
-    assert ("project", "project", "entity") in fake_api.calls
+    assert ("project", "project", "entity") not in fake_api.calls
     assert collection["items"][0]["id"] == "sweep-1"
     assert collection["truncated"] is True
+
+
+def test_collection_fallbacks_never_reintroduce_n_plus_one_or_spec_overfetch(fake_api, monkeypatch):
+    monkeypatch.setattr(
+        sdk_query,
+        "fetch_projected_runs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(SelectiveReadUnavailable("projection unavailable")),
+    )
+    monkeypatch.setattr(
+        sdk_query,
+        "fetch_projected_sweeps",
+        lambda *args, **kwargs: (_ for _ in ()).throw(SelectiveReadUnavailable("projection unavailable")),
+    )
+    monkeypatch.setattr(
+        sdk_query,
+        "fetch_projected_reports",
+        lambda *args, **kwargs: (_ for _ in ()).throw(SelectiveReadUnavailable("projection unavailable")),
+    )
+
+    run_sweeps = sdk_query.query_wandb("entity", "project", "runs", limit=1, include=["sweep"])
+    sweeps = sdk_query.query_wandb("entity", "project", "sweeps", limit=1)
+    reports = sdk_query.query_wandb("entity", "project", "reports", limit=1)
+
+    assert run_sweeps["error"] == "selective_read_unavailable"
+    assert sweeps["error"] == "selective_read_unavailable"
+    assert reports["error"] == "selective_read_unavailable"
+    assert fake_api.calls == []
+
+
+def test_explicit_report_spec_sdk_fallback_cursor_continues(fake_api, monkeypatch):
+    monkeypatch.setattr(
+        sdk_query,
+        "fetch_projected_reports",
+        lambda *args, **kwargs: (_ for _ in ()).throw(SelectiveReadUnavailable("projection unavailable")),
+    )
+
+    first = sdk_query.query_wandb("entity", "project", "reports", limit=1, include=["spec"])
+    second = sdk_query.query_wandb(
+        "entity",
+        "project",
+        "reports",
+        limit=1,
+        include=["spec"],
+        cursor=first["next_cursor"],
+    )
+
+    assert first["items"][0]["id"] == "report-1"
+    assert first["next_cursor"].startswith("mcp-sdk-v1:")
+    assert second["items"][0]["id"] == "report-2"
+    assert second["total_count"] == 2
+    assert second["has_more"] is False
+    assert second["next_cursor"] is None
 
 
 def test_reports_use_sdk_name_filter_and_optional_spec(fake_api):
@@ -423,7 +526,7 @@ def test_malformed_collection_filter_returns_sdk_query_error(fake_api):
     result = sdk_query.query_wandb("entity", "project", "runs", filters={"$bad": True})
 
     assert result["error"] == "sdk_query_failed"
-    assert result["message"] == "invalid filters"
+    assert result["message"] == "W&B query failed (ValueError)"
 
 
 def test_sdk_client_initialization_failure_returns_structured_error(monkeypatch):
@@ -440,7 +543,7 @@ def test_sdk_client_initialization_failure_returns_structured_error(monkeypatch)
     result = sdk_query.query_wandb("entity", "project", "project")
 
     assert result["error"] == "sdk_query_failed"
-    assert result["message"] == "temporary initialization failure"
+    assert result["message"] == "W&B query failed (RuntimeError)"
 
 
 def test_supported_sdk_exposes_every_public_query_operation():
