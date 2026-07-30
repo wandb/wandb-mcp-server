@@ -135,6 +135,20 @@ def fake_api(monkeypatch):
             "unsupported include",
         ),
         ({"entity_name": "entity", "project_name": "project", "resource": "runs", "limit": 0}, "limit"),
+        (
+            {"entity_name": "entity", "project_name": "project", "resource": "project", "cursor": "cursor-1"},
+            "cursor is supported only",
+        ),
+        (
+            {
+                "entity_name": "entity",
+                "project_name": "project",
+                "resource": "runs",
+                "cursor": "cursor-1",
+                "response_mode": "count",
+            },
+            "cursor is not supported",
+        ),
     ],
 )
 def test_invalid_requests_do_not_create_api(monkeypatch, kwargs, message):
@@ -253,6 +267,7 @@ async def test_public_mcp_schema_dispatches_targeted_summary_keys(fake_api, monk
         "summary_keys",
         "config_keys",
         "response_mode",
+        "cursor",
     } <= query_tool.inputSchema["properties"].keys()
 
     await server.call_tool(
@@ -422,7 +437,7 @@ def test_malformed_collection_filter_returns_sdk_query_error(fake_api):
     result = sdk_query.query_wandb("entity", "project", "runs", filters={"$bad": True})
 
     assert result["error"] == "sdk_query_failed"
-    assert result["message"] == "invalid filters"
+    assert result["message"] == "W&B query failed (ValueError)"
 
 
 def test_sdk_client_initialization_failure_returns_structured_error(monkeypatch):
@@ -439,7 +454,7 @@ def test_sdk_client_initialization_failure_returns_structured_error(monkeypatch)
     result = sdk_query.query_wandb("entity", "project", "project")
 
     assert result["error"] == "sdk_query_failed"
-    assert result["message"] == "temporary initialization failure"
+    assert result["message"] == "W&B query failed (RuntimeError)"
 
 
 def test_supported_sdk_exposes_every_public_query_operation():

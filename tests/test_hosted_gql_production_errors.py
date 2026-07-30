@@ -63,7 +63,7 @@ def test_malformed_natural_language_query_fails_before_execute(monkeypatch):
         variables={"entity": "entity", "project": "project"},
     )
 
-    assert "Failed to validate initial query" in result["errors"][0]["message"]
+    assert "Syntax Error" in result["errors"][0]["message"]
     assert client.executions == []
 
 
@@ -166,7 +166,7 @@ def test_ambiguous_connection_without_first_is_rejected_before_execute(
     )
 
     assert result["errors"][0]["error"] == "query_too_complex"
-    assert "must include a first argument" in result["errors"][0]["message"]
+    assert "must include first" in result["errors"][0]["message"]
     assert client.executions == []
 
 
@@ -198,7 +198,7 @@ def test_existing_first_on_ambiguous_connection_is_not_changed(monkeypatch):
     )
 
     executed_query, _ = client.executions[0]
-    assert "views(first: 10)" in executed_query
+    assert "views(first: 10, after: $__mcp_after)" in executed_query
     assert result == upstream_error
 
 
@@ -225,9 +225,9 @@ def test_valid_run_query_still_clamps_literal_first(monkeypatch):
     )
 
     executed_query, variables = client.executions[0]
-    assert "runs(first: 50)" in executed_query
+    assert "runs(first: 50, after: $__mcp_after)" in executed_query
     assert "100000" not in executed_query
-    assert variables["limit"] == 50
+    assert variables["__mcp_after"] is None
     assert "errors" not in result
 
 
@@ -254,6 +254,6 @@ def test_variable_default_first_is_clamped_before_execute(monkeypatch):
     )
 
     executed_query, variables = client.executions[0]
-    assert "$first: Int = 50" in executed_query
-    assert variables["limit"] == 50
+    assert "$first: Int = 100000" in executed_query
+    assert variables["first"] == 50
     assert "errors" not in result

@@ -10,6 +10,8 @@ from wandb_mcp_server.wandb_selective_reads import (
     METRIC_VALUE_STEPS_QUERY,
     PROJECTED_RUNS_QUERY,
     PROJECTED_RUN_QUERY,
+    PROJECTED_REPORTS_QUERY,
+    PROJECTED_SWEEPS_QUERY,
     PROJECT_COUNTS_QUERY,
     PROJECT_FIELDS_QUERY,
     REGISTRY_ARTIFACT_VERSIONS_QUERY,
@@ -146,6 +148,8 @@ def test_every_application_owned_document_is_query_only():
     for document in (
         PROJECTED_RUNS_QUERY,
         PROJECTED_RUN_QUERY,
+        PROJECTED_REPORTS_QUERY,
+        PROJECTED_SWEEPS_QUERY,
         PROJECT_COUNTS_QUERY,
         PROJECT_FIELDS_QUERY,
         ARTIFACT_INVENTORY_QUERY,

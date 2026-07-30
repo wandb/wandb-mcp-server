@@ -113,7 +113,7 @@ def test_hosted_literal_first_is_rewritten_before_execute(monkeypatch):
     executed_query, variables = client.executions[0]
     assert "first: 50" in executed_query
     assert "100000" not in executed_query
-    assert variables["limit"] == 50
+    assert variables["__mcp_after"] is None
     assert "errors" not in result
 
 
@@ -130,8 +130,8 @@ def test_query_executes_with_service_api_without_client(monkeypatch):
     )
 
     executed_query, variables = service_api.executions[0]
-    assert "first: 100000" in executed_query
-    assert variables["limit"] == 100
+    assert "first: 100" in executed_query
+    assert variables["__mcp_after"] is None
     assert "errors" not in result
 
 
@@ -218,18 +218,18 @@ def test_hosted_nested_connection_query_is_rejected_before_execute(monkeypatch):
     )
 
     assert result["errors"][0]["error"] == "query_too_complex"
-    assert "Nested paginated collection" in result["errors"][0]["details"][0]
+    assert "Nested paginated connection" in result["errors"][0]["message"]
     assert client.executions == []
 
 
-def test_hosted_last_pagination_is_rejected_before_execute(monkeypatch):
+def test_hosted_last_pagination_is_bounded_to_one_page(monkeypatch):
     monkeypatch.setattr(cfg, "MCP_HOSTED_MODE", True)
     client = FakeClient()
     _install_fake_api(monkeypatch, client)
     query = """
     query Runs($entity: String!, $project: String!) {
       project(name: $project, entityName: $entity) {
-        runs(last: 10) {
+        runs(last: 10000) {
           edges { node { id } }
           pageInfo { hasNextPage endCursor }
         }
@@ -242,11 +242,11 @@ def test_hosted_last_pagination_is_rejected_before_execute(monkeypatch):
         variables={"entity": "e", "project": "p"},
     )
 
-    assert result["errors"][0]["error"] == "query_too_complex"
-    assert client.executions == []
+    assert "last: 20" in client.executions[0][0]
+    assert "errors" not in result
 
 
-def test_non_hosted_query_passes_literal_first_unchanged(monkeypatch):
+def test_non_hosted_query_is_bounded_too(monkeypatch):
     monkeypatch.setattr(cfg, "MCP_HOSTED_MODE", False)
     client = FakeClient()
     _install_fake_api(monkeypatch, client)
@@ -259,5 +259,5 @@ def test_non_hosted_query_passes_literal_first_unchanged(monkeypatch):
     )
 
     executed_query, variables = client.executions[0]
-    assert "first: 100000" in executed_query
-    assert variables["limit"] == 100
+    assert "first: 100" in executed_query
+    assert variables["__mcp_after"] is None
