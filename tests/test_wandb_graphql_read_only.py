@@ -125,6 +125,7 @@ def test_application_graphql_transport_is_confined_to_approved_modules():
     package_root = Path(__file__).parents[1] / "src" / "wandb_mcp_server"
     approved = {
         package_root / "wandb_graphql.py",
+        package_root / "wandb_report_writer.py",
         package_root / "wandb_selective_reads.py",
         package_root / "mcp_tools" / "query_wandb_gql.py",
     }

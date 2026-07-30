@@ -48,6 +48,20 @@ class WandBServerBusy(RuntimeError):
         }
 
 
+class WandBWriteOutcomeUnknown(RuntimeError):
+    """A dispatched W&B write ended without a confirmed response."""
+
+    def __init__(self) -> None:
+        super().__init__("W&B did not confirm whether the write completed.")
+
+
+class WandBReportCreationFailed(RuntimeError):
+    """A confirmed report-creation failure safe to expose at the MCP boundary."""
+
+    def __init__(self) -> None:
+        super().__init__("The W&B report could not be created.")
+
+
 def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
     pending: list[BaseException] = [exc]
     seen: set[int] = set()
@@ -64,6 +78,16 @@ def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
         ):
             if isinstance(nested, BaseException):
                 pending.append(nested)
+
+
+def wandb_write_outcome_unknown_from_exception(exc: BaseException) -> bool:
+    """Return whether an exception chain contains an unconfirmed W&B write."""
+    return any(isinstance(current, WandBWriteOutcomeUnknown) for current in _exception_chain(exc))
+
+
+def wandb_report_creation_failed_from_exception(exc: BaseException) -> bool:
+    """Return whether an exception chain contains a safe report failure."""
+    return any(isinstance(current, WandBReportCreationFailed) for current in _exception_chain(exc))
 
 
 def _retry_after_ms(value: object) -> int:

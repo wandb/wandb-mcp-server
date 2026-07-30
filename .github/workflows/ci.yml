@@ -106,6 +106,7 @@ jobs:
             tests/test_summarize_evaluation.py \
             tests/test_infer_schema.py \
             tests/test_tool_registration.py \
+            tests/test_report_writer.py \
             tests/test_wandb_graphql.py \
             tests/test_wandb_graphql_read_only.py \
             tests/test_hosted_gql_guardrails.py \
