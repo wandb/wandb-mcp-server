@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
@@ -23,6 +26,7 @@ from wandb_mcp_server.config import (
     structured_error,
 )
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_selective_reads import (
     SelectiveReadUnavailable,
@@ -125,10 +129,125 @@ _JSON_MAX_MAPPING_KEYS = 500
 _JSON_MAX_LIST_ITEMS = 500
 _JSON_MAX_STRING_CHARS = 16_000
 _SDK_RUN_CACHE_LOCK = threading.Lock()
+_SDK_CURSOR_PREFIX = "mcp-sdk-v1:"
+_MAX_SDK_FALLBACK_REQUESTS = 10
+_MAX_TYPED_INPUT_BYTES = 64 * 1024
+_MAX_CURSOR_BYTES = 4 * 1024
+_MAX_IDENTIFIER_BYTES = 1024
+_MAX_ENUM_BYTES = 64
+_MAX_FILTER_DEPTH = 12
 
 
 class WandBQueryValidationError(ValueError):
     """Raised before any W&B client is obtained for an invalid request."""
+
+
+def _sdk_cursor_fingerprint(
+    *,
+    entity_name: str,
+    project_name: str,
+    resource: str,
+    filters: Optional[Dict[str, Any]],
+    order: str,
+    report_name: Optional[str],
+    include: frozenset[str],
+    summary_keys: Optional[List[str]],
+    config_keys: Optional[List[str]],
+) -> str:
+    """Bind compatibility offsets to the collection query that created them."""
+    canonical = json.dumps(
+        {
+            "entity": entity_name,
+            "project": project_name,
+            "resource": resource,
+            "filters": filters,
+            "order": order,
+            "report_name": report_name,
+            "include": sorted(include),
+            "summary_keys": sorted(summary_keys or ()),
+            "config_keys": sorted(config_keys or ()),
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()[:24]
+
+
+def _encode_sdk_cursor(resource: str, offset: int, fingerprint: str) -> str:
+    payload = json.dumps(
+        {"resource": resource, "offset": offset, "query": fingerprint},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return _SDK_CURSOR_PREFIX + base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_sdk_cursor(cursor: Optional[str], resource: str, fingerprint: str) -> Optional[int]:
+    if cursor is None or not cursor.startswith(_SDK_CURSOR_PREFIX):
+        return None
+    encoded = cursor.removeprefix(_SDK_CURSOR_PREFIX)
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(encoded + padding))
+        offset = payload["offset"]
+        cursor_resource = payload["resource"]
+        cursor_fingerprint = payload["query"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        raise WandBQueryValidationError("cursor is not a valid MCP SDK continuation") from None
+    if cursor_resource != resource or isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise WandBQueryValidationError("cursor is not valid for this collection resource")
+    if cursor_fingerprint != fingerprint:
+        raise WandBQueryValidationError("cursor does not match this collection query")
+    return offset
+
+
+def _validate_text_bound(name: str, value: str, maximum_bytes: int) -> None:
+    if len(value.encode("utf-8")) > maximum_bytes:
+        raise WandBQueryValidationError(f"{name} exceeds the {maximum_bytes}-byte limit")
+
+
+def _validate_filter_shape(value: Any, *, depth: int = 0) -> None:
+    if depth > _MAX_FILTER_DEPTH:
+        raise WandBQueryValidationError(f"filters exceed the maximum depth of {_MAX_FILTER_DEPTH}")
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise WandBQueryValidationError("filters must use string keys")
+            _validate_filter_shape(child, depth=depth + 1)
+        return
+    if isinstance(value, (list, tuple)):
+        for child in value:
+            _validate_filter_shape(child, depth=depth + 1)
+        return
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float) and math.isfinite(value):
+        return
+    raise WandBQueryValidationError("filters must contain finite JSON-compatible values")
+
+
+def _validate_filter_bound(filters: Optional[Dict[str, Any]]) -> None:
+    if filters is None:
+        return
+    _validate_filter_shape(filters)
+    try:
+        encoded = json.dumps(filters, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        raise WandBQueryValidationError("filters must contain finite JSON-compatible values") from None
+    if len(encoded) > _MAX_TYPED_INPUT_BYTES:
+        raise WandBQueryValidationError(f"filters exceed the {_MAX_TYPED_INPUT_BYTES}-byte limit")
+
+
+def _validate_sdk_fallback_window(offset: int, applied_limit: int) -> None:
+    page_size = min(applied_limit, MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE)
+    requests = math.ceil((offset + applied_limit + 1) / max(1, page_size))
+    if requests > _MAX_SDK_FALLBACK_REQUESTS:
+        raise WandBQueryValidationError(
+            "cursor exceeds the bounded SDK compatibility window; restart the query "
+            "or use a backend that supports projected continuation"
+        )
 
 
 def _json_safe(
@@ -156,49 +275,78 @@ def _json_safe(
         return {"_truncated": "cycle"}
     seen.add(value_id)
     try:
-        scalar_item = getattr(value, "item", None)
-        if callable(scalar_item):
-            return _json_safe(scalar_item(), _depth=_depth + 1, _seen=seen)
-    except (TypeError, ValueError, OverflowError):
-        pass
-    if isinstance(value, Mapping):
-        result = {
-            str(key): _json_safe(item, _depth=_depth + 1, _seen=seen)
-            for key, item in islice(value.items(), _JSON_MAX_MAPPING_KEYS)
-        }
-        try:
-            mapping_length = len(value)
-        except TypeError:
-            mapping_length = len(result)
-        if mapping_length > _JSON_MAX_MAPPING_KEYS:
-            result["_truncated_keys"] = mapping_length - _JSON_MAX_MAPPING_KEYS
-        return result
-    if isinstance(value, (list, tuple, set, frozenset)):
-        values = list(islice(iter(value), _JSON_MAX_LIST_ITEMS + 1))
-        result = [_json_safe(item, _depth=_depth + 1, _seen=seen) for item in values[:_JSON_MAX_LIST_ITEMS]]
-        if len(values) > _JSON_MAX_LIST_ITEMS:
+        if isinstance(value, Mapping):
+            result = {
+                str(key): _json_safe(item, _depth=_depth + 1, _seen=seen)
+                for key, item in islice(value.items(), _JSON_MAX_MAPPING_KEYS)
+            }
             try:
-                omitted = len(value) - _JSON_MAX_LIST_ITEMS
+                mapping_length = len(value)
             except TypeError:
-                omitted = 1
-            result.append({"_truncated_items": omitted})
-        return result
-    try:
-        mapping = dict(value)
-    except (TypeError, ValueError):
-        rendered = str(value)
-        return rendered if len(rendered) <= _JSON_MAX_STRING_CHARS else rendered[:_JSON_MAX_STRING_CHARS] + "…"
-    return _json_safe(mapping, _depth=_depth + 1, _seen=seen)
+                mapping_length = len(result)
+            if mapping_length > _JSON_MAX_MAPPING_KEYS:
+                result["_truncated_keys"] = mapping_length - _JSON_MAX_MAPPING_KEYS
+            return result
+        # W&B 0.28 HTTPSummary is a bounded dict-like public SDK object but is
+        # not a collections.abc.Mapping. Inspect methods on the type so its
+        # __getattr__ does not turn probes such as ``value.item`` into KeyError.
+        items_method = getattr(type(value), "items", None)
+        if callable(items_method):
+            try:
+                pairs = list(islice(items_method(value), _JSON_MAX_MAPPING_KEYS + 1))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                pairs = []
+            if pairs:
+                result = {
+                    str(key): _json_safe(item, _depth=_depth + 1, _seen=seen)
+                    for key, item in pairs[:_JSON_MAX_MAPPING_KEYS]
+                }
+                if len(pairs) > _JSON_MAX_MAPPING_KEYS:
+                    result["_truncated_keys"] = len(pairs) - _JSON_MAX_MAPPING_KEYS
+                return result
+        try:
+            scalar_item = getattr(type(value), "item", None)
+            if callable(scalar_item):
+                return _json_safe(scalar_item(value), _depth=_depth + 1, _seen=seen)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            pass
+        if isinstance(value, (list, tuple, set, frozenset)):
+            values = list(islice(iter(value), _JSON_MAX_LIST_ITEMS + 1))
+            result = [_json_safe(item, _depth=_depth + 1, _seen=seen) for item in values[:_JSON_MAX_LIST_ITEMS]]
+            if len(values) > _JSON_MAX_LIST_ITEMS:
+                try:
+                    omitted = len(value) - _JSON_MAX_LIST_ITEMS
+                except TypeError:
+                    omitted = 1
+                result.append({"_truncated_items": omitted})
+            return result
+        try:
+            mapping = dict(value)
+        except (TypeError, ValueError):
+            rendered = str(value)
+            return rendered if len(rendered) <= _JSON_MAX_STRING_CHARS else rendered[:_JSON_MAX_STRING_CHARS] + "…"
+        return _json_safe(mapping, _depth=_depth + 1, _seen=seen)
+    finally:
+        seen.discard(value_id)
 
 
-def _serialize_user(user: Any) -> Any:
-    if user is None or isinstance(user, (str, int, float, bool, Mapping)):
+def _serialize_user(user: Any, *, include_email: bool = True) -> Any:
+    if user is None or isinstance(user, (str, int, float, bool)):
         return _json_safe(user)
+    if isinstance(user, Mapping):
+        data: dict[str, Any] = {
+            "username": user.get("username"),
+            "name": user.get("name"),
+        }
+        if include_email:
+            data["email"] = user.get("email")
+        return {key: _json_safe(value) for key, value in data.items() if value is not None}
     data = {
         "username": getattr(user, "username", None),
         "name": getattr(user, "name", None),
-        "email": getattr(user, "email", None),
     }
+    if include_email:
+        data["email"] = getattr(user, "email", None)
     return {key: _json_safe(value) for key, value in data.items() if value is not None}
 
 
@@ -229,9 +377,14 @@ def _serialize_sweep(sweep: Any, include: frozenset[str]) -> Dict[str, Any]:
         "id": _json_safe(getattr(sweep, "id", None)),
         "name": _json_safe(getattr(sweep, "name", None)),
         "state": _json_safe(getattr(sweep, "state", None)),
+        "method": _json_safe(getattr(sweep, "method", None)),
+        "description": _json_safe(getattr(sweep, "description", None)),
         "entity": _json_safe(entity),
         "project": _json_safe(project),
         "expected_run_count": _json_safe(getattr(sweep, "expected_run_count", None)),
+        "run_count": _json_safe(getattr(sweep, "run_count", None)),
+        "created_at": _json_safe(getattr(sweep, "created_at", None)),
+        "updated_at": _json_safe(getattr(sweep, "updated_at", None)),
         "url": publicize_wandb_url(
             getattr(sweep, "url", None),
             fallback_segments=(entity, project, "sweeps", sweep_id),
@@ -240,6 +393,17 @@ def _serialize_sweep(sweep: Any, include: frozenset[str]) -> Dict[str, Any]:
     if "config" in include:
         result["config"] = _json_safe(getattr(sweep, "config", {}))
     return result
+
+
+def _serialize_sweep_reference(sweep: Any, *, entity: Any, project: Any) -> Dict[str, Any]:
+    sweep_id = getattr(sweep, "id", None) or getattr(sweep, "name", None)
+    return {
+        "id": _json_safe(sweep_id),
+        "name": _json_safe(sweep_id),
+        "entity": _json_safe(entity),
+        "project": _json_safe(project),
+        "url": public_wandb_url(entity, project, "sweeps", sweep_id),
+    }
 
 
 def _select_mapping_values(value: Any, keys: Optional[List[str]]) -> Dict[str, Any]:
@@ -299,7 +463,7 @@ def _serialize_run(
     run_id = getattr(run, "id", None)
     result = {
         "id": _json_safe(run_id),
-        "display_name": _json_safe(getattr(run, "name", None)),
+        "display_name": _json_safe(getattr(run, "name", None) or run_id),
         "state": _json_safe(getattr(run, "state", None)),
         "entity": _json_safe(entity),
         "project": _json_safe(project),
@@ -310,10 +474,11 @@ def _serialize_run(
         "created_at": _json_safe(getattr(run, "created_at", None)),
         "heartbeat_at": _json_safe(getattr(run, "heartbeat_at", None)),
         "duration": _json_safe(getattr(run, "duration", None)),
+        "history_line_count": _json_safe(getattr(run, "history_line_count", None)),
         "group": _json_safe(getattr(run, "group", None)),
         "job_type": _json_safe(getattr(run, "job_type", None)),
-        "tags": _json_safe(getattr(run, "tags", [])),
-        "user": _serialize_user(getattr(run, "user", None)),
+        "tags": _json_safe(getattr(run, "tags", None) or []),
+        "user": _serialize_user(getattr(run, "user", None), include_email=False),
     }
     if include_summary:
         result["summary"] = _serialize_summary(run, summary_keys)
@@ -336,7 +501,15 @@ def _serialize_run(
         result["system_metrics"] = _json_safe(getattr(run, "system_metrics", {}))
     if "sweep" in include:
         sweep = getattr(run, "sweep", None)
-        result["sweep"] = None if sweep is None else _serialize_sweep(sweep, frozenset())
+        result["sweep"] = (
+            None
+            if sweep is None
+            else _serialize_sweep_reference(
+                sweep,
+                entity=entity,
+                project=project,
+            )
+        )
     return result
 
 
@@ -357,8 +530,9 @@ def _serialize_report(report: Any, include: frozenset[str]) -> Dict[str, Any]:
 
 
 def _estimate_tokens(payload: Dict[str, Any]) -> int:
-    """Conservative approximation suitable for enforcing the configured budget."""
-    return max(1, len(json.dumps(payload, default=str, ensure_ascii=False)) // 4)
+    """Exact token count with a conservative tokenizer-failure fallback."""
+    serialized = json.dumps(payload, default=str, ensure_ascii=False, allow_nan=False)
+    return count_tokens_conservative(serialized)
 
 
 def _fit_collection_to_budget(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -377,24 +551,17 @@ def _fit_collection_to_budget(payload: Dict[str, Any]) -> Dict[str, Any]:
             if _estimate_tokens(payload) <= MAX_RESPONSE_TOKENS:
                 break
 
-    dropped_items = 0
-    while payload["items"] and _estimate_tokens(payload) > MAX_RESPONSE_TOKENS:
-        payload["items"].pop()
-        dropped_items += 1
-
-    if omitted_fields or dropped_items:
+    if omitted_fields:
         payload["returned_count"] = len(payload["items"])
         payload["count"] = len(payload["items"])
-        payload["has_more"] = original_has_more or dropped_items > 0
-        payload["project_exhaustive"] = original_exhaustive and dropped_items == 0
-        if dropped_items:
-            payload["next_cursor"] = None
+        payload["has_more"] = original_has_more
+        payload["project_exhaustive"] = original_exhaustive
         payload["truncated"] = True
         payload["truncation"] = {
             "applied": True,
             "reason": "response_token_budget",
             "omitted_fields": sorted(omitted_fields),
-            "dropped_items": dropped_items,
+            "dropped_items": 0,
         }
     if _estimate_tokens(payload) > MAX_RESPONSE_TOKENS:
         return structured_error(
@@ -463,38 +630,67 @@ def _validate_request(
         raise WandBQueryValidationError("entity_name must be a non-empty string")
     if not isinstance(project_name, str) or not project_name.strip():
         raise WandBQueryValidationError("project_name must be a non-empty string")
-    if resource not in _INCLUDE_FIELDS:
-        raise WandBQueryValidationError(f"unsupported resource: {resource!r}")
+    _validate_text_bound("entity_name", entity_name, _MAX_IDENTIFIER_BYTES)
+    _validate_text_bound("project_name", project_name, _MAX_IDENTIFIER_BYTES)
+    if (
+        not isinstance(resource, str)
+        or len(resource.encode("utf-8")) > _MAX_ENUM_BYTES
+        or resource not in _INCLUDE_FIELDS
+    ):
+        raise WandBQueryValidationError("unsupported resource")
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise WandBQueryValidationError("limit must be a positive integer")
     if filters is not None and not isinstance(filters, dict):
         raise WandBQueryValidationError("filters must be a dictionary")
+    _validate_filter_bound(filters)
     if filters is not None and resource != "runs":
         raise WandBQueryValidationError("filters are supported only for resource='runs'")
     if resource != "runs" and order != "-created_at":
         raise WandBQueryValidationError("order is supported only for resource='runs'")
-    if resource == "run" and not run_id:
+    if resource == "run" and (not isinstance(run_id, str) or not run_id.strip()):
         raise WandBQueryValidationError("run_id is required for resource='run'")
     if resource != "run" and run_id is not None:
         raise WandBQueryValidationError("run_id is supported only for resource='run'")
-    if resource == "sweep" and not sweep_id:
+    if run_id is not None:
+        _validate_text_bound("run_id", run_id, _MAX_IDENTIFIER_BYTES)
+    if resource == "sweep" and (not isinstance(sweep_id, str) or not sweep_id.strip()):
         raise WandBQueryValidationError("sweep_id is required for resource='sweep'")
     if resource != "sweep" and sweep_id is not None:
         raise WandBQueryValidationError("sweep_id is supported only for resource='sweep'")
+    if sweep_id is not None:
+        _validate_text_bound("sweep_id", sweep_id, _MAX_IDENTIFIER_BYTES)
     if resource != "reports" and report_name is not None:
         raise WandBQueryValidationError("report_name is supported only for resource='reports'")
-    if response_mode not in {"items", "count"}:
+    if report_name is not None:
+        if not isinstance(report_name, str) or not report_name.strip():
+            raise WandBQueryValidationError("report_name must be a non-empty string")
+        _validate_text_bound("report_name", report_name, _MAX_IDENTIFIER_BYTES)
+    if not isinstance(order, str) or not order.strip():
+        raise WandBQueryValidationError("order must be a non-empty string")
+    _validate_text_bound("order", order, _MAX_IDENTIFIER_BYTES)
+    if not isinstance(response_mode, str) or response_mode not in {"items", "count"}:
         raise WandBQueryValidationError("response_mode must be 'items' or 'count'")
     if response_mode == "count" and resource != "runs":
         raise WandBQueryValidationError("response_mode='count' is supported only for resource='runs'")
     if cursor is not None and (not isinstance(cursor, str) or not cursor.strip()):
         raise WandBQueryValidationError("cursor must be a non-empty string")
+    if cursor is not None:
+        _validate_text_bound("cursor", cursor, _MAX_CURSOR_BYTES)
     if cursor is not None and resource not in {"runs", "sweeps", "reports"}:
         raise WandBQueryValidationError("cursor is supported only for collection resources")
     if cursor is not None and response_mode != "items":
         raise WandBQueryValidationError("cursor is not supported with response_mode='count'")
-    if include is not None and (not isinstance(include, list) or not all(isinstance(item, str) for item in include)):
-        raise WandBQueryValidationError("include must be a list of strings")
+    if include is not None and (
+        not isinstance(include, list)
+        or len(include) > 20
+        or not all(
+            isinstance(item, str) and bool(item.strip()) and len(item.encode("utf-8")) <= _MAX_ENUM_BYTES
+            for item in include
+        )
+    ):
+        raise WandBQueryValidationError(
+            f"include must contain at most 20 non-empty strings of at most {_MAX_ENUM_BYTES} bytes"
+        )
     if summary_keys is not None and (
         not isinstance(summary_keys, list)
         or not summary_keys
@@ -502,6 +698,8 @@ def _validate_request(
         or not all(isinstance(item, str) and item.strip() for item in summary_keys)
     ):
         raise WandBQueryValidationError(f"summary_keys must contain 1-{MCP_MAX_HISTORY_KEYS} non-empty strings")
+    for key in summary_keys or ():
+        _validate_text_bound("summary_keys item", key, _MAX_IDENTIFIER_BYTES)
     if summary_keys is not None and resource not in {"run", "runs"}:
         raise WandBQueryValidationError("summary_keys are supported only for resource='run' or resource='runs'")
     if config_keys is not None and (
@@ -511,6 +709,8 @@ def _validate_request(
         or not all(isinstance(item, str) and item.strip() for item in config_keys)
     ):
         raise WandBQueryValidationError(f"config_keys must contain 1-{MCP_MAX_HISTORY_KEYS} non-empty strings")
+    for key in config_keys or ():
+        _validate_text_bound("config_keys item", key, _MAX_IDENTIFIER_BYTES)
     if config_keys is not None and resource not in {"run", "runs"}:
         raise WandBQueryValidationError("config_keys are supported only for resource='run' or resource='runs'")
     if response_mode == "count" and (include or summary_keys or config_keys):
@@ -524,9 +724,7 @@ def _validate_request(
     unsupported = requested - _INCLUDE_FIELDS[resource]
     if unsupported:
         allowed = sorted(_INCLUDE_FIELDS[resource])
-        raise WandBQueryValidationError(
-            f"unsupported include value(s) for resource={resource!r}: {sorted(unsupported)}; allowed: {allowed}"
-        )
+        raise WandBQueryValidationError(f"unsupported include value for this resource; allowed values: {allowed}")
     full_detail_limit = 3 if MCP_HOSTED_MODE and MCP_WORKLOAD_PROFILE == "local" else MCP_MAX_FULL_DETAIL_ITEMS
     if resource in {"runs", "sweeps", "reports"} and limit > full_detail_limit:
         untargeted_summary = "summary" in requested and summary_keys is None
@@ -612,16 +810,6 @@ def _collection_total_count(collection: Any) -> Optional[int]:
         return None
 
 
-def _collection_cursor(collection: Any, has_more: bool) -> Optional[str]:
-    if not has_more:
-        return None
-    try:
-        cursor = collection.cursor
-    except (AttributeError, TypeError, ValueError):
-        return None
-    return str(cursor) if cursor else None
-
-
 def _decorate_projected_run(item: Dict[str, Any]) -> Dict[str, Any]:
     run_id = item.get("id")
     if run_id:
@@ -649,8 +837,11 @@ def _decorate_projected_report(
     entity_name: str,
     project_name: str,
 ) -> Dict[str, Any]:
-    report_path = item.get("name") or item.get("id")
-    if report_path:
+    display_name = item.get("display_name")
+    report_id = item.get("id")
+    if display_name and report_id:
+        slug = re.sub(r"-+", "-", re.sub(r"\W", "-", str(display_name))).strip("-")
+        report_path = f"{slug}--{str(report_id).replace('=', '')}"
         item["url"] = public_wandb_url(entity_name, project_name, "reports", report_path)
     return _json_safe(item)
 
@@ -744,11 +935,33 @@ def query_wandb(
             response_mode,
             cursor,
         )
+        sdk_cursor_fingerprint = _sdk_cursor_fingerprint(
+            entity_name=entity_name,
+            project_name=project_name,
+            resource=resource,
+            filters=filters,
+            order=order,
+            report_name=report_name,
+            include=include_fields,
+            summary_keys=summary_keys,
+            config_keys=config_keys,
+        )
+        sdk_fallback_offset = _decode_sdk_cursor(cursor, resource, sdk_cursor_fingerprint)
     except WandBQueryValidationError as exc:
-        return structured_error("invalid_request", str(exc), source="wandb_sdk", resource=resource)
+        safe_resource = resource if isinstance(resource, str) and resource in _INCLUDE_FIELDS else "unknown"
+        return structured_error("invalid_request", str(exc), source="wandb_sdk", resource=safe_resource)
 
     requested_limit = limit
     applied_limit = min(limit, MCP_MAX_WANDB_QUERY_ITEMS)
+    try:
+        if sdk_fallback_offset is not None:
+            if resource == "sweeps" or (resource == "reports" and "spec" not in include_fields):
+                raise WandBQueryValidationError(
+                    "this collection does not support SDK fallback cursors; restart with no cursor"
+                )
+            _validate_sdk_fallback_window(sdk_fallback_offset, applied_limit)
+    except WandBQueryValidationError as exc:
+        return structured_error("invalid_request", str(exc), source="wandb_sdk", resource=resource)
     path = f"{entity_name}/{project_name}"
 
     with track_tool_execution(
@@ -828,14 +1041,18 @@ def query_wandb(
 
             if resource == "runs":
                 if response_mode == "count":
-                    runs = api.runs(
-                        path,
-                        filters=filters,
-                        order=order,
-                        per_page=1,
-                        include_sweeps=False,
-                        lazy=True,
-                    )
+                    with _SDK_RUN_CACHE_LOCK:
+                        flush = getattr(api, "flush", None)
+                        if callable(flush):
+                            flush()
+                        runs = api.runs(
+                            path,
+                            filters=filters,
+                            order=order,
+                            per_page=1,
+                            include_sweeps=False,
+                            lazy=True,
+                        )
                     total_count = len(runs)
                     return {
                         "source": "wandb_sdk",
@@ -847,7 +1064,7 @@ def query_wandb(
                         "project_exhaustive": True,
                     }
 
-                use_projection = bool(cursor or include_fields or summary_keys or config_keys)
+                use_projection = sdk_fallback_offset is None
                 if use_projection:
                     try:
                         projected = fetch_projected_runs(
@@ -867,7 +1084,7 @@ def query_wandb(
                             cursor=cursor,
                         )
                     except SelectiveReadUnavailable as exc:
-                        if cursor is not None or applied_limit > MCP_MAX_FULL_DETAIL_ITEMS:
+                        if cursor is not None:
                             return structured_error(
                                 "selective_read_unavailable",
                                 (
@@ -877,9 +1094,24 @@ def query_wandb(
                                 source="wandb_sdk",
                                 resource=resource,
                             )
-                        compatibility_caveat = (
-                            f"{exc}; used a bounded full-page SDK fallback without per-run lazy loads"
-                        )
+                        if "sweep" in include_fields:
+                            return structured_error(
+                                "selective_read_unavailable",
+                                f"{exc}; the SDK fallback would load one sweep per run",
+                                source="wandb_sdk",
+                                resource=resource,
+                            )
+                        if include_fields and applied_limit > MCP_MAX_FULL_DETAIL_ITEMS:
+                            return structured_error(
+                                "selective_read_unavailable",
+                                (
+                                    f"{exc}; the requested detail shape exceeds the bounded "
+                                    "public-SDK compatibility window"
+                                ),
+                                source="wandb_sdk",
+                                resource=resource,
+                            )
+                        compatibility_caveat = f"{exc}; used a bounded public-SDK compatibility page"
                     else:
                         return _collection_envelope(
                             resource,
@@ -895,8 +1127,9 @@ def query_wandb(
                             source="wandb_selective_read",
                         )
                 else:
-                    compatibility_caveat = None
+                    compatibility_caveat = "continued a bounded public-SDK compatibility page"
 
+                offset = sdk_fallback_offset or 0
                 with _SDK_RUN_CACHE_LOCK:
                     flush = getattr(api, "flush", None)
                     if callable(flush):
@@ -905,21 +1138,24 @@ def query_wandb(
                         path,
                         filters=filters,
                         order=order,
-                        per_page=min(
-                            applied_limit + (1 if compatibility_caveat else 0),
-                            MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE,
-                        ),
-                        include_sweeps="sweep" in include_fields,
+                        per_page=min(applied_limit, MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE),
+                        include_sweeps=False,
                         lazy=not bool(include_fields & {"summary", "config", "system_metrics"}),
                     )
                 total_count = _collection_total_count(runs)
-                page = list(islice(runs, applied_limit))
-                has_more = bool(total_count is not None and total_count > len(page))
+                lookahead = 0 if total_count is not None else 1
+                page = list(islice(runs, offset, offset + applied_limit + lookahead))
+                items_page = page[:applied_limit]
+                has_more = len(page) > applied_limit or bool(
+                    total_count is not None and total_count > offset + len(items_page)
+                )
                 if total_count is None:
                     try:
-                        has_more = bool(runs.more)
+                        has_more = has_more or bool(runs.more)
                     except (AttributeError, TypeError, ValueError):
-                        has_more = len(page) == applied_limit
+                        # We requested one lookahead item from this iterator; if
+                        # none arrived, the fallback collection is exhausted.
+                        pass
                 items = [
                     _serialize_run(
                         run,
@@ -928,10 +1164,10 @@ def query_wandb(
                         config_keys=config_keys,
                         include_summary="summary" in include_fields,
                     )
-                    for run in page[:applied_limit]
+                    for run in items_page
                 ]
                 if total_count is None and not has_more:
-                    total_count = len(items)
+                    total_count = offset + len(items)
                 return _collection_envelope(
                     resource,
                     entity_name,
@@ -942,7 +1178,9 @@ def query_wandb(
                     has_more,
                     total_count,
                     cursor=cursor,
-                    next_cursor=_collection_cursor(runs, has_more),
+                    next_cursor=(
+                        _encode_sdk_cursor(resource, offset + len(items), sdk_cursor_fingerprint) if has_more else None
+                    ),
                     compatibility_caveat=compatibility_caveat,
                 )
 
@@ -962,30 +1200,11 @@ def query_wandb(
                         cursor=cursor,
                     )
                 except SelectiveReadUnavailable as exc:
-                    if cursor is not None or applied_limit > MCP_MAX_FULL_DETAIL_ITEMS:
-                        return structured_error(
-                            "selective_read_unavailable",
-                            f"{exc}; a bounded continuation cannot be reproduced safely by the public SDK",
-                            source="wandb_sdk",
-                            resource=resource,
-                        )
-                    sdk_sweeps = api.project(project_name, entity=entity_name).sweeps(
-                        per_page=min(applied_limit + 1, MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE)
-                    )
-                    sweep_page = list(islice(sdk_sweeps, applied_limit + 1))
-                    has_more = len(sweep_page) > applied_limit or bool(getattr(sdk_sweeps, "more", False))
-                    items = [_serialize_sweep(sweep, include_fields) for sweep in sweep_page[:applied_limit]]
-                    return _collection_envelope(
-                        resource,
-                        entity_name,
-                        project_name,
-                        items,
-                        requested_limit,
-                        applied_limit,
-                        has_more,
-                        _collection_total_count(sdk_sweeps),
-                        next_cursor=_collection_cursor(sdk_sweeps, has_more),
-                        compatibility_caveat=f"{exc}; used a small bounded SDK fallback",
+                    return structured_error(
+                        "selective_read_unavailable",
+                        f"{exc}; the public SDK would load each sweep individually",
+                        source="wandb_sdk",
+                        resource=resource,
                     )
                 return _collection_envelope(
                     resource,
@@ -1002,6 +1221,8 @@ def query_wandb(
                 )
 
             try:
+                if sdk_fallback_offset is not None:
+                    raise SelectiveReadUnavailable("continuing bounded SDK fallback")
                 reports = fetch_projected_reports(
                     api,
                     entity=entity_name,
@@ -1013,19 +1234,34 @@ def query_wandb(
                     cursor=cursor,
                 )
             except SelectiveReadUnavailable as exc:
-                if cursor is not None or applied_limit > MCP_MAX_FULL_DETAIL_ITEMS:
+                if "spec" not in include_fields:
                     return structured_error(
                         "selective_read_unavailable",
-                        f"{exc}; a bounded continuation cannot be reproduced safely by the public SDK",
+                        f"{exc}; the public SDK would download every report spec",
                         source="wandb_sdk",
                         resource=resource,
                     )
+                if cursor is not None and sdk_fallback_offset is None:
+                    return structured_error(
+                        "selective_read_unavailable",
+                        f"{exc}; a native continuation cannot be reproduced safely by the public SDK",
+                        source="wandb_sdk",
+                        resource=resource,
+                    )
+                if applied_limit > MCP_MAX_FULL_DETAIL_ITEMS:
+                    return structured_error(
+                        "selective_read_unavailable",
+                        f"{exc}; report spec fallback is limited to {MCP_MAX_FULL_DETAIL_ITEMS} items",
+                        source="wandb_sdk",
+                        resource=resource,
+                    )
+                offset = sdk_fallback_offset or 0
                 sdk_reports = api.reports(
                     path,
                     name=report_name,
                     per_page=min(applied_limit + 1, MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE),
                 )
-                report_page = list(islice(sdk_reports, applied_limit + 1))
+                report_page = list(islice(sdk_reports, offset, offset + applied_limit + 1))
                 items = [_serialize_report(report, include_fields) for report in report_page[:applied_limit]]
                 has_more = len(report_page) > applied_limit or bool(getattr(sdk_reports, "more", False))
                 return _collection_envelope(
@@ -1036,8 +1272,11 @@ def query_wandb(
                     requested_limit,
                     applied_limit,
                     has_more,
-                    None if has_more else len(items),
-                    next_cursor=_collection_cursor(sdk_reports, has_more),
+                    None if has_more else offset + len(items),
+                    cursor=cursor,
+                    next_cursor=(
+                        _encode_sdk_cursor(resource, offset + len(items), sdk_cursor_fingerprint) if has_more else None
+                    ),
                     compatibility_caveat=f"{exc}; used a small bounded SDK fallback",
                 )
             return _collection_envelope(
@@ -1054,8 +1293,8 @@ def query_wandb(
                 source="wandb_selective_read",
             )
         except Exception as exc:
-            logger.error("W&B SDK query failed: %s", exc, exc_info=True)
-            ctx.mark_error(f"sdk_query_failed: {exc}")
+            logger.error("W&B SDK query failed (%s)", type(exc).__name__)
+            ctx.mark_error(f"sdk_query_failed: {type(exc).__name__}")
             return _sdk_error_result(
                 exc,
                 resource=resource,

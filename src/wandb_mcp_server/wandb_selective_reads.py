@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from typing import Any, Mapping, NoReturn, Sequence
 
 from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
@@ -355,6 +356,62 @@ class SelectiveReadUnavailable(RuntimeError):
     """Raised when a backend cannot serve an application-owned read shape."""
 
 
+_MAX_PROJECTED_PAGE_REQUESTS = 10
+
+
+def _projected_page_request_limit(target: int, page_size: int) -> int:
+    """Bound requests even when a backend returns short or empty pages."""
+    expected_requests = math.ceil(max(1, target) / max(1, page_size))
+    return min(_MAX_PROJECTED_PAGE_REQUESTS, expected_requests + 1)
+
+
+def _next_projected_cursor(
+    *,
+    context: str,
+    current: str | None,
+    candidate: Any,
+    seen: set[str],
+) -> str:
+    """Return a usable continuation cursor or reject a broken connection."""
+    if not isinstance(candidate, str) or not candidate:
+        raise SelectiveReadUnavailable(f"{context} reported another page without a continuation cursor")
+    if candidate == current or candidate in seen:
+        raise SelectiveReadUnavailable(f"{context} repeated a continuation cursor")
+    seen.add(candidate)
+    return candidate
+
+
+def _projected_connection_page(
+    connection: Mapping[str, Any],
+    *,
+    context: str,
+) -> tuple[list[Mapping[str, Any]], Mapping[str, Any], bool]:
+    """Validate one fixed-projection connection page before consuming it."""
+    edges = connection.get("edges")
+    if not isinstance(edges, list) or not all(isinstance(edge, Mapping) for edge in edges):
+        raise SelectiveReadUnavailable(f"{context} returned invalid edges")
+    page_info = connection.get("pageInfo")
+    if not isinstance(page_info, Mapping) or not isinstance(page_info.get("hasNextPage"), bool):
+        raise SelectiveReadUnavailable(f"{context} returned invalid pagination metadata")
+    return edges, page_info, page_info["hasNextPage"]
+
+
+def _retained_projected_cursor(
+    edge: Mapping[str, Any],
+    *,
+    context: str,
+    current: str | None,
+    seen: set[str],
+) -> str:
+    """Resume immediately after the last edge retained from an oversized page."""
+    return _next_projected_cursor(
+        context=context,
+        current=current,
+        candidate=edge.get("cursor"),
+        seen=seen,
+    )
+
+
 def _raise_selective_failure(context: str, exc: Exception) -> NoReturn:
     """Preserve actionable upstream errors; wrap only projection compatibility failures."""
     status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
@@ -500,8 +557,10 @@ def fetch_projected_runs(
     total_count = 0
     requests = 0
     has_next_page = False
+    seen_cursors = {cursor} if cursor else set()
+    max_requests = _projected_page_request_limit(target, page_size)
 
-    while len(items) < target:
+    while len(items) < target and requests < max_requests:
         raise_if_tool_deadline_exceeded()
         variables = {
             "entity": entity,
@@ -527,29 +586,52 @@ def fetch_projected_runs(
         connection = project_payload.get("runs")
         if not isinstance(connection, Mapping):
             raise SelectiveReadUnavailable("projected run query returned no run connection")
-        for edge in connection.get("edges") or []:
-            node = edge.get("node") if isinstance(edge, Mapping) else None
-            if isinstance(node, Mapping):
-                items.append(
-                    _normalize_run_node(
-                        node,
-                        entity=entity,
-                        project=project,
-                        summary_keys=summary_keys or (),
-                        config_keys=config_keys or (),
-                        include_summary=include_summary,
-                        include_config=include_config,
-                        include_sweep=include_sweep,
-                        include_system_metrics=include_system_metrics,
-                    )
+        edges, page_info, backend_has_next = _projected_connection_page(
+            connection,
+            context="projected run query",
+        )
+        retained_edge: Mapping[str, Any] | None = None
+        consumed_edges = 0
+        for edge in edges:
+            if len(items) >= target:
+                break
+            node = edge.get("node")
+            if not isinstance(node, Mapping):
+                raise SelectiveReadUnavailable("projected run query returned an invalid run edge")
+            items.append(
+                _normalize_run_node(
+                    node,
+                    entity=entity,
+                    project=project,
+                    summary_keys=summary_keys or (),
+                    config_keys=config_keys or (),
+                    include_summary=include_summary,
+                    include_config=include_config,
+                    include_sweep=include_sweep,
+                    include_system_metrics=include_system_metrics,
                 )
-                if len(items) >= target:
-                    break
-        page_info = connection.get("pageInfo") or {}
-        has_next_page = bool(page_info.get("hasNextPage"))
-        page_cursor = page_info.get("endCursor")
-        if not has_next_page or not page_cursor:
+            )
+            retained_edge = edge
+            consumed_edges += 1
+        cut_mid_page = consumed_edges < len(edges)
+        has_next_page = backend_has_next or cut_mid_page
+        if not has_next_page:
             break
+        if cut_mid_page:
+            assert retained_edge is not None
+            page_cursor = _retained_projected_cursor(
+                retained_edge,
+                context="projected run query",
+                current=page_cursor,
+                seen=seen_cursors,
+            )
+        else:
+            page_cursor = _next_projected_cursor(
+                context="projected run query",
+                current=page_cursor,
+                candidate=page_info.get("endCursor"),
+                seen=seen_cursors,
+            )
 
     return ProjectedRunPage(
         items=items[:limit],
@@ -614,7 +696,9 @@ def fetch_projected_sweeps(
     requests = 0
     total_count: int | None = None
     has_next_page = False
-    while len(items) < target:
+    seen_cursors = {cursor} if cursor else set()
+    max_requests = _projected_page_request_limit(target, page_size)
+    while len(items) < target and requests < max_requests:
         raise_if_tool_deadline_exceeded()
         try:
             data = execute_graphql(
@@ -636,10 +720,18 @@ def fetch_projected_sweeps(
         connection = project_payload.get("sweeps")
         if not isinstance(connection, Mapping):
             raise SelectiveReadUnavailable("projected sweep query returned no sweep connection")
-        for edge in connection.get("edges") or []:
-            node = edge.get("node") if isinstance(edge, Mapping) else None
+        edges, page_info, backend_has_next = _projected_connection_page(
+            connection,
+            context="projected sweep query",
+        )
+        retained_edge: Mapping[str, Any] | None = None
+        consumed_edges = 0
+        for edge in edges:
+            if len(items) >= target:
+                break
+            node = edge.get("node")
             if not isinstance(node, Mapping):
-                continue
+                raise SelectiveReadUnavailable("projected sweep query returned an invalid sweep edge")
             sweep_id = node.get("name") or node.get("id")
             item = {
                 "id": sweep_id,
@@ -657,13 +749,27 @@ def fetch_projected_sweeps(
             if include_config:
                 item["config"] = _parse_json_mapping(node.get("config"))
             items.append(item)
-            if len(items) >= target:
-                break
-        page_info = connection.get("pageInfo") or {}
-        has_next_page = bool(page_info.get("hasNextPage"))
-        page_cursor = page_info.get("endCursor")
-        if not has_next_page or not page_cursor:
+            retained_edge = edge
+            consumed_edges += 1
+        cut_mid_page = consumed_edges < len(edges)
+        has_next_page = backend_has_next or cut_mid_page
+        if not has_next_page:
             break
+        if cut_mid_page:
+            assert retained_edge is not None
+            page_cursor = _retained_projected_cursor(
+                retained_edge,
+                context="projected sweep query",
+                current=page_cursor,
+                seen=seen_cursors,
+            )
+        else:
+            page_cursor = _next_projected_cursor(
+                context="projected sweep query",
+                current=page_cursor,
+                candidate=page_info.get("endCursor"),
+                seen=seen_cursors,
+            )
     has_more = has_next_page
     return ProjectedResourcePage(
         items=items[:limit],
@@ -691,7 +797,9 @@ def fetch_projected_reports(
     page_cursor = cursor
     requests = 0
     has_next_page = False
-    while len(items) < target:
+    seen_cursors = {cursor} if cursor else set()
+    max_requests = _projected_page_request_limit(target, page_size)
+    while len(items) < target and requests < max_requests:
         raise_if_tool_deadline_exceeded()
         try:
             data = execute_graphql(
@@ -712,10 +820,18 @@ def fetch_projected_reports(
         connection = _project_payload(data).get("allViews")
         if not isinstance(connection, Mapping):
             raise SelectiveReadUnavailable("projected report query returned no report connection")
-        for edge in connection.get("edges") or []:
-            node = edge.get("node") if isinstance(edge, Mapping) else None
+        edges, page_info, backend_has_next = _projected_connection_page(
+            connection,
+            context="projected report query",
+        )
+        retained_edge: Mapping[str, Any] | None = None
+        consumed_edges = 0
+        for edge in edges:
+            if len(items) >= target:
+                break
+            node = edge.get("node")
             if not isinstance(node, Mapping):
-                continue
+                raise SelectiveReadUnavailable("projected report query returned an invalid report edge")
             item = {
                 "id": node.get("id"),
                 "name": node.get("name"),
@@ -728,13 +844,27 @@ def fetch_projected_reports(
             if include_spec:
                 item["spec"] = _parse_json_mapping(node.get("spec"))
             items.append(item)
-            if len(items) >= target:
-                break
-        page_info = connection.get("pageInfo") or {}
-        has_next_page = bool(page_info.get("hasNextPage"))
-        page_cursor = page_info.get("endCursor")
-        if not has_next_page or not page_cursor:
+            retained_edge = edge
+            consumed_edges += 1
+        cut_mid_page = consumed_edges < len(edges)
+        has_next_page = backend_has_next or cut_mid_page
+        if not has_next_page:
             break
+        if cut_mid_page:
+            assert retained_edge is not None
+            page_cursor = _retained_projected_cursor(
+                retained_edge,
+                context="projected report query",
+                current=page_cursor,
+                seen=seen_cursors,
+            )
+        else:
+            page_cursor = _next_projected_cursor(
+                context="projected report query",
+                current=page_cursor,
+                candidate=page_info.get("endCursor"),
+                seen=seen_cursors,
+            )
     has_more = has_next_page
     total_count = len(items[:limit]) if cursor is None and not has_more else None
     return ProjectedResourcePage(

@@ -25,6 +25,9 @@ MAX_GRAPHQL_DOCUMENT_BYTES = 64 * 1024
 MAX_GRAPHQL_DEPTH = 12
 MAX_GRAPHQL_FIELDS = 200
 MAX_GRAPHQL_FRAGMENTS = 32
+MAX_GRAPHQL_VARIABLE_DEPTH = 12
+MAX_GRAPHQL_VARIABLE_NODES = 5_000
+MAX_GRAPHQL_EXPANDED_SELECTIONS = MAX_GRAPHQL_FIELDS * 4
 
 QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION = """Execute a bounded, query-only GraphQL document against W&B Models.
 
@@ -64,7 +67,28 @@ class _ConnectionPlan:
     first_variable: str | None
     after_variable: str | None
     initial_after: str | None
+    initial_before: str | None
+    edges_key: str | None
+    page_info_key: str | None
+    edge_cursor_key: str | None
+    has_next_page_key: str | None
+    end_cursor_key: str | None
+    has_previous_page_key: str | None
+    start_cursor_key: str | None
     backward: bool = False
+
+
+@dataclass
+class _SelectionExpansionBudget:
+    visited: int = 0
+
+    def consume(self) -> None:
+        self.visited += 1
+        if self.visited > MAX_GRAPHQL_EXPANDED_SELECTIONS:
+            raise GraphQLQueryValidationError(
+                f"GraphQL expanded selections are limited to {MAX_GRAPHQL_EXPANDED_SELECTIONS}",
+                error="query_too_complex",
+            )
 
 
 def find_paginated_collections(obj: Dict, current_path: Optional[List[str]] = None) -> List[List[str]]:
@@ -106,15 +130,18 @@ def _selection_field_names(
     selection_set: gql_ast.SelectionSetNode | None,
     fragments: Mapping[str, gql_ast.FragmentDefinitionNode],
     stack: tuple[str, ...] = (),
+    budget: _SelectionExpansionBudget | None = None,
 ) -> set[str]:
     names: set[str] = set()
     if selection_set is None:
         return names
+    budget = budget or _SelectionExpansionBudget()
     for selection in selection_set.selections:
+        budget.consume()
         if isinstance(selection, gql_ast.FieldNode):
             names.add(selection.name.value)
         elif isinstance(selection, gql_ast.InlineFragmentNode):
-            names.update(_selection_field_names(selection.selection_set, fragments, stack))
+            names.update(_selection_field_names(selection.selection_set, fragments, stack, budget))
         elif isinstance(selection, gql_ast.FragmentSpreadNode):
             fragment_name = selection.name.value
             if fragment_name in stack:
@@ -127,16 +154,99 @@ def _selection_field_names(
                     fragment.selection_set,
                     fragments,
                     (*stack, fragment_name),
+                    budget,
                 )
             )
     return names
 
 
+def _selection_fields(
+    selection_set: gql_ast.SelectionSetNode | None,
+    fragments: Mapping[str, gql_ast.FragmentDefinitionNode],
+    stack: tuple[str, ...] = (),
+    budget: _SelectionExpansionBudget | None = None,
+) -> list[gql_ast.FieldNode]:
+    """Expand one selection level, retaining response aliases."""
+    fields: list[gql_ast.FieldNode] = []
+    if selection_set is None:
+        return fields
+    budget = budget or _SelectionExpansionBudget()
+    for selection in selection_set.selections:
+        budget.consume()
+        if isinstance(selection, gql_ast.FieldNode):
+            fields.append(selection)
+        elif isinstance(selection, gql_ast.InlineFragmentNode):
+            fields.extend(_selection_fields(selection.selection_set, fragments, stack, budget))
+        elif isinstance(selection, gql_ast.FragmentSpreadNode):
+            fragment_name = selection.name.value
+            if fragment_name in stack:
+                raise GraphQLQueryValidationError("GraphQL fragment cycles are not allowed")
+            fragment = fragments.get(fragment_name)
+            if fragment is None:
+                raise GraphQLQueryValidationError(f"Unknown GraphQL fragment: {fragment_name}")
+            fields.extend(
+                _selection_fields(
+                    fragment.selection_set,
+                    fragments,
+                    (*stack, fragment_name),
+                    budget,
+                )
+            )
+    return fields
+
+
+def _response_key(
+    selection_set: gql_ast.SelectionSetNode | None,
+    field_name: str,
+    fragments: Mapping[str, gql_ast.FragmentDefinitionNode],
+    budget: _SelectionExpansionBudget,
+) -> str | None:
+    """Return the unique response key selected for a schema field."""
+    keys = {
+        _field_name(field)
+        for field in _selection_fields(selection_set, fragments, budget=budget)
+        if field.name.value == field_name
+    }
+    if len(keys) > 1:
+        raise GraphQLQueryValidationError(
+            f"Paginated connection selects {field_name!r} through multiple aliases",
+            error="query_too_complex",
+        )
+    return next(iter(keys), None)
+
+
+def _nested_response_key(
+    selection_set: gql_ast.SelectionSetNode | None,
+    parent_field_name: str,
+    child_field_name: str,
+    fragments: Mapping[str, gql_ast.FragmentDefinitionNode],
+    budget: _SelectionExpansionBudget,
+) -> str | None:
+    """Return a unique response key selected below a connection metadata field."""
+    keys: set[str] = set()
+    for field in _selection_fields(selection_set, fragments, budget=budget):
+        if field.name.value != parent_field_name:
+            continue
+        key = _response_key(field.selection_set, child_field_name, fragments, budget)
+        if key is not None:
+            keys.add(key)
+    if len(keys) > 1:
+        raise GraphQLQueryValidationError(
+            (f"Paginated connection selects {parent_field_name}.{child_field_name} through multiple aliases"),
+            error="query_too_complex",
+        )
+    return next(iter(keys), None)
+
+
 def _is_connection_field(
     node: gql_ast.FieldNode,
     fragments: Mapping[str, gql_ast.FragmentDefinitionNode],
+    budget: _SelectionExpansionBudget,
 ) -> bool:
-    return {"edges", "pageInfo"}.issubset(_selection_field_names(node.selection_set, fragments))
+    argument_names = {argument.name.value for argument in node.arguments or ()}
+    if argument_names & {"first", "last"}:
+        return True
+    return {"edges", "pageInfo"}.issubset(_selection_field_names(node.selection_set, fragments, budget=budget))
 
 
 def _int_variable_defaults(operation: gql_ast.OperationDefinitionNode) -> dict[str, int]:
@@ -145,6 +255,37 @@ def _int_variable_defaults(operation: gql_ast.OperationDefinitionNode) -> dict[s
         if isinstance(definition.default_value, gql_ast.IntValueNode):
             defaults[definition.variable.name.value] = int(definition.default_value.value)
     return defaults
+
+
+def _string_variable_defaults(operation: gql_ast.OperationDefinitionNode) -> dict[str, str]:
+    defaults: dict[str, str] = {}
+    for definition in operation.variable_definitions or ():
+        if isinstance(definition.default_value, gql_ast.StringValueNode):
+            defaults[definition.variable.name.value] = definition.default_value.value
+    return defaults
+
+
+def _validate_variable_shape(value: Any) -> None:
+    """Reject deeply nested or pathologically broad JSON variables."""
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    visited = 0
+    while stack:
+        current, depth = stack.pop()
+        visited += 1
+        if visited > MAX_GRAPHQL_VARIABLE_NODES:
+            raise GraphQLQueryValidationError(
+                f"GraphQL variables may contain at most {MAX_GRAPHQL_VARIABLE_NODES} JSON values",
+                error="query_too_complex",
+            )
+        if depth > MAX_GRAPHQL_VARIABLE_DEPTH:
+            raise GraphQLQueryValidationError(
+                f"GraphQL variables are limited to depth {MAX_GRAPHQL_VARIABLE_DEPTH}",
+                error="query_too_complex",
+            )
+        if isinstance(current, Mapping):
+            stack.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current)
 
 
 def _replace_argument(
@@ -191,14 +332,25 @@ def _analyze_and_bound_document(
     if variables is not None and not isinstance(variables, Mapping):
         raise GraphQLQueryValidationError("variables must be a mapping")
     try:
-        variables_bytes = len(json.dumps(dict(variables or {}), ensure_ascii=False, allow_nan=False).encode("utf-8"))
-    except (TypeError, ValueError):
+        serialized_variables = json.dumps(
+            dict(variables or {}),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+    except (RecursionError, TypeError, ValueError):
         raise GraphQLQueryValidationError("variables must be finite JSON-compatible values") from None
+    variables_bytes = len(serialized_variables.encode("utf-8"))
     if variables_bytes > MAX_GRAPHQL_DOCUMENT_BYTES:
         raise GraphQLQueryValidationError(
             "GraphQL variables exceed the 64 KiB limit",
             error="query_too_complex",
         )
+    try:
+        bounded_variables = json.loads(serialized_variables)
+    except (RecursionError, TypeError, ValueError, json.JSONDecodeError):
+        raise GraphQLQueryValidationError("variables must be finite JSON-compatible values") from None
+    _validate_variable_shape(bounded_variables)
 
     document = validate_read_only_graphql(query)
     operations = [
@@ -224,6 +376,7 @@ def _analyze_and_bound_document(
     connections: list[tuple[list[str], gql_ast.FieldNode]] = []
     field_count = 0
     max_depth = 0
+    expansion_budget = _SelectionExpansionBudget()
 
     def walk(
         selection_set: gql_ast.SelectionSetNode | None,
@@ -236,6 +389,7 @@ def _analyze_and_bound_document(
         if selection_set is None:
             return
         for selection in selection_set.selections:
+            expansion_budget.consume()
             if isinstance(selection, gql_ast.FieldNode):
                 field_count += 1
                 max_depth = max(max_depth, depth)
@@ -248,7 +402,7 @@ def _analyze_and_bound_document(
                         error="query_too_complex",
                     )
                 field_path = [*path, _field_name(selection)]
-                is_connection = _is_connection_field(selection, fragments)
+                is_connection = _is_connection_field(selection, fragments, expansion_budget)
                 if is_connection:
                     if connection_ancestor:
                         raise GraphQLQueryValidationError(
@@ -286,7 +440,6 @@ def _analyze_and_bound_document(
                 )
 
     walk(operation.selection_set, [], 1, False)
-    bounded_variables = dict(variables or {})
     if not connections:
         return gql_printer.print_ast(document), bounded_variables, None
 
@@ -327,7 +480,59 @@ def _analyze_and_bound_document(
     else:
         raise GraphQLQueryValidationError(f"GraphQL {argument_name} must be an integer literal or variable")
 
+    edges_key = _response_key(connection_field.selection_set, "edges", fragments, expansion_budget)
+    page_info_key = _response_key(connection_field.selection_set, "pageInfo", fragments, expansion_budget)
+    edge_cursor_key = _nested_response_key(
+        connection_field.selection_set,
+        "edges",
+        "cursor",
+        fragments,
+        expansion_budget,
+    )
+    has_next_page_key = _nested_response_key(
+        connection_field.selection_set,
+        "pageInfo",
+        "hasNextPage",
+        fragments,
+        expansion_budget,
+    )
+    end_cursor_key = _nested_response_key(
+        connection_field.selection_set,
+        "pageInfo",
+        "endCursor",
+        fragments,
+        expansion_budget,
+    )
+    has_previous_page_key = _nested_response_key(
+        connection_field.selection_set,
+        "pageInfo",
+        "hasPreviousPage",
+        fragments,
+        expansion_budget,
+    )
+    start_cursor_key = _nested_response_key(
+        connection_field.selection_set,
+        "pageInfo",
+        "startCursor",
+        fragments,
+        expansion_budget,
+    )
+
     if last is not None:
+        before = arguments.get("before")
+        initial_before: str | None = None
+        if before is not None and isinstance(before.value, gql_ast.VariableNode):
+            before_variable = before.value.name.value
+            initial_before = bounded_variables.get(
+                before_variable,
+                _string_variable_defaults(operation).get(before_variable),
+            )
+            if initial_before is not None and not isinstance(initial_before, str):
+                raise GraphQLQueryValidationError(f"GraphQL variable ${before_variable} must be a string or null")
+        elif before is not None and isinstance(before.value, gql_ast.StringValueNode):
+            initial_before = before.value.value
+        elif before is not None and not isinstance(before.value, gql_ast.NullValueNode):
+            raise GraphQLQueryValidationError("GraphQL before must be a string literal, variable, or null")
         return (
             gql_printer.print_ast(document),
             bounded_variables,
@@ -337,6 +542,14 @@ def _analyze_and_bound_document(
                 first_variable=first_variable,
                 after_variable=None,
                 initial_after=None,
+                initial_before=initial_before,
+                edges_key=edges_key,
+                page_info_key=page_info_key,
+                edge_cursor_key=edge_cursor_key,
+                has_next_page_key=has_next_page_key,
+                end_cursor_key=end_cursor_key,
+                has_previous_page_key=has_previous_page_key,
+                start_cursor_key=start_cursor_key,
                 backward=True,
             ),
         )
@@ -346,13 +559,19 @@ def _analyze_and_bound_document(
     initial_after: str | None = None
     if after is not None and isinstance(after.value, gql_ast.VariableNode):
         after_variable = after.value.name.value
-        supplied_after = bounded_variables.get(after_variable)
+        supplied_after = bounded_variables.get(
+            after_variable,
+            _string_variable_defaults(operation).get(after_variable),
+        )
         if supplied_after is not None and not isinstance(supplied_after, str):
             raise GraphQLQueryValidationError(f"GraphQL variable ${after_variable} must be a string or null")
         initial_after = supplied_after
     else:
-        if after is not None and isinstance(after.value, gql_ast.StringValueNode):
-            initial_after = after.value.value
+        if after is not None:
+            if isinstance(after.value, gql_ast.StringValueNode):
+                initial_after = after.value.value
+            elif not isinstance(after.value, gql_ast.NullValueNode):
+                raise GraphQLQueryValidationError("GraphQL after must be a string literal, variable, or null")
         _ensure_variable_definition(operation, after_variable, "String")
         _replace_argument(
             connection_field,
@@ -370,12 +589,23 @@ def _analyze_and_bound_document(
             first_variable=first_variable,
             after_variable=after_variable,
             initial_after=initial_after,
+            initial_before=None,
+            edges_key=edges_key,
+            page_info_key=page_info_key,
+            edge_cursor_key=edge_cursor_key,
+            has_next_page_key=has_next_page_key,
+            end_cursor_key=end_cursor_key,
+            has_previous_page_key=has_previous_page_key,
+            start_cursor_key=start_cursor_key,
         ),
     )
 
 
 def _estimate_tokens(payload: Mapping[str, Any]) -> int:
-    return max(1, len(json.dumps(payload, default=str, ensure_ascii=False, allow_nan=False)) // 4)
+    from wandb_mcp_server.trace_utils import count_tokens_conservative
+
+    serialized = json.dumps(payload, default=str, ensure_ascii=False, allow_nan=False)
+    return count_tokens_conservative(serialized)
 
 
 def _set_pagination_extension(
@@ -398,11 +628,87 @@ def _set_pagination_extension(
     }
 
 
+def _response_too_large(message: str) -> dict[str, Any]:
+    return {
+        "errors": [
+            {
+                "error": "response_too_large",
+                "message": message,
+            }
+        ]
+    }
+
+
+def _edge_cursor(edge: Any, plan: _ConnectionPlan) -> str | None:
+    if not isinstance(edge, Mapping) or plan.edge_cursor_key is None:
+        return None
+    value = edge.get(plan.edge_cursor_key)
+    return value if isinstance(value, str) and value else None
+
+
+def _pagination_error(error: str, message: str) -> dict[str, Any]:
+    return {"errors": [{"error": error, "message": message}]}
+
+
+def _is_non_advancing_cursor(cursor: str, plan: _ConnectionPlan) -> bool:
+    initial_cursor = plan.initial_before if plan.backward else plan.initial_after
+    return initial_cursor is not None and cursor == initial_cursor
+
+
+def _bound_unpageable_connection(
+    result: dict[str, Any],
+    connection: dict[str, Any],
+    edges: list[Any],
+    plan: _ConnectionPlan,
+    max_items: int,
+) -> dict[str, Any]:
+    """Enforce the local item cap when response pagination metadata is unusable."""
+    if len(edges) <= max_items:
+        return _fit_response_budget(result, plan)
+
+    retained = edges[-max_items:] if plan.backward else edges[:max_items]
+    boundary = retained[0] if plan.backward else retained[-1]
+    resume_cursor = _edge_cursor(boundary, plan)
+    if resume_cursor is None:
+        return _pagination_error(
+            "pagination_cursor_unavailable",
+            ("The bounded GraphQL page exceeded the item limit but no selected edge cursor permits safe continuation"),
+        )
+    if _is_non_advancing_cursor(resume_cursor, plan):
+        return _pagination_error(
+            "pagination_cursor_non_advancing",
+            "The GraphQL connection returned a repeated or non-advancing continuation cursor",
+        )
+
+    connection[plan.edges_key] = retained
+    if plan.page_info_key is not None:
+        selected_page_info = connection.get(plan.page_info_key)
+        if isinstance(selected_page_info, Mapping):
+            page_info = dict(selected_page_info)
+            if plan.backward:
+                if plan.has_previous_page_key is not None:
+                    page_info[plan.has_previous_page_key] = True
+                if plan.start_cursor_key is not None:
+                    page_info[plan.start_cursor_key] = resume_cursor
+            else:
+                if plan.has_next_page_key is not None:
+                    page_info[plan.has_next_page_key] = True
+                if plan.end_cursor_key is not None:
+                    page_info[plan.end_cursor_key] = resume_cursor
+            connection[plan.page_info_key] = page_info
+    _set_pagination_extension(
+        result,
+        returned_count=len(retained),
+        has_more=True,
+        next_cursor=resume_cursor,
+    )
+    result["extensions"]["wandb_mcp"]["limit_applied"] = max_items
+    return _fit_response_budget(result, plan)
+
+
 def _fit_response_budget(
     result: dict[str, Any],
-    connection_path: list[str] | None,
-    *,
-    backward: bool = False,
+    plan: _ConnectionPlan | None,
 ) -> dict[str, Any]:
     from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
 
@@ -410,55 +716,64 @@ def _fit_response_budget(
         if _estimate_tokens(result) <= MAX_RESPONSE_TOKENS:
             return result
     except (TypeError, ValueError):
-        return {
-            "errors": [
-                {
-                    "error": "response_too_large",
-                    "message": "GraphQL response could not be serialized safely",
-                }
-            ]
-        }
-    connection = get_nested_value(result, connection_path or []) if connection_path else None
-    if not isinstance(connection, dict) or not isinstance(connection.get("edges"), list):
-        return {
-            "errors": [
-                {
-                    "error": "response_too_large",
-                    "message": "GraphQL response exceeded the configured response budget",
-                }
-            ]
-        }
-    edges = connection["edges"]
-    dropped = 0
-    while edges and _estimate_tokens(result) > MAX_RESPONSE_TOKENS:
-        edges.pop()
-        dropped += 1
-    page_info = connection.setdefault("pageInfo", {})
-    if backward:
-        last_cursor = edges[0].get("cursor") if edges and isinstance(edges[0], dict) else None
-        page_info["hasPreviousPage"] = True
-        page_info["startCursor"] = last_cursor
-    else:
-        last_cursor = edges[-1].get("cursor") if edges and isinstance(edges[-1], dict) else None
-        page_info["hasNextPage"] = True
-        page_info["endCursor"] = last_cursor
-    _set_pagination_extension(
-        result,
-        returned_count=len(edges),
-        has_more=True,
-        next_cursor=last_cursor,
-        truncated_by_budget=True,
-    )
-    if _estimate_tokens(result) > MAX_RESPONSE_TOKENS:
-        return {
-            "errors": [
-                {
-                    "error": "response_too_large",
-                    "message": "GraphQL response metadata exceeded the configured response budget",
-                }
-            ]
-        }
-    return result
+        return _response_too_large("GraphQL response could not be serialized safely")
+    if plan is None or plan.edges_key is None:
+        return _response_too_large("GraphQL response exceeded the configured response budget")
+    connection = get_nested_value(result, plan.path)
+    if not isinstance(connection, dict):
+        return _response_too_large("GraphQL response exceeded the configured response budget")
+    edges = connection.get(plan.edges_key)
+    if not isinstance(edges, list):
+        return _response_too_large("GraphQL response exceeded the configured response budget")
+
+    page_info: dict[str, Any] = {}
+    if plan.page_info_key is not None:
+        selected_page_info = connection.get(plan.page_info_key)
+        if isinstance(selected_page_info, Mapping):
+            page_info = dict(selected_page_info)
+
+    while edges:
+        if plan.backward:
+            edges.pop(0)
+        else:
+            edges.pop()
+        if not edges:
+            break
+        resume_cursor = _edge_cursor(edges[0] if plan.backward else edges[-1], plan)
+        if resume_cursor is None:
+            return _response_too_large(
+                "GraphQL response exceeded the budget and no selected edge cursor permits safe continuation"
+            )
+        if _is_non_advancing_cursor(resume_cursor, plan):
+            return _pagination_error(
+                "pagination_cursor_non_advancing",
+                "The GraphQL connection returned a repeated or non-advancing continuation cursor",
+            )
+        if plan.backward:
+            if plan.has_previous_page_key is not None:
+                page_info[plan.has_previous_page_key] = True
+            if plan.start_cursor_key is not None:
+                page_info[plan.start_cursor_key] = resume_cursor
+        else:
+            if plan.has_next_page_key is not None:
+                page_info[plan.has_next_page_key] = True
+            if plan.end_cursor_key is not None:
+                page_info[plan.end_cursor_key] = resume_cursor
+        if plan.page_info_key is not None:
+            connection[plan.page_info_key] = page_info
+        _set_pagination_extension(
+            result,
+            returned_count=len(edges),
+            has_more=True,
+            next_cursor=resume_cursor,
+            truncated_by_budget=True,
+        )
+        try:
+            if _estimate_tokens(result) <= MAX_RESPONSE_TOKENS:
+                return result
+        except (TypeError, ValueError):
+            break
+    return _response_too_large("GraphQL response exceeded the budget and could not retain one safely continuable edge")
 
 
 def _validation_error(exc: Exception) -> dict[str, Any]:
@@ -532,33 +847,72 @@ def query_paginated_wandb_gql(
             connection = get_nested_value(result, plan.path)
             if not isinstance(connection, dict):
                 return _fit_response_budget(result, None)
-            initial_edges = connection.get("edges")
-            page_info = connection.get("pageInfo")
-            if not isinstance(initial_edges, list) or not isinstance(page_info, dict):
-                return _fit_response_budget(result, None)
+            if plan.edges_key is None:
+                return _fit_response_budget(result, plan)
+            initial_edges = connection.get(plan.edges_key)
+            if not isinstance(initial_edges, list):
+                return _fit_response_budget(result, plan)
+            page_info = connection.get(plan.page_info_key) if plan.page_info_key is not None else None
+            page_flag_key = plan.has_previous_page_key if plan.backward else plan.has_next_page_key
+            if (
+                plan.page_info_key is None
+                or not isinstance(page_info, dict)
+                or page_flag_key is None
+                or not isinstance(page_info.get(page_flag_key), bool)
+            ):
+                return _bound_unpageable_connection(
+                    result,
+                    connection,
+                    initial_edges,
+                    plan,
+                    applied_max_items,
+                )
 
             if plan.backward:
                 cut_mid_page = len(initial_edges) > applied_max_items
-                connection["edges"] = initial_edges[:applied_max_items]
-                has_more = bool(page_info.get("hasPreviousPage")) or cut_mid_page
-                next_cursor = page_info.get("startCursor")
-                if cut_mid_page and connection["edges"] and isinstance(connection["edges"][0], Mapping):
-                    next_cursor = connection["edges"][0].get("cursor") or next_cursor
-                connection["pageInfo"] = {
-                    **page_info,
-                    "hasPreviousPage": has_more,
-                    "startCursor": next_cursor,
-                }
+                connection[plan.edges_key] = initial_edges[-applied_max_items:]
+                has_more = (
+                    bool(plan.has_previous_page_key is not None and page_info.get(plan.has_previous_page_key))
+                    or cut_mid_page
+                )
+                next_cursor = page_info.get(plan.start_cursor_key) if plan.start_cursor_key is not None else None
+                if cut_mid_page and connection[plan.edges_key]:
+                    next_cursor = _edge_cursor(connection[plan.edges_key][0], plan)
+                    if next_cursor is None:
+                        return _pagination_error(
+                            "pagination_cursor_unavailable",
+                            (
+                                "The bounded backward GraphQL page stopped mid-page but no selected "
+                                "edge cursor permits safe continuation"
+                            ),
+                        )
+                if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor):
+                    next_cursor = None
+                if next_cursor is not None and _is_non_advancing_cursor(next_cursor, plan):
+                    return _pagination_error(
+                        "pagination_cursor_non_advancing",
+                        "The GraphQL connection returned a repeated or non-advancing continuation cursor",
+                    )
+                if has_more and next_cursor is None:
+                    return _pagination_error(
+                        "pagination_cursor_unavailable",
+                        "The backward GraphQL response indicates more data but exposes no continuation cursor",
+                    )
+                updated_page_info = dict(page_info)
+                if plan.has_previous_page_key is not None:
+                    updated_page_info[plan.has_previous_page_key] = has_more
+                if plan.start_cursor_key is not None:
+                    updated_page_info[plan.start_cursor_key] = next_cursor
+                connection[plan.page_info_key] = updated_page_info
                 _set_pagination_extension(
                     result,
-                    returned_count=len(connection["edges"]),
+                    returned_count=len(connection[plan.edges_key]),
                     has_more=has_more,
                     next_cursor=next_cursor,
                 )
-                return _fit_response_budget(result, plan.path, backward=True)
+                return _fit_response_budget(result, plan)
 
             aggregated: list[Any] = []
-            seen_ids: set[Any] = set()
 
             def append_edges(edges: list[Any]) -> bool:
                 cut_mid_page = False
@@ -566,27 +920,33 @@ def query_paginated_wandb_gql(
                     if len(aggregated) >= applied_max_items:
                         cut_mid_page = True
                         break
-                    node = edge.get("node") if isinstance(edge, Mapping) else None
-                    node_id = node.get("id") if isinstance(node, Mapping) else None
-                    if node_id is not None and node_id in seen_ids:
-                        continue
-                    if node_id is not None:
-                        seen_ids.add(node_id)
                     aggregated.append(edge)
                 return cut_mid_page
 
             cut_mid_page = append_edges(initial_edges)
             current_page_info = dict(page_info)
-            has_next = bool(current_page_info.get("hasNextPage"))
-            cursor = current_page_info.get("endCursor")
+            has_next = bool(plan.has_next_page_key is not None and current_page_info.get(plan.has_next_page_key))
+            cursor = current_page_info.get(plan.end_cursor_key) if plan.end_cursor_key is not None else None
+            if cursor is not None and (not isinstance(cursor, str) or not cursor):
+                cursor = None
+            seen_page_cursors = {plan.initial_after} if plan.initial_after else set()
+            if has_next and cursor is not None:
+                if cursor in seen_page_cursors:
+                    return _pagination_error(
+                        "pagination_cursor_non_advancing",
+                        "The GraphQL connection returned a repeated or non-advancing continuation cursor",
+                    )
+                seen_page_cursors.add(cursor)
             max_page_requests = max(1, math.ceil(applied_max_items / applied_page_size) + 2)
             page_requests = 1
             partial_error = False
+            last_page_had_edges = bool(initial_edges)
 
             while has_next and cursor and len(aggregated) < applied_max_items and page_requests < max_page_requests:
+                request_cursor = cursor
                 page_variables = dict(bounded_variables)
                 assert plan.after_variable is not None
-                page_variables[plan.after_variable] = cursor
+                page_variables[plan.after_variable] = request_cursor
                 if plan.first_variable:
                     page_variables[plan.first_variable] = min(
                         applied_page_size,
@@ -615,33 +975,76 @@ def query_paginated_wandb_gql(
                 if not isinstance(page_connection, Mapping):
                     partial_error = True
                     break
-                page_edges = page_connection.get("edges")
-                next_page_info = page_connection.get("pageInfo")
+                page_edges = page_connection.get(plan.edges_key)
+                next_page_info = page_connection.get(plan.page_info_key)
                 if not isinstance(page_edges, list) or not isinstance(next_page_info, Mapping):
                     partial_error = True
                     break
                 cut_mid_page = append_edges(page_edges) or cut_mid_page
                 current_page_info = dict(next_page_info)
-                has_next = bool(current_page_info.get("hasNextPage"))
-                cursor = current_page_info.get("endCursor")
-                if not page_edges:
-                    partial_error = has_next
+                if plan.has_next_page_key is None or not isinstance(
+                    current_page_info.get(plan.has_next_page_key), bool
+                ):
+                    partial_error = True
+                    last_page_had_edges = bool(page_edges)
+                    break
+                has_next = bool(plan.has_next_page_key is not None and current_page_info.get(plan.has_next_page_key))
+                cursor = current_page_info.get(plan.end_cursor_key) if plan.end_cursor_key is not None else None
+                if cursor is not None and (not isinstance(cursor, str) or not cursor):
+                    cursor = None
+                if has_next and cursor is not None:
+                    if cursor == request_cursor or cursor in seen_page_cursors:
+                        return _pagination_error(
+                            "pagination_cursor_non_advancing",
+                            "The GraphQL connection returned a repeated or non-advancing continuation cursor",
+                        )
+                    seen_page_cursors.add(cursor)
+                last_page_had_edges = bool(page_edges)
+                if not page_edges and has_next and cursor is None:
+                    partial_error = True
                     break
 
             stopped_at_limit = len(aggregated) >= applied_max_items and (has_next or cut_mid_page)
             stopped_at_request_bound = page_requests >= max_page_requests and has_next
             has_more = bool(has_next or cut_mid_page or partial_error or stopped_at_request_bound)
-            connection["edges"] = aggregated
+            connection[plan.edges_key] = aggregated
+            edge_cursor = _edge_cursor(aggregated[-1], plan) if aggregated else None
+            if cut_mid_page and edge_cursor is None:
+                return {
+                    "errors": [
+                        {
+                            "error": "pagination_cursor_unavailable",
+                            "message": (
+                                "The bounded GraphQL page stopped mid-page but no selected edge cursor "
+                                "permits safe continuation"
+                            ),
+                        }
+                    ]
+                }
+            page_end_cursor = current_page_info.get(plan.end_cursor_key) if plan.end_cursor_key is not None else None
             last_cursor = (
-                aggregated[-1].get("cursor")
-                if aggregated and isinstance(aggregated[-1], Mapping)
-                else current_page_info.get("endCursor")
+                edge_cursor
+                if cut_mid_page
+                else page_end_cursor
+                if not last_page_had_edges and isinstance(page_end_cursor, str) and page_end_cursor
+                else edge_cursor or page_end_cursor
             )
-            connection["pageInfo"] = {
-                **current_page_info,
-                "hasNextPage": has_more,
-                "endCursor": last_cursor,
-            }
+            if has_more and last_cursor is None:
+                return _pagination_error(
+                    "pagination_cursor_unavailable",
+                    "The GraphQL response indicates more data but exposes no continuation cursor",
+                )
+            if has_more and isinstance(last_cursor, str) and _is_non_advancing_cursor(last_cursor, plan):
+                return _pagination_error(
+                    "pagination_cursor_non_advancing",
+                    "The GraphQL connection returned a repeated or non-advancing continuation cursor",
+                )
+            updated_page_info = dict(current_page_info)
+            if plan.has_next_page_key is not None:
+                updated_page_info[plan.has_next_page_key] = has_more
+            if plan.end_cursor_key is not None:
+                updated_page_info[plan.end_cursor_key] = last_cursor
+            connection[plan.page_info_key] = updated_page_info
             _set_pagination_extension(
                 result,
                 returned_count=len(aggregated),
@@ -650,7 +1053,7 @@ def query_paginated_wandb_gql(
             )
             if stopped_at_limit:
                 result["extensions"]["wandb_mcp"]["limit_applied"] = applied_max_items
-            return _fit_response_budget(result, plan.path)
+            return _fit_response_budget(result, plan)
         except Exception as exc:
             logger.error("Bounded GraphQL query failed (%s)", type(exc).__name__)
             ctx.mark_error(f"query_failed: {type(exc).__name__}")

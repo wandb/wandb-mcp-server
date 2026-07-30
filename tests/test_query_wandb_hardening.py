@@ -5,15 +5,18 @@ from __future__ import annotations
 from contextlib import contextmanager
 import math
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
-from wandb.apis.public import Runs
+from wandb.apis.public import Run, Runs
+from wandb.apis.public.reports import BetaReport
 
 from wandb_mcp_server.mcp_tools import query_wandb as query_module
 from wandb_mcp_server.wandb_selective_reads import (
     PROJECTED_REPORTS_QUERY,
     PROJECTED_RUNS_QUERY,
     PROJECTED_SWEEPS_QUERY,
+    SelectiveReadUnavailable,
 )
 
 
@@ -327,6 +330,154 @@ def test_json_normalization_handles_cycles_and_non_finite_numbers():
     assert result["self"] == {"_truncated": "cycle"}
 
 
+def test_json_normalization_does_not_treat_shared_values_as_cycles():
+    shared = {"metric": 1}
+
+    result = query_module._json_safe({"left": shared, "right": shared})
+
+    assert result == {"left": {"metric": 1}, "right": {"metric": 1}}
+
+
+def test_real_wandb_028_run_summary_serializes_without_attribute_probe():
+    service = FakeServiceApi(lambda query, variables: {})
+    run = Run(
+        service,
+        "entity",
+        "project",
+        "run-1",
+        attrs={
+            "name": "run-1",
+            "displayName": "Real SDK run",
+            "state": "finished",
+            "summaryMetrics": '{"accuracy": 0.9, "nullable": null}',
+            "config": "{}",
+        },
+        lazy=False,
+    )
+
+    result = query_module._serialize_run(
+        run,
+        frozenset(),
+        include_summary=True,
+    )
+
+    assert result["summary"] == {"accuracy": 0.9, "nullable": None}
+
+
+def test_dense_unicode_uses_real_token_budget(monkeypatch):
+    monkeypatch.setattr(query_module, "MAX_RESPONSE_TOKENS", 100)
+    payload = {
+        "source": "wandb_sdk",
+        "resource": "project",
+        "entity": "entity",
+        "project": "project",
+        "item": {
+            "id": "project",
+            "display_name": "界" * 200,
+        },
+        "truncated": False,
+        "truncation": {"applied": False},
+    }
+
+    result = query_module._fit_single_to_budget(payload)
+
+    assert query_module._estimate_tokens(result) <= 100
+    assert "界" * 200 not in str(result)
+
+
+def test_projected_report_url_matches_wandb_028_beta_report():
+    service = FakeServiceApi(lambda query, variables: {})
+    attrs = {
+        "id": "VmlldzoxMjM=",
+        "name": "quarterly-results",
+        "displayName": "Quarterly Results / Café",
+        "spec": "{}",
+    }
+    sdk_report = BetaReport(
+        service,
+        attrs,
+        entity="entity",
+        project="project",
+    )
+    projected = query_module._decorate_projected_report(
+        {
+            "id": attrs["id"],
+            "name": attrs["name"],
+            "display_name": attrs["displayName"],
+        },
+        "entity",
+        "project",
+    )
+
+    assert urlsplit(projected["url"]).path == urlsplit(sdk_report.url).path
+    assert projected["url"].endswith("/reports/Quarterly-Results-Caf%C3%A9--VmlldzoxMjM")
+
+
+def test_partial_sdk_projection_fallback_cursor_continues_without_skipping(monkeypatch):
+    class Api:
+        def flush(self):
+            pass
+
+        def runs(self, *args, **kwargs):
+            return [_sdk_run("run-1"), _sdk_run("run-2")]
+
+    _install_api(monkeypatch, Api())
+    monkeypatch.setattr(
+        query_module,
+        "fetch_projected_runs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(SelectiveReadUnavailable("projection unavailable")),
+    )
+
+    first = query_module.query_wandb(
+        "entity",
+        "project",
+        "runs",
+        limit=1,
+        include=["summary"],
+        summary_keys=["accuracy"],
+    )
+    second = query_module.query_wandb(
+        "entity",
+        "project",
+        "runs",
+        limit=1,
+        include=["summary"],
+        summary_keys=["accuracy"],
+        cursor=first["next_cursor"],
+    )
+
+    assert first["items"][0]["id"] == "run-1"
+    assert first["next_cursor"].startswith("mcp-sdk-v1:")
+    assert second["items"][0]["id"] == "run-2"
+    assert second["has_more"] is False
+    assert second["next_cursor"] is None
+
+
+def test_count_mode_flushes_cached_runs_before_construction(monkeypatch):
+    class Api:
+        def __init__(self):
+            self.flushed = False
+
+        def flush(self):
+            self.flushed = True
+
+        def runs(self, *args, **kwargs):
+            assert self.flushed
+            return [_sdk_run("run-1")]
+
+    api = Api()
+    _install_api(monkeypatch, api)
+
+    result = query_module.query_wandb(
+        "entity",
+        "project",
+        "runs",
+        response_mode="count",
+    )
+
+    assert result["total_count"] == 1
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [(401, "authentication_failed"), (403, "permission_denied"), (404, "resource_not_found"), (429, "server_busy")],
@@ -342,3 +493,137 @@ def test_sdk_errors_map_to_stable_categories(monkeypatch, status, expected):
 
     assert result["error"] == expected
     assert "secret" not in result["message"]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"resource": "runs", "cursor": "x" * 5000},
+        {"resource": "runs", "filters": {"name": "x" * (64 * 1024)}},
+        {"resource": "runs", "filters": {"metric": float("nan")}},
+        {"resource": "run", "run_id": "x" * 1025},
+        {"resource": "run", "run_id": "run-1", "summary_keys": ["x" * 1025]},
+        {"resource": "reports", "report_name": "x" * 1025},
+        {"resource": "runs", "include": ["x" * 65]},
+    ],
+)
+def test_oversized_or_nonfinite_typed_inputs_fail_before_api(monkeypatch, kwargs):
+    monkeypatch.setattr(
+        query_module.WandBApiManager,
+        "get_api",
+        lambda: pytest.fail("API must not be created for invalid typed input"),
+    )
+
+    result = query_module.query_wandb(
+        entity_name="entity",
+        project_name="project",
+        **kwargs,
+    )
+
+    assert result["error"] == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    "resource",
+    [["runs"], "x" * (64 * 1024)],
+    ids=["unhashable", "oversized"],
+)
+def test_invalid_resource_errors_are_bounded_and_do_not_echo_input(monkeypatch, resource):
+    monkeypatch.setattr(
+        query_module.WandBApiManager,
+        "get_api",
+        lambda: pytest.fail("API must not be created for an invalid resource"),
+    )
+
+    result = query_module.query_wandb(
+        entity_name="entity",
+        project_name="project",
+        resource=resource,
+    )
+
+    assert result["error"] == "invalid_request"
+    assert result["resource"] == "unknown"
+    assert len(str(result)) < 512
+
+
+def test_deep_mongo_filter_fails_before_api(monkeypatch):
+    nested: dict[str, object] = {"state": "finished"}
+    for _ in range(13):
+        nested = {"$and": [nested]}
+    monkeypatch.setattr(
+        query_module.WandBApiManager,
+        "get_api",
+        lambda: pytest.fail("API must not be created for an over-deep filter"),
+    )
+
+    result = query_module.query_wandb(
+        entity_name="entity",
+        project_name="project",
+        resource="runs",
+        filters=nested,
+    )
+
+    assert result["error"] == "invalid_request"
+    assert "depth" in result["message"]
+
+
+def test_sdk_fallback_cursor_request_ceiling_is_checked_before_api(monkeypatch):
+    fingerprint = query_module._sdk_cursor_fingerprint(
+        entity_name="entity",
+        project_name="project",
+        resource="runs",
+        filters=None,
+        order="-created_at",
+        report_name=None,
+        include=frozenset(),
+        summary_keys=None,
+        config_keys=None,
+    )
+    cursor = query_module._encode_sdk_cursor("runs", 500, fingerprint)
+    monkeypatch.setattr(
+        query_module.WandBApiManager,
+        "get_api",
+        lambda: pytest.fail("API must not be created beyond the fallback request ceiling"),
+    )
+
+    result = query_module.query_wandb(
+        entity_name="entity",
+        project_name="project",
+        resource="runs",
+        limit=50,
+        cursor=cursor,
+    )
+
+    assert result["error"] == "invalid_request"
+    assert "compatibility window" in result["message"]
+
+
+def test_sdk_fallback_cursor_is_bound_to_original_query(monkeypatch):
+    fingerprint = query_module._sdk_cursor_fingerprint(
+        entity_name="entity",
+        project_name="project",
+        resource="runs",
+        filters=None,
+        order="-created_at",
+        report_name=None,
+        include=frozenset(),
+        summary_keys=None,
+        config_keys=None,
+    )
+    cursor = query_module._encode_sdk_cursor("runs", 1, fingerprint)
+    monkeypatch.setattr(
+        query_module.WandBApiManager,
+        "get_api",
+        lambda: pytest.fail("API must not be created for a mismatched continuation"),
+    )
+
+    result = query_module.query_wandb(
+        entity_name="entity",
+        project_name="project",
+        resource="runs",
+        filters={"state": "finished"},
+        cursor=cursor,
+    )
+
+    assert result["error"] == "invalid_request"
+    assert "does not match" in result["message"]
