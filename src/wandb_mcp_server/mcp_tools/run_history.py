@@ -1,6 +1,6 @@
 """Retrieve sampled time-series metric history for a W&B run.
 
-Uses `wandb.Api().run().history()` for sampled data and a tiered
+Uses the actor-isolated W&B public API client for sampled data and a tiered
 strategy for step-range queries: scan_history (parquet-backed) first,
 history() (sampled) as last resort.
 """
@@ -8,6 +8,7 @@ history() (sampled) as last resort.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import islice
 import json
 import math
 from typing import Any, Dict, List, Literal, Optional
@@ -26,8 +27,6 @@ from wandb_mcp_server.config import (
     MCP_MAX_HISTORY_RANGE_STEPS,
     MCP_MAX_HISTORY_SAMPLES,
     MCP_WORKLOAD_PROFILE,
-    MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
-    WANDB_API_BASE_URL,
 )
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
@@ -198,11 +197,12 @@ def get_run_history(
             raise ValueError("W&B API key is required to fetch run history.")
 
         try:
-            wandb_api = wandb.Api(
-                api_key=api_key,
-                overrides={"base_url": WANDB_API_BASE_URL},
-                timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
-            )
+            # Reuse the actor-isolated public API client. Constructing a fresh
+            # ``wandb.Api`` performs credential validation and creates a new
+            # transport before every history read, adding a second upstream
+            # request and avoidable connection churn to a latency-sensitive
+            # path.
+            wandb_api = WandBApiManager.get_api(api_key)
             run_path = f"{entity_name}/{project_name}/{run_id}"
             run = wandb_api.run(run_path)
         except wandb.errors.CommError as e:
@@ -391,9 +391,7 @@ def _scan_history_rows(
     scan_kwargs["page_size"] = min(1000, max(1, scan_limit))
     scanned_rows: list[dict[str, Any]] = []
     rows_scanned = 0
-    for index, row in enumerate(run.scan_history(**scan_kwargs)):
-        if index >= scan_limit:
-            break
+    for index, row in enumerate(islice(run.scan_history(**scan_kwargs), scan_limit)):
         if index % 100 == 0:
             raise_if_tool_deadline_exceeded()
         rows_scanned += 1
@@ -457,6 +455,48 @@ def _numeric_x(row: Dict[str, Any], x_axis: str) -> float | None:
     return numeric if math.isfinite(numeric) else None
 
 
+def _scan_history_for_target(
+    run: Any,
+    *,
+    keys: list[str],
+    x_axis: str,
+    target_x: float,
+    tolerance: float | None,
+    scan_limit: int,
+) -> tuple[list[dict[str, Any]], bool, int]:
+    """Stream a bounded compatibility scan and retain at most one row.
+
+    An exact lookup can stop at the first matching row. A tolerance lookup
+    must inspect the bounded window to select the nearest value, but still
+    avoids materializing thousands of history rows in memory.
+    """
+    best_row: dict[str, Any] | None = None
+    best_distance = math.inf
+    rows_scanned = 0
+    scan_kwargs = {
+        "keys": keys,
+        "page_size": min(1000, max(1, scan_limit)),
+    }
+
+    for index, row in enumerate(islice(run.scan_history(**scan_kwargs), scan_limit)):
+        if index % 100 == 0:
+            raise_if_tool_deadline_exceeded()
+        rows_scanned += 1
+        value = _numeric_x(row, x_axis)
+        if value is None:
+            continue
+        distance = abs(value - target_x)
+        if distance <= _EXACT_EPSILON:
+            return [row], True, rows_scanned
+        if tolerance is not None and distance < best_distance:
+            best_row = row
+            best_distance = distance
+
+    if best_row is not None and best_distance <= tolerance:
+        return [best_row], False, rows_scanned
+    return [], False, rows_scanned
+
+
 def _select_target_row(
     rows: list[dict[str, Any]],
     *,
@@ -512,14 +552,14 @@ def _fetch_target_x(
         )
     except SelectiveReadUnavailable as exc:
         raise_for_wandb_server_busy(exc)
-        rows, rows_scanned = _scan_history_rows(
+        selected, exact, rows_scanned = _scan_history_for_target(
             run,
             keys=requested_keys,
-            min_step=None,
-            max_step=None,
+            x_axis=x_axis,
+            target_x=target_x,
+            tolerance=tolerance,
             scan_limit=MCP_MAX_HISTORY_RANGE_STEPS,
         )
-        selected, exact = _select_target_row(rows, x_axis=x_axis, target_x=target_x, tolerance=tolerance)
         return _HistoryFetch(
             selected,
             "sdk_bounded_compatibility_scan",

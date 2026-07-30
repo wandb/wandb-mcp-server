@@ -134,7 +134,6 @@ def test_backend_wandb_constructors_use_only_resolved_api_url() -> None:
         package_root / "api_client.py",
         package_root / "server.py",
         package_root / "mcp_tools" / "log_analysis.py",
-        package_root / "mcp_tools" / "run_history.py",
     )
 
     for module in constructor_modules:
@@ -143,10 +142,15 @@ def test_backend_wandb_constructors_use_only_resolved_api_url() -> None:
         assert "WANDB_BASE_URL" not in source, module
 
     create_report_source = (package_root / "mcp_tools" / "create_report.py").read_text()
+    run_history_source = (package_root / "mcp_tools" / "run_history.py").read_text()
     report_writer_source = (package_root / "wandb_report_writer.py").read_text()
     assert "WandBApiManager.get_api" in create_report_source
     assert "wandb.Api(" not in create_report_source
     assert "WANDB_BASE_URL" not in create_report_source
     assert "WANDB_API_BASE_URL" not in create_report_source
+    assert "WandBApiManager.get_api" in run_history_source
+    assert "wandb.Api(" not in run_history_source
+    assert "WANDB_BASE_URL" not in run_history_source
+    assert "WANDB_API_BASE_URL" not in run_history_source
     assert "WANDB_BASE_URL" not in report_writer_source
     assert "WANDB_API_BASE_URL" not in report_writer_source
