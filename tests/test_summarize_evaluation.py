@@ -171,6 +171,88 @@ class TestSummarizeEvaluation:
         assert child_kwargs["limit"] == 2
         assert child_kwargs["offset"] == 0
 
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.count_traces")
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
+    def test_counts_only_direct_prediction_children(self, mock_get_svc, mock_count):
+        eval_trace = {
+            "id": "eval-abc",
+            "parent_id": None,
+            "op_name": "Evaluation.evaluate",
+            "started_at": "2026-01-01T00:00:00Z",
+            "summary": {},
+        }
+        traces = [
+            eval_trace,
+            {
+                "id": "prediction-1",
+                "parent_id": "eval-abc",
+                "op_name": "Evaluation.predict_and_score",
+                "summary": {"weave": {"status": "success"}},
+            },
+            {
+                "id": "prediction-2",
+                "parent_id": "eval-abc",
+                "op_name": "Evaluation.predict_and_score",
+                "summary": {"weave": {"status": "success"}},
+            },
+            {
+                "id": "summary-child",
+                "parent_id": "eval-abc",
+                "op_name": "Evaluation.summarize",
+                "summary": {"weave": {"status": "success"}},
+            },
+            {
+                "id": "nested-prediction",
+                "parent_id": "summary-child",
+                "op_name": "Evaluation.predict_and_score",
+                "summary": {"weave": {"status": "success"}},
+            },
+        ]
+
+        def matching(filters):
+            selected = traces
+            if filters.get("trace_roots_only"):
+                selected = [trace for trace in selected if trace.get("parent_id") is None]
+            if parent_ids := filters.get("parent_ids"):
+                selected = [trace for trace in selected if trace.get("parent_id") in parent_ids]
+            if op_name := filters.get("op_name_contains"):
+                selected = [trace for trace in selected if op_name in trace.get("op_name", "")]
+            return selected
+
+        def count_side_effect(entity_name, project_name, *, filters):
+            assert entity_name == "ent"
+            assert project_name == "proj"
+            return len(matching(filters))
+
+        def query_side_effect(**kwargs):
+            result = MagicMock()
+            selected = matching(kwargs["filters"])
+            offset = kwargs.get("offset", 0)
+            result.traces = selected[offset : offset + kwargs["limit"]]
+            return result
+
+        mock_count.side_effect = count_side_effect
+        mock_service = MagicMock()
+        mock_service.query_traces.side_effect = query_side_effect
+        mock_get_svc.return_value = mock_service
+
+        result = json.loads(
+            summarize_evaluation(
+                "ent",
+                "proj",
+                include_per_task=True,
+            )
+        )
+
+        summary = result["evaluations"][0]
+        assert summary["total_predictions"] == 2
+        assert summary["observed_predictions"] == 2
+        assert summary["details_exhaustive"] is True
+        assert [task["id"] for task in summary["per_task"]] == [
+            "prediction-1",
+            "prediction-2",
+        ]
+
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.count_traces", return_value=1)
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
     def test_query_failure_returns_error(self, mock_get_svc, _mock_count):
