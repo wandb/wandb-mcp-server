@@ -218,7 +218,14 @@ def summarize_evaluation(
 
             evaluations = []
             for eval_trace in eval_traces[:effective_max_evals]:
-                child_filters = {"parent_ids": [eval_trace.get("id", "")]}
+                # Evaluation.evaluate can have direct bookkeeping and summary
+                # children in addition to prediction rows. Count and inspect the
+                # same bounded child population so totals cannot be inflated by
+                # unrelated sibling spans.
+                child_filters = {
+                    "parent_ids": [eval_trace.get("id", "")],
+                    "op_name_contains": "Evaluation.predict_and_score",
+                }
                 child_total = count_traces(
                     entity_name=entity_name,
                     project_name=project_name,
