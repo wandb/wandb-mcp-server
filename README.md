@@ -94,6 +94,14 @@ query operation; mutations and subscriptions are always rejected. This flag is
 independent of `WANDB_MCP_READ_ONLY`. See the
 [query capability matrix](docs/query-capabilities.md).
 
+Recommended deployment presets:
+
+| Deployment | Settings |
+|---|---|
+| Hosted production | `WANDB_MCP_READ_ONLY=false`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`, `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=false` |
+| Strict customer read-only | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=false` |
+| Trusted read-only compatibility | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=true`, `MCP_MAX_GQL_ITEMS=50`, `MCP_MAX_GQL_ITEMS_PER_PAGE=20` |
+
 **Migration from v0.3.7:** `query_wandb_tool` now accepts structured SDK parameters
 (`entity_name`, `project_name`, `resource`, filters, ordering, and identifiers) instead
 of a GraphQL document. Existing raw-query callers must explicitly enable and call
