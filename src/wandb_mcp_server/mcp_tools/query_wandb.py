@@ -29,11 +29,14 @@ from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_selective_reads import (
+    ProjectedReportCursorError,
     SelectiveReadUnavailable,
     fetch_projected_reports,
     fetch_projected_run,
     fetch_projected_runs,
     fetch_projected_sweeps,
+    is_projected_report_cursor,
+    validate_projected_report_cursor,
 )
 from wandb_mcp_server.wandb_urls import public_wandb_url, publicize_wandb_url
 
@@ -77,7 +80,8 @@ run_id : str, optional
 sweep_id : str, optional
     Required only for resource="sweep".
 report_name : str, optional
-    Optional report-name filter for resource="reports".
+    Optional exact report filter for resource="reports". Accepts either the
+    internal report name or its user-visible display title.
 filters : dict, optional
     W&B SDK Mongo-style run filters for resource="runs". Supported fields include
     createdAt, displayName, duration, group, host, jobType, name, state, tags,
@@ -947,6 +951,21 @@ def query_wandb(
             config_keys=config_keys,
         )
         sdk_fallback_offset = _decode_sdk_cursor(cursor, resource, sdk_cursor_fingerprint)
+        if cursor is not None and is_projected_report_cursor(cursor) and (resource != "reports" or report_name is None):
+            raise WandBQueryValidationError(
+                "filtered report cursor requires resource='reports' and the original report_name"
+            )
+        if cursor is not None and resource == "reports" and report_name is not None and sdk_fallback_offset is None:
+            try:
+                validate_projected_report_cursor(
+                    cursor,
+                    entity=entity_name,
+                    project=project_name,
+                    report_name=report_name,
+                    include_spec="spec" in include_fields,
+                )
+            except ProjectedReportCursorError as exc:
+                raise WandBQueryValidationError(str(exc)) from None
     except WandBQueryValidationError as exc:
         safe_resource = resource if isinstance(resource, str) and resource in _INCLUDE_FIELDS else "unknown"
         return structured_error("invalid_request", str(exc), source="wandb_sdk", resource=safe_resource)

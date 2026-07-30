@@ -474,11 +474,19 @@ def test_explicit_report_spec_sdk_fallback_cursor_continues(fake_api, monkeypatc
         lambda *args, **kwargs: (_ for _ in ()).throw(SelectiveReadUnavailable("projection unavailable")),
     )
 
-    first = sdk_query.query_wandb("entity", "project", "reports", limit=1, include=["spec"])
+    first = sdk_query.query_wandb(
+        "entity",
+        "project",
+        "reports",
+        report_name="Quarterly Review",
+        limit=1,
+        include=["spec"],
+    )
     second = sdk_query.query_wandb(
         "entity",
         "project",
         "reports",
+        report_name="Quarterly Review",
         limit=1,
         include=["spec"],
         cursor=first["next_cursor"],
@@ -490,6 +498,10 @@ def test_explicit_report_spec_sdk_fallback_cursor_continues(fake_api, monkeypatc
     assert second["total_count"] == 2
     assert second["has_more"] is False
     assert second["next_cursor"] is None
+    assert fake_api.calls == [
+        ("reports", "entity/project", {"name": "Quarterly Review", "per_page": 2}),
+        ("reports", "entity/project", {"name": "Quarterly Review", "per_page": 2}),
+    ]
 
 
 def test_reports_use_sdk_name_filter_and_optional_spec(fake_api):

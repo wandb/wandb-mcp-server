@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -17,6 +18,7 @@ from wandb_mcp_server.wandb_selective_reads import (
     PROJECT_COUNTS_QUERY,
     PROJECT_FIELDS_QUERY,
     REGISTRY_ARTIFACT_VERSIONS_QUERY,
+    ProjectedReportCursorError,
     SelectiveReadUnavailable,
     fetch_registry_artifact_versions,
     fetch_project_counts,
@@ -231,6 +233,365 @@ def test_projected_collection_fetches_only_requested_fields_in_one_request():
     assert variables["summaryKeys"] == ["accuracy", "loss"]
     assert variables["configKeys"] == ["learning_rate"]
     assert json.loads(variables["filters"]) == {"state": "finished"}
+
+
+def test_report_filter_prefers_exact_internal_name_without_spec_overfetch():
+    class InternalNameServiceApi:
+        def __init__(self):
+            self.calls = []
+
+        def execute_graphql(self, query, variables=None):
+            variables = dict(variables or {})
+            self.calls.append((query, variables))
+            return {
+                "project": {
+                    "allViews": {
+                        "edges": [
+                            {
+                                "cursor": "internal-cursor",
+                                "node": {
+                                    "id": "report-id",
+                                    "name": "internal-report-name",
+                                    "displayName": "Customer-visible title",
+                                    "spec": '{"should_not": "be retained"}',
+                                },
+                            }
+                        ],
+                        "pageInfo": {"endCursor": "internal-cursor", "hasNextPage": False},
+                    }
+                }
+            }
+
+    api = type("Api", (), {"_service_api": InternalNameServiceApi()})()
+
+    result = fetch_projected_reports(
+        api,
+        entity="entity",
+        project="project",
+        report_name="internal-report-name",
+        limit=5,
+        page_size=20,
+    )
+
+    assert result.requests == 1
+    assert result.items == [
+        {
+            "id": "report-id",
+            "name": "internal-report-name",
+            "display_name": "Customer-visible title",
+            "description": None,
+            "user": None,
+            "created_at": None,
+            "updated_at": None,
+        }
+    ]
+    assert result.has_more is False
+    assert result.next_cursor is None
+    variables = api._service_api.calls[0][1]
+    assert variables["name"] == "internal-report-name"
+    assert variables["includeSpec"] is False
+
+
+def test_report_internal_name_continuation_preserves_the_filtered_connection():
+    class DuplicateInternalNameServiceApi:
+        def __init__(self):
+            self.calls = []
+
+        def execute_graphql(self, query, variables=None):
+            variables = dict(variables or {})
+            self.calls.append((query, variables))
+            after = variables["after"]
+            index = 1 if after is None else 2
+            if after is not None:
+                assert after == "internal-page-1"
+            return {
+                "project": {
+                    "allViews": {
+                        "edges": [
+                            {
+                                "cursor": f"internal-page-{index}",
+                                "node": {
+                                    "id": f"report-{index}",
+                                    "name": "duplicate-internal-name",
+                                    "displayName": f"Report {index}",
+                                },
+                            }
+                        ],
+                        "pageInfo": {
+                            "endCursor": f"internal-page-{index}",
+                            "hasNextPage": index == 1,
+                        },
+                    }
+                }
+            }
+
+    api = type("Api", (), {"_service_api": DuplicateInternalNameServiceApi()})()
+
+    first = fetch_projected_reports(
+        api,
+        entity="entity",
+        project="project",
+        report_name="duplicate-internal-name",
+        limit=1,
+        page_size=1,
+    )
+    assert [item["id"] for item in first.items] == ["report-1"]
+    assert first.requests == 1
+    assert first.has_more is True
+    assert first.next_cursor.startswith("mcp-report-v1:")
+
+    second = fetch_projected_reports(
+        api,
+        entity="entity",
+        project="project",
+        report_name="duplicate-internal-name",
+        limit=1,
+        page_size=1,
+        cursor=first.next_cursor,
+    )
+    assert [item["id"] for item in second.items] == ["report-2"]
+    assert second.requests == 1
+    assert second.has_more is False
+    assert second.next_cursor is None
+    assert len(api._service_api.calls) == 2
+    continuation_variables = api._service_api.calls[1][1]
+    assert continuation_variables["name"] == "duplicate-internal-name"
+    assert continuation_variables["after"] == "internal-page-1"
+
+
+def test_report_filter_falls_back_to_exact_display_title_in_two_bounded_requests():
+    class DisplayTitleServiceApi:
+        def __init__(self):
+            self.calls = []
+
+        def execute_graphql(self, query, variables=None):
+            variables = dict(variables or {})
+            self.calls.append((query, variables))
+            if variables["name"] is not None:
+                return {
+                    "project": {
+                        "allViews": {
+                            "edges": [],
+                            "pageInfo": {"endCursor": None, "hasNextPage": False},
+                        }
+                    }
+                }
+            return {
+                "project": {
+                    "allViews": {
+                        "edges": [
+                            {
+                                "cursor": "contains-1",
+                                "node": {
+                                    "id": "near-match",
+                                    "name": "generated-near-match",
+                                    "displayName": "Release report (copy)",
+                                },
+                            },
+                            {
+                                "cursor": "contains-2",
+                                "node": {
+                                    "id": "exact-match",
+                                    "name": "generated-exact-match",
+                                    "displayName": "Release report",
+                                    "spec": '{"should_not": "be retained"}',
+                                },
+                            },
+                        ],
+                        "pageInfo": {"endCursor": "contains-2", "hasNextPage": False},
+                    }
+                }
+            }
+
+    api = type("Api", (), {"_service_api": DisplayTitleServiceApi()})()
+
+    result = fetch_projected_reports(
+        api,
+        entity="entity",
+        project="project",
+        report_name="Release report",
+        limit=5,
+        page_size=20,
+    )
+
+    assert result.requests == 2
+    assert [item["id"] for item in result.items] == ["exact-match"]
+    assert "spec" not in result.items[0]
+    assert result.total_count == 1
+    assert result.has_more is False
+    assert len(api._service_api.calls) == 2
+    internal_variables = api._service_api.calls[0][1]
+    fallback_variables = api._service_api.calls[1][1]
+    assert internal_variables["name"] == "Release report"
+    assert fallback_variables["name"] is None
+    assert fallback_variables["first"] == 5
+    assert fallback_variables["includeSpec"] is False
+    assert "displayNameContains" not in PROJECTED_REPORTS_QUERY
+
+
+def test_report_display_title_filter_excludes_nonexact_matches_and_continues_from_backend_cursor():
+    class PaginatedDisplayTitleServiceApi:
+        def __init__(self):
+            self.calls = []
+
+        def execute_graphql(self, query, variables=None):
+            variables = dict(variables or {})
+            self.calls.append((query, variables))
+            if variables["name"] is not None:
+                return {
+                    "project": {
+                        "allViews": {
+                            "edges": [],
+                            "pageInfo": {"endCursor": None, "hasNextPage": False},
+                        }
+                    }
+                }
+            if variables["after"] is None:
+                return {
+                    "project": {
+                        "allViews": {
+                            "edges": [
+                                {
+                                    "cursor": "display-page-1",
+                                    "node": {
+                                        "id": "near-match",
+                                        "name": "generated-near-match",
+                                        "displayName": "Release report (copy)",
+                                    },
+                                }
+                            ],
+                            "pageInfo": {"endCursor": "display-page-1", "hasNextPage": True},
+                        }
+                    }
+                }
+            assert variables["after"] == "display-page-1"
+            return {
+                "project": {
+                    "allViews": {
+                        "edges": [
+                            {
+                                "cursor": "display-page-2",
+                                "node": {
+                                    "id": "exact-match",
+                                    "name": "generated-exact-match",
+                                    "displayName": "Release report",
+                                },
+                            }
+                        ],
+                        "pageInfo": {"endCursor": "display-page-2", "hasNextPage": False},
+                    }
+                }
+            }
+
+    api = type("Api", (), {"_service_api": PaginatedDisplayTitleServiceApi()})()
+
+    first = fetch_projected_reports(
+        api,
+        entity="entity",
+        project="project",
+        report_name="Release report",
+        limit=1,
+        page_size=1,
+    )
+    assert first.items == []
+    assert first.requests == 2
+    assert first.has_more is True
+    assert first.next_cursor.startswith("mcp-report-v1:")
+    assert len(api._service_api.calls) == 2
+
+    second = fetch_projected_reports(
+        api,
+        entity="entity",
+        project="project",
+        report_name="Release report",
+        limit=1,
+        page_size=1,
+        cursor=first.next_cursor,
+    )
+    assert [item["id"] for item in second.items] == ["exact-match"]
+    assert second.requests == 1
+    assert second.has_more is False
+    assert second.next_cursor is None
+    assert len(api._service_api.calls) == 3
+    continuation_variables = api._service_api.calls[2][1]
+    assert continuation_variables["name"] is None
+    assert continuation_variables["after"] == "display-page-1"
+
+
+def test_filtered_report_cursor_rejects_malformed_or_mismatched_queries_without_transport():
+    class CursorServiceApi:
+        def __init__(self):
+            self.calls = []
+
+        def execute_graphql(self, query, variables=None):
+            variables = dict(variables or {})
+            self.calls.append((query, variables))
+            if variables["name"] is not None:
+                return {
+                    "project": {
+                        "allViews": {
+                            "edges": [],
+                            "pageInfo": {"endCursor": None, "hasNextPage": False},
+                        }
+                    }
+                }
+            return {
+                "project": {
+                    "allViews": {
+                        "edges": [],
+                        "pageInfo": {"endCursor": "display-page-1", "hasNextPage": True},
+                    }
+                }
+            }
+
+    api = type("Api", (), {"_service_api": CursorServiceApi()})()
+    first = fetch_projected_reports(
+        api,
+        entity="entity",
+        project="project",
+        report_name="Release report",
+        limit=1,
+        page_size=1,
+    )
+    assert first.next_cursor.startswith("mcp-report-v1:")
+    calls_before_rejection = len(api._service_api.calls)
+
+    with pytest.raises(ProjectedReportCursorError, match="does not match"):
+        fetch_projected_reports(
+            api,
+            entity="entity",
+            project="project",
+            report_name="Different report",
+            limit=1,
+            page_size=1,
+            cursor=first.next_cursor,
+        )
+    with pytest.raises(ProjectedReportCursorError, match="not a valid"):
+        fetch_projected_reports(
+            api,
+            entity="entity",
+            project="project",
+            report_name="Release report",
+            limit=1,
+            page_size=1,
+            cursor="display-page-1",
+        )
+    malformed_mode_payload = (
+        base64.urlsafe_b64encode(json.dumps({"after": "display-page-1", "mode": "other", "query": "invalid"}).encode())
+        .decode()
+        .rstrip("=")
+    )
+    with pytest.raises(ProjectedReportCursorError, match="not a valid"):
+        fetch_projected_reports(
+            api,
+            entity="entity",
+            project="project",
+            report_name="Release report",
+            limit=1,
+            page_size=1,
+            cursor=f"mcp-report-v1:{malformed_mode_payload}",
+        )
+    assert len(api._service_api.calls) == calls_before_rejection
 
 
 @pytest.mark.parametrize("kind", ["runs", "sweeps", "reports"])
