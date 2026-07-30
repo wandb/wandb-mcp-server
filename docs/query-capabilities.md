@@ -15,7 +15,7 @@ represent.
 | Selected or bounded full summary/config | `query_wandb_tool` with `summary_keys`, `config_keys`, or `include` | No |
 | Run count | `query_wandb_tool(resource="runs", response_mode="count")` | No |
 | Sweep lookup/list/config | `query_wandb_tool(resource="sweep"|"sweeps")` | No |
-| Report lookup/list/spec | `query_wandb_tool(resource="reports")` | No |
+| Report lookup/list/spec | `query_wandb_tool(resource="reports", report_name=...)`; `report_name` accepts an exact internal name or display title | No |
 | Run metric history | `get_run_history_tool` | No |
 | Artifacts and registries | Artifact and registry tools | No |
 | Automations and integrations | Automation and integration tools | No |

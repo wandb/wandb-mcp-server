@@ -627,3 +627,80 @@ def test_sdk_fallback_cursor_is_bound_to_original_query(monkeypatch):
 
     assert result["error"] == "invalid_request"
     assert "does not match" in result["message"]
+
+
+def test_filtered_report_cursor_is_validated_before_api_construction(monkeypatch):
+    def handler(query, variables):
+        if variables["name"] is not None:
+            return {
+                "project": {
+                    "allViews": {
+                        "edges": [],
+                        "pageInfo": {"endCursor": None, "hasNextPage": False},
+                    }
+                }
+            }
+        return {
+            "project": {
+                "allViews": {
+                    "edges": [],
+                    "pageInfo": {"endCursor": "display-page-1", "hasNextPage": True},
+                }
+            }
+        }
+
+    api = SelectiveApi(handler)
+    _install_api(monkeypatch, api)
+    first = query_module.query_wandb(
+        entity_name="entity",
+        project_name="project",
+        resource="reports",
+        report_name="Release report",
+        limit=1,
+    )
+    assert first["next_cursor"].startswith("mcp-report-v1:")
+
+    monkeypatch.setattr(
+        query_module.WandBApiManager,
+        "get_api",
+        lambda: pytest.fail("API must not be created for an invalid filtered report cursor"),
+    )
+    mismatch = query_module.query_wandb(
+        entity_name="entity",
+        project_name="project",
+        resource="reports",
+        report_name="Different report",
+        limit=1,
+        cursor=first["next_cursor"],
+    )
+    malformed = query_module.query_wandb(
+        entity_name="entity",
+        project_name="project",
+        resource="reports",
+        report_name="Release report",
+        limit=1,
+        cursor="display-page-1",
+    )
+    missing_report_name = query_module.query_wandb(
+        entity_name="entity",
+        project_name="project",
+        resource="reports",
+        limit=1,
+        cursor=first["next_cursor"],
+    )
+    cross_resource = query_module.query_wandb(
+        entity_name="entity",
+        project_name="project",
+        resource="runs",
+        limit=1,
+        cursor=first["next_cursor"],
+    )
+
+    assert mismatch["error"] == "invalid_request"
+    assert "does not match" in mismatch["message"]
+    assert malformed["error"] == "invalid_request"
+    assert "not a valid" in malformed["message"]
+    assert missing_report_name["error"] == "invalid_request"
+    assert "original report_name" in missing_report_name["message"]
+    assert cross_resource["error"] == "invalid_request"
+    assert "resource='reports'" in cross_resource["message"]

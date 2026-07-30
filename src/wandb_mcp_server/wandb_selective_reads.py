@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 from typing import Any, Mapping, NoReturn, Sequence
@@ -356,7 +358,91 @@ class SelectiveReadUnavailable(RuntimeError):
     """Raised when a backend cannot serve an application-owned read shape."""
 
 
+class ProjectedReportCursorError(ValueError):
+    """Raised before transport when a filtered report cursor is invalid."""
+
+
 _MAX_PROJECTED_PAGE_REQUESTS = 10
+_PROJECTED_REPORT_CURSOR_PREFIX = "mcp-report-v1:"
+
+
+def is_projected_report_cursor(cursor: str) -> bool:
+    """Return whether a cursor belongs to a filtered projected report read."""
+    return cursor.startswith(_PROJECTED_REPORT_CURSOR_PREFIX)
+
+
+def _projected_report_cursor_fingerprint(
+    *,
+    entity: str,
+    project: str,
+    report_name: str,
+    include_spec: bool,
+) -> str:
+    """Bind a filtered continuation to the report query that created it."""
+    payload = json.dumps(
+        {
+            "entity": entity,
+            "project": project,
+            "report_name": report_name,
+            "include_spec": include_spec,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:24]
+
+
+def _encode_projected_report_cursor(*, mode: str, after: str, fingerprint: str) -> str:
+    """Wrap a backend cursor with its filtered report connection mode."""
+    payload = json.dumps(
+        {"after": after, "mode": mode, "query": fingerprint},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return _PROJECTED_REPORT_CURSOR_PREFIX + encoded
+
+
+def _decode_projected_report_cursor(cursor: str, *, fingerprint: str) -> tuple[str, str]:
+    """Decode and validate one mode-bound filtered report cursor."""
+    if not is_projected_report_cursor(cursor):
+        raise ProjectedReportCursorError("cursor is not a valid filtered report continuation")
+    encoded = cursor.removeprefix(_PROJECTED_REPORT_CURSOR_PREFIX)
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        raw = base64.b64decode((encoded + padding).encode("ascii"), altchars=b"-_", validate=True)
+        payload = json.loads(raw)
+    except (UnicodeEncodeError, ValueError, json.JSONDecodeError):
+        raise ProjectedReportCursorError("cursor is not a valid filtered report continuation") from None
+    if not isinstance(payload, Mapping) or set(payload) != {"after", "mode", "query"}:
+        raise ProjectedReportCursorError("cursor is not a valid filtered report continuation")
+    mode = payload.get("mode")
+    after = payload.get("after")
+    query = payload.get("query")
+    if mode not in {"internal", "display"} or not isinstance(after, str) or not after:
+        raise ProjectedReportCursorError("cursor is not a valid filtered report continuation")
+    if query != fingerprint:
+        raise ProjectedReportCursorError("cursor does not match this filtered report query")
+    return mode, after
+
+
+def validate_projected_report_cursor(
+    cursor: str,
+    *,
+    entity: str,
+    project: str,
+    report_name: str,
+    include_spec: bool,
+) -> None:
+    """Validate a filtered report cursor without constructing a W&B client."""
+    fingerprint = _projected_report_cursor_fingerprint(
+        entity=entity,
+        project=project,
+        report_name=report_name,
+        include_spec=include_spec,
+    )
+    _decode_projected_report_cursor(cursor, fingerprint=fingerprint)
 
 
 def _projected_page_request_limit(target: int, page_size: int) -> int:
@@ -791,8 +877,28 @@ def fetch_projected_reports(
     include_spec: bool = False,
     cursor: str | None = None,
 ) -> ProjectedResourcePage:
-    """Fetch report metadata without downloading report specs by default."""
+    """Fetch report metadata without downloading report specs by default.
+
+    W&B's ``viewName`` argument addresses the report's generated internal
+    name, while users normally know its display title. A filtered first page
+    therefore tries the internal name and, only when that lookup is empty,
+    scans one bounded metadata page for an exact display-title match.
+    Mode-bound cursors keep each continuation on the connection that produced
+    it, including when multiple reports share an internal name.
+    """
     target = max(1, limit)
+    if report_name is not None:
+        return _fetch_projected_reports_by_name(
+            api,
+            entity=entity,
+            project=project,
+            report_name=report_name,
+            target=target,
+            page_size=page_size,
+            include_spec=include_spec,
+            cursor=cursor,
+        )
+
     items: list[dict[str, Any]] = []
     page_cursor = cursor
     requests = 0
@@ -808,7 +914,7 @@ def fetch_projected_reports(
                 {
                     "entity": entity,
                     "project": project,
-                    "name": report_name,
+                    "name": None,
                     "first": min(max(1, page_size), target - len(items)),
                     "after": page_cursor,
                     "includeSpec": include_spec,
@@ -829,21 +935,7 @@ def fetch_projected_reports(
         for edge in edges:
             if len(items) >= target:
                 break
-            node = edge.get("node")
-            if not isinstance(node, Mapping):
-                raise SelectiveReadUnavailable("projected report query returned an invalid report edge")
-            item = {
-                "id": node.get("id"),
-                "name": node.get("name"),
-                "display_name": node.get("displayName"),
-                "description": node.get("description"),
-                "user": node.get("user"),
-                "created_at": node.get("createdAt"),
-                "updated_at": node.get("updatedAt"),
-            }
-            if include_spec:
-                item["spec"] = _parse_json_mapping(node.get("spec"))
-            items.append(item)
+            items.append(_projected_report_item(edge, include_spec=include_spec))
             retained_edge = edge
             consumed_edges += 1
         cut_mid_page = consumed_edges < len(edges)
@@ -872,6 +964,192 @@ def fetch_projected_reports(
         total_count=total_count,
         has_more=has_more,
         next_cursor=page_cursor if has_more else None,
+        requests=requests,
+    )
+
+
+def _fetch_projected_report_page(
+    api: Any,
+    *,
+    entity: str,
+    project: str,
+    internal_name: str | None,
+    first: int,
+    cursor: str | None,
+    include_spec: bool,
+) -> tuple[list[Mapping[str, Any]], Mapping[str, Any], bool]:
+    """Fetch and validate one bounded report connection page."""
+    raise_if_tool_deadline_exceeded()
+    try:
+        data = execute_graphql(
+            api,
+            PROJECTED_REPORTS_QUERY,
+            {
+                "entity": entity,
+                "project": project,
+                "name": internal_name,
+                "first": max(1, first),
+                "after": cursor,
+                "includeSpec": include_spec,
+            },
+        )
+    except Exception as exc:
+        _raise_selective_failure("projected report query unavailable", exc)
+    connection = _project_payload(data).get("allViews")
+    if not isinstance(connection, Mapping):
+        raise SelectiveReadUnavailable("projected report query returned no report connection")
+    return _projected_connection_page(connection, context="projected report query")
+
+
+def _projected_report_item(edge: Mapping[str, Any], *, include_spec: bool) -> dict[str, Any]:
+    """Convert one validated report edge without hydrating omitted specs."""
+    node = edge.get("node")
+    if not isinstance(node, Mapping):
+        raise SelectiveReadUnavailable("projected report query returned an invalid report edge")
+    item = {
+        "id": node.get("id"),
+        "name": node.get("name"),
+        "display_name": node.get("displayName"),
+        "description": node.get("description"),
+        "user": node.get("user"),
+        "created_at": node.get("createdAt"),
+        "updated_at": node.get("updatedAt"),
+    }
+    if include_spec:
+        item["spec"] = _parse_json_mapping(node.get("spec"))
+    return item
+
+
+def _fetch_projected_reports_by_name(
+    api: Any,
+    *,
+    entity: str,
+    project: str,
+    report_name: str,
+    target: int,
+    page_size: int,
+    include_spec: bool,
+    cursor: str | None,
+) -> ProjectedResourcePage:
+    """Resolve an exact internal report name or exact display title."""
+    requests = 0
+    request_size = min(max(1, page_size), target)
+    fingerprint = _projected_report_cursor_fingerprint(
+        entity=entity,
+        project=project,
+        report_name=report_name,
+        include_spec=include_spec,
+    )
+    mode: str | None = None
+    backend_cursor: str | None = None
+    if cursor is not None:
+        mode, backend_cursor = _decode_projected_report_cursor(cursor, fingerprint=fingerprint)
+
+    if mode in {None, "internal"}:
+        edges, page_info, backend_has_next = _fetch_projected_report_page(
+            api,
+            entity=entity,
+            project=project,
+            internal_name=report_name,
+            first=request_size,
+            cursor=backend_cursor,
+            include_spec=include_spec,
+        )
+        requests += 1
+        if edges or mode == "internal":
+            retained_edges = edges[:target]
+            items = [_projected_report_item(edge, include_spec=include_spec) for edge in retained_edges]
+            cut_mid_page = len(retained_edges) < len(edges)
+            has_more = backend_has_next or cut_mid_page
+            next_backend_cursor = None
+            if has_more:
+                seen_cursors = {backend_cursor} if backend_cursor else set()
+                if cut_mid_page:
+                    next_backend_cursor = _retained_projected_cursor(
+                        retained_edges[-1],
+                        context="projected report query",
+                        current=backend_cursor,
+                        seen=seen_cursors,
+                    )
+                else:
+                    next_backend_cursor = _next_projected_cursor(
+                        context="projected report query",
+                        current=backend_cursor,
+                        candidate=page_info.get("endCursor"),
+                        seen=seen_cursors,
+                    )
+            return ProjectedResourcePage(
+                items=items,
+                total_count=len(items) if cursor is None and not has_more else None,
+                has_more=has_more,
+                next_cursor=(
+                    _encode_projected_report_cursor(
+                        mode="internal",
+                        after=next_backend_cursor,
+                        fingerprint=fingerprint,
+                    )
+                    if next_backend_cursor is not None
+                    else None
+                ),
+                requests=requests,
+            )
+
+    edges, page_info, backend_has_next = _fetch_projected_report_page(
+        api,
+        entity=entity,
+        project=project,
+        internal_name=None,
+        first=request_size,
+        cursor=backend_cursor,
+        include_spec=include_spec,
+    )
+    requests += 1
+
+    items: list[dict[str, Any]] = []
+    last_scanned_edge: Mapping[str, Any] | None = None
+    scanned_edges = 0
+    for edge in edges:
+        if len(items) >= target:
+            break
+        item = _projected_report_item(edge, include_spec=include_spec)
+        last_scanned_edge = edge
+        scanned_edges += 1
+        if item.get("display_name") == report_name:
+            items.append(item)
+
+    cut_mid_page = scanned_edges < len(edges)
+    has_more = backend_has_next or cut_mid_page
+    next_backend_cursor = None
+    if has_more:
+        seen_cursors = {backend_cursor} if backend_cursor else set()
+        if cut_mid_page:
+            assert last_scanned_edge is not None
+            next_backend_cursor = _retained_projected_cursor(
+                last_scanned_edge,
+                context="projected report display-title scan",
+                current=backend_cursor,
+                seen=seen_cursors,
+            )
+        else:
+            next_backend_cursor = _next_projected_cursor(
+                context="projected report display-title scan",
+                current=backend_cursor,
+                candidate=page_info.get("endCursor"),
+                seen=seen_cursors,
+            )
+    return ProjectedResourcePage(
+        items=items,
+        total_count=len(items) if cursor is None and not has_more else None,
+        has_more=has_more,
+        next_cursor=(
+            _encode_projected_report_cursor(
+                mode="display",
+                after=next_backend_cursor,
+                fingerprint=fingerprint,
+            )
+            if next_backend_cursor is not None
+            else None
+        ),
         requests=requests,
     )
 
@@ -1143,6 +1421,7 @@ __all__ = [
     "ProjectedRunPage",
     "ProjectedResourcePage",
     "ArtifactVersionPage",
+    "ProjectedReportCursorError",
     "SelectiveReadUnavailable",
     "fetch_artifact_inventory",
     "fetch_metric_value_steps",
@@ -1153,4 +1432,6 @@ __all__ = [
     "fetch_projected_runs",
     "fetch_projected_sweeps",
     "fetch_projected_reports",
+    "is_projected_report_cursor",
+    "validate_projected_report_cursor",
 ]
