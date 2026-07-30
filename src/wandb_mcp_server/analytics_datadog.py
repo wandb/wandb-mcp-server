@@ -19,13 +19,18 @@ PII leakage into ops logs.
 
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from wandb_mcp_server.bounded_worker import BoundedWorkerQueue
+from wandb_mcp_server.config import (
+    MCP_ANALYTICS_QUEUE_CAPACITY,
+    MCP_ANALYTICS_TEST_BUFFER_CAPACITY,
+)
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -328,7 +333,7 @@ class DatadogForwarder:
     Live POSTs run in a daemon thread so they never block the MCP request path.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, capture_payloads: bool = False) -> None:
         self.live = os.environ.get("MCP_DATADOG_FORWARD", "false").lower() == "true"
         self._api_key = _resolve_dd_api_key() if self.live else ""
         self._site = os.environ.get("DD_SITE", "datadoghq.com")
@@ -336,8 +341,11 @@ class DatadogForwarder:
         self._version = os.environ.get("DD_VERSION", "0.0.0")
         self._service = os.environ.get("DD_SERVICE", "wandb-mcp-server")
         self._intake_url = f"https://http-intake.logs.{self._site}/api/v2/logs"
-        self._forwarded_payloads: List[Dict[str, Any]] = []
-        self._executor: Optional[ThreadPoolExecutor] = None
+        self._forwarded_payloads: Deque[Dict[str, Any]] | None = (
+            deque(maxlen=MCP_ANALYTICS_TEST_BUFFER_CAPACITY) if capture_payloads else None
+        )
+        self._executor: Optional[BoundedWorkerQueue[Dict[str, Any]]] = None
+        self._executor_lock = threading.Lock()
         self._thread_local = threading.local()
 
         if self.live and not self._api_key:
@@ -377,10 +385,9 @@ class DatadogForwarder:
             dd_service=self._service,
         )
 
-        if self._executor is None:
-            self._executor = ThreadPoolExecutor(max_workers=2)
-        self._executor.submit(self._post, entry)
-        self._forwarded_payloads.append(entry)
+        self._get_executor().submit(entry)
+        if self._forwarded_payloads is not None:
+            self._forwarded_payloads.append(entry)
         return entry
 
     def _post(self, entry: Dict[str, Any]) -> None:
@@ -407,25 +414,54 @@ class DatadogForwarder:
 
     def get_forwarded_payloads(self) -> List[Dict[str, Any]]:
         """Return all payloads that were forwarded (for testing/inspection)."""
-        return list(self._forwarded_payloads)
+        return list(self._forwarded_payloads or ())
 
     def clear_forwarded_payloads(self) -> None:
         """Clear the forwarded payloads buffer."""
-        self._forwarded_payloads.clear()
+        if self._forwarded_payloads is not None:
+            self._forwarded_payloads.clear()
+
+    @property
+    def dropped_count(self) -> int:
+        """Number of forwarding events dropped because the queue was full."""
+        return self._executor.dropped_count if self._executor is not None else 0
+
+    def _get_executor(self) -> BoundedWorkerQueue[Dict[str, Any]]:
+        if self._executor is None:
+            with self._executor_lock:
+                if self._executor is None:
+                    self._executor = BoundedWorkerQueue(
+                        self._post,
+                        capacity=MCP_ANALYTICS_QUEUE_CAPACITY,
+                        worker_count=2,
+                        on_drop=lambda count: logger.warning(
+                            "Datadog forwarding queue full; dropped_count=%s",
+                            count,
+                        ),
+                        thread_name_prefix="mcp-datadog",
+                    )
+        return self._executor
 
 
 _datadog_forwarder: Optional[DatadogForwarder] = None
+_datadog_forwarder_lock = threading.Lock()
 
 
-def get_datadog_forwarder() -> DatadogForwarder:
+def get_datadog_forwarder(*, capture_payloads: bool = False) -> DatadogForwarder:
     """Get or create the global DatadogForwarder singleton."""
     global _datadog_forwarder
     if _datadog_forwarder is None:
-        _datadog_forwarder = DatadogForwarder()
+        with _datadog_forwarder_lock:
+            if _datadog_forwarder is None:
+                _datadog_forwarder = DatadogForwarder(capture_payloads=capture_payloads)
     return _datadog_forwarder
 
 
 def reset_datadog_forwarder() -> None:
     """Reset the global DatadogForwarder (for testing)."""
     global _datadog_forwarder
-    _datadog_forwarder = None
+    with _datadog_forwarder_lock:
+        previous = _datadog_forwarder
+        _datadog_forwarder = None
+    if previous is not None and previous._executor is not None:
+        previous._executor.shutdown(wait=False, cancel_futures=True)

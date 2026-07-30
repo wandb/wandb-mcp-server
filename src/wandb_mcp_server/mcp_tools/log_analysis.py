@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 import wandb
 
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_API_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.wandb_urls import public_wandb_url
@@ -151,6 +151,7 @@ def log_analysis(
             run.update()
 
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             logger.error(f"Failed to update analysis run: {e}", exc_info=True)
             raise
 

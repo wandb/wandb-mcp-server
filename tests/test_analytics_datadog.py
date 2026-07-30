@@ -5,6 +5,8 @@ Tests the mapper (severity, attributes, PII exclusion), the gated forwarder
 where AnalyticsTracker._emit() feeds the DatadogForwarder.
 """
 
+import threading
+import time
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
@@ -450,7 +452,7 @@ class TestDatadogForwarder:
     )
     def test_forward_builds_entry_and_records(self):
         reset_datadog_forwarder()
-        fwd = DatadogForwarder()
+        fwd = DatadogForwarder(capture_payloads=True)
         with patch.object(fwd, "_post"):
             event = _make_event("tool_call", tool_name="query_traces", success=True, duration_ms=100)
             entry = fwd.forward(event)
@@ -458,6 +460,20 @@ class TestDatadogForwarder:
             assert entry["status"] == "info"
             assert entry["service"] == "test-mcp"
             assert len(fwd.get_forwarded_payloads()) == 1
+
+    @patch.dict(
+        "os.environ",
+        {
+            "MCP_DATADOG_FORWARD": "true",
+            "DD_API_KEY": "testkey",
+        },
+        clear=False,
+    )
+    def test_production_forwarder_does_not_retain_payload_history(self):
+        fwd = DatadogForwarder()
+        with patch.object(fwd, "_post"):
+            assert fwd.forward(_make_event("tool_call", tool_name="x", success=True))
+            assert fwd.get_forwarded_payloads() == []
 
     @patch.dict(
         "os.environ",
@@ -481,12 +497,49 @@ class TestDatadogForwarder:
     )
     def test_clear_forwarded_payloads(self):
         reset_datadog_forwarder()
-        fwd = DatadogForwarder()
+        fwd = DatadogForwarder(capture_payloads=True)
         with patch.object(fwd, "_post"):
             fwd.forward(_make_event("tool_call", tool_name="x", success=True))
             assert len(fwd.get_forwarded_payloads()) == 1
             fwd.clear_forwarded_payloads()
             assert fwd.get_forwarded_payloads() == []
+
+    @patch.dict(
+        "os.environ",
+        {"MCP_DATADOG_FORWARD": "true", "DD_API_KEY": "testkey"},
+        clear=False,
+    )
+    def test_live_queue_is_non_blocking_and_memory_bounded(self, monkeypatch):
+        monkeypatch.setattr(
+            "wandb_mcp_server.analytics_datadog.MCP_ANALYTICS_QUEUE_CAPACITY",
+            2,
+        )
+        monkeypatch.setattr(
+            "wandb_mcp_server.analytics_datadog.MCP_ANALYTICS_TEST_BUFFER_CAPACITY",
+            2,
+        )
+        fwd = DatadogForwarder(capture_payloads=True)
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_post(_entry):
+            started.set()
+            release.wait(timeout=2)
+
+        monkeypatch.setattr(fwd, "_post", blocked_post)
+        event = _make_event("tool_call", tool_name="query_wandb_tool", success=True)
+        fwd.forward(event)
+        assert started.wait(timeout=1)
+        fwd.forward(event)
+        before = time.monotonic()
+        fwd.forward(event)
+
+        assert time.monotonic() - before < 0.1
+        assert fwd._executor.outstanding_count <= 2
+        assert fwd.dropped_count == 1
+        assert len(fwd.get_forwarded_payloads()) == 2
+        release.set()
+        fwd._executor.shutdown(wait=True)
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +643,25 @@ class TestSingleton:
         b = get_datadog_forwarder()
         assert a is not b
 
+    @patch.dict("os.environ", {"MCP_DATADOG_FORWARD": "false"}, clear=False)
+    def test_concurrent_initialization_returns_one_instance(self):
+        reset_datadog_forwarder()
+        barrier = threading.Barrier(8)
+        results = []
+
+        def resolve() -> None:
+            barrier.wait()
+            results.append(get_datadog_forwarder())
+
+        threads = [threading.Thread(target=resolve) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1)
+
+        assert len(results) == 8
+        assert len({id(result) for result in results}) == 1
+
 
 # ---------------------------------------------------------------------------
 # E2E: AnalyticsTracker -> DatadogForwarder
@@ -614,7 +686,7 @@ class TestE2ETrackerToDatadog:
     def test_tool_call_reaches_datadog(self):
         reset_datadog_forwarder()
         reset_analytics_tracker()
-        fwd = get_datadog_forwarder()
+        fwd = get_datadog_forwarder(capture_payloads=True)
         with patch.object(fwd, "_post"):
             tracker = AnalyticsTracker(enabled=True)
             tracker.track_tool_call(
@@ -645,7 +717,7 @@ class TestE2ETrackerToDatadog:
     def test_failed_tool_call_reaches_datadog_as_error(self):
         reset_datadog_forwarder()
         reset_analytics_tracker()
-        fwd = get_datadog_forwarder()
+        fwd = get_datadog_forwarder(capture_payloads=True)
         with patch.object(fwd, "_post"):
             tracker = AnalyticsTracker(enabled=True)
             tracker.track_tool_call(
@@ -675,7 +747,7 @@ class TestE2ETrackerToDatadog:
     def test_request_500_reaches_datadog_as_error(self):
         reset_datadog_forwarder()
         reset_analytics_tracker()
-        fwd = get_datadog_forwarder()
+        fwd = get_datadog_forwarder(capture_payloads=True)
         with patch.object(fwd, "_post"):
             tracker = AnalyticsTracker(enabled=True)
             tracker.track_request(

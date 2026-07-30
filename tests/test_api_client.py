@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 import threading
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 from wandb_mcp_server import api_client
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import (
+    WandBApiManager,
+    wandb_server_busy_from_exception,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -107,3 +112,47 @@ def test_get_api_initializes_different_actors_concurrently(monkeypatch) -> None:
         second = pool.submit(WandBApiManager.get_api, "second-actor-key")
 
     assert first.result() is not second.result()
+
+
+def _http_error(status_code: int, *, body: str = "", retry_after: str | None = None):
+    response = requests.Response()
+    response.status_code = status_code
+    response._content = body.encode()
+    if retry_after is not None:
+        response.headers["Retry-After"] = retry_after
+    return requests.HTTPError(f"{status_code} {body}", response=response)
+
+
+def test_rate_limit_maps_to_bounded_retryable_server_busy() -> None:
+    busy = wandb_server_busy_from_exception(_http_error(429, body="Too many requests", retry_after="120"))
+
+    assert busy is not None
+    assert busy.status_code == 429
+    assert busy.as_dict() == {
+        "error": "server_busy",
+        "message": "The W&B service is busy; retry this tool call.",
+        "retryable": True,
+        "retry_after_ms": 60_000,
+    }
+
+
+def test_overload_service_unavailable_maps_to_server_busy() -> None:
+    busy = wandb_server_busy_from_exception(_http_error(503, body="Service unavailable: capacity exhausted"))
+
+    assert busy is not None
+    assert busy.status_code == 503
+    assert busy.retry_after_ms == 1_000
+
+
+def test_unrelated_503_is_not_misclassified_as_capacity() -> None:
+    assert wandb_server_busy_from_exception(_http_error(503, body="upstream certificate validation failed")) is None
+
+
+def test_runtime_release_does_not_add_deferred_core_workload_header() -> None:
+    package_root = Path(__file__).parents[1] / "src" / "wandb_mcp_server"
+    application_source = "\n".join(
+        path.read_text() for path in package_root.rglob("*.py") if "__pycache__" not in path.parts
+    )
+
+    assert "X-WandB-Workload" not in application_source
+    assert "GORILLA_MCP_" not in application_source

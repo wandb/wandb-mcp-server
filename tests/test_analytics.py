@@ -30,7 +30,7 @@ from wandb_mcp_server.harness import HarnessContext, current_harness_context
 
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
-    monkeypatch.setenv("MCP_REQUEST_SUCCESS_SAMPLE_RATE", "1")
+    monkeypatch.setattr(analytics_module, "MCP_REQUEST_SUCCESS_SAMPLE_RATE", 1.0)
     monkeypatch.setattr(analytics_module, "_analytics_startup_logged", False)
     reset_analytics_tracker()
     configure_analytics_logging("stdout")
@@ -559,6 +559,18 @@ class TestTrackToolCall:
         )
         assert capture.event["duration_ms"] == 123.4
 
+    def test_cancelled_admission_outcome_survives_event_emission(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="t",
+            session_id="s",
+            viewer_info=None,
+            success=False,
+            error="cancelled: tool admission wait was cancelled",
+            params={"admission_outcome": "cancelled"},
+        )
+
+        assert capture.event["usage_dimensions"]["admission_outcome"] == "cancelled"
+
     def test_mcp_tool_name_recorded_when_available(self, capture):
         AnalyticsTracker(enabled=True).track_tool_call(
             tool_name="query_paginated_wandb_gql",
@@ -718,7 +730,7 @@ class TestTrackRequest:
         assert e["mcp_client_version"] == "2.1.89"
 
     def test_success_sampling_can_drop_request(self, capture, monkeypatch):
-        monkeypatch.setenv("MCP_REQUEST_SUCCESS_SAMPLE_RATE", "0")
+        monkeypatch.setattr(analytics_module, "MCP_REQUEST_SUCCESS_SAMPLE_RATE", 0.0)
         AnalyticsTracker(enabled=True).track_request(
             request_id="drop-me",
             session_id="s",
@@ -730,7 +742,7 @@ class TestTrackRequest:
         assert capture.event is None
 
     def test_errors_and_slow_requests_bypass_sampling(self, capture, monkeypatch):
-        monkeypatch.setenv("MCP_REQUEST_SUCCESS_SAMPLE_RATE", "0")
+        monkeypatch.setattr(analytics_module, "MCP_REQUEST_SUCCESS_SAMPLE_RATE", 0.0)
         tracker = AnalyticsTracker(enabled=True)
         tracker.track_request("error", "s", "POST", "/mcp", 500, duration_ms=10)
         assert capture.event["status_code"] == 500

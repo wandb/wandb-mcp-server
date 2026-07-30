@@ -307,6 +307,17 @@ def get_retry_session(
     return session
 
 
+def get_no_retry_session() -> requests.Session:
+    """Return a session that performs exactly one HTTP attempt.
+
+    Functional MCP calls use this when retrying upstream overload would
+    amplify customer traffic. The normal ``requests`` adapters use a zero-retry
+    policy and return the original response, preserving status and headers for
+    the shared MCP overload mapper.
+    """
+    return requests.Session()
+
+
 class _ToolExecutionContext:
     """Mutable context yielded by ``track_tool_execution``.
 

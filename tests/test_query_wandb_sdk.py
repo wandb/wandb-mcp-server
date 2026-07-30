@@ -308,6 +308,7 @@ async def test_public_query_tools_run_sync_sdk_work_off_event_loop(fake_api, mon
 @pytest.mark.asyncio
 async def test_public_mcp_dispatch_enforces_hosted_summary_limit(monkeypatch):
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
     monkeypatch.setattr(sdk_query, "MCP_HOSTED_MODE", True)
     monkeypatch.setattr(
         sdk_query.WandBApiManager,

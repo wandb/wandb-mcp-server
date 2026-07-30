@@ -10,7 +10,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.config import MCP_MAX_WANDB_QUERY_ITEMS
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
@@ -122,6 +122,7 @@ def list_registries(
             )
 
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             logger.error(f"Error in list_registries: {e}", exc_info=True)
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "api_error", "message": str(e)[:500]})
@@ -238,6 +239,7 @@ def list_registry_collections(
             )
 
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             logger.error(f"Error in list_registry_collections: {e}", exc_info=True)
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "api_error", "message": str(e)[:500]})

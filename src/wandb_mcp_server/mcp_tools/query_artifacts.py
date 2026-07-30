@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.config import MCP_MAX_WANDB_QUERY_ITEMS, MCP_WORKLOAD_PROFILE
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
@@ -179,7 +179,8 @@ def list_artifact_versions(
                     )
                     raw_versions: list[Any] = page.items
                     upstream_has_more = page.has_more
-                except SelectiveReadUnavailable:
+                except SelectiveReadUnavailable as exc:
+                    raise_for_wandb_server_busy(exc)
                     versions_iter = registry.collections(
                         filter={"name": collection_name},
                         per_page=min(scan_limit, 100),
@@ -248,6 +249,7 @@ def list_artifact_versions(
             return json.dumps(result)
 
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             logger.error(f"Error in list_artifact_versions: {e}", exc_info=True)
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "api_error", "message": str(e)[:500]})
@@ -346,6 +348,7 @@ def get_artifact_details(
             return json.dumps(result)
 
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             logger.error(f"Error in get_artifact_details: {e}", exc_info=True)
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "api_error", "message": str(e)[:500]})
@@ -482,6 +485,7 @@ def compare_artifact_versions(
             return json.dumps(result)
 
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             logger.error(f"Error in compare_artifact_versions: {e}", exc_info=True)
             ctx.mark_error(f"{type(e).__name__}: {e}")
             return json.dumps({"error": "api_error", "message": str(e)[:500]})
@@ -641,7 +645,8 @@ def _get_logged_by(artifact: Any) -> Optional[Dict[str, Any]]:
     try:
         run = artifact.logged_by()
         return _serialize_run_info(run)
-    except Exception:
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
         logger.debug("logged_by() failed", exc_info=True)
         return None
 
@@ -661,7 +666,8 @@ def _build_lineage(artifact: Any) -> Dict[str, Any]:
                     used_by_truncated = True
                     break
                 used_by.append(_serialize_run_info(run))
-    except Exception:
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
         logger.debug("used_by() failed", exc_info=True)
 
     source_artifact = None
@@ -669,7 +675,8 @@ def _build_lineage(artifact: Any) -> Dict[str, Any]:
         src = artifact.source_artifact
         if src is not None and src is not artifact:
             source_artifact = getattr(src, "source_qualified_name", None) or getattr(src, "name", None)
-    except Exception:
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
         logger.debug("source_artifact failed", exc_info=True)
 
     linked: Optional[List[str]] = None
@@ -681,7 +688,8 @@ def _build_lineage(artifact: Any) -> Dict[str, Any]:
                 name = getattr(la, "source_qualified_name", None) or getattr(la, "name", None)
                 if name:
                     linked.append(name)
-    except Exception:
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
         logger.debug("linked_artifacts failed", exc_info=True)
 
     lineage: Dict[str, Any] = {
@@ -709,7 +717,8 @@ def _list_files(artifact: Any, max_files: int) -> List[Dict[str, Any]]:
                     "digest": getattr(f, "digest", None),
                 }
             )
-    except Exception:
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
         logger.debug("files() failed", exc_info=True)
     return files
 
@@ -741,7 +750,8 @@ def _compute_file_diff(art_a: Any, art_b: Any, max_entries: int) -> Dict[str, An
                 scan_truncated = True
                 break
             files_a[getattr(f, "name", "")] = getattr(f, "digest", "")
-    except Exception:
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
         logger.debug("files() failed for artifact_a", exc_info=True)
 
     try:
@@ -750,7 +760,8 @@ def _compute_file_diff(art_a: Any, art_b: Any, max_entries: int) -> Dict[str, An
                 scan_truncated = True
                 break
             files_b[getattr(f, "name", "")] = getattr(f, "digest", "")
-    except Exception:
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
         logger.debug("files() failed for artifact_b", exc_info=True)
 
     names_a, names_b = set(files_a.keys()), set(files_b.keys())

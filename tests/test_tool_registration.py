@@ -199,6 +199,7 @@ def test_constructed_servers_use_public_boundary_instrumentation(monkeypatch):
     assert isinstance(stdio, InstrumentedFastMCP)
     assert analytics._resolve_transport() == "stdio"
 
+    monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
     http = create_mcp_server("http")
     assert isinstance(http, InstrumentedFastMCP)
     assert analytics._resolve_transport() == "http"

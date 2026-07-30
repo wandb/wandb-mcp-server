@@ -5,7 +5,7 @@ import math
 from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.admission import ToolDeadlineExceeded
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.config import MCP_MAX_HISTORY_KEYS, MCP_MAX_HISTORY_SAMPLES
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
@@ -231,10 +231,12 @@ def compare_runs(
         except Exception as selective_error:
             if isinstance(selective_error, ToolDeadlineExceeded):
                 raise
+            raise_for_wandb_server_busy(selective_error)
             try:
                 run_a = api.run(f"{path}/{run_id_a}")
                 run_b = api.run(f"{path}/{run_id_b}")
             except Exception as e:
+                raise_for_wandb_server_busy(e)
                 ctx.mark_error(f"{type(e).__name__}: {e}")
                 return json.dumps({"error": "run_not_found", "message": str(e)[:500]})
 
@@ -358,6 +360,7 @@ def compare_runs(
                     ],
                 }
             except Exception as e:
+                raise_for_wandb_server_busy(e)
                 result["history_comparison"] = {"error": str(e)[:300], "sampled": True}
 
         return json.dumps(result, default=str)

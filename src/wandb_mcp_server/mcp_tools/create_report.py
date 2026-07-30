@@ -12,6 +12,7 @@ import wandb_workspaces.reports.v2 as wr
 import wandb_workspaces.reports.v2.interface as wr_interface
 
 import wandb
+from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_API_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
@@ -333,8 +334,9 @@ def create_report(
             return {"url": publicize_wandb_url(report.url)}
 
         except Exception as e:
+            raise_for_wandb_server_busy(e)
             logger.error(f"Error creating report: {e}")
-            raise Exception(f"Error creating report: {e}")
+            raise Exception(f"Error creating report: {e}") from e
 
 
 def _build_panel_blocks(

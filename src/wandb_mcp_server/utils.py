@@ -6,6 +6,7 @@ import netrc
 import os
 import subprocess
 import sys
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -14,6 +15,12 @@ from urllib.parse import urlparse
 import simple_parsing
 from rich.logging import RichHandler
 from rich.console import Console
+
+from wandb_mcp_server.error_sanitizer import (
+    MAX_EXTERNAL_ERROR_CHARS,
+    sanitize_sensitive_text,
+    sanitize_sensitive_value,
+)
 
 os.environ["WANDB_SILENT"] = "True"
 os.environ["WEAVE_SILENT"] = "True"
@@ -65,10 +72,61 @@ class _JsonLogFormatter(logging.Formatter):
             payload["session_id_prefix"] = session_prefix
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
+        else:
+            sanitized_exc_info = getattr(record, "_wandb_mcp_sanitized_exc_info", None)
+            if sanitized_exc_info:
+                payload["exc_info"] = sanitized_exc_info
         # stack_info is separate from exc_info; include if present
         if record.stack_info:
             payload["stack_info"] = self.formatStack(record.stack_info)
         return _json.dumps(payload, default=str)
+
+
+class _SensitiveDataFilter(logging.Filter):
+    """Ensure credentials and internal service addresses never reach logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = sanitize_sensitive_text(
+                record.getMessage(),
+                max_chars=MAX_EXTERNAL_ERROR_CHARS,
+            )
+            if record.exc_info:
+                exception_text = sanitize_sensitive_text(
+                    "".join(traceback.format_exception(*record.exc_info)),
+                    max_chars=MAX_EXTERNAL_ERROR_CHARS,
+                )
+                record._wandb_mcp_sanitized_exc_info = exception_text
+                if os.environ.get("MCP_LOG_FORMAT", "rich").strip().lower() != "json":
+                    message = f"{message}\n{exception_text}"
+                record.exc_info = None
+                record.exc_text = None
+            record.msg = message
+            record.args = ()
+            if hasattr(record, "json_fields"):
+                record.json_fields = sanitize_sensitive_value(record.json_fields)
+        except Exception:
+            # Logging must remain non-fatal. The sanitizer is intentionally
+            # conservative, but a malformed third-party record cannot break
+            # request handling.
+            pass
+        return True
+
+
+def _install_sensitive_record_factory() -> None:
+    """Sanitize every log record, including third-party/root logger output."""
+    current_factory = logging.getLogRecordFactory()
+    if getattr(current_factory, "_wandb_mcp_sensitive", False):
+        return
+    sanitizer = _SensitiveDataFilter()
+
+    def _sanitizing_factory(*args, **kwargs):
+        record = current_factory(*args, **kwargs)
+        sanitizer.filter(record)
+        return record
+
+    _sanitizing_factory._wandb_mcp_sensitive = True  # type: ignore[attr-defined]
+    logging.setLogRecordFactory(_sanitizing_factory)
 
 
 def _build_log_handler() -> logging.Handler:
@@ -85,16 +143,18 @@ def _build_log_handler() -> logging.Handler:
     if log_format == "json":
         handler: logging.Handler = logging.StreamHandler(sys.stderr)
         handler.setFormatter(_JsonLogFormatter())
-        return handler
-    # Default: rich output, preserves today's behavior for local dev + Cloud Run.
-    stderr_console = Console(stderr=True)
-    return RichHandler(
-        console=stderr_console,
-        show_time=True,
-        show_level=True,
-        show_path=False,
-        markup=True,
-    )
+    else:
+        # Default: rich output, preserves today's behavior for local dev + Cloud Run.
+        stderr_console = Console(stderr=True)
+        handler = RichHandler(
+            console=stderr_console,
+            show_time=True,
+            show_level=True,
+            show_path=False,
+            markup=True,
+        )
+    handler.addFilter(_SensitiveDataFilter())
+    return handler
 
 
 # Third-party loggers we explicitly reconfigure in JSON mode so every line emitted by
@@ -135,6 +195,7 @@ def configure_process_logging() -> None:
     if _process_logging_configured:
         return
     _process_logging_configured = True
+    _install_sensitive_record_factory()
 
     if os.environ.get("MCP_LOG_FORMAT", "rich").strip().lower() != "json":
         return

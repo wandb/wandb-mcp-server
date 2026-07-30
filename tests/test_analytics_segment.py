@@ -6,6 +6,7 @@ AnalyticsTracker._emit() automatically feeds the SegmentForwarder.
 """
 
 import time
+import threading
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
@@ -284,6 +285,56 @@ class TestSegmentForwarder:
         f.clear_forwarded_payloads()
         assert len(f.get_forwarded_payloads()) == 0
 
+    @patch.dict("os.environ", {"MCP_SEGMENT_FORWARD": "true"})
+    def test_live_queue_is_non_blocking_and_bounded(self, monkeypatch):
+        monkeypatch.setattr(
+            "wandb_mcp_server.analytics_segment.MCP_ANALYTICS_QUEUE_CAPACITY",
+            2,
+        )
+        f = SegmentForwarder(base_url="https://api.wandb.test")
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_post(_payload):
+            started.set()
+            release.wait(timeout=2)
+
+        monkeypatch.setattr(f, "_post", blocked_post)
+        event = {
+            "event_type": "tool_call",
+            "user_id": "actor",
+            "tool_name": "query_wandb_tool",
+        }
+        f.forward(event)
+        assert started.wait(timeout=1)
+        f.forward(event)
+        before = time.monotonic()
+        f.forward(event)
+
+        assert time.monotonic() - before < 0.1
+        assert f._executor.outstanding_count <= 2
+        assert f.dropped_count == 1
+        release.set()
+        f._executor.shutdown(wait=True)
+
+    @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
+    def test_test_payload_history_is_bounded(self, monkeypatch):
+        monkeypatch.setattr(
+            "wandb_mcp_server.analytics_segment.MCP_ANALYTICS_TEST_BUFFER_CAPACITY",
+            2,
+        )
+        f = SegmentForwarder()
+        for index in range(3):
+            f.forward(
+                {
+                    "event_type": "tool_call",
+                    "user_id": "actor",
+                    "tool_name": f"tool-{index}",
+                }
+            )
+
+        assert len(f.get_forwarded_payloads()) == 2
+
 
 # ---------------------------------------------------------------------------
 # Singleton lifecycle
@@ -298,6 +349,32 @@ class TestSingleton:
         f1 = get_segment_forwarder()
         reset_segment_forwarder()
         assert get_segment_forwarder() is not f1
+
+    def test_concurrent_initialization_returns_one_instance(self):
+        barrier = threading.Barrier(8)
+        results = []
+
+        def resolve() -> None:
+            barrier.wait()
+            results.append(get_segment_forwarder())
+
+        threads = [threading.Thread(target=resolve) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1)
+
+        assert len(results) == 8
+        assert len({id(result) for result in results}) == 1
+
+
+def test_segment_session_does_not_retry_wandb_overload() -> None:
+    session = __import__(
+        "wandb_mcp_server.analytics_segment",
+        fromlist=["_build_retry_session"],
+    )._build_retry_session()
+
+    assert session.get_adapter("https://").max_retries.total == 0
 
 
 # ---------------------------------------------------------------------------
