@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import base64
+import io
 import logging
+import pickle
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
+from uvicorn.logging import AccessFormatter
 
 from wandb_mcp_server.analytics import _prepare_event
 from wandb_mcp_server.api_client import WandBApiManager
@@ -69,6 +73,144 @@ def test_log_filter_sanitizes_message_arguments_and_exception() -> None:
     _assert_canaries_absent(record.getMessage())
     _assert_canaries_absent(record._wandb_mcp_sanitized_exc_info)
     assert record.exc_info is None
+
+
+def _uvicorn_access_record(path: str) -> logging.LogRecord:
+    return logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:8080", "POST", path, "1.1", 200),
+        None,
+    )
+
+
+def _uvicorn_access_formatter() -> AccessFormatter:
+    return AccessFormatter(
+        '%(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+        use_colors=False,
+    )
+
+
+def test_log_filter_preserves_uvicorn_access_record_contract() -> None:
+    record = _uvicorn_access_record(f"/mcp?upstream={INTERNAL_URL}&api_key={SECRET}")
+
+    assert _SensitiveDataFilter().filter(record)
+
+    assert isinstance(record.args, tuple)
+    assert len(record.args) == 5
+    rendered = _uvicorn_access_formatter().format(record)
+    _assert_canaries_absent(rendered)
+    assert "POST" in rendered
+    assert "200 OK" in rendered
+
+
+def test_sanitized_uvicorn_access_record_remains_queue_safe() -> None:
+    record = _uvicorn_access_record(f"/mcp?upstream={INTERNAL_URL}&api_key={SECRET}")
+
+    assert _SensitiveDataFilter().filter(record)
+    restored = pickle.loads(pickle.dumps(record))
+
+    rendered = _uvicorn_access_formatter().format(restored)
+    _assert_canaries_absent(rendered)
+    assert len(restored.args) == 5
+
+
+def test_uvicorn_access_logger_formats_through_process_record_factory() -> None:
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(_uvicorn_access_formatter())
+    handler.addFilter(_SensitiveDataFilter())
+    logger = logging.getLogger("uvicorn.access.sanitizer-regression")
+    original_handlers = logger.handlers[:]
+    original_level = logger.level
+    original_propagate = logger.propagate
+    try:
+        logger.handlers = [handler]
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:8080",
+            "POST",
+            f"/mcp?upstream={INTERNAL_URL}&api_key={SECRET}",
+            "1.1",
+            200,
+        )
+    finally:
+        logger.handlers = original_handlers
+        logger.setLevel(original_level)
+        logger.propagate = original_propagate
+
+    rendered = stream.getvalue()
+    _assert_canaries_absent(rendered)
+    assert "POST" in rendered
+    assert "200 OK" in rendered
+
+
+def test_log_filter_preserves_mapping_arguments_and_sanitizes_literals() -> None:
+    record = logging.LogRecord(
+        "structured.logger",
+        logging.INFO,
+        __file__,
+        1,
+        f"backend={INTERNAL_URL} request=%(path)s api_key=%(api_key)s",
+        ({"path": INTERNAL_URL, "api_key": SECRET},),
+        None,
+    )
+
+    assert _SensitiveDataFilter().filter(record)
+
+    assert isinstance(record.args, dict)
+    assert set(record.args) == {"path", "api_key"}
+    _assert_canaries_absent(record.getMessage())
+
+
+def test_custom_argument_record_sanitizes_literals_without_flattening() -> None:
+    class CustomLogRecord(logging.LogRecord):
+        pass
+
+    record = CustomLogRecord(
+        "custom.structured.logger",
+        logging.INFO,
+        __file__,
+        1,
+        f"backend={INTERNAL_URL} api_key=%s literal={SECRET} progress=100%%",
+        (SECRET,),
+        None,
+    )
+
+    assert _SensitiveDataFilter().filter(record)
+
+    assert type(record) is CustomLogRecord
+    assert isinstance(record.args, tuple)
+    assert len(record.args) == 1
+    assert "%s" in record.msg
+    assert "%%" in record.msg
+    rendered = record.getMessage()
+    _assert_canaries_absent(rendered)
+    assert "api_key=<redacted>" in rendered
+    assert "progress=100%" in rendered
+
+
+def test_log_filter_formats_uvicorn_access_records_concurrently() -> None:
+    sanitizer = _SensitiveDataFilter()
+    formatter = _uvicorn_access_formatter()
+
+    def _format(index: int) -> str:
+        record = _uvicorn_access_record(f"/mcp/{index}?upstream={INTERNAL_URL}&token={SECRET}")
+        assert sanitizer.filter(record)
+        return formatter.format(record)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        rendered = list(pool.map(_format, range(100)))
+
+    assert len(rendered) == 100
+    for message in rendered:
+        _assert_canaries_absent(message)
+        assert "200 OK" in message
 
 
 def test_analytics_preparation_sanitizes_before_forwarding() -> None:
