@@ -91,6 +91,16 @@ def count_tokens(text: str) -> int:
         return len(text.split())
 
 
+def count_tokens_conservative(text: str) -> int:
+    """Count tokens exactly, with a conservative no-tokenizer fallback."""
+    try:
+        return len(_get_tiktoken_encoding().encode(text))
+    except Exception:
+        # A UTF-8 byte upper bound is intentionally conservative for BPE-style
+        # tokenizers and cannot undercount dense CJK or unusual scalar data.
+        return max(1, len(text.encode("utf-8")))
+
+
 def calculate_token_counts(traces: List[Dict]) -> Dict[str, int]:
     """Calculate token counts for traces."""
     total_tokens = 0
