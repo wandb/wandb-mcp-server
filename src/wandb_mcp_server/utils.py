@@ -4,6 +4,7 @@ import json as _json
 import logging
 import netrc
 import os
+import re
 import subprocess
 import sys
 import traceback
@@ -82,15 +83,80 @@ class _JsonLogFormatter(logging.Formatter):
         return _json.dumps(payload, default=str)
 
 
+def _sanitize_rendered_log_message(record: logging.LogRecord, message: object) -> str:
+    """Sanitize a rendered message without changing its logging arguments."""
+    exception_text = getattr(record, "_wandb_mcp_sanitized_message_suffix", "")
+    if exception_text:
+        message = f"{message}\n{exception_text}"
+    return sanitize_sensitive_text(
+        message,
+        max_chars=MAX_EXTERNAL_ERROR_CHARS,
+    )
+
+
+_LOG_PERCENT_TOKEN_RE = re.compile(r"%(?:\([^)]+\))?[#0\- +]?(?:\d+|\*)?(?:\.(?:\d+|\*))?[hlL]?[diouxXeEfFgGcrsa%]")
+
+
+def _sanitize_log_message_template(message: str) -> str:
+    """Redact literal values without consuming printf-style placeholders."""
+    tokens: list[str] = []
+
+    def _protect_token(match: re.Match[str]) -> str:
+        tokens.append(match.group(0))
+        # A leading comma keeps key/value redaction from interpreting the
+        # sentinel as the value in templates such as ``api_key=%s``.
+        return f",<wandb-mcp-log-token-{len(tokens) - 1}>,"
+
+    sanitized = sanitize_sensitive_text(_LOG_PERCENT_TOKEN_RE.sub(_protect_token, message))
+    for index, token in enumerate(tokens):
+        sanitized = sanitized.replace(f",<wandb-mcp-log-token-{index}>,", token)
+    return sanitized
+
+
+class _SensitiveLogRecord(logging.LogRecord):
+    """A pickle-safe LogRecord that sanitizes only its rendered message."""
+
+    __slots__ = ()
+    _wandb_mcp_sensitive_get_message = True
+
+    def getMessage(self) -> str:
+        return _sanitize_rendered_log_message(self, super().getMessage())
+
+
+def _install_sensitive_get_message(record: logging.LogRecord) -> None:
+    """Make ``getMessage`` safe without replacing ``msg`` or clearing ``args``."""
+    if getattr(type(record), "_wandb_mcp_sensitive_get_message", False) or getattr(
+        record, "_wandb_mcp_sensitive_get_message", False
+    ):
+        return
+
+    if type(record) is logging.LogRecord:
+        record.__class__ = _SensitiveLogRecord
+    elif not record.args:
+        # Preserve custom record classes and any formatter-specific behavior.
+        # Argument-bearing records are still protected by shape-preserving
+        # argument sanitization in the filter.
+        record.msg = sanitize_sensitive_text(
+            record.msg,
+            max_chars=MAX_EXTERNAL_ERROR_CHARS,
+        )
+
+
 class _SensitiveDataFilter(logging.Filter):
-    """Ensure credentials and internal service addresses never reach logs."""
+    """Ensure credentials and internal service addresses never reach logs.
+
+    Some third-party formatters, including Uvicorn's access formatter, treat
+    ``LogRecord.args`` as a structured protocol. Sanitize those values without
+    flattening the record so downstream formatters retain their expected shape.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            message = sanitize_sensitive_text(
-                record.getMessage(),
-                max_chars=MAX_EXTERNAL_ERROR_CHARS,
-            )
+            if record.args:
+                record.args = sanitize_sensitive_value(record.args)
+                if isinstance(record.msg, str):
+                    record.msg = _sanitize_log_message_template(record.msg)
+            _install_sensitive_get_message(record)
             if record.exc_info:
                 exception_text = sanitize_sensitive_text(
                     "".join(traceback.format_exception(*record.exc_info)),
@@ -98,11 +164,9 @@ class _SensitiveDataFilter(logging.Filter):
                 )
                 record._wandb_mcp_sanitized_exc_info = exception_text
                 if os.environ.get("MCP_LOG_FORMAT", "rich").strip().lower() != "json":
-                    message = f"{message}\n{exception_text}"
+                    record._wandb_mcp_sanitized_message_suffix = exception_text
                 record.exc_info = None
                 record.exc_text = None
-            record.msg = message
-            record.args = ()
             if hasattr(record, "json_fields"):
                 record.json_fields = sanitize_sensitive_value(record.json_fields)
         except Exception:
@@ -121,7 +185,8 @@ def _install_sensitive_record_factory() -> None:
     sanitizer = _SensitiveDataFilter()
 
     def _sanitizing_factory(*args, **kwargs):
-        record = current_factory(*args, **kwargs)
+        factory = _SensitiveLogRecord if current_factory is logging.LogRecord else current_factory
+        record = factory(*args, **kwargs)
         sanitizer.filter(record)
         return record
 
