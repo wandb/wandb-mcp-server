@@ -96,6 +96,7 @@ jobs:
         run: |
           uv run --no-sync pytest \
             tests/test_query_wandb_sdk.py \
+            tests/test_query_wandb_hardening.py \
             tests/test_probe_project.py \
             tests/test_wandb_selective_reads.py \
             tests/test_run_history.py \
@@ -109,6 +110,7 @@ jobs:
             tests/test_report_writer.py \
             tests/test_wandb_graphql.py \
             tests/test_wandb_graphql_read_only.py \
+            tests/test_raw_graphql_hardening.py \
             tests/test_hosted_gql_guardrails.py \
             tests/test_hosted_gql_production_errors.py \
             -k "not locked_wandb_versions_are_installed" \

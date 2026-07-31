@@ -72,6 +72,27 @@ def _install_api(monkeypatch, api):
     monkeypatch.setattr(query_module, "track_tool_execution", _tracking)
 
 
+def _projected_cursor_for(**overrides):
+    query = {
+        "entity_name": "entity",
+        "project_name": "project",
+        "resource": "runs",
+        "filters": {"state": "finished"},
+        "order": "-created_at",
+        "report_name": None,
+        "include": frozenset({"summary", "config"}),
+        "summary_keys": ["accuracy"],
+        "config_keys": ["learning_rate"],
+    }
+    query.update(overrides)
+    fingerprint = query_module._collection_cursor_fingerprint(**query)
+    return query_module._encode_query_cursor(
+        kind="projected",
+        position="private-backend-position",
+        fingerprint=fingerprint,
+    )
+
+
 def test_real_wandb_028_runs_paginator_is_bounded_to_one_page(monkeypatch):
     def handler(query, variables):
         assert variables["perPage"] == 50
@@ -149,7 +170,7 @@ def test_config_only_single_projection_preserves_default_summary_and_nulls(monke
     assert "graphql_id" not in result["item"]
 
 
-def test_projected_run_cursor_and_lightweight_sweep_have_no_n_plus_one(monkeypatch):
+def test_projected_run_cursor_allows_changed_limit_and_lightweight_sweep_has_no_n_plus_one(monkeypatch):
     def handler(query, variables):
         assert query == PROJECTED_RUNS_QUERY
         assert variables["includeSweep"] is True
@@ -184,12 +205,13 @@ def test_projected_run_cursor_and_lightweight_sweep_have_no_n_plus_one(monkeypat
         "entity",
         "project",
         "runs",
-        limit=2,
+        limit=1,
         include=["sweep"],
         cursor=first["next_cursor"],
     )
 
-    assert first["next_cursor"] == "cursor-2"
+    assert first["next_cursor"].startswith("mcp-query-v1:")
+    assert "cursor-2" not in first["next_cursor"]
     assert first["truncation"]["applied"] is True
     assert second["has_more"] is False
     assert second["next_cursor"] is None
@@ -278,7 +300,8 @@ def test_report_total_count_is_unknown_when_more_pages_exist(monkeypatch):
     result = query_module.query_wandb("entity", "project", "reports", limit=1)
 
     assert result["total_count"] is None
-    assert result["next_cursor"] == "r-1"
+    assert result["next_cursor"].startswith("mcp-query-v1:")
+    assert "r-1" not in result["next_cursor"]
 
 
 def test_clamped_limit_does_not_claim_more_when_backend_is_exhausted(monkeypatch):
@@ -447,7 +470,7 @@ def test_partial_sdk_projection_fallback_cursor_continues_without_skipping(monke
     )
 
     assert first["items"][0]["id"] == "run-1"
-    assert first["next_cursor"].startswith("mcp-sdk-v1:")
+    assert first["next_cursor"].startswith("mcp-query-v1:")
     assert second["items"][0]["id"] == "run-2"
     assert second["has_more"] is False
     assert second["next_cursor"] is None
@@ -520,7 +543,8 @@ def test_oversized_or_nonfinite_typed_inputs_fail_before_api(monkeypatch, kwargs
         **kwargs,
     )
 
-    assert result["error"] == "invalid_request"
+    expected_error = "invalid_cursor" if "cursor" in kwargs else "invalid_request"
+    assert result["error"] == expected_error
 
 
 @pytest.mark.parametrize(
@@ -568,7 +592,7 @@ def test_deep_mongo_filter_fails_before_api(monkeypatch):
 
 
 def test_sdk_fallback_cursor_request_ceiling_is_checked_before_api(monkeypatch):
-    fingerprint = query_module._sdk_cursor_fingerprint(
+    fingerprint = query_module._collection_cursor_fingerprint(
         entity_name="entity",
         project_name="project",
         resource="runs",
@@ -579,7 +603,7 @@ def test_sdk_fallback_cursor_request_ceiling_is_checked_before_api(monkeypatch):
         summary_keys=None,
         config_keys=None,
     )
-    cursor = query_module._encode_sdk_cursor("runs", 500, fingerprint)
+    cursor = query_module._encode_query_cursor(kind="sdk_offset", position=500, fingerprint=fingerprint)
     monkeypatch.setattr(
         query_module.WandBApiManager,
         "get_api",
@@ -594,12 +618,12 @@ def test_sdk_fallback_cursor_request_ceiling_is_checked_before_api(monkeypatch):
         cursor=cursor,
     )
 
-    assert result["error"] == "invalid_request"
+    assert result["error"] == "invalid_cursor"
     assert "compatibility window" in result["message"]
 
 
 def test_sdk_fallback_cursor_is_bound_to_original_query(monkeypatch):
-    fingerprint = query_module._sdk_cursor_fingerprint(
+    fingerprint = query_module._collection_cursor_fingerprint(
         entity_name="entity",
         project_name="project",
         resource="runs",
@@ -610,7 +634,7 @@ def test_sdk_fallback_cursor_is_bound_to_original_query(monkeypatch):
         summary_keys=None,
         config_keys=None,
     )
-    cursor = query_module._encode_sdk_cursor("runs", 1, fingerprint)
+    cursor = query_module._encode_query_cursor(kind="sdk_offset", position=1, fingerprint=fingerprint)
     monkeypatch.setattr(
         query_module.WandBApiManager,
         "get_api",
@@ -625,8 +649,119 @@ def test_sdk_fallback_cursor_is_bound_to_original_query(monkeypatch):
         cursor=cursor,
     )
 
-    assert result["error"] == "invalid_request"
+    assert result["error"] == "invalid_cursor"
     assert "does not match" in result["message"]
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"entity_name": "other-entity"},
+        {"project_name": "other-project"},
+        {"filters": {"state": "running"}},
+        {"order": "+created_at"},
+        {"include": ["summary", "config", "system_metrics"]},
+        {"summary_keys": ["loss"]},
+        {"config_keys": ["batch_size"]},
+    ],
+    ids=["entity", "project", "filters", "order", "include", "summary-keys", "config-keys"],
+)
+def test_projected_cursor_is_query_bound_before_api_construction(monkeypatch, changed):
+    cursor = _projected_cursor_for()
+    request = {
+        "entity_name": "entity",
+        "project_name": "project",
+        "resource": "runs",
+        "filters": {"state": "finished"},
+        "order": "-created_at",
+        "include": ["summary", "config"],
+        "summary_keys": ["accuracy"],
+        "config_keys": ["learning_rate"],
+        "limit": 1,
+        "cursor": cursor,
+    }
+    request.update(changed)
+    monkeypatch.setattr(
+        query_module.WandBApiManager,
+        "get_api",
+        lambda: pytest.fail("API must not be created for a mismatched continuation"),
+    )
+
+    result = query_module.query_wandb(**request)
+
+    assert result["error"] == "invalid_cursor"
+    assert "does not match" in result["message"]
+
+
+def test_projected_cursor_is_bound_to_resource_and_report_selector_before_api(monkeypatch):
+    collection_cursor = query_module._encode_query_cursor(
+        kind="projected",
+        position="private-backend-position",
+        fingerprint=query_module._collection_cursor_fingerprint(
+            entity_name="entity",
+            project_name="project",
+            resource="runs",
+            filters=None,
+            order="-created_at",
+            report_name=None,
+            include=frozenset(),
+            summary_keys=None,
+            config_keys=None,
+        ),
+    )
+    report_cursor = _projected_cursor_for(
+        resource="reports",
+        filters=None,
+        report_name="Quarterly report",
+        include=frozenset(),
+        summary_keys=None,
+        config_keys=None,
+    )
+    monkeypatch.setattr(
+        query_module.WandBApiManager,
+        "get_api",
+        lambda: pytest.fail("API must not be created for a mismatched continuation"),
+    )
+
+    cross_resource = query_module.query_wandb(
+        entity_name="entity",
+        project_name="project",
+        resource="sweeps",
+        cursor=collection_cursor,
+    )
+    changed_selector = query_module.query_wandb(
+        entity_name="entity",
+        project_name="project",
+        resource="reports",
+        report_name="Different report",
+        cursor=report_cursor,
+    )
+
+    assert cross_resource["error"] == "invalid_cursor"
+    assert changed_selector["error"] == "invalid_cursor"
+    assert "does not match" in cross_resource["message"]
+    assert "does not match" in changed_selector["message"]
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "private-backend-position",
+        "mcp-query-v1:not-base64!",
+        query_module._encode_query_cursor(kind="projected", position="position", fingerprint="wrong-query"),
+    ],
+    ids=["raw-backend", "malformed-envelope", "wrong-fingerprint"],
+)
+def test_malformed_or_unbound_typed_cursors_fail_before_api(monkeypatch, cursor):
+    monkeypatch.setattr(
+        query_module.WandBApiManager,
+        "get_api",
+        lambda: pytest.fail("API must not be created for an invalid continuation"),
+    )
+
+    result = query_module.query_wandb("entity", "project", "runs", cursor=cursor)
+
+    assert result["error"] == "invalid_cursor"
 
 
 def test_filtered_report_cursor_is_validated_before_api_construction(monkeypatch):
@@ -658,7 +793,7 @@ def test_filtered_report_cursor_is_validated_before_api_construction(monkeypatch
         report_name="Release report",
         limit=1,
     )
-    assert first["next_cursor"].startswith("mcp-report-v1:")
+    assert first["next_cursor"].startswith("mcp-query-v1:")
 
     monkeypatch.setattr(
         query_module.WandBApiManager,
@@ -696,11 +831,11 @@ def test_filtered_report_cursor_is_validated_before_api_construction(monkeypatch
         cursor=first["next_cursor"],
     )
 
-    assert mismatch["error"] == "invalid_request"
+    assert mismatch["error"] == "invalid_cursor"
     assert "does not match" in mismatch["message"]
-    assert malformed["error"] == "invalid_request"
+    assert malformed["error"] == "invalid_cursor"
     assert "not a valid" in malformed["message"]
-    assert missing_report_name["error"] == "invalid_request"
-    assert "original report_name" in missing_report_name["message"]
-    assert cross_resource["error"] == "invalid_request"
-    assert "resource='reports'" in cross_resource["message"]
+    assert missing_report_name["error"] == "invalid_cursor"
+    assert "does not match" in missing_report_name["message"]
+    assert cross_resource["error"] == "invalid_cursor"
+    assert "does not match" in cross_resource["message"]

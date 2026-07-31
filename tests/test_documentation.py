@@ -16,6 +16,7 @@ from wandb_mcp_server.server import register_tools
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 README = REPOSITORY_ROOT / "README.md"
+QUERY_CAPABILITIES = REPOSITORY_ROOT / "docs" / "query-capabilities.md"
 FEATURE_FLAGS = (
     "WANDB_MCP_ENABLE_RAW_GRAPHQL",
     "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
@@ -76,3 +77,50 @@ def test_relative_documentation_links_resolve():
                 broken.append(f"{path.relative_to(REPOSITORY_ROOT)} -> {target}")
 
     assert not broken, "Broken relative documentation links:\n" + "\n".join(broken)
+
+
+def test_every_former_named_graphql_example_has_a_typed_v040_route():
+    text = QUERY_CAPABILITIES.read_text()
+    route_rows = dict(
+        re.findall(
+            r"^\| `([^`]+)` \| `([^`]+)` \|",
+            text,
+            flags=re.MULTILINE,
+        )
+    )
+
+    assert route_rows == {
+        "MinimalRunIdVsDisplayName": "query_wandb_tool",
+        "GetProjectInfo": "query_wandb_tool",
+        "GetSortedRuns": "query_wandb_tool",
+        "GetFilteredRuns": "query_wandb_tool",
+        "GetRunByDisplayName": "query_wandb_tool",
+    }
+
+
+def test_query_capability_matrix_routes_typed_specialized_and_raw_reads():
+    text = QUERY_CAPABILITIES.read_text()
+
+    for typed_route in (
+        'query_wandb_tool(resource="project")',
+        'query_wandb_tool(resource="run", run_id=...)',
+        'query_wandb_tool(resource="runs", filters=..., order=...)',
+        'query_wandb_tool(resource="sweep"|"sweeps")',
+        'query_wandb_tool(resource="reports", report_name=...)',
+    ):
+        assert f"`{typed_route}`" in text
+
+    for specialized_tool in (
+        "get_run_history_tool",
+        "list_artifact_versions_tool",
+        "get_artifact_details_tool",
+        "list_registries_tool",
+        "list_registry_collections_tool",
+        "list_wandb_automations_tool",
+        "list_wandb_integrations_tool",
+    ):
+        assert f"`{specialized_tool}`" in text
+
+    raw_rows = [line for line in text.splitlines() if line.startswith("|") and "query_wandb_graphql_tool" in line]
+    assert len(raw_rows) == 4
+    assert all(line.rstrip().endswith("| Yes |") for line in raw_rows)

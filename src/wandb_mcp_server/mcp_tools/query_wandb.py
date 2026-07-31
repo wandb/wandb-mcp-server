@@ -8,6 +8,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from itertools import islice
@@ -31,6 +32,7 @@ from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_selective_reads import (
     ProjectedReportCursorError,
     SelectiveReadUnavailable,
+    fetch_project_metadata,
     fetch_projected_reports,
     fetch_projected_run,
     fetch_projected_runs,
@@ -106,7 +108,9 @@ response_mode : "items" | "count", optional
     "items" returns bounded resources. "count" is supported for resource="runs"
     and returns only the exact server-side matching count.
 cursor : str, optional
-    Opaque continuation cursor returned by a previous collection response.
+    Opaque continuation cursor returned by a previous collection response. Reuse
+    it only with the same resource, scope, filters, ordering, selector, and field
+    projection. The next page may request a different limit.
 
 Returns
 -------
@@ -133,7 +137,7 @@ _JSON_MAX_MAPPING_KEYS = 500
 _JSON_MAX_LIST_ITEMS = 500
 _JSON_MAX_STRING_CHARS = 16_000
 _SDK_RUN_CACHE_LOCK = threading.Lock()
-_SDK_CURSOR_PREFIX = "mcp-sdk-v1:"
+_QUERY_CURSOR_PREFIX = "mcp-query-v1:"
 _MAX_SDK_FALLBACK_REQUESTS = 10
 _MAX_TYPED_INPUT_BYTES = 64 * 1024
 _MAX_CURSOR_BYTES = 4 * 1024
@@ -146,7 +150,19 @@ class WandBQueryValidationError(ValueError):
     """Raised before any W&B client is obtained for an invalid request."""
 
 
-def _sdk_cursor_fingerprint(
+class WandBCursorValidationError(WandBQueryValidationError):
+    """Raised before client construction for an invalid typed continuation."""
+
+
+@dataclass(frozen=True)
+class _QueryCursor:
+    """Decoded position from an opaque, query-bound continuation token."""
+
+    kind: Literal["projected", "sdk_offset"]
+    position: str | int
+
+
+def _collection_cursor_fingerprint(
     *,
     entity_name: str,
     project_name: str,
@@ -158,7 +174,7 @@ def _sdk_cursor_fingerprint(
     summary_keys: Optional[List[str]],
     config_keys: Optional[List[str]],
 ) -> str:
-    """Bind compatibility offsets to the collection query that created them."""
+    """Bind every collection position to the query that created it."""
     canonical = json.dumps(
         {
             "entity": entity_name,
@@ -168,8 +184,8 @@ def _sdk_cursor_fingerprint(
             "order": order,
             "report_name": report_name,
             "include": sorted(include),
-            "summary_keys": sorted(summary_keys or ()),
-            "config_keys": sorted(config_keys or ()),
+            "summary_keys": summary_keys,
+            "config_keys": config_keys,
         },
         ensure_ascii=False,
         allow_nan=False,
@@ -179,32 +195,44 @@ def _sdk_cursor_fingerprint(
     return hashlib.sha256(canonical).hexdigest()[:24]
 
 
-def _encode_sdk_cursor(resource: str, offset: int, fingerprint: str) -> str:
+def _encode_query_cursor(*, kind: Literal["projected", "sdk_offset"], position: str | int, fingerprint: str) -> str:
+    """Encode a backend cursor or compatibility offset without exposing it."""
     payload = json.dumps(
-        {"resource": resource, "offset": offset, "query": fingerprint},
+        {"kind": kind, "position": position, "query": fingerprint},
         separators=(",", ":"),
         sort_keys=True,
-    ).encode()
-    return _SDK_CURSOR_PREFIX + base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    ).encode("utf-8")
+    return _QUERY_CURSOR_PREFIX + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
-def _decode_sdk_cursor(cursor: Optional[str], resource: str, fingerprint: str) -> Optional[int]:
-    if cursor is None or not cursor.startswith(_SDK_CURSOR_PREFIX):
+def _decode_query_cursor(cursor: Optional[str], fingerprint: str) -> Optional[_QueryCursor]:
+    """Decode and validate a continuation before constructing a W&B client."""
+    if cursor is None:
         return None
-    encoded = cursor.removeprefix(_SDK_CURSOR_PREFIX)
+    if not cursor.startswith(_QUERY_CURSOR_PREFIX):
+        raise WandBCursorValidationError("cursor is not a valid typed W&B continuation")
+    encoded = cursor.removeprefix(_QUERY_CURSOR_PREFIX)
     try:
         padding = "=" * (-len(encoded) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(encoded + padding))
-        offset = payload["offset"]
-        cursor_resource = payload["resource"]
-        cursor_fingerprint = payload["query"]
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        raise WandBQueryValidationError("cursor is not a valid MCP SDK continuation") from None
-    if cursor_resource != resource or isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-        raise WandBQueryValidationError("cursor is not valid for this collection resource")
-    if cursor_fingerprint != fingerprint:
-        raise WandBQueryValidationError("cursor does not match this collection query")
-    return offset
+        raw = base64.b64decode((encoded + padding).encode("ascii"), altchars=b"-_", validate=True)
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError, json.JSONDecodeError):
+        raise WandBCursorValidationError("cursor is not a valid typed W&B continuation") from None
+    if not isinstance(payload, Mapping) or set(payload) != {"kind", "position", "query"}:
+        raise WandBCursorValidationError("cursor is not a valid typed W&B continuation")
+    kind = payload.get("kind")
+    position = payload.get("position")
+    if kind == "projected":
+        if not isinstance(position, str) or not position:
+            raise WandBCursorValidationError("cursor contains an invalid projected position")
+    elif kind == "sdk_offset":
+        if isinstance(position, bool) or not isinstance(position, int) or position < 0:
+            raise WandBCursorValidationError("cursor contains an invalid SDK offset")
+    else:
+        raise WandBCursorValidationError("cursor contains an unsupported continuation kind")
+    if payload.get("query") != fingerprint:
+        raise WandBCursorValidationError("cursor does not match this collection query")
+    return _QueryCursor(kind=kind, position=position)
 
 
 def _validate_text_bound(name: str, value: str, maximum_bytes: int) -> None:
@@ -248,7 +276,7 @@ def _validate_sdk_fallback_window(offset: int, applied_limit: int) -> None:
     page_size = min(applied_limit, MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE)
     requests = math.ceil((offset + applied_limit + 1) / max(1, page_size))
     if requests > _MAX_SDK_FALLBACK_REQUESTS:
-        raise WandBQueryValidationError(
+        raise WandBCursorValidationError(
             "cursor exceeds the bounded SDK compatibility window; restart the query "
             "or use a backend that supports projected continuation"
         )
@@ -677,13 +705,14 @@ def _validate_request(
     if response_mode == "count" and resource != "runs":
         raise WandBQueryValidationError("response_mode='count' is supported only for resource='runs'")
     if cursor is not None and (not isinstance(cursor, str) or not cursor.strip()):
-        raise WandBQueryValidationError("cursor must be a non-empty string")
+        raise WandBCursorValidationError("cursor must be a non-empty string")
     if cursor is not None:
-        _validate_text_bound("cursor", cursor, _MAX_CURSOR_BYTES)
+        if len(cursor.encode("utf-8")) > _MAX_CURSOR_BYTES:
+            raise WandBCursorValidationError(f"cursor exceeds the {_MAX_CURSOR_BYTES}-byte limit")
     if cursor is not None and resource not in {"runs", "sweeps", "reports"}:
-        raise WandBQueryValidationError("cursor is supported only for collection resources")
+        raise WandBCursorValidationError("cursor is supported only for collection resources")
     if cursor is not None and response_mode != "items":
-        raise WandBQueryValidationError("cursor is not supported with response_mode='count'")
+        raise WandBCursorValidationError("cursor is not supported with response_mode='count'")
     if include is not None and (
         not isinstance(include, list)
         or len(include) > 20
@@ -829,6 +858,15 @@ def _decorate_projected_run(item: Dict[str, Any]) -> Dict[str, Any]:
     return _json_safe(item)
 
 
+def _decorate_projected_project(
+    item: Dict[str, Any],
+    entity_name: str,
+    project_name: str,
+) -> Dict[str, Any]:
+    item["url"] = public_wandb_url(entity_name, project_name)
+    return _json_safe(item)
+
+
 def _decorate_projected_sweep(item: Dict[str, Any]) -> Dict[str, Any]:
     sweep_id = item.get("id")
     if sweep_id:
@@ -939,7 +977,7 @@ def query_wandb(
             response_mode,
             cursor,
         )
-        sdk_cursor_fingerprint = _sdk_cursor_fingerprint(
+        cursor_fingerprint = _collection_cursor_fingerprint(
             entity_name=entity_name,
             project_name=project_name,
             resource=resource,
@@ -950,22 +988,39 @@ def query_wandb(
             summary_keys=summary_keys,
             config_keys=config_keys,
         )
-        sdk_fallback_offset = _decode_sdk_cursor(cursor, resource, sdk_cursor_fingerprint)
-        if cursor is not None and is_projected_report_cursor(cursor) and (resource != "reports" or report_name is None):
-            raise WandBQueryValidationError(
+        continuation = _decode_query_cursor(cursor, cursor_fingerprint)
+        projected_cursor = (
+            str(continuation.position) if continuation is not None and continuation.kind == "projected" else None
+        )
+        sdk_fallback_offset = (
+            int(continuation.position) if continuation is not None and continuation.kind == "sdk_offset" else None
+        )
+        if (
+            projected_cursor is not None
+            and is_projected_report_cursor(projected_cursor)
+            and (resource != "reports" or report_name is None)
+        ):
+            raise WandBCursorValidationError(
                 "filtered report cursor requires resource='reports' and the original report_name"
             )
-        if cursor is not None and resource == "reports" and report_name is not None and sdk_fallback_offset is None:
+        if projected_cursor is not None and resource == "reports" and report_name is not None:
             try:
                 validate_projected_report_cursor(
-                    cursor,
+                    projected_cursor,
                     entity=entity_name,
                     project=project_name,
                     report_name=report_name,
                     include_spec="spec" in include_fields,
                 )
             except ProjectedReportCursorError as exc:
-                raise WandBQueryValidationError(str(exc)) from None
+                raise WandBCursorValidationError(str(exc)) from None
+        if sdk_fallback_offset is not None and (
+            resource == "sweeps" or (resource == "reports" and "spec" not in include_fields)
+        ):
+            raise WandBCursorValidationError("cursor continuation kind is not supported for this collection query")
+    except WandBCursorValidationError as exc:
+        safe_resource = resource if isinstance(resource, str) and resource in _INCLUDE_FIELDS else "unknown"
+        return structured_error("invalid_cursor", str(exc), source="wandb_sdk", resource=safe_resource)
     except WandBQueryValidationError as exc:
         safe_resource = resource if isinstance(resource, str) and resource in _INCLUDE_FIELDS else "unknown"
         return structured_error("invalid_request", str(exc), source="wandb_sdk", resource=safe_resource)
@@ -974,13 +1029,9 @@ def query_wandb(
     applied_limit = min(limit, MCP_MAX_WANDB_QUERY_ITEMS)
     try:
         if sdk_fallback_offset is not None:
-            if resource == "sweeps" or (resource == "reports" and "spec" not in include_fields):
-                raise WandBQueryValidationError(
-                    "this collection does not support SDK fallback cursors; restart with no cursor"
-                )
             _validate_sdk_fallback_window(sdk_fallback_offset, applied_limit)
-    except WandBQueryValidationError as exc:
-        return structured_error("invalid_request", str(exc), source="wandb_sdk", resource=resource)
+    except WandBCursorValidationError as exc:
+        return structured_error("invalid_cursor", str(exc), source="wandb_sdk", resource=resource)
     path = f"{entity_name}/{project_name}"
 
     with track_tool_execution(
@@ -1001,8 +1052,48 @@ def query_wandb(
         try:
             api = WandBApiManager.get_api()
             if resource == "project":
-                project = api.project(project_name, entity=entity_name)
-                return _single_envelope(resource, entity_name, project_name, _serialize_project(project))
+                try:
+                    item = fetch_project_metadata(
+                        api,
+                        entity=entity_name,
+                        project=project_name,
+                    )
+                except SelectiveReadUnavailable as exc:
+                    project = api.project(project_name, entity=entity_name)
+                    with _SDK_RUN_CACHE_LOCK:
+                        flush = getattr(api, "flush", None)
+                        if callable(flush):
+                            flush()
+                        runs = api.runs(
+                            path,
+                            per_page=1,
+                            include_sweeps=False,
+                            lazy=True,
+                        )
+                    item = _serialize_project(project)
+                    item["run_count"] = _collection_total_count(runs)
+                    count_caveat = (
+                        "the exact run count came from the bounded public-SDK count path"
+                        if item["run_count"] is not None
+                        else "the public-SDK fallback could not expose an exact run count"
+                    )
+                    return _single_envelope(
+                        resource,
+                        entity_name,
+                        project_name,
+                        item,
+                        compatibility_caveat=(
+                            f"{exc}; used bounded public-SDK project metadata; {count_caveat}; "
+                            "description may be unavailable because the public SDK does not expose it"
+                        ),
+                    )
+                return _single_envelope(
+                    resource,
+                    entity_name,
+                    project_name,
+                    _decorate_projected_project(item, entity_name, project_name),
+                    source="wandb_selective_read",
+                )
 
             if resource == "run":
                 use_projection = bool(summary_keys or config_keys) and not (
@@ -1100,7 +1191,7 @@ def query_wandb(
                             include_config="config" in include_fields,
                             include_sweep="sweep" in include_fields,
                             include_system_metrics="system_metrics" in include_fields,
-                            cursor=cursor,
+                            cursor=projected_cursor,
                         )
                     except SelectiveReadUnavailable as exc:
                         if cursor is not None:
@@ -1142,7 +1233,15 @@ def query_wandb(
                             projected.has_more,
                             projected.total_count,
                             cursor=cursor,
-                            next_cursor=projected.next_cursor,
+                            next_cursor=(
+                                _encode_query_cursor(
+                                    kind="projected",
+                                    position=projected.next_cursor,
+                                    fingerprint=cursor_fingerprint,
+                                )
+                                if projected.next_cursor is not None
+                                else None
+                            ),
                             source="wandb_selective_read",
                         )
                 else:
@@ -1198,7 +1297,13 @@ def query_wandb(
                     total_count,
                     cursor=cursor,
                     next_cursor=(
-                        _encode_sdk_cursor(resource, offset + len(items), sdk_cursor_fingerprint) if has_more else None
+                        _encode_query_cursor(
+                            kind="sdk_offset",
+                            position=offset + len(items),
+                            fingerprint=cursor_fingerprint,
+                        )
+                        if has_more
+                        else None
                     ),
                     compatibility_caveat=compatibility_caveat,
                 )
@@ -1216,7 +1321,7 @@ def query_wandb(
                         limit=applied_limit,
                         page_size=MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE,
                         include_config="config" in include_fields,
-                        cursor=cursor,
+                        cursor=projected_cursor,
                     )
                 except SelectiveReadUnavailable as exc:
                     return structured_error(
@@ -1235,7 +1340,15 @@ def query_wandb(
                     sweeps.has_more,
                     sweeps.total_count,
                     cursor=cursor,
-                    next_cursor=sweeps.next_cursor,
+                    next_cursor=(
+                        _encode_query_cursor(
+                            kind="projected",
+                            position=sweeps.next_cursor,
+                            fingerprint=cursor_fingerprint,
+                        )
+                        if sweeps.next_cursor is not None
+                        else None
+                    ),
                     source="wandb_selective_read",
                 )
 
@@ -1250,7 +1363,7 @@ def query_wandb(
                     limit=applied_limit,
                     page_size=MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE,
                     include_spec="spec" in include_fields,
-                    cursor=cursor,
+                    cursor=projected_cursor,
                 )
             except SelectiveReadUnavailable as exc:
                 if "spec" not in include_fields:
@@ -1294,7 +1407,13 @@ def query_wandb(
                     None if has_more else offset + len(items),
                     cursor=cursor,
                     next_cursor=(
-                        _encode_sdk_cursor(resource, offset + len(items), sdk_cursor_fingerprint) if has_more else None
+                        _encode_query_cursor(
+                            kind="sdk_offset",
+                            position=offset + len(items),
+                            fingerprint=cursor_fingerprint,
+                        )
+                        if has_more
+                        else None
                     ),
                     compatibility_caveat=f"{exc}; used a small bounded SDK fallback",
                 )
@@ -1308,7 +1427,15 @@ def query_wandb(
                 reports.has_more,
                 reports.total_count,
                 cursor=cursor,
-                next_cursor=reports.next_cursor,
+                next_cursor=(
+                    _encode_query_cursor(
+                        kind="projected",
+                        position=reports.next_cursor,
+                        fingerprint=cursor_fingerprint,
+                    )
+                    if reports.next_cursor is not None
+                    else None
+                ),
                 source="wandb_selective_read",
             )
         except Exception as exc:

@@ -5,6 +5,25 @@ typed read tools below. An administrator can enable
 `WANDB_MCP_ENABLE_RAW_GRAPHQL=true` only for read shapes the typed tools cannot
 represent.
 
+## v0.3 GraphQL example migration
+
+Every named GraphQL example previously documented on `query_wandb_tool` has a
+typed v0.4 route. These calls no longer require callers to construct a GraphQL
+document or JSON-encode filter variables.
+
+Collection `next_cursor` values are opaque and bound to the original resource,
+entity/project, filters, ordering, selector, and field projection. Clients may
+change only the page `limit` when continuing; mismatched reuse returns
+`invalid_cursor` without contacting W&B.
+
+| Former example | v0.4 route | Structured request |
+|---|---|---|
+| `MinimalRunIdVsDisplayName` | `query_wandb_tool` | Use `resource="run", run_id=...` for a short ID, or `resource="runs", filters={"displayName": {"$eq": ...}}` for a display name |
+| `GetProjectInfo` | `query_wandb_tool` | `resource="project"` returns stable project metadata including `description` and `run_count` |
+| `GetSortedRuns` | `query_wandb_tool` | `resource="runs", order=...` with optional `summary_keys` |
+| `GetFilteredRuns` | `query_wandb_tool` | `resource="runs", filters=..., order=..., summary_keys=[...], cursor=...` |
+| `GetRunByDisplayName` | `query_wandb_tool` | `resource="runs", filters={"displayName": {"$eq": ...}}, summary_keys=[...]` |
+
 | Read requirement | Preferred MCP tool | Raw GraphQL needed? |
 |---|---|---|
 | Entity and project discovery | `list_entities_tool`, `query_wandb_entity_projects` | No |
@@ -17,8 +36,8 @@ represent.
 | Sweep lookup/list/config | `query_wandb_tool(resource="sweep"|"sweeps")` | No |
 | Report lookup/list/spec | `query_wandb_tool(resource="reports", report_name=...)`; `report_name` accepts an exact internal name or display title | No |
 | Run metric history | `get_run_history_tool` | No |
-| Artifacts and registries | Artifact and registry tools | No |
-| Automations and integrations | Automation and integration tools | No |
+| Artifacts and registries | `list_artifact_versions_tool`, `get_artifact_details_tool`, `list_registries_tool`, and `list_registry_collections_tool` | No |
+| Automations and integrations | `list_wandb_automations_tool` and `list_wandb_integrations_tool` | No |
 | Schema introspection or unmodeled/custom fields | `query_wandb_graphql_tool` | Yes |
 | Aliases or exact GraphQL response shape | `query_wandb_graphql_tool` | Yes |
 | Cross-resource/compound nesting | `query_wandb_graphql_tool` | Yes |

@@ -17,12 +17,14 @@ from wandb_mcp_server.wandb_selective_reads import (
     PROJECTED_SWEEPS_QUERY,
     PROJECT_COUNTS_QUERY,
     PROJECT_FIELDS_QUERY,
+    PROJECT_METADATA_QUERY,
     REGISTRY_ARTIFACT_VERSIONS_QUERY,
     ProjectedReportCursorError,
     SelectiveReadUnavailable,
     fetch_registry_artifact_versions,
     fetch_project_counts,
     fetch_project_fields,
+    fetch_project_metadata,
     fetch_metric_value_steps,
     fetch_projected_reports,
     fetch_projected_run,
@@ -38,6 +40,16 @@ class FakeServiceApi:
     def execute_graphql(self, query, variables=None):
         variables = variables or {}
         self.calls.append((query, variables))
+        if "MCPProjectMetadata" in query:
+            return {
+                "project": {
+                    "id": "project-id",
+                    "name": variables["project"],
+                    "entityName": variables["entity"],
+                    "description": "Customer project",
+                    "runCount": 41,
+                }
+            }
         if "MCPProjectedRuns" in query:
             summary = {key: 0.9 if key == "accuracy" else 0.2 for key in variables["summaryKeys"]}
             config = {key: {"value": 0.01} for key in variables["configKeys"]}
@@ -202,11 +214,45 @@ def test_every_application_owned_document_is_query_only():
         PROJECTED_SWEEPS_QUERY,
         PROJECT_COUNTS_QUERY,
         PROJECT_FIELDS_QUERY,
+        PROJECT_METADATA_QUERY,
         ARTIFACT_INVENTORY_QUERY,
         METRIC_VALUE_STEPS_QUERY,
         REGISTRY_ARTIFACT_VERSIONS_QUERY,
     ):
         validate_read_only_graphql(document)
+
+
+def test_project_metadata_is_one_fixed_query_only_request():
+    api = FakeApi()
+
+    result = fetch_project_metadata(api, entity="entity", project="project")
+
+    assert result == {
+        "id": "project-id",
+        "name": "project",
+        "entity": "entity",
+        "description": "Customer project",
+        "run_count": 41,
+    }
+    assert api._service_api.calls == [(PROJECT_METADATA_QUERY, {"entity": "entity", "project": "project"})]
+
+
+def test_project_metadata_wraps_transport_incompatibility_for_sdk_fallback():
+    class IncompatibleServiceApi:
+        def __init__(self):
+            self.calls = 0
+
+        def execute_graphql(self, query, variables=None):
+            self.calls += 1
+            raise RuntimeError("field unavailable")
+
+    api = FakeApi()
+    api._service_api = IncompatibleServiceApi()
+
+    with pytest.raises(SelectiveReadUnavailable, match="project metadata query unavailable: RuntimeError"):
+        fetch_project_metadata(api, entity="entity", project="project")
+
+    assert api._service_api.calls == 1
 
 
 def test_projected_collection_fetches_only_requested_fields_in_one_request():
