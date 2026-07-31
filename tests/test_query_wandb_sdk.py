@@ -165,7 +165,8 @@ def test_invalid_requests_do_not_create_api(monkeypatch, kwargs, message):
 
     result = sdk_query.query_wandb(**kwargs)
 
-    assert result["error"] == "invalid_request"
+    expected_error = "invalid_cursor" if "cursor" in kwargs else "invalid_request"
+    assert result["error"] == expected_error
     assert message in result["message"]
 
 
@@ -302,6 +303,91 @@ async def test_public_mcp_schema_dispatches_targeted_summary_keys(fake_api, monk
     )
 
     assert fake_api.calls[0][0:2] == ("runs", "entity/project")
+
+
+@pytest.mark.parametrize(
+    ("example_name", "arguments", "expected_call", "expected_shape"),
+    [
+        (
+            "MinimalRunIdVsDisplayName-run-id",
+            {"resource": "run", "run_id": "run-1"},
+            ("run", "entity/project/run-1"),
+            "item",
+        ),
+        (
+            "MinimalRunIdVsDisplayName-display-name",
+            {"resource": "runs", "filters": {"displayName": {"$eq": "display-run-1"}}, "limit": 1},
+            ("runs", "entity/project"),
+            "items",
+        ),
+        (
+            "GetProjectInfo",
+            {"resource": "project"},
+            ("project", "project", "entity"),
+            "item",
+        ),
+        (
+            "GetSortedRuns",
+            {
+                "resource": "runs",
+                "order": "+summary_metrics.accuracy",
+                "summary_keys": ["accuracy"],
+                "limit": 1,
+            },
+            ("runs", "entity/project"),
+            "items",
+        ),
+        (
+            "GetFilteredRuns",
+            {
+                "resource": "runs",
+                "filters": {"state": "finished", "summary_metrics.accuracy": {"$gt": 0.8}},
+                "order": "-summary_metrics.accuracy",
+                "limit": 1,
+            },
+            ("runs", "entity/project"),
+            "items",
+        ),
+        (
+            "GetRunByDisplayName",
+            {"resource": "runs", "filters": {"displayName": {"$eq": "display-run-1"}}, "limit": 1},
+            ("runs", "entity/project"),
+            "items",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_former_graphql_examples_succeed_through_public_mcp_boundary(
+    fake_api,
+    monkeypatch,
+    example_name,
+    arguments,
+    expected_call,
+    expected_shape,
+):
+    """Keep every former named GraphQL example working through typed MCP input."""
+    monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
+    server = create_mcp_server("stdio")
+    result = await server.call_tool(
+        "query_wandb_tool",
+        {"entity_name": "entity", "project_name": "project", **arguments},
+    )
+
+    assert isinstance(result, tuple), example_name
+    payload = result[1]["result"]
+    assert payload["resource"] == arguments["resource"]
+    assert payload["source"] in {"wandb_sdk", "wandb_selective_read"}
+    assert expected_shape in payload
+    if expected_shape == "item":
+        assert payload["item"]["id"] in {"project-id", "run-1"}
+    else:
+        assert payload["items"][0]["id"] == "run-1"
+
+    call = fake_api.calls[-1]
+    assert call[: len(expected_call)] == expected_call
+    if arguments["resource"] == "runs":
+        assert call[2]["filters"] == arguments.get("filters")
+        assert call[2]["order"] == arguments.get("order", "-created_at")
 
 
 def test_count_mode_uses_public_sdk_without_iterating(fake_api):
@@ -493,7 +579,7 @@ def test_explicit_report_spec_sdk_fallback_cursor_continues(fake_api, monkeypatc
     )
 
     assert first["items"][0]["id"] == "report-1"
-    assert first["next_cursor"].startswith("mcp-sdk-v1:")
+    assert first["next_cursor"].startswith("mcp-query-v1:")
     assert second["items"][0]["id"] == "report-2"
     assert second["total_count"] == 2
     assert second["has_more"] is False
