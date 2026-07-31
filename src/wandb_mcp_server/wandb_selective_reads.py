@@ -98,6 +98,18 @@ query MCPProjectedRun(
 }
 """
 
+PROJECT_METADATA_QUERY = """
+query MCPProjectMetadata($entity: String!, $project: String!) {
+  project(name: $project, entityName: $entity) {
+    id
+    name
+    entityName
+    description
+    runCount
+  }
+}
+"""
+
 PROJECTED_SWEEPS_QUERY = """
 query MCPProjectedSweeps(
   $entity: String!
@@ -615,6 +627,38 @@ def _project_payload(data: Mapping[str, Any]) -> Mapping[str, Any]:
     if not isinstance(project, Mapping):
         raise ValueError("W&B project was not found or is not accessible")
     return project
+
+
+def fetch_project_metadata(api: Any, *, entity: str, project: str) -> dict[str, Any]:
+    """Fetch stable project metadata in one fixed, query-only request."""
+    raise_if_tool_deadline_exceeded()
+    try:
+        data = execute_graphql(
+            api,
+            PROJECT_METADATA_QUERY,
+            {"entity": entity, "project": project},
+        )
+    except Exception as exc:
+        _raise_selective_failure("project metadata query unavailable", exc)
+
+    project_payload = _project_payload(data)
+    project_id = project_payload.get("id")
+    project_name = project_payload.get("name")
+    run_count = project_payload.get("runCount")
+    if not isinstance(project_id, str) or not project_id:
+        raise SelectiveReadUnavailable("project metadata query returned no project id")
+    if not isinstance(project_name, str) or not project_name:
+        raise SelectiveReadUnavailable("project metadata query returned no project name")
+    if isinstance(run_count, bool) or not isinstance(run_count, int) or run_count < 0:
+        raise SelectiveReadUnavailable("project metadata query returned an invalid run count")
+
+    return {
+        "id": project_id,
+        "name": project_name,
+        "entity": project_payload.get("entityName") or entity,
+        "description": project_payload.get("description"),
+        "run_count": run_count,
+    }
 
 
 def fetch_projected_runs(
@@ -1411,6 +1455,7 @@ __all__ = [
     "ARTIFACT_INVENTORY_QUERY",
     "REGISTRY_ARTIFACT_VERSIONS_QUERY",
     "METRIC_VALUE_STEPS_QUERY",
+    "PROJECT_METADATA_QUERY",
     "PROJECTED_RUNS_QUERY",
     "PROJECTED_RUN_QUERY",
     "PROJECTED_SWEEPS_QUERY",
@@ -1427,6 +1472,7 @@ __all__ = [
     "fetch_metric_value_steps",
     "fetch_registry_artifact_versions",
     "fetch_project_counts",
+    "fetch_project_metadata",
     "fetch_project_fields",
     "fetch_projected_run",
     "fetch_projected_runs",

@@ -170,14 +170,82 @@ def test_invalid_requests_do_not_create_api(monkeypatch, kwargs, message):
     assert message in result["message"]
 
 
-def test_project_uses_public_sdk_and_stable_single_envelope(fake_api):
+def test_project_uses_fixed_projection_and_stable_single_envelope(fake_api, monkeypatch):
+    projection_calls = []
+
+    def projected(api, *, entity, project):
+        projection_calls.append((api, entity, project))
+        return {
+            "id": "project-id",
+            "name": project,
+            "entity": entity,
+            "description": "Project description",
+            "run_count": 41,
+        }
+
+    monkeypatch.setattr(sdk_query, "fetch_project_metadata", projected)
+
     result = sdk_query.query_wandb("entity", "project", "project")
 
-    assert fake_api.calls == [("project", "project", "entity")]
-    assert result["source"] == "wandb_sdk"
+    assert projection_calls == [(fake_api, "entity", "project")]
+    assert fake_api.calls == []
+    assert result["source"] == "wandb_selective_read"
     assert result["resource"] == "project"
     assert result["item"]["id"] == "project-id"
+    assert result["item"]["description"] == "Project description"
+    assert result["item"]["run_count"] == 41
+    assert result["item"]["url"] == "https://wandb.ai/entity/project"
     assert result["truncation"] == {"applied": False}
+
+
+def test_project_projection_falls_back_to_two_bounded_public_sdk_reads(fake_api, monkeypatch):
+    monkeypatch.setattr(
+        sdk_query,
+        "fetch_project_metadata",
+        lambda *args, **kwargs: (_ for _ in ()).throw(SelectiveReadUnavailable("projection unavailable")),
+    )
+    fake_api.project_result.description = None
+
+    class CountedRuns:
+        def __len__(self):
+            return 3
+
+    def counted_runs(path, **kwargs):
+        fake_api.calls.append(("runs", path, kwargs))
+        return CountedRuns()
+
+    fake_api.runs = counted_runs
+
+    result = sdk_query.query_wandb("entity", "project", "project")
+
+    assert fake_api.calls == [
+        ("project", "project", "entity"),
+        (
+            "runs",
+            "entity/project",
+            {"per_page": 1, "include_sweeps": False, "lazy": True},
+        ),
+    ]
+    assert result["source"] == "wandb_sdk"
+    assert result["item"]["description"] is None
+    assert result["item"]["run_count"] == 3
+    assert "description may be unavailable" in result["compatibility_caveat"]
+
+
+def test_project_projection_preserves_actionable_upstream_errors_without_sdk_fallback(fake_api, monkeypatch):
+    class UnauthorizedError(RuntimeError):
+        status_code = 401
+
+    def unauthorized(*args, **kwargs):
+        raise UnauthorizedError("secret upstream response")
+
+    monkeypatch.setattr(sdk_query, "fetch_project_metadata", unauthorized)
+
+    result = sdk_query.query_wandb("entity", "project", "project")
+
+    assert result["error"] == "authentication_failed"
+    assert result["message"] == "W&B authentication failed"
+    assert fake_api.calls == []
 
 
 def test_run_includes_summary_by_default_and_requested_details(fake_api):
@@ -323,7 +391,7 @@ async def test_public_mcp_schema_dispatches_targeted_summary_keys(fake_api, monk
         (
             "GetProjectInfo",
             {"resource": "project"},
-            ("project", "project", "entity"),
+            None,
             "item",
         ),
         (
@@ -343,6 +411,7 @@ async def test_public_mcp_schema_dispatches_targeted_summary_keys(fake_api, monk
                 "resource": "runs",
                 "filters": {"state": "finished", "summary_metrics.accuracy": {"$gt": 0.8}},
                 "order": "-summary_metrics.accuracy",
+                "summary_keys": ["accuracy"],
                 "limit": 1,
             },
             ("runs", "entity/project"),
@@ -350,7 +419,12 @@ async def test_public_mcp_schema_dispatches_targeted_summary_keys(fake_api, monk
         ),
         (
             "GetRunByDisplayName",
-            {"resource": "runs", "filters": {"displayName": {"$eq": "display-run-1"}}, "limit": 1},
+            {
+                "resource": "runs",
+                "filters": {"displayName": {"$eq": "display-run-1"}},
+                "summary_keys": ["accuracy"],
+                "limit": 1,
+            },
             ("runs", "entity/project"),
             "items",
         ),
@@ -367,6 +441,20 @@ async def test_former_graphql_examples_succeed_through_public_mcp_boundary(
 ):
     """Keep every former named GraphQL example working through typed MCP input."""
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
+    project_projection_calls = []
+    if arguments["resource"] == "project":
+
+        def projected(api, *, entity, project):
+            project_projection_calls.append((api, entity, project))
+            return {
+                "id": "project-id",
+                "name": project,
+                "entity": entity,
+                "description": "Project description",
+                "run_count": 41,
+            }
+
+        monkeypatch.setattr(sdk_query, "fetch_project_metadata", projected)
     server = create_mcp_server("stdio")
     result = await server.call_tool(
         "query_wandb_tool",
@@ -382,9 +470,16 @@ async def test_former_graphql_examples_succeed_through_public_mcp_boundary(
         assert payload["item"]["id"] in {"project-id", "run-1"}
     else:
         assert payload["items"][0]["id"] == "run-1"
+    if example_name == "GetProjectInfo":
+        assert payload["item"]["description"] == "Project description"
+        assert payload["item"]["run_count"] == 41
+        assert project_projection_calls == [(fake_api, "entity", "project")]
+    if arguments.get("summary_keys"):
+        assert payload["items"][0]["summary"] == {"accuracy": 0.9}
 
-    call = fake_api.calls[-1]
-    assert call[: len(expected_call)] == expected_call
+    if expected_call is not None:
+        call = fake_api.calls[-1]
+        assert call[: len(expected_call)] == expected_call
     if arguments["resource"] == "runs":
         assert call[2]["filters"] == arguments.get("filters")
         assert call[2]["order"] == arguments.get("order", "-created_at")

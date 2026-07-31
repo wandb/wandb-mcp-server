@@ -19,10 +19,10 @@ change only the page `limit` when continuing; mismatched reuse returns
 | Former example | v0.4 route | Structured request |
 |---|---|---|
 | `MinimalRunIdVsDisplayName` | `query_wandb_tool` | Use `resource="run", run_id=...` for a short ID, or `resource="runs", filters={"displayName": {"$eq": ...}}` for a display name |
-| `GetProjectInfo` | `query_wandb_tool` | `resource="project"` |
+| `GetProjectInfo` | `query_wandb_tool` | `resource="project"` returns stable project metadata including `description` and `run_count` |
 | `GetSortedRuns` | `query_wandb_tool` | `resource="runs", order=...` with optional `summary_keys` |
-| `GetFilteredRuns` | `query_wandb_tool` | `resource="runs", filters=..., order=..., cursor=...` |
-| `GetRunByDisplayName` | `query_wandb_tool` | `resource="runs", filters={"displayName": {"$eq": ...}}` |
+| `GetFilteredRuns` | `query_wandb_tool` | `resource="runs", filters=..., order=..., summary_keys=[...], cursor=...` |
+| `GetRunByDisplayName` | `query_wandb_tool` | `resource="runs", filters={"displayName": {"$eq": ...}}, summary_keys=[...]` |
 
 | Read requirement | Preferred MCP tool | Raw GraphQL needed? |
 |---|---|---|

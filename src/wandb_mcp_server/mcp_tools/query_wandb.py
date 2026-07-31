@@ -32,6 +32,7 @@ from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_selective_reads import (
     ProjectedReportCursorError,
     SelectiveReadUnavailable,
+    fetch_project_metadata,
     fetch_projected_reports,
     fetch_projected_run,
     fetch_projected_runs,
@@ -857,6 +858,15 @@ def _decorate_projected_run(item: Dict[str, Any]) -> Dict[str, Any]:
     return _json_safe(item)
 
 
+def _decorate_projected_project(
+    item: Dict[str, Any],
+    entity_name: str,
+    project_name: str,
+) -> Dict[str, Any]:
+    item["url"] = public_wandb_url(entity_name, project_name)
+    return _json_safe(item)
+
+
 def _decorate_projected_sweep(item: Dict[str, Any]) -> Dict[str, Any]:
     sweep_id = item.get("id")
     if sweep_id:
@@ -1042,8 +1052,48 @@ def query_wandb(
         try:
             api = WandBApiManager.get_api()
             if resource == "project":
-                project = api.project(project_name, entity=entity_name)
-                return _single_envelope(resource, entity_name, project_name, _serialize_project(project))
+                try:
+                    item = fetch_project_metadata(
+                        api,
+                        entity=entity_name,
+                        project=project_name,
+                    )
+                except SelectiveReadUnavailable as exc:
+                    project = api.project(project_name, entity=entity_name)
+                    with _SDK_RUN_CACHE_LOCK:
+                        flush = getattr(api, "flush", None)
+                        if callable(flush):
+                            flush()
+                        runs = api.runs(
+                            path,
+                            per_page=1,
+                            include_sweeps=False,
+                            lazy=True,
+                        )
+                    item = _serialize_project(project)
+                    item["run_count"] = _collection_total_count(runs)
+                    count_caveat = (
+                        "the exact run count came from the bounded public-SDK count path"
+                        if item["run_count"] is not None
+                        else "the public-SDK fallback could not expose an exact run count"
+                    )
+                    return _single_envelope(
+                        resource,
+                        entity_name,
+                        project_name,
+                        item,
+                        compatibility_caveat=(
+                            f"{exc}; used bounded public-SDK project metadata; {count_caveat}; "
+                            "description may be unavailable because the public SDK does not expose it"
+                        ),
+                    )
+                return _single_envelope(
+                    resource,
+                    entity_name,
+                    project_name,
+                    _decorate_projected_project(item, entity_name, project_name),
+                    source="wandb_selective_read",
+                )
 
             if resource == "run":
                 use_projection = bool(summary_keys or config_keys) and not (
