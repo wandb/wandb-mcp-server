@@ -26,6 +26,9 @@ Version 0.4.0 makes W&B reads SDK-first, bounded, and workload-aware:
 
 - Run collections return lightweight metadata by default and support targeted
   `summary_keys` and `config_keys` instead of loading every metric.
+- Multi-key run history uses bounded outer-union semantics, so metrics logged
+  at different cadences remain visible instead of requiring every key on the
+  same history row.
 - Shared and Dedicated workload profiles bound collection, history, evaluation,
   and schema reads. Overloaded hosted servers return a retryable `server_busy`
   response instead of creating unbounded W&B API traffic.
@@ -63,7 +66,7 @@ deployment settings, and the complete customer-visible summary.
 | **resolve_trace_roots_tool** | Resolve spans to their root traces | *"Find the root traces for these calls"* |
 | **query_wandb_tool** | Query projects, runs, sweeps, and reports through bounded W&B read APIs | *"Show me runs with loss < 0.1"* |
 | **probe_project_tool** | Discover useful project fields and bounded samples | *"What metrics and config fields are available?"* |
-| **get_run_history_tool** | Sampled time-series metric data | *"Show loss curve for run abc123"* |
+| **get_run_history_tool** | Bounded time-series data with sparse, multi-key outer-union sampling | *"Show loss and validation-loss curves for run abc123"* |
 | **compare_runs_tool** | Compare selected metrics and configuration across runs | *"Compare these three training runs"* |
 | **diagnose_run_tool** | Diagnose a run using bounded metadata and history reads | *"Why did this run diverge?"* |
 | **summarize_evaluation_tool** | Summarize bounded evaluation results with coverage metadata | *"Summarize this evaluation"* |
@@ -106,6 +109,17 @@ Recommended deployment presets:
 (`entity_name`, `project_name`, `resource`, filters, ordering, and identifiers) instead
 of a GraphQL document. Existing raw-query callers must explicitly enable and call
 `query_wandb_graphql_tool`.
+
+**Run history semantics:** `get_run_history_tool` outer-joins requested metric
+series by `_step`, falling back to the selected x-axis when `_step` is absent, so keys logged in separate
+`wandb.log()` calls do not disappear. `samples` is the total final-row budget
+across all requested keys, not a per-key allowance. For bounded step ranges,
+rows containing none of the requested values are removed before deterministic,
+key-aware sampling; sparse series are retained in full when the budget permits.
+Additive diagnostics report `requested_keys`, `matching_rows`, per-key observed
+and returned counts, missing keys, source truncation, and any keys omitted by limits. This path
+uses a fixed application-owned query-only projection, accepts no caller-supplied
+GraphQL, and works with `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`.
 
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
 

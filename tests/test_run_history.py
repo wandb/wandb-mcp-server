@@ -2,11 +2,16 @@
 
 import asyncio
 import json
+import weakref
+from collections.abc import Sequence
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import wandb
 from mcp.server.fastmcp import FastMCP
+from wandb.apis.public.history import HistoryScan
+from wandb.proto import wandb_api_pb2 as pb
 
 from wandb_mcp_server.mcp_tools.run_history import (
     GET_RUN_HISTORY_TOOL_DESCRIPTION,
@@ -15,6 +20,117 @@ from wandb_mcp_server.mcp_tools.run_history import (
 )
 from wandb_mcp_server.server import register_tools
 from wandb_mcp_server.wandb_selective_reads import SelectiveReadUnavailable
+
+
+class _SampledHistoryServiceApi:
+    """Fake the W&B ServiceApi while keeping sampledHistory's real envelope."""
+
+    def __init__(self, series):
+        self.series = series
+        self.calls = []
+
+    def execute_graphql(self, query, variables=None):
+        self.calls.append((query, dict(variables or {})))
+        return {"project": {"run": {"sampledHistory": self.series}}}
+
+
+def _api_with_run_and_sampled_series(run, series):
+    service_api = _SampledHistoryServiceApi(series)
+    api = MagicMock()
+    api.run.return_value = run
+    api._service_api = service_api
+    return api, service_api
+
+
+class _HistoryScanService:
+    """Fake the service transport below W&B 0.28's real HistoryScan."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+        self.init_calls = []
+        self.cleanup_calls = 0
+
+    def send_api_request(self, request):
+        history_request = request.read_run_history_request
+        kind = history_request.WhichOneof("request")
+        if kind == "scan_run_history_init":
+            init = history_request.scan_run_history_init
+            self.init_calls.append(
+                {
+                    "entity": init.entity,
+                    "project": init.project,
+                    "run_id": init.run_id,
+                    "keys": list(init.keys),
+                }
+            )
+            return pb.ApiResponse(
+                read_run_history_response=pb.ReadRunHistoryResponse(
+                    scan_run_history_init=pb.ScanRunHistoryInitResponse(request_id=7)
+                )
+            )
+        if kind == "scan_run_history_cleanup":
+            self.cleanup_calls += 1
+            return pb.ApiResponse(
+                read_run_history_response=pb.ReadRunHistoryResponse(
+                    scan_run_history_cleanup=pb.ScanRunHistoryCleanupResponse()
+                )
+            )
+
+        page = history_request.scan_run_history
+        self.calls.append((page.min_step, page.max_step))
+        history_rows = []
+        for row in self.rows:
+            if not (page.min_step <= row.get("_step", -1) < page.max_step):
+                continue
+            history_rows.append(
+                pb.HistoryRow(
+                    history_items=[
+                        pb.ParquetHistoryItem(key=key, value_json=json.dumps(value)) for key, value in row.items()
+                    ]
+                )
+            )
+        return pb.ApiResponse(
+            read_run_history_response=pb.ReadRunHistoryResponse(
+                run_history=pb.RunHistoryResponse(history_rows=history_rows)
+            )
+        )
+
+    def finalize(self, owner, request):
+        """Mirror the lifecycle hook added to W&B's public ServiceApi."""
+        weakref.finalize(owner, self.send_api_request, request)
+
+
+def _wandb_history_scan(rows, *, min_step, max_step, keys, page_size):
+    """Construct the actual public paginator over a fake protobuf transport."""
+    transport = _HistoryScanService(rows)
+    run = SimpleNamespace(entity="e", project="p", id="run1")
+    scan = HistoryScan(
+        run,
+        service_api=transport,
+        min_step=min_step,
+        max_step=max_step,
+        keys=keys,
+        page_size=page_size,
+        use_cache=False,
+    )
+    return scan, transport
+
+
+class _GuardedLargeSequence(Sequence):
+    """Sequence that fails if a sanitizer tries to materialize every item."""
+
+    def __init__(self):
+        self.accesses = 0
+
+    def __len__(self):
+        return 1_000_000
+
+    def __getitem__(self, index):
+        if index >= 101:
+            raise AssertionError("history sanitizer read past its bounded prefix")
+        self.accesses += 1
+        return index
 
 
 class TestRunHistoryDescription:
@@ -50,14 +166,21 @@ class TestGetRunHistory:
         mock_run = MagicMock()
         mock_run.name = "my-run"
         mock_run.lastHistoryStep = 1000
-        mock_run.history.return_value = [
-            {"_step": 0, "loss": 2.5, "accuracy": 0.1},
-            {"_step": 100, "loss": 1.0, "accuracy": 0.5},
-            {"_step": 200, "loss": 0.5, "accuracy": 0.8},
-        ]
-
-        mock_api = MagicMock()
-        mock_api.run.return_value = mock_run
+        mock_api, service_api = _api_with_run_and_sampled_series(
+            mock_run,
+            [
+                [
+                    {"_step": 0, "loss": 2.5},
+                    {"_step": 100, "loss": 1.0},
+                    {"_step": 200, "loss": 0.5},
+                ],
+                [
+                    {"_step": 0, "accuracy": 0.1},
+                    {"_step": 100, "accuracy": 0.5},
+                    {"_step": 200, "accuracy": 0.8},
+                ],
+            ],
+        )
         mock_api_mgr.get_api.return_value = mock_api
         mock_wandb_mod.errors = wandb.errors
 
@@ -71,6 +194,8 @@ class TestGetRunHistory:
         assert "accuracy" in result["keys_returned"]
         mock_api_mgr.get_api.assert_called_once_with("fake_key_12345678901234567890")
         mock_wandb_mod.Api.assert_not_called()
+        mock_run.history.assert_not_called()
+        assert len(service_api.calls) == 1
 
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
@@ -357,6 +482,444 @@ class TestGetRunHistory:
         assert result["keys_returned"] == []
 
 
+class TestCrossCadenceHistory:
+    """Regression coverage for metrics logged in separate wandb.log calls (#136)."""
+
+    @staticmethod
+    def _configure(mock_wandb_mod, mock_api_mgr, series, *, last_step=1000):
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+        run = MagicMock()
+        run.name = "cross-cadence"
+        run.lastHistoryStep = last_step
+        api, service_api = _api_with_run_and_sampled_series(run, series)
+        mock_api_mgr.get_api.return_value = api
+        mock_wandb_mod.errors = wandb.errors
+        return run, service_api
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_different_cadences_are_outer_joined(self, mock_wandb_mod, mock_api_mgr):
+        run, service_api = self._configure(
+            mock_wandb_mod,
+            mock_api_mgr,
+            [
+                [{"_step": 0, "loss": 1.0}, {"_step": 2, "loss": 0.5}],
+                [{"_step": 1, "eval/loss": 0.9}, {"_step": 3, "eval/loss": 0.4}],
+            ],
+            last_step=3,
+        )
+
+        result = json.loads(get_run_history("e", "p", "run1", keys=["loss", "eval/loss"], samples=500))
+
+        assert result["rows"] == [
+            {"_step": 0, "loss": 1.0},
+            {"_step": 1, "eval/loss": 0.9},
+            {"_step": 2, "loss": 0.5},
+            {"_step": 3, "eval/loss": 0.4},
+        ]
+        assert result["requested_keys"] == ["loss", "eval/loss"]
+        assert result["join"] == "outer"
+        assert result["matching_rows"] == 4
+        assert result["key_row_counts"] == {
+            "loss": {"observed": 2, "returned": 2},
+            "eval/loss": {"observed": 2, "returned": 2},
+        }
+        assert result["missing_keys"] == []
+        assert result["keys_omitted_by_limits"] == []
+        assert result["key_counts_exact"] is False
+        mock_api_mgr.get_api.return_value.run.assert_called_once_with("e/p/run1")
+        run.history.assert_not_called()
+        assert len(service_api.calls) == 1
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_same_and_partially_overlapping_cadences_align_by_step(
+        self,
+        mock_wandb_mod,
+        mock_api_mgr,
+    ):
+        self._configure(
+            mock_wandb_mod,
+            mock_api_mgr,
+            [
+                [
+                    {"_step": 0, "loss": 1.0},
+                    {"_step": 1, "loss": 0.8},
+                    {"_step": 2, "loss": 0.6},
+                ],
+                [
+                    {"_step": 1, "accuracy": 0.5},
+                    {"_step": 2, "accuracy": 0.7},
+                    {"_step": 3, "accuracy": 0.9},
+                ],
+            ],
+            last_step=3,
+        )
+
+        result = json.loads(get_run_history("e", "p", "run1", keys=["loss", "accuracy"], samples=10))
+
+        assert result["rows"] == [
+            {"_step": 0, "loss": 1.0},
+            {"_step": 1, "loss": 0.8, "accuracy": 0.5},
+            {"_step": 2, "loss": 0.6, "accuracy": 0.7},
+            {"_step": 3, "accuracy": 0.9},
+        ]
+        assert result["matching_rows"] == 4
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_duplicate_axis_values_preserve_occurrence_order(self, mock_wandb_mod, mock_api_mgr):
+        self._configure(
+            mock_wandb_mod,
+            mock_api_mgr,
+            [
+                [{"_step": 0, "loss": 1.0}, {"_step": 0, "loss": 0.8}],
+                [{"_step": 0, "accuracy": 0.4}, {"_step": 0, "accuracy": 0.6}],
+            ],
+            last_step=0,
+        )
+
+        result = json.loads(get_run_history("e", "p", "run1", keys=["loss", "accuracy"], samples=10))
+
+        assert result["rows"] == [
+            {"_step": 0, "loss": 1.0, "accuracy": 0.4},
+            {"_step": 0, "loss": 0.8, "accuracy": 0.6},
+        ]
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_custom_axis_is_the_fallback_join_key(self, mock_wandb_mod, mock_api_mgr):
+        self._configure(
+            mock_wandb_mod,
+            mock_api_mgr,
+            [
+                [{"epoch": 1, "loss": 1.0}, {"epoch": 2, "loss": 0.5}],
+                [{"epoch": 1, "accuracy": 0.4}, {"epoch": 3, "accuracy": 0.8}],
+            ],
+            last_step=3,
+        )
+
+        result = json.loads(
+            get_run_history(
+                "e",
+                "p",
+                "run1",
+                keys=["loss", "accuracy"],
+                samples=10,
+                x_axis="epoch",
+            )
+        )
+
+        assert result["rows"] == [
+            {"epoch": 1, "loss": 1.0, "accuracy": 0.4},
+            {"epoch": 2, "loss": 0.5},
+            {"epoch": 3, "accuracy": 0.8},
+        ]
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_custom_axis_sorts_when_step_is_present_but_unobserved(
+        self,
+        mock_wandb_mod,
+        mock_api_mgr,
+    ):
+        self._configure(
+            mock_wandb_mod,
+            mock_api_mgr,
+            [
+                [
+                    {"_step": None, "epoch": 2, "loss": 0.5},
+                    {"_step": None, "epoch": 1, "loss": 1.0},
+                ],
+                [
+                    {"_step": float("nan"), "epoch": 2, "accuracy": 0.8},
+                    {"_step": float("nan"), "epoch": 1, "accuracy": 0.4},
+                ],
+            ],
+            last_step=2,
+        )
+
+        result = json.loads(
+            get_run_history(
+                "e",
+                "p",
+                "run1",
+                keys=["loss", "accuracy"],
+                samples=10,
+                x_axis="epoch",
+            )
+        )
+
+        assert result["rows"] == [
+            {"epoch": 1, "loss": 1.0, "accuracy": 0.4},
+            {"epoch": 2, "loss": 0.5, "accuracy": 0.8},
+        ]
+        assert result["coverage"] == {
+            "first_x": 1.0,
+            "last_x": 2.0,
+            "requested_min_step": None,
+            "requested_max_step": None,
+            "target_x": None,
+            "tolerance": None,
+        }
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_duplicate_and_missing_keys_have_truthful_metadata(self, mock_wandb_mod, mock_api_mgr):
+        _, service_api = self._configure(
+            mock_wandb_mod,
+            mock_api_mgr,
+            [[{"_step": 0, "loss": 1.0}], []],
+            last_step=0,
+        )
+
+        result = json.loads(get_run_history("e", "p", "run1", keys=["loss", "missing", "loss"], samples=10))
+
+        assert result["requested_keys"] == ["loss", "missing"]
+        assert result["rows"] == [{"_step": 0, "loss": 1.0}]
+        assert result["missing_keys"] == ["missing"]
+        assert result["key_row_counts"] == {
+            "loss": {"observed": 1, "returned": 1},
+            "missing": {"observed": 0, "returned": 0},
+        }
+        assert len(service_api.calls) == 1
+        assert len(service_api.calls[0][1]["specs"]) == 2
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_tiny_budget_reports_the_unrepresented_key(self, mock_wandb_mod, mock_api_mgr):
+        self._configure(
+            mock_wandb_mod,
+            mock_api_mgr,
+            [
+                [{"_step": 0, "loss": 1.0}],
+                [{"_step": 1, "accuracy": 0.5}],
+            ],
+            last_step=1,
+        )
+
+        result = json.loads(get_run_history("e", "p", "run1", keys=["loss", "accuracy"], samples=1))
+
+        assert len(result["rows"]) == 1
+        assert result["matching_rows"] == 2
+        assert len(result["keys_omitted_by_limits"]) == 1
+        assert set(result["keys_omitted_by_limits"]) < {"loss", "accuracy"}
+        assert result["key_counts_exact"] is False
+
+    @pytest.mark.parametrize("status_code", [429, 503])
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_overload_is_mapped_to_retryable_server_busy(
+        self,
+        mock_wandb_mod,
+        mock_api_mgr,
+        status_code,
+    ):
+        from wandb_mcp_server.api_client import WandBServerBusy
+
+        run, service_api = self._configure(mock_wandb_mod, mock_api_mgr, [[], []])
+        error = RuntimeError("W&B capacity exhausted")
+        error.response = SimpleNamespace(
+            status_code=status_code,
+            headers={"Retry-After": "2"},
+            reason="capacity exhausted",
+            text="capacity exhausted",
+        )
+        service_api.execute_graphql = MagicMock(side_effect=error)
+
+        with pytest.raises(WandBServerBusy) as caught:
+            get_run_history("e", "p", "run1", keys=["loss", "eval/loss"])
+
+        assert caught.value.status_code == status_code
+        assert caught.value.retry_after_ms == 2_000
+        assert service_api.execute_graphql.call_count == 1
+        run.history.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RuntimeError("HTTP 401 unauthorized"),
+            TimeoutError("history request timed out"),
+        ],
+    )
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_authentication_and_timeout_fail_without_fallback(
+        self,
+        mock_wandb_mod,
+        mock_api_mgr,
+        error,
+    ):
+        run, service_api = self._configure(mock_wandb_mod, mock_api_mgr, [[], []])
+        service_api.execute_graphql = MagicMock(side_effect=error)
+
+        with pytest.raises(ValueError, match="Failed to fetch history"):
+            get_run_history("e", "p", "run1", keys=["loss", "eval/loss"])
+
+        assert service_api.execute_graphql.call_count == 1
+        run.history.assert_not_called()
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_cancellation_propagates_without_fallback(self, mock_wandb_mod, mock_api_mgr):
+        run, service_api = self._configure(mock_wandb_mod, mock_api_mgr, [[], []])
+        service_api.execute_graphql = MagicMock(side_effect=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
+            get_run_history("e", "p", "run1", keys=["loss", "eval/loss"])
+
+        assert service_api.execute_graphql.call_count == 1
+        run.history.assert_not_called()
+
+
+class TestSparseRangeHistory:
+    @staticmethod
+    def _configure(mock_wandb_mod, mock_api_mgr, rows, *, last_step):
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+        run = MagicMock()
+        run.name = "sparse-range"
+        run.lastHistoryStep = last_step
+        scan_state = {}
+
+        def scan_history(**kwargs):
+            scan, transport = _wandb_history_scan(
+                rows,
+                min_step=kwargs.get("min_step", 0),
+                max_step=kwargs.get("max_step", last_step + 1),
+                keys=kwargs.get("keys"),
+                page_size=kwargs.get("page_size", 1_000),
+            )
+            scan_state["scan"] = scan
+            scan_state["transport"] = transport
+            return scan
+
+        run.scan_history.side_effect = scan_history
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=run))
+        mock_wandb_mod.errors = wandb.errors
+        return run, scan_state
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_range_filters_step_only_shells_before_sampling(self, mock_wandb_mod, mock_api_mgr):
+        rows = [
+            *({"_step": step, "loss": float(step)} for step in range(200)),
+            *({"_step": step, "eval/loss": float(step)} for step in range(200, 400)),
+            *({"_step": step} for step in range(400, 600)),
+        ]
+        run, scan_state = self._configure(mock_wandb_mod, mock_api_mgr, rows, last_step=599)
+
+        result = json.loads(
+            get_run_history(
+                "e",
+                "p",
+                "run1",
+                keys=["loss", "eval/loss"],
+                samples=500,
+                min_step=0,
+                max_step=599,
+            )
+        )
+
+        assert result["sampled_points"] == 400
+        assert result["matching_rows"] == 400
+        assert result["rows_scanned"] == 600
+        assert all("loss" in row or "eval/loss" in row for row in result["rows"])
+        assert result["key_row_counts"] == {
+            "loss": {"observed": 200, "returned": 200},
+            "eval/loss": {"observed": 200, "returned": 200},
+        }
+        assert result["key_counts_exact"] is True
+        assert result["keys_omitted_by_limits"] == []
+        assert run.scan_history.call_args.kwargs["keys"] == ["_step", "loss", "eval/loss"]
+        assert scan_state["transport"].init_calls == [
+            {
+                "entity": "e",
+                "project": "p",
+                "run_id": "run1",
+                "keys": ["_step", "loss", "eval/loss"],
+            }
+        ]
+        assert scan_state["transport"].calls == [(0, 600)]
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_sparse_series_survives_dense_series_sampling(self, mock_wandb_mod, mock_api_mgr):
+        rows = []
+        for step in range(1_000):
+            row = {"_step": step, "loss": float(step)}
+            if step in {250, 750}:
+                row["rare/accuracy"] = step / 1_000
+            rows.append(row)
+        _, scan_state = self._configure(mock_wandb_mod, mock_api_mgr, rows, last_step=999)
+
+        result = json.loads(
+            get_run_history(
+                "e",
+                "p",
+                "run1",
+                keys=["loss", "rare/accuracy"],
+                samples=20,
+                min_step=0,
+                max_step=999,
+            )
+        )
+
+        assert result["sampled_points"] == 20
+        assert [row["_step"] for row in result["rows"] if "rare/accuracy" in row] == [250, 750]
+        assert result["key_row_counts"]["rare/accuracy"] == {"observed": 2, "returned": 2}
+        assert result["keys_omitted_by_limits"] == []
+        assert scan_state["transport"].calls == [(0, 1_000)]
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_duplicate_internal_steps_make_range_counts_inexact(
+        self,
+        mock_wandb_mod,
+        mock_api_mgr,
+    ):
+        rows = [
+            {"_step": 0, "loss": 1.0},
+            {"_step": 0, "eval/loss": 0.9},
+            {"_step": 1, "loss": 0.8},
+        ]
+        _, scan_state = self._configure(mock_wandb_mod, mock_api_mgr, rows, last_step=1)
+
+        result = json.loads(
+            get_run_history(
+                "e",
+                "p",
+                "run1",
+                keys=["loss", "eval/loss"],
+                samples=10,
+                min_step=0,
+                max_step=1,
+            )
+        )
+
+        assert result["rows"] == rows[:2]
+        assert result["rows_scanned"] == 3
+        assert result["source_truncated"] is True
+        assert result["key_counts_exact"] is False
+        assert result["truncated"] is True
+        assert "retained prefix" in result["compatibility_caveat"]
+        assert scan_state["transport"].calls == [(0, 2)]
+
+    def test_complete_sparse_series_is_retained_when_it_fits(self):
+        from wandb_mcp_server.mcp_tools.run_history import _key_aware_sample
+
+        rows = [
+            *({"_step": step, "dense": float(step)} for step in range(100)),
+            *({"_step": 100 + step, "sparse": float(step)} for step in range(10)),
+        ]
+
+        sampled = _key_aware_sample(rows, 11, ["dense", "sparse"])
+
+        assert len(sampled) == 11
+        assert sum("sparse" in row for row in sampled) == 10
+        assert sum("dense" in row for row in sampled) == 1
+        assert [row["_step"] for row in sampled] == sorted(row["_step"] for row in sampled)
+
+
 class TestHistoryTruncation:
     """Tests for row-budget enforcement on history responses (M1)."""
 
@@ -374,7 +937,7 @@ class TestHistoryTruncation:
         mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
-        with patch("wandb_mcp_server.config.MAX_RESPONSE_TOKENS", 500):
+        with patch("wandb_mcp_server.config.MAX_RESPONSE_TOKENS", 1_000):
             result = json.loads(get_run_history("e", "p", "run1", samples=2000))
         assert result["sampled_points"] < 2000
         assert "truncation_note" in result
@@ -452,7 +1015,7 @@ class TestHistoryTruncation:
         mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
         mock_wandb_mod.errors = wandb.errors
 
-        with patch("wandb_mcp_server.config.MAX_RESPONSE_TOKENS", 500):
+        with patch("wandb_mcp_server.config.MAX_RESPONSE_TOKENS", 1_000):
             result = json.loads(get_run_history("e", "p", "run1", samples=2000))
         steps = [r["_step"] for r in result["rows"]]
         assert steps == sorted(steps)
@@ -464,6 +1027,86 @@ class TestHistoryTruncation:
         rows = [{"_step": i, "v": 1.0} for i in range(5)]
         result = _enforce_row_budget(rows, budget_chars=100000)
         assert len(result) == 5
+
+    def test_history_value_sanitizer_bounds_cycles_depth_and_large_sequences(self):
+        from wandb_mcp_server.mcp_tools.run_history import _clean_history_rows
+
+        cycle = []
+        cycle.append(cycle)
+        deep = {"value": 1}
+        for _ in range(10):
+            deep = {"nested": deep}
+        large = _GuardedLargeSequence()
+
+        rows = _clean_history_rows(
+            [
+                {
+                    "_step": 0,
+                    "cycle": cycle,
+                    "deep": deep,
+                    "large": large,
+                    "nan": float("nan"),
+                    "positive_infinity": float("inf"),
+                    "negative_infinity": float("-inf"),
+                }
+            ]
+        )
+
+        serialized = json.dumps(rows, allow_nan=False)
+        assert "<cycle>" in serialized
+        assert "<max-depth>" in serialized
+        assert "list entries omitted" in serialized
+        assert large.accesses == 101
+        assert "nan" not in rows[0]
+        assert "positive_infinity" not in rows[0]
+        assert "negative_infinity" not in rows[0]
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_complete_response_envelope_respects_token_budget(self, mock_wandb_mod, mock_api_mgr):
+        from wandb_mcp_server.trace_utils import count_tokens_conservative
+
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+        mock_run = MagicMock(name="large-value-run")
+        mock_run.name = "large-value-run"
+        mock_run.lastHistoryStep = 0
+        mock_run.history.return_value = [{"_step": 0, "loss": {"payload": "x" * 100_000}}]
+        mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=mock_run))
+        mock_wandb_mod.errors = wandb.errors
+
+        with patch("wandb_mcp_server.config.MAX_RESPONSE_TOKENS", 1_000):
+            response = get_run_history("e", "p", "run1", keys=["loss"], samples=1)
+
+        result = json.loads(response)
+        assert count_tokens_conservative(response) <= 1_000
+        assert result["truncated"] is True
+        assert result["sampled_points"] == 1
+        assert result["rows"] == [{"_step": 0, "loss": "<value-truncated>"}]
+        assert result["keys_omitted_by_limits"] == []
+        assert result["key_row_counts"]["loss"] == {"observed": 1, "returned": 1}
+
+    @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.run_history.wandb")
+    def test_metadata_too_large_returns_bounded_error(self, mock_wandb_mod, mock_api_mgr):
+        from wandb_mcp_server.trace_utils import count_tokens_conservative
+
+        mock_api_mgr.get_api_key.return_value = "fake_key_12345678901234567890"
+        mock_run = MagicMock(name="wide-run")
+        mock_run.name = "wide-run"
+        mock_run.lastHistoryStep = 0
+        keys = [f"metric_{index}_" + "x" * 100 for index in range(20)]
+        api, _ = _api_with_run_and_sampled_series(
+            mock_run,
+            [[{"_step": 0, key: float(index)}] for index, key in enumerate(keys)],
+        )
+        mock_api_mgr.get_api.return_value = api
+        mock_wandb_mod.errors = wandb.errors
+
+        with patch("wandb_mcp_server.config.MAX_RESPONSE_TOKENS", 50):
+            response = get_run_history("e", "p", "run1", keys=keys, samples=1)
+
+        assert count_tokens_conservative(response) <= 50
+        assert json.loads(response)["error"] == "response_too_large"
 
 
 class TestTieredStepRangeFetch:
@@ -523,7 +1166,7 @@ class TestTieredStepRangeFetch:
 
         get_run_history("e", "p", "run1", keys=["loss"], min_step=10, max_step=100)
         call_kwargs = mock_run.scan_history.call_args[1]
-        assert call_kwargs["keys"] == ["loss"]
+        assert call_kwargs["keys"] == ["_step", "loss"]
         assert call_kwargs["min_step"] == 10
         assert call_kwargs["max_step"] == 101
 
@@ -755,7 +1398,10 @@ class TestCustomAxisHistory:
         run = MagicMock()
         run.name = "system"
         run.lastHistoryStep = 10
-        run.history.return_value = [{"_timestamp": 10, "system.cpu": 40.0}]
+        run.history.return_value = [
+            {"_timestamp": 10, "system.cpu": 40.0, "system.memory": 75.0},
+            {"_timestamp": 11, "system.memory": 76.0},
+        ]
         mock_api_mgr.get_api.return_value = MagicMock(run=MagicMock(return_value=run))
         mock_wandb_mod.errors = wandb.errors
 
@@ -774,5 +1420,9 @@ class TestCustomAxisHistory:
         assert result["stream"] == "system"
         assert result["retrieval_method"] == "sdk_sample"
         assert result["sampled"] is True
+        assert result["rows"] == [{"_timestamp": 10, "system.cpu": 40.0}]
+        assert result["matching_rows"] == 1
+        assert result["key_row_counts"] == {"system.cpu": {"observed": 1, "returned": 1}}
         assert run.history.call_args.kwargs["stream"] == "system"
         assert run.history.call_args.kwargs["x_axis"] == "_timestamp"
+        assert "keys" not in run.history.call_args.kwargs

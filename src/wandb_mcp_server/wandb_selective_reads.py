@@ -272,6 +272,21 @@ query MCPMetricValueSteps(
 }
 """
 
+SAMPLED_HISTORY_SERIES_QUERY = """
+query MCPSampledHistorySeries(
+  $entity: String!
+  $project: String!
+  $run: String!
+  $specs: [JSONString!]!
+) {
+  project(name: $project, entityName: $entity) {
+    run(name: $run) {
+      sampledHistory(specs: $specs)
+    }
+  }
+}
+"""
+
 REGISTRY_ARTIFACT_VERSIONS_QUERY = """
 query MCPRegistryArtifactVersions(
   $organization: String!
@@ -366,6 +381,17 @@ class ArtifactVersionPage:
     requests: int
 
 
+@dataclass(frozen=True)
+class SampledHistoryBatch:
+    """Bounded sampled history series returned by one fixed read request."""
+
+    series: list[list[dict[str, Any]]]
+    keys: list[str]
+    rows_received: int
+    samples_per_series: int
+    requests: int
+
+
 class SelectiveReadUnavailable(RuntimeError):
     """Raised when a backend cannot serve an application-owned read shape."""
 
@@ -376,6 +402,7 @@ class ProjectedReportCursorError(ValueError):
 
 _MAX_PROJECTED_PAGE_REQUESTS = 10
 _PROJECTED_REPORT_CURSOR_PREFIX = "mcp-report-v1:"
+_MAX_SAMPLED_HISTORY_INPUT_ROWS = 10_000
 
 
 def is_projected_report_cursor(cursor: str) -> bool:
@@ -1358,6 +1385,95 @@ def fetch_metric_value_steps(
     return [int(step) if isinstance(step, (int, float)) else None for step in steps]
 
 
+def fetch_sampled_history_series(
+    api: Any,
+    *,
+    entity: str,
+    project: str,
+    run_id: str,
+    keys: Sequence[str],
+    x_axis: str,
+    samples: int,
+) -> SampledHistoryBatch:
+    """Fetch one independently sampled series per key in one read-only request.
+
+    W&B's public ``Run.history(keys=[...])`` samples only rows where every
+    requested key co-occurs. Real training loops commonly log those keys on
+    different cadences, so this fixed projection sends one bounded spec per
+    key and lets the caller outer-join the returned series.
+    """
+    unique_keys = list(dict.fromkeys(keys))
+    if not unique_keys:
+        raise ValueError("keys must contain at least one history key")
+    if isinstance(samples, bool) or not isinstance(samples, int) or samples < 1:
+        raise ValueError("samples must be a positive integer")
+
+    samples_per_series = min(
+        samples,
+        max(1, _MAX_SAMPLED_HISTORY_INPUT_ROWS // len(unique_keys)),
+    )
+    specs: list[str] = []
+    for key in unique_keys:
+        # sampledHistory treats the first key as its x-axis. Include the
+        # internal step as a stable join key for custom axes without changing
+        # which axis controls backend sampling.
+        spec_keys = list(dict.fromkeys([x_axis, "_step", key]))
+        specs.append(
+            json.dumps(
+                {"keys": spec_keys, "samples": samples_per_series},
+                separators=(",", ":"),
+            )
+        )
+
+    raise_if_tool_deadline_exceeded()
+    try:
+        data = execute_graphql(
+            api,
+            SAMPLED_HISTORY_SERIES_QUERY,
+            {
+                "entity": entity,
+                "project": project,
+                "run": run_id,
+                "specs": specs,
+            },
+        )
+    except Exception as exc:
+        _raise_selective_failure("sampled history series query unavailable", exc)
+
+    run_node = _project_payload(data).get("run")
+    if not isinstance(run_node, Mapping):
+        raise ValueError("W&B run was not found or is not accessible")
+    payload = run_node.get("sampledHistory")
+    if not isinstance(payload, list) or len(payload) != len(unique_keys):
+        raise SelectiveReadUnavailable("sampled history series query returned an invalid series count")
+
+    series: list[list[dict[str, Any]]] = []
+    rows_received = 0
+    for requested_key, item in zip(unique_keys, payload, strict=True):
+        if not isinstance(item, list) or not all(isinstance(row, Mapping) for row in item):
+            raise SelectiveReadUnavailable("sampled history series query returned an invalid series")
+        if len(item) > samples_per_series:
+            raise SelectiveReadUnavailable("sampled history series query exceeded its per-series row limit")
+        rows_received += len(item)
+        if rows_received > _MAX_SAMPLED_HISTORY_INPUT_ROWS:
+            raise SelectiveReadUnavailable("sampled history series query exceeded its total row limit")
+        filtered_rows: list[dict[str, Any]] = []
+        for row in item:
+            requested_value = row.get(requested_key)
+            if requested_value is None or (isinstance(requested_value, float) and not math.isfinite(requested_value)):
+                continue
+            filtered_rows.append({str(response_key): value for response_key, value in row.items()})
+        series.append(filtered_rows)
+
+    return SampledHistoryBatch(
+        series=series,
+        keys=unique_keys,
+        rows_received=rows_received,
+        samples_per_series=samples_per_series,
+        requests=1,
+    )
+
+
 def fetch_registry_artifact_versions(
     api: Any,
     *,
@@ -1455,6 +1571,7 @@ __all__ = [
     "ARTIFACT_INVENTORY_QUERY",
     "REGISTRY_ARTIFACT_VERSIONS_QUERY",
     "METRIC_VALUE_STEPS_QUERY",
+    "SAMPLED_HISTORY_SERIES_QUERY",
     "PROJECT_METADATA_QUERY",
     "PROJECTED_RUNS_QUERY",
     "PROJECTED_RUN_QUERY",
@@ -1466,10 +1583,12 @@ __all__ = [
     "ProjectedRunPage",
     "ProjectedResourcePage",
     "ArtifactVersionPage",
+    "SampledHistoryBatch",
     "ProjectedReportCursorError",
     "SelectiveReadUnavailable",
     "fetch_artifact_inventory",
     "fetch_metric_value_steps",
+    "fetch_sampled_history_series",
     "fetch_registry_artifact_versions",
     "fetch_project_counts",
     "fetch_project_metadata",
