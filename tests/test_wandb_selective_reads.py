@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 
@@ -19,6 +20,7 @@ from wandb_mcp_server.wandb_selective_reads import (
     PROJECT_FIELDS_QUERY,
     PROJECT_METADATA_QUERY,
     REGISTRY_ARTIFACT_VERSIONS_QUERY,
+    SAMPLED_HISTORY_SERIES_QUERY,
     ProjectedReportCursorError,
     SelectiveReadUnavailable,
     fetch_registry_artifact_versions,
@@ -30,6 +32,7 @@ from wandb_mcp_server.wandb_selective_reads import (
     fetch_projected_run,
     fetch_projected_runs,
     fetch_projected_sweeps,
+    fetch_sampled_history_series,
 )
 
 
@@ -217,6 +220,7 @@ def test_every_application_owned_document_is_query_only():
         PROJECT_METADATA_QUERY,
         ARTIFACT_INVENTORY_QUERY,
         METRIC_VALUE_STEPS_QUERY,
+        SAMPLED_HISTORY_SERIES_QUERY,
         REGISTRY_ARTIFACT_VERSIONS_QUERY,
     ):
         validate_read_only_graphql(document)
@@ -829,6 +833,235 @@ def test_metric_value_lookup_returns_candidate_steps_for_caller_verification():
     assert "stepsForMetricValues" in query
     assert variables["metric"] == "validation/step"
     assert variables["values"] == [1000.0, 2000.0]
+
+
+class SampledHistoryServiceApi:
+    """Small ServiceApi fake that preserves the real sampledHistory envelope."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = []
+
+    def execute_graphql(self, query, variables=None):
+        self.calls.append((query, dict(variables or {})))
+        return {"project": {"run": {"sampledHistory": self.payload}}}
+
+
+def test_sampled_history_fetches_disjoint_series_in_one_fixed_query():
+    service = SampledHistoryServiceApi(
+        [
+            [{"_step": 0, "loss": 1.0}, {"_step": 2, "loss": 0.5}],
+            [{"_step": 1, "eval/loss": 0.9}, {"_step": 3, "eval/loss": 0.4}],
+        ]
+    )
+    api = type("Api", (), {"_service_api": service})()
+
+    batch = fetch_sampled_history_series(
+        api,
+        entity="entity",
+        project="project",
+        run_id="run-1",
+        keys=["loss", "eval/loss"],
+        x_axis="_step",
+        samples=500,
+    )
+
+    assert batch.keys == ["loss", "eval/loss"]
+    assert batch.series == service.payload
+    assert batch.rows_received == 4
+    assert batch.samples_per_series == 500
+    assert batch.requests == 1
+    assert len(service.calls) == 1
+    query, variables = service.calls[0]
+    assert query == SAMPLED_HISTORY_SERIES_QUERY
+    assert variables["entity"] == "entity"
+    assert variables["project"] == "project"
+    assert variables["run"] == "run-1"
+    assert [json.loads(spec) for spec in variables["specs"]] == [
+        {"keys": ["_step", "loss"], "samples": 500},
+        {"keys": ["_step", "eval/loss"], "samples": 500},
+    ]
+
+
+def test_sampled_history_deduplicates_keys_and_bounds_total_input_rows():
+    service = SampledHistoryServiceApi([[], [], []])
+    api = type("Api", (), {"_service_api": service})()
+
+    batch = fetch_sampled_history_series(
+        api,
+        entity="entity",
+        project="project",
+        run_id="run-1",
+        keys=["loss", "accuracy", "loss", "eval/loss"],
+        x_axis="epoch",
+        samples=10_000,
+    )
+
+    assert batch.keys == ["loss", "accuracy", "eval/loss"]
+    assert batch.samples_per_series == 3_333
+    assert batch.samples_per_series * len(batch.keys) <= 10_000
+    assert len(service.calls) == 1
+    specs = [json.loads(spec) for spec in service.calls[0][1]["specs"]]
+    assert [spec["keys"] for spec in specs] == [
+        ["epoch", "_step", "loss"],
+        ["epoch", "_step", "accuracy"],
+        ["epoch", "_step", "eval/loss"],
+    ]
+    assert {spec["samples"] for spec in specs} == {3_333}
+
+
+def test_sampled_history_counts_raw_rows_but_drops_unobserved_values():
+    service = SampledHistoryServiceApi(
+        [
+            [
+                {"_step": 0, "loss": None},
+                {"_step": 1, "loss": float("nan")},
+                {"_step": 2, "loss": float("inf")},
+                {"_step": 3, "loss": 0.5},
+            ],
+            [{"_step": 0, "eval/loss": 0.4}],
+        ]
+    )
+    api = type("Api", (), {"_service_api": service})()
+
+    batch = fetch_sampled_history_series(
+        api,
+        entity="entity",
+        project="project",
+        run_id="run-1",
+        keys=["loss", "eval/loss"],
+        x_axis="_step",
+        samples=4,
+    )
+
+    assert batch.rows_received == 5
+    assert batch.series == [
+        [{"_step": 3, "loss": 0.5}],
+        [{"_step": 0, "eval/loss": 0.4}],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (None, "invalid series count"),
+        ([[]], "invalid series count"),
+        ([{}, []], "invalid series"),
+        ([[{"_step": 0}], ["not-a-row"]], "invalid series"),
+    ],
+)
+def test_sampled_history_rejects_malformed_batch_responses(payload, message):
+    service = SampledHistoryServiceApi(payload)
+    api = type("Api", (), {"_service_api": service})()
+
+    with pytest.raises(SelectiveReadUnavailable, match=message):
+        fetch_sampled_history_series(
+            api,
+            entity="entity",
+            project="project",
+            run_id="run-1",
+            keys=["loss", "eval/loss"],
+            x_axis="_step",
+            samples=500,
+        )
+
+    assert len(service.calls) == 1
+
+
+def test_sampled_history_rejects_missing_run_without_retrying_per_key():
+    class MissingRunServiceApi:
+        def __init__(self):
+            self.calls = 0
+
+        def execute_graphql(self, query, variables=None):
+            self.calls += 1
+            return {"project": {"run": None}}
+
+    service = MissingRunServiceApi()
+    api = type("Api", (), {"_service_api": service})()
+
+    with pytest.raises(ValueError, match="run was not found"):
+        fetch_sampled_history_series(
+            api,
+            entity="entity",
+            project="project",
+            run_id="missing",
+            keys=["loss", "eval/loss"],
+            x_axis="_step",
+            samples=500,
+        )
+
+    assert service.calls == 1
+
+
+def test_sampled_history_rejects_backend_over_return_without_retrying():
+    service = SampledHistoryServiceApi(
+        [
+            [{"_step": step, "loss": float(step)} for step in range(3)],
+            [{"_step": 0, "eval/loss": 1.0}],
+        ]
+    )
+    api = type("Api", (), {"_service_api": service})()
+
+    with pytest.raises(SelectiveReadUnavailable, match="per-series row limit"):
+        fetch_sampled_history_series(
+            api,
+            entity="entity",
+            project="project",
+            run_id="run-1",
+            keys=["loss", "eval/loss"],
+            x_axis="_step",
+            samples=2,
+        )
+
+    assert len(service.calls) == 1
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 404, 429, 503])
+def test_sampled_history_preserves_actionable_upstream_statuses(status_code):
+    error = RuntimeError(f"upstream status {status_code}")
+    error.status_code = status_code
+
+    class RaisingServiceApi:
+        def execute_graphql(self, query, variables=None):
+            raise error
+
+    api = type("Api", (), {"_service_api": RaisingServiceApi()})()
+
+    with pytest.raises(RuntimeError) as caught:
+        fetch_sampled_history_series(
+            api,
+            entity="entity",
+            project="project",
+            run_id="run-1",
+            keys=["loss", "eval/loss"],
+            x_axis="_step",
+            samples=2,
+        )
+
+    assert caught.value is error
+
+
+@pytest.mark.parametrize("error", [TimeoutError("timed out"), asyncio.CancelledError()])
+def test_sampled_history_preserves_timeout_and_cancellation(error):
+    class RaisingServiceApi:
+        def execute_graphql(self, query, variables=None):
+            raise error
+
+    api = type("Api", (), {"_service_api": RaisingServiceApi()})()
+
+    with pytest.raises(type(error)) as caught:
+        fetch_sampled_history_series(
+            api,
+            entity="entity",
+            project="project",
+            run_id="run-1",
+            keys=["loss", "eval/loss"],
+            x_axis="_step",
+            samples=2,
+        )
+
+    assert caught.value is error
 
 
 def test_registry_artifact_versions_use_fixed_ordered_query():

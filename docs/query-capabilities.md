@@ -35,7 +35,7 @@ change only the page `limit` when continuing; mismatched reuse returns
 | Run count | `query_wandb_tool(resource="runs", response_mode="count")` | No |
 | Sweep lookup/list/config | `query_wandb_tool(resource="sweep"|"sweeps")` | No |
 | Report lookup/list/spec | `query_wandb_tool(resource="reports", report_name=...)`; `report_name` accepts an exact internal name or display title | No |
-| Run metric history | `get_run_history_tool` | No |
+| Run metric history, including sparse keys logged at different cadences | `get_run_history_tool` | No |
 | Artifacts and registries | `list_artifact_versions_tool`, `get_artifact_details_tool`, `list_registries_tool`, and `list_registry_collections_tool` | No |
 | Automations and integrations | `list_wandb_automations_tool` and `list_wandb_integrations_tool` | No |
 | Schema introspection or unmodeled/custom fields | `query_wandb_graphql_tool` | Yes |
@@ -43,6 +43,29 @@ change only the page `limit` when continuing; mismatched reuse returns
 | Cross-resource/compound nesting | `query_wandb_graphql_tool` | Yes |
 | Sweep agents, report run sets, or Launch resources | `query_wandb_graphql_tool` | Yes |
 | Backward pagination | Use a typed forward read when possible | Compatibility-only; raw tool returns one bounded `last` page |
+
+## Run history guarantees
+
+`get_run_history_tool` handles multiple requested metrics as an outer union.
+It obtains one bounded series per key in a single fixed, application-owned,
+query-only history request, then merges the series by `_step` or the selected x-axis.
+The selected x-axis is used only when a row has no `_step`.
+Metrics do not need to occur in the same `wandb.log()` call or at the same
+cadence. Duplicate axis values retain their occurrence order.
+
+The `samples` argument is one total output-row budget across the merged result,
+not a separate budget for every key. Range reads discard rows containing none
+of the requested values before deterministic, key-aware sampling. Sparse series
+are preserved completely when the budget permits; when it does not, the
+response identifies affected keys rather than silently presenting partial data
+as complete.
+
+The existing response fields remain compatible. Additive diagnostics include
+`requested_keys`, `join="outer"`, `matching_rows`, `key_row_counts`,
+`missing_keys`, `keys_omitted_by_limits`, `key_counts_exact`, and
+`source_truncated`. The fixed
+projection is revalidated as query-only and accepts no caller-selected GraphQL,
+so this behavior is available with `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`.
 
 The compatibility tool accepts exactly one query operation and rejects
 mutations, subscriptions, mixed/multiple operations, nested or multiple
