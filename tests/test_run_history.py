@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import weakref
 from collections.abc import Sequence
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -94,6 +95,10 @@ class _HistoryScanService:
                 run_history=pb.RunHistoryResponse(history_rows=history_rows)
             )
         )
+
+    def finalize(self, owner, request):
+        """Mirror the lifecycle hook added to W&B's public ServiceApi."""
+        weakref.finalize(owner, self.send_api_request, request)
 
 
 def _wandb_history_scan(rows, *, min_step, max_step, keys, page_size):
