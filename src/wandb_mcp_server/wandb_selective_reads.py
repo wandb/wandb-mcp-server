@@ -383,11 +383,14 @@ class ArtifactVersionPage:
 
 @dataclass(frozen=True)
 class SampledHistoryBatch:
-    """Bounded sampled history series returned by one fixed read request."""
+    """Bounded sampled history series returned by fixed read requests."""
 
     series: list[list[dict[str, Any]]]
     keys: list[str]
+    # Raw rows returned by Core before fork-segment normalization.
     rows_received: int
+    # Rows retained for the pre-merge bounded working set.
+    rows_retained: int
     samples_per_series: int
     requests: int
 
@@ -403,6 +406,8 @@ class ProjectedReportCursorError(ValueError):
 _MAX_PROJECTED_PAGE_REQUESTS = 10
 _PROJECTED_REPORT_CURSOR_PREFIX = "mcp-report-v1:"
 _MAX_SAMPLED_HISTORY_INPUT_ROWS = 10_000
+_MAX_SAMPLED_HISTORY_RAW_ROWS = 100_000
+_MAX_SAMPLED_HISTORY_SPECS_PER_REQUEST = 8
 
 
 def is_projected_report_cursor(cursor: str) -> bool:
@@ -1394,83 +1399,116 @@ def fetch_sampled_history_series(
     keys: Sequence[str],
     x_axis: str,
     samples: int,
+    min_step: int | None = None,
+    max_step: int | None = None,
 ) -> SampledHistoryBatch:
-    """Fetch one independently sampled series per key in one read-only request.
+    """Fetch one independently sampled series per key in bounded read requests.
 
     W&B's public ``Run.history(keys=[...])`` samples only rows where every
     requested key co-occurs. Real training loops commonly log those keys on
-    different cadences, so this fixed projection sends one bounded spec per
-    key and lets the caller outer-join the returned series.
+    different cadences, so this fixed projection sends one bounded spec per key
+    and lets the caller outer-join the returned series. Specs are chunked to
+    bound the independent history-store reads executed by W&B Core.
     """
     unique_keys = list(dict.fromkeys(keys))
     if not unique_keys:
         raise ValueError("keys must contain at least one history key")
     if isinstance(samples, bool) or not isinstance(samples, int) or samples < 1:
         raise ValueError("samples must be a positive integer")
+    for name, value in (("min_step", min_step), ("max_step", max_step)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError(f"{name} must be an integer")
+    if min_step is not None and max_step is not None and max_step < min_step:
+        raise ValueError("max_step must be greater than or equal to min_step")
 
     samples_per_series = min(
         samples,
         max(1, _MAX_SAMPLED_HISTORY_INPUT_ROWS // len(unique_keys)),
     )
-    specs: list[str] = []
+    specs_by_key: list[tuple[str, str]] = []
     for key in unique_keys:
-        # sampledHistory treats the first key as its x-axis. Include the
-        # internal step as a stable join key for custom axes without changing
-        # which axis controls backend sampling.
+        # Server 0.82 applies AND semantics within a spec, so each metric gets
+        # an independent spec. A custom x-axis intentionally remains in that
+        # spec: a value cannot be plotted against an axis logged on another row.
         spec_keys = list(dict.fromkeys([x_axis, "_step", key]))
-        specs.append(
-            json.dumps(
-                {"keys": spec_keys, "samples": samples_per_series},
-                separators=(",", ":"),
-            )
-        )
-
-    raise_if_tool_deadline_exceeded()
-    try:
-        data = execute_graphql(
-            api,
-            SAMPLED_HISTORY_SERIES_QUERY,
-            {
-                "entity": entity,
-                "project": project,
-                "run": run_id,
-                "specs": specs,
-            },
-        )
-    except Exception as exc:
-        _raise_selective_failure("sampled history series query unavailable", exc)
-
-    run_node = _project_payload(data).get("run")
-    if not isinstance(run_node, Mapping):
-        raise ValueError("W&B run was not found or is not accessible")
-    payload = run_node.get("sampledHistory")
-    if not isinstance(payload, list) or len(payload) != len(unique_keys):
-        raise SelectiveReadUnavailable("sampled history series query returned an invalid series count")
+        spec: dict[str, Any] = {"keys": spec_keys, "samples": samples_per_series}
+        if min_step is not None:
+            spec["minStep"] = min_step
+        if max_step is not None:
+            # sampledHistory treats maxStep as inclusive, matching the MCP
+            # interface (unlike public Run.scan_history).
+            spec["maxStep"] = max_step
+        specs_by_key.append((key, json.dumps(spec, separators=(",", ":"))))
 
     series: list[list[dict[str, Any]]] = []
     rows_received = 0
-    for requested_key, item in zip(unique_keys, payload, strict=True):
-        if not isinstance(item, list) or not all(isinstance(row, Mapping) for row in item):
-            raise SelectiveReadUnavailable("sampled history series query returned an invalid series")
-        if len(item) > samples_per_series:
-            raise SelectiveReadUnavailable("sampled history series query exceeded its per-series row limit")
-        rows_received += len(item)
-        if rows_received > _MAX_SAMPLED_HISTORY_INPUT_ROWS:
-            raise SelectiveReadUnavailable("sampled history series query exceeded its total row limit")
-        filtered_rows: list[dict[str, Any]] = []
-        for row in item:
-            requested_value = row.get(requested_key)
-            if requested_value is None or (isinstance(requested_value, float) and not math.isfinite(requested_value)):
-                continue
-            filtered_rows.append({str(response_key): value for response_key, value in row.items()})
-        series.append(filtered_rows)
+    rows_retained = 0
+    requests = 0
+    for offset in range(0, len(specs_by_key), _MAX_SAMPLED_HISTORY_SPECS_PER_REQUEST):
+        batch = specs_by_key[offset : offset + _MAX_SAMPLED_HISTORY_SPECS_PER_REQUEST]
+        raise_if_tool_deadline_exceeded()
+        try:
+            data = execute_graphql(
+                api,
+                SAMPLED_HISTORY_SERIES_QUERY,
+                {
+                    "entity": entity,
+                    "project": project,
+                    "run": run_id,
+                    "specs": [spec for _, spec in batch],
+                },
+            )
+        except Exception as exc:
+            _raise_selective_failure("sampled history series query unavailable", exc)
+        requests += 1
+
+        run_node = _project_payload(data).get("run")
+        if not isinstance(run_node, Mapping):
+            raise ValueError("W&B run was not found or is not accessible")
+        payload = run_node.get("sampledHistory")
+        if not isinstance(payload, list) or len(payload) != len(batch):
+            raise SelectiveReadUnavailable("sampled history series query returned an invalid series count")
+
+        for (requested_key, _), item in zip(batch, payload, strict=True):
+            if not isinstance(item, list) or not all(isinstance(row, Mapping) for row in item):
+                raise SelectiveReadUnavailable("sampled history series query returned an invalid series")
+            rows_received += len(item)
+            if rows_received > _MAX_SAMPLED_HISTORY_RAW_ROWS:
+                raise SelectiveReadUnavailable("sampled history series query exceeded its raw row safety limit")
+            filtered_rows: list[dict[str, Any]] = []
+            for row in item:
+                requested_value = row.get(requested_key)
+                if requested_value is None or (
+                    isinstance(requested_value, float) and not math.isfinite(requested_value)
+                ):
+                    continue
+                filtered_rows.append({str(response_key): value for response_key, value in row.items()})
+            # Core 0.82 samples fork segments independently and concatenates
+            # them, so a valid forked-run response may exceed the requested
+            # per-spec sample hint. The raw safety limit above bounds a
+            # pathological response; normalize valid forked results before
+            # enforcing the separate 10K retained-row working-set limit.
+            if len(filtered_rows) > samples_per_series:
+                if samples_per_series == 1:
+                    filtered_rows = [filtered_rows[0]]
+                else:
+                    last = len(filtered_rows) - 1
+                    indexes = [
+                        round(position * last / (samples_per_series - 1)) for position in range(samples_per_series)
+                    ]
+                    filtered_rows = [filtered_rows[index] for index in indexes]
+            rows_retained += len(filtered_rows)
+            if rows_retained > _MAX_SAMPLED_HISTORY_INPUT_ROWS:
+                raise SelectiveReadUnavailable("sampled history series query exceeded its retained row limit")
+            series.append(filtered_rows)
 
     return SampledHistoryBatch(
         series=series,
         keys=unique_keys,
         rows_received=rows_received,
+        rows_retained=rows_retained,
         samples_per_series=samples_per_series,
-        requests=1,
+        requests=requests,
     )
 
 

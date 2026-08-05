@@ -26,9 +26,9 @@ Version 0.4.0 makes W&B reads SDK-first, bounded, and workload-aware:
 
 - Run collections return lightweight metadata by default and support targeted
   `summary_keys` and `config_keys` instead of loading every metric.
-- Multi-key run history uses bounded outer-union semantics, so metrics logged
-  at different cadences remain visible instead of requiring every key on the
-  same history row.
+- Explicit multi-key default-history reads use bounded outer-union semantics,
+  so metrics logged at different cadences remain visible instead of requiring
+  every key on the same history row.
 - Shared and Dedicated workload profiles bound collection, history, evaluation,
   and schema reads. Overloaded hosted servers return a retryable `server_busy`
   response instead of creating unbounded W&B API traffic.
@@ -110,16 +110,23 @@ Recommended deployment presets:
 of a GraphQL document. Existing raw-query callers must explicitly enable and call
 `query_wandb_graphql_tool`.
 
-**Run history semantics:** `get_run_history_tool` outer-joins requested metric
-series by `_step`, falling back to the selected x-axis when `_step` is absent, so keys logged in separate
-`wandb.log()` calls do not disappear. `samples` is the total final-row budget
-across all requested keys, not a per-key allowance. For bounded step ranges,
-rows containing none of the requested values are removed before deterministic,
-key-aware sampling; sparse series are retained in full when the budget permits.
-Additive diagnostics report `requested_keys`, `matching_rows`, per-key observed
-and returned counts, missing keys, source truncation, and any keys omitted by limits. This path
-uses a fixed application-owned query-only projection, accepts no caller-supplied
-GraphQL, and works with `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`.
+**Run history semantics:** for explicit multi-key default-history sampled and
+ranged collection reads, `get_run_history_tool` outer-joins requested metric
+series by `_step`, falling back to the selected x-axis when `_step` is absent,
+so keys logged in separate `wandb.log()` calls do not disappear. Multi-key
+ranges use one independent bounded series per metric, in requests of at most
+eight series. The independent-spec path is designed to cover active/newly
+synced as well as exported history. Multi-request reads use the same freshly
+observed upper-step boundary for every batch. `samples` is the
+total final-row budget across all requested keys, not a per-key allowance. All
+observed sparse points in the bounded result are
+retained when the budget permits. Diagnostics report `unobserved_keys` when no
+usable finite/non-null value appears in a bounded/sample result; `missing_keys`
+is reported only when absence was checked exactly. A custom x-axis must occur
+on the same row as its metric because the server does not invent interpolation.
+Exact `target_x` remains a point lookup rather than an outer-union read. This
+path uses a fixed application-owned query-only projection, accepts no
+caller-supplied GraphQL, and works with `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`.
 
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
 

@@ -46,26 +46,39 @@ change only the page `limit` when continuing; mismatched reuse returns
 
 ## Run history guarantees
 
-`get_run_history_tool` handles multiple requested metrics as an outer union.
-It obtains one bounded series per key in a single fixed, application-owned,
-query-only history request, then merges the series by `_step` or the selected x-axis.
-The selected x-axis is used only when a row has no `_step`.
-Metrics do not need to occur in the same `wandb.log()` call or at the same
-cadence. Duplicate axis values retain their occurrence order.
+For explicit multi-key default-history sampled and ranged collection reads,
+`get_run_history_tool` handles requested metrics as an outer union. It obtains
+one bounded series per key with a fixed, application-owned, query-only
+projection, batches at most eight series per upstream request, then merges the
+series by `_step` or the selected x-axis. This avoids sending the combined-key
+spec that triggers Server 0.82's within-spec all-keys filter, without one
+network roundtrip per metric. Reads spanning multiple batches use one freshly
+observed upper-step boundary. Metrics do not need to occur in the same
+`wandb.log()` call or at
+the same cadence. Duplicate axis values retain their per-series occurrence
+order.
+
+A custom x-axis remains in each metric's independent series specification. The
+axis and metric must therefore occur on the same history row; the server does
+not fabricate an alignment or interpolation policy. Exact `target_x` requests
+remain point lookups and do not use collection outer-union semantics.
 
 The `samples` argument is one total output-row budget across the merged result,
 not a separate budget for every key. Range reads discard rows containing none
-of the requested values before deterministic, key-aware sampling. Sparse series
-are preserved completely when the budget permits; when it does not, the
-response identifies affected keys rather than silently presenting partial data
-as complete.
+of the requested values before deterministic, key-aware sampling. All observed
+sparse points in the bounded result are preserved when the budget permits; when
+it does not, the response identifies affected keys rather than silently
+presenting partial data as complete.
 
 The existing response fields remain compatible. Additive diagnostics include
-`requested_keys`, `join="outer"`, `matching_rows`, `key_row_counts`,
-`missing_keys`, `keys_omitted_by_limits`, `key_counts_exact`, and
-`source_truncated`. The fixed
-projection is revalidated as query-only and accepts no caller-selected GraphQL,
-so this behavior is available with `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`.
+`requested_keys`, `join="outer"`, `matching_rows`, `matching_rows_exact`,
+`key_row_counts`, `unobserved_keys`, `missing_keys`,
+`keys_omitted_by_limits`, `key_counts_exact`, and `source_truncated`.
+`unobserved_keys` means no usable finite/non-null value appeared for a key in the
+bounded/sample result; `missing_keys` is emitted only when the count is exact.
+The fixed projection is
+revalidated as query-only and accepts no caller-selected GraphQL, so this
+behavior is available with `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`.
 
 The compatibility tool accepts exactly one query operation and rejects
 mutations, subscriptions, mixed/multiple operations, nested or multiple

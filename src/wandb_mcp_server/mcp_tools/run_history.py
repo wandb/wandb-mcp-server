@@ -1,8 +1,7 @@
 """Retrieve sampled time-series metric history for a W&B run.
 
-Uses the actor-isolated W&B public API client for sampled data and a tiered
-strategy for step-range queries: scan_history (parquet-backed) first,
-history() (sampled) as last resort.
+Uses the actor-isolated W&B public API client, independent bounded series for
+multi-key reads, and the public scan API for single-key step ranges.
 """
 
 from __future__ import annotations
@@ -42,8 +41,9 @@ logger = get_rich_logger(__name__)
 
 GET_RUN_HISTORY_TOOL_DESCRIPTION = """Retrieve bounded time-series metric data from a W&B run.
 
-Use SDK sampling for overviews, bounded scans for internal-step ranges, and an
-exact custom-axis lookup for a logged x-axis value. Every response states the
+Use bounded independent-series sampling for explicit multi-key default-history
+overviews and ranges, SDK scans for single-key ranges, and an exact point lookup
+for a logged x-axis value. Every response states the
 retrieval method, whether values are sampled or exact, rows scanned, coverage,
 and any profile or response-budget truncation.
 
@@ -71,20 +71,23 @@ run_id : str
     not the display name.
 keys : list of str, optional
     Specific metric keys to retrieve (e.g., ["loss", "val_loss", "accuracy"]).
-    Keys logged on different cadences are outer-unioned by step; a row may carry
-    only the requested metrics logged at that point.
+    For explicit multi-key default-history sampled and ranged collection reads,
+    keys logged on different cadences are outer-unioned by step; a row may carry
+    only the requested metrics logged at that point. target_x is an exact point
+    lookup rather than a collection join.
     Hosted deployments require 1-20 explicit keys to prevent accidental retrieval
     of extremely high-cardinality histories.
 samples : int, optional
     Total merged-row budget shared across all requested keys. Defaults to 500.
     Use fewer samples for quick overviews, more for detailed analysis.
 min_step : int, optional
-    Minimum step to include. Defaults to None (start from beginning).
+    Inclusive non-negative minimum step to include. Defaults to None.
 max_step : int, optional
-    Maximum step to include. Defaults to None (include all steps).
+    Inclusive non-negative maximum step to include. Defaults to None.
 x_axis : str, optional
     History x-axis. Defaults to "_step". Set this to a logged monotonic metric
-    such as "validation/step" for custom-axis sampling or target lookup.
+    such as "validation/step" for custom-axis projection or target lookup. For
+    collection reads, the custom axis and metric must occur on the same row.
 target_x : float, optional
     Retrieve the row where x_axis logged this exact value. If no exact value was
     logged, returns target_not_logged.
@@ -103,7 +106,9 @@ JSON with:
   - total_steps: last logged step number
   - sampled_points: number of rows returned
   - keys_returned: list of metric keys in the response
-  - requested_keys, join, matching_rows, per-key row counts, and missing/omitted keys
+  - requested_keys, optional join, matching_rows, per-key row counts, and
+    unobserved/missing/omitted keys. Unobserved means no usable finite/non-null
+    value appeared in a bounded result; missing is emitted only for exact counts.
   - retrieval_method, exact, sampled, rows_scanned, coverage, truncation
 
 Examples
@@ -117,6 +122,7 @@ Examples
 
 MAX_HISTORY_ROWS = MCP_MAX_HISTORY_SAMPLES
 _EXACT_EPSILON = 1e-9
+_MAX_SAFE_HISTORY_STEP = (1 << 63) - 2
 
 
 @dataclass(frozen=True)
@@ -172,6 +178,15 @@ def get_run_history(
         raise ValueError("target_x is supported only for the default history stream")
     if stream == "system" and (min_step is not None or max_step is not None):
         raise ValueError("step-range scans are supported only for the default history stream")
+    for name, value in (("min_step", min_step), ("max_step", max_step)):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer")
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative")
+        if value > _MAX_SAFE_HISTORY_STEP:
+            raise ValueError(f"{name} must be at most {_MAX_SAFE_HISTORY_STEP}")
     if keys is not None and (
         not isinstance(keys, list)
         or not all(isinstance(key, str) and key.strip() for key in keys)
@@ -220,6 +235,11 @@ def get_run_history(
             wandb_api = WandBApiManager.get_api(api_key)
             run_path = f"{entity_name}/{project_name}/{run_id}"
             run = wandb_api.run(run_path)
+            # This public property performs a narrow, fresh historyKeys read.
+            # Do not call Run.load(force=True): Api.run() already loaded the
+            # full Run fragment, and forcing it again would repeatedly fetch
+            # unbounded config/summary/system metrics on wide active runs.
+            snapshot_last_step = run.lastHistoryStep
         except wandb.errors.CommError as e:
             if busy := wandb_server_busy_from_exception(e):
                 raise busy from e
@@ -272,41 +292,27 @@ def get_run_history(
                     keys=requested_keys,
                     min_step=min_step,
                     max_step=max_step,
+                    snapshot_max_step=snapshot_last_step,
                     x_axis=x_axis,
                     stream=stream,
                 )
             elif stream == "default" and len(requested_keys) > 1:
-                batch = fetch_sampled_history_series(
+                fetched = _fetch_independent_sampled_history(
                     wandb_api,
-                    entity=entity_name,
-                    project=project_name,
+                    entity_name=entity_name,
+                    project_name=project_name,
                     run_id=run_id,
                     keys=requested_keys,
                     x_axis=x_axis,
-                    samples=clamped_samples,
-                )
-                merged_rows = _outer_join_history_series(batch.series, x_axis=x_axis)
-                clean_merged_rows = _clean_history_rows(merged_rows)
-                value_rows = _filter_rows_with_requested_values(
-                    clean_merged_rows,
-                    requested_keys,
-                )
-                matching_rows = len(value_rows)
-                observed_counts = _key_row_counts(clean_merged_rows, requested_keys)
-                sampled_rows = _key_aware_sample(
-                    value_rows,
-                    clamped_samples,
-                    requested_keys,
-                )
-                fetched = _HistoryFetch(
-                    rows=sampled_rows,
+                    clamped_samples=clamped_samples,
                     method="batched_sampled_history",
-                    sampled=True,
-                    exact=False,
-                    rows_scanned=batch.rows_received,
-                    matching_rows=matching_rows,
-                    observed_key_counts=observed_counts,
-                    key_counts_exact=False,
+                    max_step=(
+                        snapshot_last_step
+                        if isinstance(snapshot_last_step, int)
+                        and not isinstance(snapshot_last_step, bool)
+                        and snapshot_last_step >= 0
+                        else None
+                    ),
                 )
             else:
                 history_kwargs: Dict[str, Any] = {"samples": clamped_samples, "pandas": False}
@@ -357,12 +363,16 @@ def get_run_history(
 
         from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
 
-        total_steps = getattr(run, "lastHistoryStep", len(clean_rows))
+        total_steps = (
+            snapshot_last_step
+            if isinstance(snapshot_last_step, int) and not isinstance(snapshot_last_step, bool)
+            else len(clean_rows)
+        )
         original_count = len(clean_rows)
 
         returned_counts = _key_row_counts(clean_rows, requested_keys)
         keys_in_response = sorted({key for row in clean_rows for key in row if key != "_step"})
-        missing_keys = [key for key in requested_keys if observed_counts.get(key, 0) == 0]
+        unobserved_keys = [key for key in requested_keys if observed_counts.get(key, 0) == 0]
         keys_omitted_by_limits = [
             key for key in requested_keys if observed_counts.get(key, 0) > 0 and returned_counts.get(key, 0) == 0
         ]
@@ -380,8 +390,8 @@ def get_run_history(
             "sampled_points": len(clean_rows),
             "keys_returned": keys_in_response,
             "requested_keys": requested_keys,
-            "join": "outer",
             "matching_rows": matching_rows,
+            "matching_rows_exact": fetched.key_counts_exact,
             "key_row_counts": {
                 key: {
                     "observed": observed_counts.get(key, 0),
@@ -389,7 +399,7 @@ def get_run_history(
                 }
                 for key in requested_keys
             },
-            "missing_keys": missing_keys,
+            "unobserved_keys": unobserved_keys,
             "keys_omitted_by_limits": keys_omitted_by_limits,
             "key_counts_exact": fetched.key_counts_exact,
             "retrieval_method": fetched.method,
@@ -411,6 +421,10 @@ def get_run_history(
             "source_truncated": fetched.source_truncated,
             "truncated": profile_limit_applied or fetched.source_truncated,
         }
+        if stream == "default" and len(requested_keys) > 1 and target_x is None:
+            result_dict["join"] = "outer"
+        if fetched.key_counts_exact:
+            result_dict["missing_keys"] = unobserved_keys
         if profile_limit_applied:
             result_dict["profile_limit_note"] = (
                 f"The {MCP_WORKLOAD_PROFILE} workload profile limits history responses to "
@@ -447,6 +461,9 @@ def _scan_history_rows(
         # Public SDK scan_history treats max_step as exclusive; the MCP
         # interface documents max_step as inclusive.
         scan_kwargs["max_step"] = max_step + 1
+    # Active runs can grow while the actor-scoped Api object remains cached.
+    # Always rebuild the SDK history reader instead of reusing cached parquet.
+    scan_kwargs["use_cache"] = False
     scan_kwargs["page_size"] = min(1000, max(1, scan_limit))
     scanned_rows: list[dict[str, Any]] = []
     rows_scanned = 0
@@ -462,6 +479,54 @@ def _scan_history_rows(
     return scanned_rows, rows_scanned, source_truncated
 
 
+def _fetch_independent_sampled_history(
+    api: Any,
+    *,
+    entity_name: str,
+    project_name: str,
+    run_id: str,
+    keys: Sequence[str],
+    x_axis: str,
+    clamped_samples: int,
+    method: str,
+    min_step: int | None = None,
+    max_step: int | None = None,
+) -> _HistoryFetch:
+    """Fetch, outer-join, and sample independent key series."""
+    batch = fetch_sampled_history_series(
+        api,
+        entity=entity_name,
+        project=project_name,
+        run_id=run_id,
+        keys=keys,
+        x_axis=x_axis,
+        samples=clamped_samples,
+        min_step=min_step,
+        max_step=max_step,
+    )
+    merged_rows = _outer_join_history_series(batch.series, x_axis=x_axis)
+    clean_merged_rows = _clean_history_rows(merged_rows)
+    value_rows = _filter_rows_with_requested_values(clean_merged_rows, keys)
+    observed_counts = _key_row_counts(clean_merged_rows, keys)
+    return _HistoryFetch(
+        rows=_key_aware_sample(value_rows, clamped_samples, keys),
+        method=method,
+        sampled=True,
+        exact=False,
+        rows_scanned=batch.rows_received,
+        compatibility_caveat=(
+            "Custom-axis collection reads include only metric values logged on "
+            "a row containing the requested x-axis; values without that axis "
+            "cannot be aligned and are not returned."
+            if x_axis != "_step"
+            else None
+        ),
+        matching_rows=len(value_rows),
+        observed_key_counts=observed_counts,
+        key_counts_exact=False,
+    )
+
+
 def _fetch_step_range_with_metadata(
     api: Any,
     run: Any,
@@ -473,16 +538,45 @@ def _fetch_step_range_with_metadata(
     keys: Optional[List[str]],
     min_step: Optional[int],
     max_step: Optional[int],
+    snapshot_max_step: int | None,
     x_axis: str,
     stream: Literal["default", "system"],
 ) -> _HistoryFetch:
-    """Fetch history rows for a step range using a tiered strategy.
+    """Fetch history rows for a step range using a bounded strategy.
 
     Strategy order:
-      1. scan_history (parquet-backed when available with SDK-managed fallback;
-         fails silently when lastHistoryStep == -1)
-      2. history() sampled fallback (always works, ignores step bounds)
+      1. independently sampled, bounded series for multi-key default history
+      2. scan_history for single-key/default unprojected ranges
+      3. history() sampled fallback when the SDK scan is unavailable
     """
+    if stream == "default" and keys and len(keys) > 1:
+        effective_max_step = max_step
+        if isinstance(snapshot_max_step, int) and not isinstance(snapshot_max_step, bool) and snapshot_max_step >= 0:
+            effective_max_step = min(max_step, snapshot_max_step) if max_step is not None else snapshot_max_step
+            if min_step is not None and min_step > effective_max_step:
+                return _HistoryFetch(
+                    rows=[],
+                    method="batched_sampled_history_range",
+                    sampled=True,
+                    exact=False,
+                    rows_scanned=0,
+                    matching_rows=0,
+                    observed_key_counts={key: 0 for key in keys},
+                    key_counts_exact=False,
+                )
+        return _fetch_independent_sampled_history(
+            api,
+            entity_name=entity_name,
+            project_name=project_name,
+            run_id=run_id,
+            keys=keys,
+            x_axis=x_axis,
+            clamped_samples=clamped_samples,
+            method="batched_sampled_history_range",
+            min_step=min_step,
+            max_step=effective_max_step,
+        )
+
     scan_limit = MCP_MAX_HISTORY_RANGE_STEPS
     if min_step is not None and max_step is not None:
         scan_limit = min(scan_limit, max_step - min_step + 1)
@@ -526,35 +620,22 @@ def _fetch_step_range_with_metadata(
             last_step,
             clamped_samples,
         )
-        if stream == "default" and keys and len(keys) > 1:
-            batch = fetch_sampled_history_series(
-                api,
-                entity=entity_name,
-                project=project_name,
-                run_id=run_id,
-                keys=keys,
+        history_kwargs: Dict[str, Any] = {
+            "samples": clamped_samples,
+            "pandas": False,
+            "stream": stream,
+            "x_axis": x_axis,
+        }
+        if keys and stream == "default":
+            history_kwargs["keys"] = keys
+        fallback_rows = list(run.history(**history_kwargs))
+        fallback_scanned = len(fallback_rows)
+        if stream == "system" and keys:
+            fallback_rows = _project_system_history_rows(
+                fallback_rows,
+                requested_keys=keys,
                 x_axis=x_axis,
-                samples=clamped_samples,
             )
-            fallback_rows = _outer_join_history_series(batch.series, x_axis=x_axis)
-            fallback_scanned = batch.rows_received
-        else:
-            history_kwargs: Dict[str, Any] = {
-                "samples": clamped_samples,
-                "pandas": False,
-                "stream": stream,
-                "x_axis": x_axis,
-            }
-            if keys and stream == "default":
-                history_kwargs["keys"] = keys
-            fallback_rows = list(run.history(**history_kwargs))
-            fallback_scanned = len(fallback_rows)
-            if stream == "system" and keys:
-                fallback_rows = _project_system_history_rows(
-                    fallback_rows,
-                    requested_keys=keys,
-                    x_axis=x_axis,
-                )
 
         clean_fallback = _clean_history_rows(fallback_rows)
         clean_fallback = _filter_rows_to_step_bounds(
@@ -1089,6 +1170,7 @@ def _scan_history_for_target(
     scan_kwargs = {
         "keys": keys,
         "page_size": min(1000, max(1, scan_limit)),
+        "use_cache": False,
     }
 
     for index, row in enumerate(islice(run.scan_history(**scan_kwargs), scan_limit)):

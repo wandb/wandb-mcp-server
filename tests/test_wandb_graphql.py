@@ -5,7 +5,9 @@ from __future__ import annotations
 import ast
 from importlib.metadata import version
 from pathlib import Path
+import tomllib
 
+from packaging.version import Version
 import pytest
 from wandb.apis.public.service_api import ServiceApi
 
@@ -54,6 +56,14 @@ def test_execute_graphql_reports_sdk_compatibility_error_without_service_transpo
         execute_graphql(object(), "query Test { viewer { id } }")
 
 
-def test_locked_wandb_versions_are_installed():
-    assert version("wandb") == "0.28.0"
-    assert version("wandb-workspaces") == "0.4.4"
+def test_lockfile_pins_supported_wandb_versions():
+    lock = tomllib.loads((Path(__file__).parents[1] / "uv.lock").read_text())
+    locked = {package["name"]: package["version"] for package in lock["package"]}
+
+    assert locked["wandb"] == "0.28.0"
+    assert locked["wandb-workspaces"] == "0.4.4"
+
+
+def test_installed_wandb_versions_meet_supported_floor():
+    assert Version(version("wandb")) >= Version("0.28.0")
+    assert Version(version("wandb-workspaces")) >= Version("0.4.4")

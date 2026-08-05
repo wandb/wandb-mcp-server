@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -841,10 +842,17 @@ class SampledHistoryServiceApi:
     def __init__(self, payload):
         self.payload = payload
         self.calls = []
+        self.offset = 0
 
     def execute_graphql(self, query, variables=None):
-        self.calls.append((query, dict(variables or {})))
-        return {"project": {"run": {"sampledHistory": self.payload}}}
+        variables = dict(variables or {})
+        self.calls.append((query, variables))
+        payload = self.payload
+        if isinstance(payload, list):
+            batch_size = len(variables.get("specs") or [])
+            payload = payload[self.offset : self.offset + batch_size]
+            self.offset += batch_size
+        return {"project": {"run": {"sampledHistory": payload}}}
 
 
 def test_sampled_history_fetches_disjoint_series_in_one_fixed_query():
@@ -869,6 +877,7 @@ def test_sampled_history_fetches_disjoint_series_in_one_fixed_query():
     assert batch.keys == ["loss", "eval/loss"]
     assert batch.series == service.payload
     assert batch.rows_received == 4
+    assert batch.rows_retained == 4
     assert batch.samples_per_series == 500
     assert batch.requests == 1
     assert len(service.calls) == 1
@@ -910,6 +919,41 @@ def test_sampled_history_deduplicates_keys_and_bounds_total_input_rows():
     assert {spec["samples"] for spec in specs} == {3_333}
 
 
+@pytest.mark.parametrize(
+    ("key_count", "expected_requests"),
+    [(2, 1), (8, 1), (9, 2), (20, 3), (50, 7)],
+)
+def test_sampled_history_chunks_specs_and_applies_inclusive_step_bounds(
+    key_count,
+    expected_requests,
+):
+    keys = [f"metric-{index}" for index in range(key_count)]
+    service = SampledHistoryServiceApi([[{"_step": 10, key: float(index)}] for index, key in enumerate(keys)])
+    api = type("Api", (), {"_service_api": service})()
+
+    batch = fetch_sampled_history_series(
+        api,
+        entity="entity",
+        project="project",
+        run_id="run-1",
+        keys=keys,
+        x_axis="_step",
+        samples=1,
+        min_step=10,
+        max_step=20,
+    )
+
+    assert batch.requests == expected_requests
+    assert len(batch.series) == key_count
+    assert [len(call[1]["specs"]) for call in service.calls] == [
+        min(8, key_count - offset) for offset in range(0, key_count, 8)
+    ]
+    assert all(len(call[1]["specs"]) <= 8 for call in service.calls)
+    specs = [json.loads(spec) for _, variables in service.calls for spec in variables["specs"]]
+    assert [spec["keys"][-1] for spec in specs] == keys
+    assert all(spec["minStep"] == 10 and spec["maxStep"] == 20 for spec in specs)
+
+
 def test_sampled_history_counts_raw_rows_but_drops_unobserved_values():
     service = SampledHistoryServiceApi(
         [
@@ -935,6 +979,7 @@ def test_sampled_history_counts_raw_rows_but_drops_unobserved_values():
     )
 
     assert batch.rows_received == 5
+    assert batch.rows_retained == 2
     assert batch.series == [
         [{"_step": 3, "loss": 0.5}],
         [{"_step": 0, "eval/loss": 0.4}],
@@ -994,16 +1039,72 @@ def test_sampled_history_rejects_missing_run_without_retrying_per_key():
     assert service.calls == 1
 
 
-def test_sampled_history_rejects_backend_over_return_without_retrying():
+def test_sampled_history_resamples_valid_forked_backend_over_return():
     service = SampledHistoryServiceApi(
         [
-            [{"_step": step, "loss": float(step)} for step in range(3)],
+            [{"_step": step, "loss": float(step)} for step in range(5)],
             [{"_step": 0, "eval/loss": 1.0}],
         ]
     )
     api = type("Api", (), {"_service_api": service})()
 
-    with pytest.raises(SelectiveReadUnavailable, match="per-series row limit"):
+    batch = fetch_sampled_history_series(
+        api,
+        entity="entity",
+        project="project",
+        run_id="run-1",
+        keys=["loss", "eval/loss"],
+        x_axis="_step",
+        samples=2,
+    )
+
+    assert len(service.calls) == 1
+    assert batch.rows_received == 6
+    assert batch.rows_retained == 3
+    assert batch.series == [
+        [{"_step": 0, "loss": 0.0}, {"_step": 4, "loss": 4.0}],
+        [{"_step": 0, "eval/loss": 1.0}],
+    ]
+
+
+@pytest.mark.parametrize("key_count", [20, 50])
+def test_sampled_history_normalizes_valid_multi_segment_over_return(key_count):
+    keys = [f"metric-{index}" for index in range(key_count)]
+    retained_per_key = 10_000 // key_count
+    service = SampledHistoryServiceApi(
+        [[{"_step": step, key: float(step)} for step in range(retained_per_key * 2)] for key in keys]
+    )
+    api = type("Api", (), {"_service_api": service})()
+
+    batch = fetch_sampled_history_series(
+        api,
+        entity="entity",
+        project="project",
+        run_id="forked-run",
+        keys=keys,
+        x_axis="_step",
+        samples=retained_per_key,
+    )
+
+    assert batch.rows_received == 20_000
+    assert batch.rows_retained == 10_000
+    assert sum(map(len, batch.series)) == 10_000
+    assert all(len(series) == retained_per_key for series in batch.series)
+
+
+def test_sampled_history_rejects_backend_response_above_raw_safety_cap():
+    service = SampledHistoryServiceApi(
+        [
+            [{"_step": step, "loss": float(step)} for step in range(11)],
+            [],
+        ]
+    )
+    api = type("Api", (), {"_service_api": service})()
+
+    with (
+        patch("wandb_mcp_server.wandb_selective_reads._MAX_SAMPLED_HISTORY_RAW_ROWS", 10),
+        pytest.raises(SelectiveReadUnavailable, match="raw row safety limit"),
+    ):
         fetch_sampled_history_series(
             api,
             entity="entity",
@@ -1011,7 +1112,7 @@ def test_sampled_history_rejects_backend_over_return_without_retrying():
             run_id="run-1",
             keys=["loss", "eval/loss"],
             x_axis="_step",
-            samples=2,
+            samples=5,
         )
 
     assert len(service.calls) == 1
