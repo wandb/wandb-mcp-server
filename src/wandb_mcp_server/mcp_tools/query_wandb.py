@@ -40,6 +40,7 @@ from wandb_mcp_server.wandb_selective_reads import (
     is_projected_report_cursor,
     validate_projected_report_cursor,
 )
+from wandb_mcp_server.wandb_graphql import GraphQLResponseTooLarge
 from wandb_mcp_server.wandb_urls import public_wandb_url, publicize_wandb_url
 
 logger = get_rich_logger(__name__)
@@ -911,6 +912,12 @@ def _sdk_error_result(
         "entity": entity_name,
         "project": project_name,
     }
+    if isinstance(exc, GraphQLResponseTooLarge):
+        return structured_error(
+            "response_too_large",
+            "The bounded W&B response was too large; request fewer items or fields",
+            **common,
+        )
     if status == 401 or "unauth" in name or "invalid api key" in message or "no w&b api key" in message:
         return structured_error("authentication_failed", "W&B authentication failed", **common)
     if status == 403 or "permission" in message or "forbidden" in message:
@@ -1437,6 +1444,14 @@ def query_wandb(
                     else None
                 ),
                 source="wandb_selective_read",
+            )
+        except GraphQLResponseTooLarge as exc:
+            ctx.mark_error("response_too_large")
+            return _sdk_error_result(
+                exc,
+                resource=resource,
+                entity_name=entity_name,
+                project_name=project_name,
             )
         except Exception as exc:
             logger.error("W&B SDK query failed (%s)", type(exc).__name__)

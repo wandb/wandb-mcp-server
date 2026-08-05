@@ -18,6 +18,7 @@ from wandb_mcp_server.wandb_selective_reads import (
     PROJECTED_SWEEPS_QUERY,
     SelectiveReadUnavailable,
 )
+from wandb_mcp_server.wandb_graphql import GraphQLResponseTooLarge
 
 
 @contextmanager
@@ -91,6 +92,22 @@ def _projected_cursor_for(**overrides):
         position="private-backend-position",
         fingerprint=fingerprint,
     )
+
+
+def test_projected_response_size_limit_does_not_fall_back_to_full_sdk_objects(monkeypatch):
+    api = SimpleNamespace()
+    _install_api(monkeypatch, api)
+    monkeypatch.setattr(
+        query_module,
+        "fetch_projected_runs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GraphQLResponseTooLarge("bounded")),
+    )
+
+    result = query_module.query_wandb("entity", "project", "runs", limit=50)
+
+    assert result["error"] == "response_too_large"
+    assert result["resource"] == "runs"
+    assert result.get("retryable") is not True
 
 
 def test_real_wandb_028_runs_paginator_is_bounded_to_one_page(monkeypatch):

@@ -26,13 +26,14 @@ Version 0.4.0 makes W&B reads SDK-first, bounded, and workload-aware:
 
 - Run collections return lightweight metadata by default and support targeted
   `summary_keys` and `config_keys` instead of loading every metric.
-- Multi-key run history uses bounded outer-union semantics, so metrics logged
-  at different cadences remain visible instead of requiring every key on the
-  same history row.
+- Explicit multi-key default-history reads use bounded outer-union semantics,
+  so metrics logged at different cadences remain visible instead of requiring
+  every key on the same history row.
 - Shared and Dedicated workload profiles bound collection, history, evaluation,
-  and schema reads. Overloaded hosted servers return a retryable `server_busy`
-  response instead of creating unbounded W&B API traffic.
-- Dedicated and Self-Managed deployments can send backend API traffic over an
+  and schema reads. When admission is enabled, weighted in-flight work cannot
+  exceed the configured per-actor and per-process cost capacities; overload
+  returns retryable `server_busy`. Local STDIO leaves admission off by default.
+- Dedicated and Self-Managed deployments can send W&B Models/API traffic over an
   internal Kubernetes service with `WANDB_INTERNAL_BASE_URL`, while public links
   continue to use `WANDB_BASE_URL`.
 - Raw GraphQL is disabled by default and remains query-only when explicitly
@@ -50,7 +51,7 @@ deployment settings, and the complete customer-visible summary.
 
 | **Analyze Experiments** | **Debug Traces** | **Create Reports** | **Get Help** |
 |:---|:---|:---|:---|
-| Show me the top 5 runs by eval/accuracy in wandb-smle/hiring-agent-demo-public? | How did the latency of my hiring agent predict traces evolve over the last months? | Generate a wandb report comparing the decisions made by the hiring agent last month | How do I create a leaderboard in Weave - ask SupportBot? |
+| Show me the top 5 runs by eval/accuracy in wandb-smle/hiring-agent-demo-public? | How did the latency of my hiring agent predict traces evolve over the last months? | Generate a wandb report comparing the decisions made by the hiring agent last month | Search the official W&B docs for how to create a leaderboard in Weave. |
 
 *"Go through the last 100 traces of my last training run in grpo-cuda/axolotl-grpo and tell me why rollout traces of my RL experiment were bad sometimes?"*
 </details>
@@ -97,6 +98,12 @@ query operation; mutations and subscriptions are always rejected. This flag is
 independent of `WANDB_MCP_READ_ONLY`. See the
 [query capability matrix](docs/query-capabilities.md).
 
+On the supported W&B service transport, raw and fixed GraphQL responses are
+checked at 16 MiB before MCP JSON decoding and again after decoding with a
+500,000-node structural ceiling. Oversized results return
+`response_too_large`. These are MCP processing safeguards after the SDK has
+received the protobuf envelope; they do not cap network bytes or backend work.
+
 Recommended deployment presets:
 
 | Deployment | Settings |
@@ -110,16 +117,29 @@ Recommended deployment presets:
 of a GraphQL document. Existing raw-query callers must explicitly enable and call
 `query_wandb_graphql_tool`.
 
-**Run history semantics:** `get_run_history_tool` outer-joins requested metric
-series by `_step`, falling back to the selected x-axis when `_step` is absent, so keys logged in separate
-`wandb.log()` calls do not disappear. `samples` is the total final-row budget
-across all requested keys, not a per-key allowance. For bounded step ranges,
-rows containing none of the requested values are removed before deterministic,
-key-aware sampling; sparse series are retained in full when the budget permits.
-Additive diagnostics report `requested_keys`, `matching_rows`, per-key observed
-and returned counts, missing keys, source truncation, and any keys omitted by limits. This path
-uses a fixed application-owned query-only projection, accepts no caller-supplied
-GraphQL, and works with `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`.
+**Run history semantics:** for explicit multi-key default-history sampled and
+ranged collection reads, `get_run_history_tool` outer-joins requested metric
+series by `_step`, falling back to the selected x-axis when `_step` is absent,
+so keys logged in separate `wandb.log()` calls do not disappear. Multi-key
+ranges use one independent bounded series per metric, in requests of at most
+eight series. The independent-spec path is designed to cover active/newly
+synced as well as exported history. Multi-request reads use the same freshly
+observed upper-step boundary for every batch. A fixed snapshot query reads run
+identity plus one complete, resume-oriented `historyTail` row; it avoids loading
+the full config, summary, system metrics, or history-key index before the
+bounded history read. `samples` is the
+total final-row budget across all requested keys, not a per-key allowance. All
+observed sparse points in the bounded result are
+retained when the budget permits. Diagnostics report `unobserved_keys` when no
+usable finite/non-null value appears in a bounded/sample result; `missing_keys`
+is reported only when absence was checked exactly. A custom x-axis must occur
+on the same row as its metric because the server does not invent interpolation.
+`non_finite_counts` reports NaN or Infinity observations seen in the bounded
+source; those invalid JSON numeric values are omitted from returned rows, and
+their counts are exhaustive only when `key_counts_exact=true`.
+Exact `target_x` remains a point lookup rather than an outer-union read. This
+path uses a fixed application-owned query-only projection, accepts no
+caller-supplied GraphQL, and works with `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`.
 
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
 
@@ -593,7 +613,7 @@ When running the server locally, you can customize its behavior with command lin
 |----------|-------------|----------|
 | `WANDB_API_KEY` | Your W&B API key (alternative to `--wandb_api_key` flag) | Yes |
 | `WANDB_BASE_URL` | Public W&B instance URL used for credentials and user-facing links | No |
-| `WANDB_INTERNAL_BASE_URL` | Optional server-side W&B API URL; Dedicated charts set this to the in-cluster API service | No |
+| `WANDB_INTERNAL_BASE_URL` | Optional server-side W&B Models/API URL; Dedicated charts set this to the in-cluster API service. Weave trace routing remains controlled by `WF_TRACE_SERVER_URL`. | No |
 | `MCP_SERVER_LOG_LEVEL` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` | No |
 | `WANDB_SILENT` | Set to `"True"` to suppress W&B SDK output (default: `true`) | No |
 | `WEAVE_SILENT` | Set to `"True"` to suppress Weave SDK output (default: `true`) | No |
@@ -612,8 +632,8 @@ When running the server locally, you can customize its behavior with command lin
 | `MCP_ADMISSION_ACTOR_CAPACITY` | Maximum concurrent cost units per API-key actor (profile default: shared `4`, dedicated `8`, local `16`) | No |
 | `MCP_ADMISSION_PROCESS_CAPACITY` | Maximum concurrent cost units per server process (default: `16`) | No |
 | `MCP_ADMISSION_WAIT_MS` | Maximum queue wait before returning retryable `server_busy` (default: `2000`) | No |
-| `MCP_TOOL_TIMEOUT_SECONDS` | Hosted public-tool execution deadline (default: `30`) | No |
-| `MCP_WANDB_REQUEST_TIMEOUT_SECONDS` | Timeout for public W&B SDK requests (default: `20`) | No |
+| `MCP_TOOL_TIMEOUT_SECONDS` | Hosted public-tool response deadline (default: `30`); timed-out sync workers retain admission capacity until they finish | No |
+| `MCP_WANDB_REQUEST_TIMEOUT_SECONDS` | Timeout for server-side W&B SDK and fixed read requests (default: `20`) | No |
 | `MCP_SYNC_TOOL_WORKERS` | Bounded worker count for synchronous public tools (profile-derived default, capped at `16`) | No |
 | `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events | No |
 | `MCP_ANALYTICS_QUEUE_CAPACITY` | Maximum outstanding events per optional Segment or Datadog forwarder (default: `256`) | No |
@@ -624,7 +644,7 @@ When running the server locally, you can customize its behavior with command lin
 Workload profiles provide one deployment-level choice while preserving the
 individual `MCP_MAX_*` overrides for advanced operators:
 
-| Profile | Collection rows | History samples | Metric keys | Range scan rows | Full-detail rows | Eval detail rows | Schema sample rows | Actor/process cost |
+| Profile | Collection rows | History samples | Metric keys | Range step span | Full-detail rows | Eval detail rows | Schema sample rows | Actor/process cost |
 |---------|----------------:|----------------:|------------:|----------------:|-----------------:|-----------------:|-------------------:|-------------------:|
 | `shared` | 100 | 500 | 20 | 5,000 | 3 | 500 | 100 | 4 / 16 |
 | `dedicated` | 250 | 1,500 | 50 | 20,000 | 10 | 2,000 | 250 | 8 / 16 |

@@ -10,7 +10,9 @@ import math
 from typing import Any, Mapping, NoReturn, Sequence
 
 from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
-from wandb_mcp_server.wandb_graphql import execute_graphql
+from wandb_mcp_server.wandb_graphql import GraphQLResponseTooLarge, execute_graphql
+
+MAX_SAFE_HISTORY_STEP = (1 << 63) - 2
 
 
 PROJECTED_RUNS_QUERY = """
@@ -93,6 +95,20 @@ query MCPProjectedRun(
       }
       summaryMetrics(keys: $summaryKeys) @include(if: $includeSummary)
       config(keys: $configKeys) @include(if: $includeConfig)
+    }
+  }
+}
+"""
+
+HISTORY_RUN_SNAPSHOT_QUERY = """
+query MCPHistoryRunSnapshot($entity: String!, $project: String!, $run: String!) {
+  project(name: $project, entityName: $entity) {
+    run(name: $run) {
+      name
+      displayName
+      state
+      historyLineCount
+      historyTail
     }
   }
 }
@@ -383,11 +399,17 @@ class ArtifactVersionPage:
 
 @dataclass(frozen=True)
 class SampledHistoryBatch:
-    """Bounded sampled history series returned by one fixed read request."""
+    """Bounded sampled history series returned by fixed read requests."""
 
     series: list[list[dict[str, Any]]]
     keys: list[str]
+    # Raw rows returned by Core before fork-segment normalization.
     rows_received: int
+    # Rows retained for the pre-merge bounded working set.
+    rows_retained: int
+    bytes_retained: int
+    values_truncated: int
+    non_finite_counts: dict[str, int]
     samples_per_series: int
     requests: int
 
@@ -403,6 +425,127 @@ class ProjectedReportCursorError(ValueError):
 _MAX_PROJECTED_PAGE_REQUESTS = 10
 _PROJECTED_REPORT_CURSOR_PREFIX = "mcp-report-v1:"
 _MAX_SAMPLED_HISTORY_INPUT_ROWS = 10_000
+_MAX_SAMPLED_HISTORY_RAW_ROWS = 100_000
+_MAX_SAMPLED_HISTORY_SPECS_PER_REQUEST = 8
+_MAX_SAMPLED_HISTORY_ROW_BYTES = 64 * 1024
+_MAX_SAMPLED_HISTORY_RETAINED_BYTES = 8 * 1024 * 1024
+_MAX_SAMPLED_HISTORY_VALUE_NODES = 500
+_MAX_SAMPLED_HISTORY_VALUE_DEPTH = 6
+_MAX_SAMPLED_HISTORY_COLLECTION_ITEMS = 100
+_TRUNCATED_HISTORY_VALUE = "<history value truncated>"
+_CORE_NON_FINITE_TOKENS = frozenset({"NaN", "Infinity", "-Infinity"})
+
+
+@dataclass
+class _SampledValueBudget:
+    remaining_bytes: int = 60 * 1024
+    remaining_nodes: int = _MAX_SAMPLED_HISTORY_VALUE_NODES
+    truncated: bool = False
+
+
+def _bounded_sampled_history_value(
+    value: Any,
+    budget: _SampledValueBudget,
+    *,
+    depth: int = 0,
+    seen: set[int] | None = None,
+) -> Any:
+    """Copy one decoded JSON value without exceeding a fixed working budget."""
+    budget.remaining_nodes -= 1
+    if budget.remaining_nodes < 0 or budget.remaining_bytes <= 0 or depth >= _MAX_SAMPLED_HISTORY_VALUE_DEPTH:
+        budget.truncated = True
+        return _TRUNCATED_HISTORY_VALUE
+    if value is None or isinstance(value, (bool, int)):
+        budget.remaining_bytes -= len(str(value))
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            budget.truncated = True
+            return None
+        budget.remaining_bytes -= len(repr(value))
+        return value
+    if isinstance(value, str):
+        candidate = value[: min(len(value), budget.remaining_bytes)]
+        encoded = candidate.encode("utf-8")
+        if len(encoded) > budget.remaining_bytes:
+            candidate = encoded[: budget.remaining_bytes].decode("utf-8", errors="ignore")
+            encoded = candidate.encode("utf-8")
+        budget.remaining_bytes -= len(encoded)
+        if len(candidate) != len(value):
+            budget.truncated = True
+        return candidate or (_TRUNCATED_HISTORY_VALUE if value else "")
+
+    active = seen if seen is not None else set()
+    identity = id(value)
+    if identity in active:
+        budget.truncated = True
+        return "<cyclic history value>"
+    active.add(identity)
+    try:
+        if isinstance(value, Mapping):
+            result: dict[str, Any] = {}
+            for index, (key, child) in enumerate(value.items()):
+                if index >= _MAX_SAMPLED_HISTORY_COLLECTION_ITEMS:
+                    result["_truncated"] = "additional mapping entries omitted"
+                    budget.truncated = True
+                    break
+                safe_key = _bounded_sampled_history_value(str(key), budget, depth=depth + 1, seen=active)
+                result[str(safe_key)] = _bounded_sampled_history_value(child, budget, depth=depth + 1, seen=active)
+                if budget.remaining_bytes <= 0:
+                    budget.truncated = True
+                    break
+            return result
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            result = []
+            for index, child in enumerate(value):
+                if index >= _MAX_SAMPLED_HISTORY_COLLECTION_ITEMS:
+                    result.append("<additional list entries omitted>")
+                    budget.truncated = True
+                    break
+                result.append(_bounded_sampled_history_value(child, budget, depth=depth + 1, seen=active))
+                if budget.remaining_bytes <= 0:
+                    budget.truncated = True
+                    break
+            return result
+        budget.truncated = True
+        return _bounded_sampled_history_value(str(value), budget, depth=depth + 1, seen=active)
+    finally:
+        active.discard(identity)
+
+
+def _bounded_sampled_history_row(
+    row: Mapping[str, Any],
+    *,
+    requested_key: str,
+    x_axis: str,
+) -> tuple[dict[str, Any], int, bool]:
+    """Retain only selected fields and cap the copied row by bytes and nodes."""
+    budget = _SampledValueBudget()
+    bounded: dict[str, Any] = {}
+    for key in dict.fromkeys((x_axis, "_step", requested_key)):
+        if key in row:
+            bounded[key] = _bounded_sampled_history_value(row[key], budget)
+    encoded_size = len(
+        json.dumps(
+            bounded,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    if encoded_size > _MAX_SAMPLED_HISTORY_ROW_BYTES:
+        bounded = {key: value for key, value in bounded.items() if key in {x_axis, "_step"}}
+        bounded[requested_key] = _TRUNCATED_HISTORY_VALUE
+        budget.truncated = True
+        encoded_size = len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    return bounded, encoded_size, budget.truncated
+
+
+def _is_non_finite_history_value(value: Any) -> bool:
+    """Recognize Python and Core 0.82's JSON-safe non-finite encodings."""
+    return (isinstance(value, float) and not math.isfinite(value)) or (
+        isinstance(value, str) and value in _CORE_NON_FINITE_TOKENS
+    )
 
 
 def is_projected_report_cursor(cursor: str) -> bool:
@@ -539,6 +682,8 @@ def _retained_projected_cursor(
 
 def _raise_selective_failure(context: str, exc: Exception) -> NoReturn:
     """Preserve actionable upstream errors; wrap only projection compatibility failures."""
+    if isinstance(exc, GraphQLResponseTooLarge):
+        raise exc
     status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
     response = getattr(exc, "response", None)
     if status is None and response is not None:
@@ -834,6 +979,70 @@ def fetch_projected_run(
         include_summary=summary_keys is None or bool(summary_keys),
         include_config=bool(config_keys),
     )
+
+
+def fetch_history_run_snapshot(
+    api: Any,
+    *,
+    entity: str,
+    project: str,
+    run_id: str,
+) -> dict[str, Any] | None:
+    """Read only the identity and upper step needed to construct history."""
+    raise_if_tool_deadline_exceeded()
+    try:
+        data = execute_graphql(
+            api,
+            HISTORY_RUN_SNAPSHOT_QUERY,
+            {"entity": entity, "project": project, "run": run_id},
+        )
+    except Exception as exc:
+        _raise_selective_failure("history run snapshot query unavailable", exc)
+    node = _project_payload(data).get("run")
+    if not isinstance(node, Mapping):
+        return None
+
+    history_line_count = node.get("historyLineCount")
+    if isinstance(history_line_count, bool) or not isinstance(history_line_count, int) or history_line_count < 0:
+        raise SelectiveReadUnavailable("history run snapshot returned an invalid history line count")
+    history_tail = node.get("historyTail")
+    if not isinstance(history_tail, str):
+        raise SelectiveReadUnavailable("history run snapshot returned no bounded history tail")
+    try:
+        encoded_rows = json.loads(history_tail)
+        if not isinstance(encoded_rows, list) or len(encoded_rows) > 8:
+            raise ValueError
+        if not encoded_rows:
+            if history_line_count == 0:
+                return {
+                    "id": node.get("name") or run_id,
+                    "display_name": node.get("displayName") or node.get("name") or run_id,
+                    "state": node.get("state"),
+                    "history_line_count": history_line_count,
+                    "last_step": -1,
+                }
+            raise ValueError
+        if not isinstance(encoded_rows[-1], str):
+            raise ValueError
+        # W&B's resume contract treats the final encoded row as the tail. Core
+        # 0.82 returns one row; accepting a short legacy list keeps older
+        # compatible servers correct without processing an unbounded history.
+        tail_row = json.loads(encoded_rows[-1])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise SelectiveReadUnavailable("history run snapshot returned an invalid bounded history tail") from None
+    raw_step = tail_row.get("_step") if isinstance(tail_row, Mapping) else None
+    if isinstance(raw_step, bool) or not isinstance(raw_step, int) or raw_step < 0 or raw_step > MAX_SAFE_HISTORY_STEP:
+        raise SelectiveReadUnavailable("history run snapshot returned an invalid upper step")
+    # Core returns step zero for a genuinely empty history.  The line count
+    # distinguishes that case from a run whose only logged row is step zero.
+    last_step = -1 if history_line_count == 0 and raw_step == 0 else raw_step
+    return {
+        "id": node.get("name") or run_id,
+        "display_name": node.get("displayName") or node.get("name") or run_id,
+        "state": node.get("state"),
+        "history_line_count": history_line_count,
+        "last_step": last_step,
+    }
 
 
 def fetch_projected_sweeps(
@@ -1394,83 +1603,143 @@ def fetch_sampled_history_series(
     keys: Sequence[str],
     x_axis: str,
     samples: int,
+    min_step: int | None = None,
+    max_step: int | None = None,
 ) -> SampledHistoryBatch:
-    """Fetch one independently sampled series per key in one read-only request.
+    """Fetch one independently sampled series per key in bounded read requests.
 
     W&B's public ``Run.history(keys=[...])`` samples only rows where every
     requested key co-occurs. Real training loops commonly log those keys on
-    different cadences, so this fixed projection sends one bounded spec per
-    key and lets the caller outer-join the returned series.
+    different cadences, so this fixed projection sends one bounded spec per key
+    and lets the caller outer-join the returned series. Specs are chunked to
+    bound the independent history-store reads executed by W&B Core.
     """
     unique_keys = list(dict.fromkeys(keys))
     if not unique_keys:
         raise ValueError("keys must contain at least one history key")
     if isinstance(samples, bool) or not isinstance(samples, int) or samples < 1:
         raise ValueError("samples must be a positive integer")
+    for name, value in (("min_step", min_step), ("max_step", max_step)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError(f"{name} must be an integer")
+    if min_step is not None and max_step is not None and max_step < min_step:
+        raise ValueError("max_step must be greater than or equal to min_step")
 
     samples_per_series = min(
         samples,
         max(1, _MAX_SAMPLED_HISTORY_INPUT_ROWS // len(unique_keys)),
     )
-    specs: list[str] = []
+    specs_by_key: list[tuple[str, str]] = []
     for key in unique_keys:
-        # sampledHistory treats the first key as its x-axis. Include the
-        # internal step as a stable join key for custom axes without changing
-        # which axis controls backend sampling.
+        # Server 0.82 applies AND semantics within a spec, so each metric gets
+        # an independent spec. A custom x-axis intentionally remains in that
+        # spec: a value cannot be plotted against an axis logged on another row.
         spec_keys = list(dict.fromkeys([x_axis, "_step", key]))
-        specs.append(
-            json.dumps(
-                {"keys": spec_keys, "samples": samples_per_series},
-                separators=(",", ":"),
-            )
-        )
-
-    raise_if_tool_deadline_exceeded()
-    try:
-        data = execute_graphql(
-            api,
-            SAMPLED_HISTORY_SERIES_QUERY,
-            {
-                "entity": entity,
-                "project": project,
-                "run": run_id,
-                "specs": specs,
-            },
-        )
-    except Exception as exc:
-        _raise_selective_failure("sampled history series query unavailable", exc)
-
-    run_node = _project_payload(data).get("run")
-    if not isinstance(run_node, Mapping):
-        raise ValueError("W&B run was not found or is not accessible")
-    payload = run_node.get("sampledHistory")
-    if not isinstance(payload, list) or len(payload) != len(unique_keys):
-        raise SelectiveReadUnavailable("sampled history series query returned an invalid series count")
+        spec: dict[str, Any] = {"keys": spec_keys, "samples": samples_per_series}
+        if min_step is not None:
+            spec["minStep"] = min_step
+        if max_step is not None:
+            # sampledHistory treats maxStep as inclusive, matching the MCP
+            # interface (unlike public Run.scan_history).
+            spec["maxStep"] = max_step
+        specs_by_key.append((key, json.dumps(spec, separators=(",", ":"))))
 
     series: list[list[dict[str, Any]]] = []
     rows_received = 0
-    for requested_key, item in zip(unique_keys, payload, strict=True):
-        if not isinstance(item, list) or not all(isinstance(row, Mapping) for row in item):
-            raise SelectiveReadUnavailable("sampled history series query returned an invalid series")
-        if len(item) > samples_per_series:
-            raise SelectiveReadUnavailable("sampled history series query exceeded its per-series row limit")
-        rows_received += len(item)
-        if rows_received > _MAX_SAMPLED_HISTORY_INPUT_ROWS:
-            raise SelectiveReadUnavailable("sampled history series query exceeded its total row limit")
-        filtered_rows: list[dict[str, Any]] = []
-        for row in item:
-            requested_value = row.get(requested_key)
-            if requested_value is None or (isinstance(requested_value, float) and not math.isfinite(requested_value)):
-                continue
-            filtered_rows.append({str(response_key): value for response_key, value in row.items()})
-        series.append(filtered_rows)
+    rows_retained = 0
+    bytes_retained = 0
+    values_truncated = 0
+    non_finite_counts = {key: 0 for key in unique_keys}
+    requests = 0
+    for offset in range(0, len(specs_by_key), _MAX_SAMPLED_HISTORY_SPECS_PER_REQUEST):
+        batch = specs_by_key[offset : offset + _MAX_SAMPLED_HISTORY_SPECS_PER_REQUEST]
+        raise_if_tool_deadline_exceeded()
+        try:
+            data = execute_graphql(
+                api,
+                SAMPLED_HISTORY_SERIES_QUERY,
+                {
+                    "entity": entity,
+                    "project": project,
+                    "run": run_id,
+                    "specs": [spec for _, spec in batch],
+                },
+            )
+        except Exception as exc:
+            _raise_selective_failure("sampled history series query unavailable", exc)
+        requests += 1
+
+        run_node = _project_payload(data).get("run")
+        if not isinstance(run_node, Mapping):
+            raise ValueError("W&B run was not found or is not accessible")
+        payload = run_node.get("sampledHistory")
+        if not isinstance(payload, list) or len(payload) != len(batch):
+            raise SelectiveReadUnavailable("sampled history series query returned an invalid series count")
+
+        for (requested_key, _), item in zip(batch, payload, strict=True):
+            if not isinstance(item, list) or not all(isinstance(row, Mapping) for row in item):
+                raise SelectiveReadUnavailable("sampled history series query returned an invalid series")
+            rows_received += len(item)
+            if rows_received > _MAX_SAMPLED_HISTORY_RAW_ROWS:
+                raise SelectiveReadUnavailable("sampled history series query exceeded its raw row safety limit")
+
+            non_finite_counts[requested_key] += sum(
+                _is_non_finite_history_value(row.get(requested_key)) for row in item
+            )
+            valid_count = sum(
+                1
+                for row in item
+                if row.get(requested_key) is not None and not _is_non_finite_history_value(row.get(requested_key))
+            )
+            retained_count = min(valid_count, samples_per_series)
+            if 0 < retained_count < valid_count:
+                last = valid_count - 1
+                retained_positions = (
+                    {round(position * last / (retained_count - 1)) for position in range(retained_count)}
+                    if retained_count > 1
+                    else {0}
+                )
+            else:
+                retained_positions = None
+
+            filtered_rows: list[dict[str, Any]] = []
+            valid_index = -1
+            for row in item:
+                requested_value = row.get(requested_key)
+                if requested_value is None or _is_non_finite_history_value(requested_value):
+                    continue
+                valid_index += 1
+                if retained_positions is not None and valid_index not in retained_positions:
+                    continue
+                bounded_row, row_bytes, row_was_truncated = _bounded_sampled_history_row(
+                    row,
+                    requested_key=requested_key,
+                    x_axis=x_axis,
+                )
+                if bytes_retained + row_bytes > _MAX_SAMPLED_HISTORY_RETAINED_BYTES:
+                    raise SelectiveReadUnavailable("sampled history series query exceeded its retained byte limit")
+                bytes_retained += row_bytes
+                values_truncated += int(row_was_truncated)
+                filtered_rows.append(bounded_row)
+            # Core 0.82 samples fork segments independently and concatenates
+            # them, so a valid forked-run response may exceed the requested
+            # per-spec sample hint. Selection happens before copying values, so
+            # even a valid fork over-return cannot inflate the working set.
+            rows_retained += len(filtered_rows)
+            if rows_retained > _MAX_SAMPLED_HISTORY_INPUT_ROWS:
+                raise SelectiveReadUnavailable("sampled history series query exceeded its retained row limit")
+            series.append(filtered_rows)
 
     return SampledHistoryBatch(
         series=series,
         keys=unique_keys,
         rows_received=rows_received,
+        rows_retained=rows_retained,
+        bytes_retained=bytes_retained,
+        values_truncated=values_truncated,
+        non_finite_counts=non_finite_counts,
         samples_per_series=samples_per_series,
-        requests=1,
+        requests=requests,
     )
 
 

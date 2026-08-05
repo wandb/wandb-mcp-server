@@ -7,7 +7,7 @@ This server provides tools for:
 - Counting traces efficiently
 - Querying W&B experiment data through the public SDK
 - Creating shareable reports with visualizations
-- Getting help via wandbot support agent
+- Searching official W&B documentation
 - Discovering available entities and projects
 """
 
@@ -87,7 +87,6 @@ from wandb_mcp_server.mcp_tools.query_wandb import (
     query_wandb,
 )
 
-# wandbot removed -- zero usage across 400+ benchmark runs, superseded by search_wandb_docs_tool
 from wandb_mcp_server.mcp_tools.query_weave import (
     QUERY_WEAVE_TRACES_TOOL_DESCRIPTION,
     query_paginated_weave_traces,

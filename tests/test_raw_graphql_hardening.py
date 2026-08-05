@@ -11,6 +11,7 @@ import pytest
 import wandb_mcp_server.api_client as api_client
 from wandb_mcp_server.mcp_tools import query_wandb_gql as gql_tool
 from wandb_mcp_server.trace_utils import count_tokens
+from wandb_mcp_server.wandb_graphql import GraphQLResponseTooLarge
 
 
 @contextmanager
@@ -583,6 +584,27 @@ def test_oversized_non_connection_response_returns_bounded_error(monkeypatch):
     result = gql_tool.query_paginated_wandb_gql("query Viewer { viewer { custom } }")
 
     assert result["errors"][0]["error"] == "response_too_large"
+
+
+def test_transport_size_limit_returns_non_retryable_bounded_error(monkeypatch):
+    service = Service()
+    _install(monkeypatch, service)
+    monkeypatch.setattr(
+        gql_tool,
+        "execute_graphql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GraphQLResponseTooLarge("bounded")),
+    )
+
+    result = gql_tool.query_paginated_wandb_gql("query Viewer { viewer { custom } }")
+
+    assert result == {
+        "errors": [
+            {
+                "error": "response_too_large",
+                "message": "The W&B GraphQL response exceeded the safety limit; request fewer items or fields",
+            }
+        ]
+    }
 
 
 def test_response_budget_uses_real_token_count_for_unicode(monkeypatch):

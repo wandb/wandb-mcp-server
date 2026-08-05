@@ -178,10 +178,12 @@ def tool_cost(name: str, arguments: Mapping[str, Any] | None = None) -> tuple[st
             return "light", 1
         return "expensive", 2
     if name == "get_run_history_tool":
+        keys = arguments.get("keys")
         if (
             arguments.get("target_x") is not None
             or arguments.get("min_step") is not None
             or arguments.get("max_step") is not None
+            or (isinstance(keys, list) and len(keys) > 8)
         ):
             return "heavy", 4
         return "expensive", 2

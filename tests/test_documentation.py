@@ -17,6 +17,7 @@ from wandb_mcp_server.server import register_tools
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 README = REPOSITORY_ROOT / "README.md"
 QUERY_CAPABILITIES = REPOSITORY_ROOT / "docs" / "query-capabilities.md"
+RELEASE_NOTES = REPOSITORY_ROOT / "docs" / "releases" / "v0.4.0.md"
 FEATURE_FLAGS = (
     "WANDB_MCP_ENABLE_RAW_GRAPHQL",
     "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
@@ -124,3 +125,23 @@ def test_query_capability_matrix_routes_typed_specialized_and_raw_reads():
     raw_rows = [line for line in text.splitlines() if line.startswith("|") and "query_wandb_graphql_tool" in line]
     assert len(raw_rows) == 4
     assert all(line.rstrip().endswith("| Yes |") for line in raw_rows)
+
+
+def test_history_safety_metadata_is_documented_truthfully():
+    for path in (README, QUERY_CAPABILITIES, RELEASE_NOTES):
+        text = path.read_text()
+        assert "non_finite_counts" in text
+        assert "key_counts_exact" in text
+
+    capability_text = QUERY_CAPABILITIES.read_text()
+    assert "source_truncated" in capability_text
+    assert "step-window" in capability_text
+    assert "post-protobuf" in capability_text
+
+
+def test_removed_wandbot_is_not_documented_or_shipped():
+    assert not (REPOSITORY_ROOT / "src" / "wandb_mcp_server" / "mcp_tools" / "query_wandbot.py").exists()
+    for path in (*_durable_markdown_files(), REPOSITORY_ROOT / "env.example"):
+        text = path.read_text().lower()
+        assert "wandbot" not in text
+        assert "supportbot" not in text
