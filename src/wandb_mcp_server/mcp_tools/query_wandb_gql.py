@@ -15,6 +15,7 @@ from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_graphql import (
     GraphQLReadOnlyViolation,
+    GraphQLResponseTooLarge,
     execute_graphql,
     validate_read_only_graphql,
 )
@@ -47,8 +48,11 @@ have bounded typed MCP tools.
 
 The document must contain exactly one query operation. Mutations, subscriptions,
 mixed documents, multiple operations, nested/multiple paginated connections, and
-unbounded connections are rejected before any W&B request. Responses and
-pagination are bounded by deployment limits.
+unbounded connections are rejected before any W&B request. Pagination and MCP
+output are bounded. On the supported ServiceApi path, response text is checked
+before MCP JSON decoding and decoded structure is checked again; these checks
+occur after the SDK receives the protobuf envelope and are not a wire-size or
+backend-work limit.
 """
 
 
@@ -954,6 +958,10 @@ def query_paginated_wandb_gql(
                     )
                 try:
                     page = execute_graphql(api, bounded_query, page_variables)
+                except GraphQLResponseTooLarge:
+                    return _response_too_large(
+                        "The W&B GraphQL response exceeded the safety limit; request fewer items or fields"
+                    )
                 except Exception as exc:
                     result.setdefault("errors", []).append(
                         {
@@ -1054,6 +1062,11 @@ def query_paginated_wandb_gql(
             if stopped_at_limit:
                 result["extensions"]["wandb_mcp"]["limit_applied"] = applied_max_items
             return _fit_response_budget(result, plan)
+        except GraphQLResponseTooLarge:
+            ctx.mark_error("response_too_large")
+            return _response_too_large(
+                "The W&B GraphQL response exceeded the safety limit; request fewer items or fields"
+            )
         except Exception as exc:
             logger.error("Bounded GraphQL query failed (%s)", type(exc).__name__)
             ctx.mark_error(f"query_failed: {type(exc).__name__}")

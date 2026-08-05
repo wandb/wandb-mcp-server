@@ -12,6 +12,7 @@ import pytest
 from wandb_mcp_server.wandb_graphql import validate_read_only_graphql
 from wandb_mcp_server.wandb_selective_reads import (
     ARTIFACT_INVENTORY_QUERY,
+    HISTORY_RUN_SNAPSHOT_QUERY,
     METRIC_VALUE_STEPS_QUERY,
     PROJECTED_RUNS_QUERY,
     PROJECTED_RUN_QUERY,
@@ -24,6 +25,7 @@ from wandb_mcp_server.wandb_selective_reads import (
     SAMPLED_HISTORY_SERIES_QUERY,
     ProjectedReportCursorError,
     SelectiveReadUnavailable,
+    fetch_history_run_snapshot,
     fetch_registry_artifact_versions,
     fetch_project_counts,
     fetch_project_fields,
@@ -214,6 +216,7 @@ def test_every_application_owned_document_is_query_only():
     for document in (
         PROJECTED_RUNS_QUERY,
         PROJECTED_RUN_QUERY,
+        HISTORY_RUN_SNAPSHOT_QUERY,
         PROJECTED_REPORTS_QUERY,
         PROJECTED_SWEEPS_QUERY,
         PROJECT_COUNTS_QUERY,
@@ -793,6 +796,100 @@ def test_single_projected_run_supports_nested_and_literal_config_keys():
     assert result["config"] == {"model.name": "small"}
 
 
+@pytest.mark.parametrize(
+    ("history_line_count", "tail_step", "expected_last_step"),
+    [(0, 0, -1), (1, 0, 0), (5, 4, 4)],
+)
+def test_history_snapshot_distinguishes_empty_and_step_zero_runs(
+    history_line_count,
+    tail_step,
+    expected_last_step,
+):
+    payload = {
+        "project": {
+            "run": {
+                "name": "run-1",
+                "displayName": "Run 1",
+                "state": "running",
+                "historyLineCount": history_line_count,
+                "historyTail": json.dumps([json.dumps({"_step": tail_step, "_runtime": 1})]),
+            }
+        }
+    }
+    with patch("wandb_mcp_server.wandb_selective_reads.execute_graphql", return_value=payload) as execute:
+        result = fetch_history_run_snapshot(FakeApi(), entity="entity", project="project", run_id="run-1")
+
+    assert result is not None
+    assert result["last_step"] == expected_last_step
+    query = execute.call_args.args[1]
+    assert "historyTail" in query
+    for forbidden in ("historyKeys", "summaryMetrics", "systemMetrics", "config"):
+        assert forbidden not in query
+
+
+@pytest.mark.parametrize(
+    "history_tail",
+    [
+        None,
+        "{}",
+        json.dumps(["not-json"]),
+        json.dumps([json.dumps({"_step": -1})]),
+        json.dumps([json.dumps({"_step": (1 << 63) - 1})]),
+    ],
+)
+def test_history_snapshot_rejects_malformed_or_unsafe_tail(history_tail):
+    payload = {
+        "project": {
+            "run": {
+                "name": "run-1",
+                "displayName": "Run 1",
+                "state": "running",
+                "historyLineCount": 1,
+                "historyTail": history_tail,
+            }
+        }
+    }
+    with (
+        patch("wandb_mcp_server.wandb_selective_reads.execute_graphql", return_value=payload),
+        pytest.raises(SelectiveReadUnavailable, match="history run snapshot"),
+    ):
+        fetch_history_run_snapshot(FakeApi(), entity="entity", project="project", run_id="run-1")
+
+
+def test_history_snapshot_accepts_bounded_legacy_tail_shapes():
+    empty_payload = {
+        "project": {
+            "run": {
+                "name": "empty",
+                "displayName": "Empty",
+                "state": "running",
+                "historyLineCount": 0,
+                "historyTail": "[]",
+            }
+        }
+    }
+    multi_payload = {
+        "project": {
+            "run": {
+                "name": "fork",
+                "displayName": "Fork",
+                "state": "running",
+                "historyLineCount": 2,
+                "historyTail": json.dumps([json.dumps({"_step": 0}), json.dumps({"_step": 7, "_runtime": 1})]),
+            }
+        }
+    }
+    with patch(
+        "wandb_mcp_server.wandb_selective_reads.execute_graphql",
+        side_effect=[empty_payload, multi_payload],
+    ):
+        empty = fetch_history_run_snapshot(FakeApi(), entity="entity", project="project", run_id="empty")
+        fork = fetch_history_run_snapshot(FakeApi(), entity="entity", project="project", run_id="fork")
+
+    assert empty is not None and empty["last_step"] == -1
+    assert fork is not None and fork["last_step"] == 7
+
+
 def test_project_field_index_and_counts_are_server_side():
     api = FakeApi()
 
@@ -878,6 +975,8 @@ def test_sampled_history_fetches_disjoint_series_in_one_fixed_query():
     assert batch.series == service.payload
     assert batch.rows_received == 4
     assert batch.rows_retained == 4
+    assert batch.bytes_retained > 0
+    assert batch.values_truncated == 0
     assert batch.samples_per_series == 500
     assert batch.requests == 1
     assert len(service.calls) == 1
@@ -961,7 +1060,8 @@ def test_sampled_history_counts_raw_rows_but_drops_unobserved_values():
                 {"_step": 0, "loss": None},
                 {"_step": 1, "loss": float("nan")},
                 {"_step": 2, "loss": float("inf")},
-                {"_step": 3, "loss": 0.5},
+                {"_step": 3, "loss": "-Infinity"},
+                {"_step": 4, "loss": 0.5},
             ],
             [{"_step": 0, "eval/loss": 0.4}],
         ]
@@ -978,12 +1078,13 @@ def test_sampled_history_counts_raw_rows_but_drops_unobserved_values():
         samples=4,
     )
 
-    assert batch.rows_received == 5
+    assert batch.rows_received == 6
     assert batch.rows_retained == 2
     assert batch.series == [
-        [{"_step": 3, "loss": 0.5}],
+        [{"_step": 4, "loss": 0.5}],
         [{"_step": 0, "eval/loss": 0.4}],
     ]
+    assert batch.non_finite_counts == {"loss": 3, "eval/loss": 0}
 
 
 @pytest.mark.parametrize(
@@ -1116,6 +1217,57 @@ def test_sampled_history_rejects_backend_response_above_raw_safety_cap():
         )
 
     assert len(service.calls) == 1
+
+
+def test_sampled_history_bounds_multi_megabyte_metric_values_before_copying():
+    service = SampledHistoryServiceApi(
+        [
+            [{"_step": 0, "loss": {"blob": "x" * 2_000_000}}],
+            [{"_step": 0, "eval/loss": 0.4}],
+        ]
+    )
+    api = type("Api", (), {"_service_api": service})()
+
+    batch = fetch_sampled_history_series(
+        api,
+        entity="entity",
+        project="project",
+        run_id="run-1",
+        keys=["loss", "eval/loss"],
+        x_axis="_step",
+        samples=2,
+    )
+
+    assert batch.values_truncated == 1
+    assert batch.bytes_retained < 128 * 1024
+    assert len(json.dumps(batch.series)) < 128 * 1024
+
+
+def test_sampled_history_rejects_cumulative_retained_bytes():
+    service = SampledHistoryServiceApi(
+        [
+            [{"_step": 0, "loss": "x" * 200}],
+            [{"_step": 0, "eval/loss": "y" * 200}],
+        ]
+    )
+    api = type("Api", (), {"_service_api": service})()
+
+    with (
+        patch(
+            "wandb_mcp_server.wandb_selective_reads._MAX_SAMPLED_HISTORY_RETAINED_BYTES",
+            100,
+        ),
+        pytest.raises(SelectiveReadUnavailable, match="retained byte limit"),
+    ):
+        fetch_sampled_history_series(
+            api,
+            entity="entity",
+            project="project",
+            run_id="run-1",
+            keys=["loss", "eval/loss"],
+            x_axis="_step",
+            samples=2,
+        )
 
 
 @pytest.mark.parametrize("status_code", [401, 403, 404, 429, 503])

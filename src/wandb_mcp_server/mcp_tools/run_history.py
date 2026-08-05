@@ -14,6 +14,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Dict, List, Literal, Optional
 
 import wandb
+from wandb.apis.public import Run
+from wandb.apis.public.history import HistoryScan
 
 from wandb_mcp_server.api_client import (
     WandBApiManager,
@@ -26,16 +28,20 @@ from wandb_mcp_server.config import (
     MCP_MAX_HISTORY_KEYS,
     MCP_MAX_HISTORY_RANGE_STEPS,
     MCP_MAX_HISTORY_SAMPLES,
+    MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
     MCP_WORKLOAD_PROFILE,
 )
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_selective_reads import (
+    MAX_SAFE_HISTORY_STEP,
     SelectiveReadUnavailable,
+    fetch_history_run_snapshot,
     fetch_metric_value_steps,
     fetch_sampled_history_series,
 )
+from wandb_mcp_server.wandb_graphql import GraphQLResponseTooLarge
 
 logger = get_rich_logger(__name__)
 
@@ -43,7 +49,7 @@ GET_RUN_HISTORY_TOOL_DESCRIPTION = """Retrieve bounded time-series metric data f
 
 Use bounded independent-series sampling for explicit multi-key default-history
 overviews and ranges, SDK scans for single-key ranges, and an exact point lookup
-for a logged x-axis value. Every response states the
+for a logged x-axis value. Every successful response states the
 retrieval method, whether values are sampled or exact, rows scanned, coverage,
 and any profile or response-budget truncation.
 
@@ -67,30 +73,32 @@ entity_name : str
 project_name : str
     The W&B project name.
 run_id : str
-    The 8-character W&B run ID (e.g., "gtng2y4l"). This is the short ID,
-    not the display name.
+    The W&B run ID (often an 8-character generated ID such as "gtng2y4l";
+    custom run IDs are also accepted). This is not the display name.
 keys : list of str, optional
     Specific metric keys to retrieve (e.g., ["loss", "val_loss", "accuracy"]).
     For explicit multi-key default-history sampled and ranged collection reads,
     keys logged on different cadences are outer-unioned by step; a row may carry
     only the requested metrics logged at that point. target_x is an exact point
     lookup rather than a collection join.
-    Hosted deployments require 1-20 explicit keys to prevent accidental retrieval
-    of extremely high-cardinality histories.
+    Shared hosted deployments require explicit keys up to the configured cap
+    (20 by default; the Dedicated profile defaults to 50).
 samples : int, optional
     Total merged-row budget shared across all requested keys. Defaults to 500.
     Use fewer samples for quick overviews, more for detailed analysis.
 min_step : int, optional
-    Inclusive non-negative minimum step to include. Defaults to None.
+    Inclusive non-negative minimum step to include. Defaults to None. Step
+    ranges are supported only for the default history stream.
 max_step : int, optional
-    Inclusive non-negative maximum step to include. Defaults to None.
+    Inclusive non-negative maximum step to include. Defaults to None. Step
+    ranges are supported only for the default history stream.
 x_axis : str, optional
     History x-axis. Defaults to "_step". Set this to a logged monotonic metric
     such as "validation/step" for custom-axis projection or target lookup. For
     collection reads, the custom axis and metric must occur on the same row.
 target_x : float, optional
     Retrieve the row where x_axis logged this exact value. If no exact value was
-    logged, returns target_not_logged.
+    logged, returns target_not_logged. Supported only for the default stream.
 tolerance : float, optional
     When target_x was not logged exactly, permit a bounded nearest-value
     refinement within this absolute tolerance.
@@ -109,7 +117,13 @@ JSON with:
   - requested_keys, optional join, matching_rows, per-key row counts, and
     unobserved/missing/omitted keys. Unobserved means no usable finite/non-null
     value appeared in a bounded result; missing is emitted only for exact counts.
-  - retrieval_method, exact, sampled, rows_scanned, coverage, truncation
+  - non_finite_counts for NaN/Infinity observations seen in the bounded source;
+    invalid JSON numeric values are counted rather than returned, and counts are
+    exhaustive only when key_counts_exact is true.
+  - retrieval_method, exact, sampled, rows_scanned, coverage, truncation,
+    source_truncated (source step-window/row cap reached), and
+    source_values_truncated (source rows containing an oversized value replaced
+    by a bounded sentinel)
 
 Examples
 --------
@@ -122,7 +136,52 @@ Examples
 
 MAX_HISTORY_ROWS = MCP_MAX_HISTORY_SAMPLES
 _EXACT_EPSILON = 1e-9
-_MAX_SAFE_HISTORY_STEP = (1 << 63) - 2
+_MAX_HISTORY_IDENTIFIER_BYTES = 1024
+_MAX_HISTORY_INPUT_BYTES = 64 * 1024
+_MAX_HISTORY_SCAN_VALUE_JSON_BYTES = 64 * 1024
+_MAX_HISTORY_SCAN_PAGE_JSON_BYTES = 8 * 1024 * 1024
+_MAX_HISTORY_SCAN_PAGE_ITEMS = 100_000
+_MAX_HISTORY_SCAN_PAGE_KEY_BYTES = 4 * 1024 * 1024
+_CORE_NON_FINITE_TOKENS = frozenset({"NaN", "Infinity", "-Infinity"})
+
+
+class _BoundedHistoryTransport:
+    """Reject oversized scan scalars before W&B's HistoryScan JSON-decodes them."""
+
+    def __init__(self, service_api: Any):
+        self._service_api = service_api
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._service_api, name)
+
+    def send_api_request(self, request: Any, *args: Any, **kwargs: Any) -> Any:
+        raise_if_tool_deadline_exceeded()
+        kwargs.setdefault("timeout", MCP_WANDB_REQUEST_TIMEOUT_SECONDS)
+        response = self._service_api.send_api_request(request, *args, **kwargs)
+        read_response = getattr(response, "read_run_history_response", None)
+        if read_response is None or read_response.WhichOneof("response") != "run_history":
+            return response
+        page_bytes = 0
+        page_items = 0
+        page_key_bytes = 0
+        for row in read_response.run_history.history_rows:
+            for item in row.history_items:
+                page_items += 1
+                if page_items > _MAX_HISTORY_SCAN_PAGE_ITEMS:
+                    raise GraphQLResponseTooLarge("A W&B history page exceeded the item safety limit.")
+                page_key_bytes += len(item.key.encode("utf-8"))
+                if page_key_bytes > _MAX_HISTORY_SCAN_PAGE_KEY_BYTES:
+                    raise GraphQLResponseTooLarge("A W&B history page exceeded the key safety limit.")
+                value_json = item.value_json
+                if len(value_json) > _MAX_HISTORY_SCAN_VALUE_JSON_BYTES:
+                    raise GraphQLResponseTooLarge("A W&B history value exceeded the scan safety limit.")
+                encoded_size = len(value_json.encode("utf-8"))
+                if encoded_size > _MAX_HISTORY_SCAN_VALUE_JSON_BYTES:
+                    raise GraphQLResponseTooLarge("A W&B history value exceeded the scan safety limit.")
+                page_bytes += encoded_size
+                if page_bytes > _MAX_HISTORY_SCAN_PAGE_JSON_BYTES:
+                    raise GraphQLResponseTooLarge("A W&B history page exceeded the scan safety limit.")
+        return response
 
 
 @dataclass(frozen=True)
@@ -137,6 +196,118 @@ class _HistoryFetch:
     observed_key_counts: dict[str, int] | None = None
     key_counts_exact: bool = False
     source_truncated: bool = False
+    source_values_truncated: int = 0
+    non_finite_counts: dict[str, int] | None = None
+
+
+class _BoundedHistoryRun:
+    """Delegate sampled reads while keeping scans off the full history-key query."""
+
+    def __init__(self, run: Any, *, last_step: int | None):
+        self._run = run
+        self._last_step = last_step
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._run, name)
+
+    @property
+    def lastHistoryStep(self) -> int:  # noqa: N802 - W&B public API spelling
+        return self._last_step if self._last_step is not None else -1
+
+    def scan_history(
+        self,
+        *,
+        keys: list[str] | None = None,
+        page_size: int = 1_000,
+        min_step: int = 0,
+        max_step: int | None = None,
+        use_cache: bool = False,
+    ) -> Any:
+        """Construct W&B's typed history paginator with a narrow step snapshot.
+
+        Public ``Run.scan_history`` first reads the complete ``historyKeys``
+        JSON merely to obtain ``lastStep``.  Wide projects can have tens of
+        thousands of keys, so the MCP obtains ``_step`` through a fixed narrow
+        projection and constructs the same W&B 0.28 paginator directly.
+        """
+        stop_step = max_step
+        if self._last_step is not None and self._last_step >= 0:
+            snapshot_stop = self._last_step + 1
+            stop_step = snapshot_stop if stop_step is None else min(stop_step, snapshot_stop)
+        if stop_step is None:
+            raise SelectiveReadUnavailable("bounded history upper step was unavailable")
+        requested_stop_step = stop_step
+        stop_step = min(stop_step, min_step + MCP_MAX_HISTORY_RANGE_STEPS)
+        if stop_step <= min_step:
+            return iter(())
+        service_api = getattr(self._run, "_service_api", None)
+        if service_api is None:
+            raise SelectiveReadUnavailable("W&B typed history transport was unavailable")
+        scan = HistoryScan(
+            self._run,
+            service_api=_BoundedHistoryTransport(service_api),
+            min_step=min_step,
+            max_step=stop_step,
+            keys=keys,
+            page_size=page_size,
+            use_cache=use_cache,
+        )
+        scan._mcp_step_window_truncated = stop_step < requested_stop_step
+        return scan
+
+
+def _resolve_bounded_history_run(
+    api: Any,
+    *,
+    entity_name: str,
+    project_name: str,
+    run_id: str,
+) -> tuple[_BoundedHistoryRun, int | None]:
+    """Resolve a fresh lightweight SDK run and its narrow upper-step snapshot."""
+    snapshot = fetch_history_run_snapshot(
+        api,
+        entity=entity_name,
+        project=project_name,
+        run_id=run_id,
+    )
+    if snapshot is None:
+        raise wandb.errors.CommError(f"Run not found: {entity_name}/{project_name}/{run_id}")
+    service_api = getattr(api, "_service_api", None)
+    if service_api is None:
+        raise SelectiveReadUnavailable("W&B typed history transport was unavailable")
+    run = Run(
+        service_api,
+        entity_name,
+        project_name,
+        run_id,
+        attrs={
+            "name": run_id,
+            "displayName": snapshot.get("display_name") or run_id,
+            "state": snapshot.get("state"),
+            "historyLineCount": snapshot.get("history_line_count"),
+        },
+        lazy=True,
+        api_key=getattr(api, "api_key", None),
+    )
+    last_step = snapshot.get("last_step")
+    bounded_run = _BoundedHistoryRun(
+        run,
+        last_step=(last_step if isinstance(last_step, int) and not isinstance(last_step, bool) else None),
+    )
+    return bounded_run, bounded_run.lastHistoryStep
+
+
+def _history_text_bytes(name: str, value: object) -> int:
+    """Validate one history identifier and return its UTF-8 byte length."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    try:
+        encoded_length = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError(f"{name} must contain valid UTF-8 text") from None
+    if encoded_length > _MAX_HISTORY_IDENTIFIER_BYTES:
+        raise ValueError(f"{name} exceeds the {_MAX_HISTORY_IDENTIFIER_BYTES}-byte limit")
+    return encoded_length
 
 
 def get_run_history(
@@ -154,10 +325,17 @@ def get_run_history(
 ) -> str:
     """Fetch bounded metric history for a W&B run."""
 
+    input_bytes = sum(
+        _history_text_bytes(name, value)
+        for name, value in (
+            ("entity_name", entity_name),
+            ("project_name", project_name),
+            ("run_id", run_id),
+            ("x_axis", x_axis),
+        )
+    )
     if isinstance(samples, bool) or not isinstance(samples, int) or samples < 1:
         raise ValueError("samples must be a positive integer")
-    if not isinstance(x_axis, str) or not x_axis.strip():
-        raise ValueError("x_axis must be a non-empty string")
     if stream not in {"default", "system"}:
         raise ValueError("stream must be 'default' or 'system'")
     if target_x is not None and (
@@ -185,14 +363,18 @@ def get_run_history(
             raise ValueError(f"{name} must be an integer")
         if value < 0:
             raise ValueError(f"{name} must be non-negative")
-        if value > _MAX_SAFE_HISTORY_STEP:
-            raise ValueError(f"{name} must be at most {_MAX_SAFE_HISTORY_STEP}")
+        if value > MAX_SAFE_HISTORY_STEP:
+            raise ValueError(f"{name} must be at most {MAX_SAFE_HISTORY_STEP}")
     if keys is not None and (
         not isinstance(keys, list)
         or not all(isinstance(key, str) and key.strip() for key in keys)
         or len(keys) > MCP_MAX_HISTORY_KEYS
     ):
         raise ValueError(f"keys must contain at most {MCP_MAX_HISTORY_KEYS} non-empty strings")
+    for index, key in enumerate(keys or ()):
+        input_bytes += _history_text_bytes(f"keys[{index}]", key)
+    if input_bytes > _MAX_HISTORY_INPUT_BYTES:
+        raise ValueError(f"history identifiers exceed the {_MAX_HISTORY_INPUT_BYTES}-byte total limit")
     if (MCP_WORKLOAD_PROFILE == "shared" or MCP_HOSTED_MODE) and not keys:
         raise ValueError(
             f"The shared workload profile requires explicit history keys (1-{MCP_MAX_HISTORY_KEYS} metrics)."
@@ -227,19 +409,28 @@ def get_run_history(
             raise ValueError("W&B API key is required to fetch run history.")
 
         try:
-            # Reuse the actor-isolated public API client. Constructing a fresh
-            # ``wandb.Api`` performs credential validation and creates a new
-            # transport before every history read, adding a second upstream
-            # request and avoidable connection churn to a latency-sensitive
-            # path.
+            # Reuse the actor-isolated public API transport, but never call
+            # Api.run(): W&B intentionally hydrates that method's full run
+            # fragment. Resolve only identity plus a fresh upper step, then
+            # construct the typed SDK history reader without config, summary,
+            # system-metric, or full history-key hydration.
             wandb_api = WandBApiManager.get_api(api_key)
             run_path = f"{entity_name}/{project_name}/{run_id}"
-            run = wandb_api.run(run_path)
-            # This public property performs a narrow, fresh historyKeys read.
-            # Do not call Run.load(force=True): Api.run() already loaded the
-            # full Run fragment, and forcing it again would repeatedly fetch
-            # unbounded config/summary/system metrics on wide active runs.
-            snapshot_last_step = run.lastHistoryStep
+            run, snapshot_last_step = _resolve_bounded_history_run(
+                wandb_api,
+                entity_name=entity_name,
+                project_name=project_name,
+                run_id=run_id,
+            )
+        except GraphQLResponseTooLarge:
+            return json.dumps(
+                {
+                    "error": "response_too_large",
+                    "message": "The bounded W&B history response was too large; request fewer keys or samples.",
+                    "run_id": run_id,
+                    "retryable": False,
+                }
+            )
         except wandb.errors.CommError as e:
             if busy := wandb_server_busy_from_exception(e):
                 raise busy from e
@@ -345,7 +536,17 @@ def get_run_history(
                     matching_rows=matching_rows,
                     observed_key_counts=observed_counts,
                     key_counts_exact=False,
+                    non_finite_counts=_non_finite_key_counts(rows, requested_keys),
                 )
+        except GraphQLResponseTooLarge:
+            return json.dumps(
+                {
+                    "error": "response_too_large",
+                    "message": "The bounded W&B history response was too large; request fewer keys or samples.",
+                    "run_id": run_id,
+                    "retryable": False,
+                }
+            )
         except Exception as e:
             raise_for_wandb_server_busy(e)
             raise ValueError(f"Failed to fetch history for run {run_id}: {e}")
@@ -419,7 +620,9 @@ def get_run_history(
                 "tolerance": tolerance,
             },
             "source_truncated": fetched.source_truncated,
-            "truncated": profile_limit_applied or fetched.source_truncated,
+            "source_values_truncated": fetched.source_values_truncated,
+            "non_finite_counts": {key: count for key, count in (fetched.non_finite_counts or {}).items() if count > 0},
+            "truncated": (profile_limit_applied or fetched.source_truncated or fetched.source_values_truncated > 0),
         }
         if stream == "default" and len(requested_keys) > 1 and target_x is None:
             result_dict["join"] = "outer"
@@ -467,8 +670,9 @@ def _scan_history_rows(
     scan_kwargs["page_size"] = min(1000, max(1, scan_limit))
     scanned_rows: list[dict[str, Any]] = []
     rows_scanned = 0
-    source_truncated = False
-    for index, row in enumerate(islice(run.scan_history(**scan_kwargs), scan_limit + 1)):
+    scanner = run.scan_history(**scan_kwargs)
+    source_truncated = getattr(scanner, "_mcp_step_window_truncated", False) is True
+    for index, row in enumerate(islice(scanner, scan_limit + 1)):
         if index % 100 == 0:
             raise_if_tool_deadline_exceeded()
         rows_scanned += 1
@@ -524,6 +728,8 @@ def _fetch_independent_sampled_history(
         matching_rows=len(value_rows),
         observed_key_counts=observed_counts,
         key_counts_exact=False,
+        source_values_truncated=batch.values_truncated,
+        non_finite_counts=batch.non_finite_counts,
     )
 
 
@@ -609,6 +815,7 @@ def _fetch_step_range_with_metadata(
             ),
             key_counts_exact=(min_step is not None and max_step is not None and not source_truncated),
             source_truncated=source_truncated,
+            non_finite_counts=_non_finite_key_counts(scanned_rows, keys or []),
         )
 
     # Strategy 2: history() sampled fallback (ignores step bounds but always works)
@@ -663,6 +870,7 @@ def _fetch_step_range_with_metadata(
             matching_rows=len(matching_fallback),
             observed_key_counts=fallback_counts,
             key_counts_exact=False,
+            non_finite_counts=_non_finite_key_counts(fallback_rows, keys or []),
         )
 
     return _HistoryFetch(
@@ -675,6 +883,7 @@ def _fetch_step_range_with_metadata(
         observed_key_counts=observed_counts,
         key_counts_exact=(min_step is not None and max_step is not None and not source_truncated),
         source_truncated=source_truncated,
+        non_finite_counts=_non_finite_key_counts(scanned_rows, keys or []),
     )
 
 
@@ -686,6 +895,8 @@ def _is_observed_value(value: Any) -> bool:
         return False
     if isinstance(value, float):
         return math.isfinite(value)
+    if isinstance(value, str) and value in _CORE_NON_FINITE_TOKENS:
+        return False
     return True
 
 
@@ -783,6 +994,25 @@ def _key_row_counts(
     requested_keys: Sequence[str],
 ) -> dict[str, int]:
     return {key: sum(key in row and _is_observed_value(row[key]) for row in rows) for key in requested_keys}
+
+
+def _non_finite_key_counts(
+    rows: Sequence[Mapping[str, Any]],
+    requested_keys: Sequence[str],
+) -> dict[str, int]:
+    """Count bounded non-finite scalar observations without returning invalid JSON."""
+    return {
+        key: sum(
+            (
+                isinstance(row.get(key), float)
+                and not math.isfinite(row[key])
+                or (isinstance(row.get(key), str) and row.get(key) in _CORE_NON_FINITE_TOKENS)
+            )
+            for row in rows
+            if key in row
+        )
+        for key in requested_keys
+    }
 
 
 def _project_system_history_rows(
@@ -1173,7 +1403,8 @@ def _scan_history_for_target(
         "use_cache": False,
     }
 
-    for index, row in enumerate(islice(run.scan_history(**scan_kwargs), scan_limit)):
+    scanner = run.scan_history(**scan_kwargs)
+    for index, row in enumerate(islice(scanner, scan_limit)):
         if index % 100 == 0:
             raise_if_tool_deadline_exceeded()
         rows_scanned += 1

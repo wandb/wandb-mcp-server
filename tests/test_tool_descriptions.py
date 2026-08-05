@@ -8,7 +8,6 @@ from wandb_mcp_server.mcp_tools.query_wandb import QUERY_WANDB_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.query_wandb_gql import QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.create_report import CREATE_WANDB_REPORT_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.list_wandb_entities_projects import LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION
-from wandb_mcp_server.mcp_tools.query_wandbot import WANDBOT_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.infer_schema import INFER_TRACE_SCHEMA_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.run_history import GET_RUN_HISTORY_TOOL_DESCRIPTION
 from wandb_mcp_server.mcp_tools.docs_search import SEARCH_WANDB_DOCS_TOOL_DESCRIPTION
@@ -40,7 +39,6 @@ ALL_DESCRIPTIONS = {
     "query_wandb_graphql": QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION,
     "create_wandb_report": CREATE_WANDB_REPORT_TOOL_DESCRIPTION,
     "list_entity_projects": LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION,
-    "query_wandb_support_bot": WANDBOT_TOOL_DESCRIPTION,
     "infer_trace_schema": INFER_TRACE_SCHEMA_TOOL_DESCRIPTION,
     "get_run_history": GET_RUN_HISTORY_TOOL_DESCRIPTION,
     "search_wandb_docs": SEARCH_WANDB_DOCS_TOOL_DESCRIPTION,
@@ -75,17 +73,6 @@ class TestAllToolsHaveWhenToUse:
         end = description.index("</when_to_use>")
         content = description[start:end].strip()
         assert len(content) > 20, f"{tool_name} <when_to_use> section is too short"
-
-
-class TestWandbotDeprecated:
-    def test_wandbot_marked_deprecated(self):
-        assert "[DEPRECATED]" in WANDBOT_TOOL_DESCRIPTION
-
-    def test_wandbot_references_replacement(self):
-        assert "search_wandb_docs_tool" in WANDBOT_TOOL_DESCRIPTION
-
-    def test_wandbot_when_to_use_says_avoid(self):
-        assert "AVOID" in WANDBOT_TOOL_DESCRIPTION or "avoid" in WANDBOT_TOOL_DESCRIPTION.lower()
 
 
 class TestDetailLevelInQueryWeave:
@@ -126,6 +113,16 @@ class TestQueryWandbSdkRouting:
     )
     def test_raw_graphql_description_rejects_sdk_parity_use_cases(self, sdk_resource):
         assert sdk_resource in QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION
+
+
+class TestRunHistoryDescription:
+    def test_documents_bounded_non_finite_counts(self):
+        assert "non_finite_counts" in GET_RUN_HISTORY_TOOL_DESCRIPTION
+        assert "key_counts_exact" in GET_RUN_HISTORY_TOOL_DESCRIPTION
+
+    def test_documents_source_truncation_and_custom_ids(self):
+        assert "source step-window/row cap reached" in GET_RUN_HISTORY_TOOL_DESCRIPTION
+        assert "custom run IDs are also accepted" in GET_RUN_HISTORY_TOOL_DESCRIPTION
 
 
 class TestPanelsInCreateReport:

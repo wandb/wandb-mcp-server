@@ -7,9 +7,14 @@ from typing import Any, Dict, List, Optional
 from wandb_mcp_server.admission import ToolDeadlineExceeded
 from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.config import MCP_MAX_HISTORY_KEYS, MCP_MAX_HISTORY_SAMPLES
+from wandb_mcp_server.mcp_tools.run_history import get_run_history
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.wandb_selective_reads import fetch_project_fields, fetch_projected_run
+from wandb_mcp_server.wandb_graphql import GraphQLResponseTooLarge
+from wandb_mcp_server.wandb_selective_reads import (
+    fetch_project_fields,
+    fetch_projected_run,
+)
 
 logger = get_rich_logger(__name__)
 
@@ -198,7 +203,6 @@ def compare_runs(
         selection_source = "explicit"
         field_index_exhaustive: bool | None = None
         try:
-            path = f"{entity_name}/{project_name}"
             if config_keys is None or summary_keys is None:
                 auto_config, auto_summary, field_index_exhaustive = _indexed_comparison_keys(
                     api, entity_name, project_name
@@ -226,61 +230,33 @@ def compare_runs(
                 summary_keys=selected_summary,
             )
             if projected_a is None or projected_b is None:
-                raise ValueError("one or both runs were not found")
+                return json.dumps(
+                    {
+                        "error": "run_not_found",
+                        "message": "One or both requested runs were not found or are not accessible.",
+                    }
+                )
             compatibility_caveat = None
         except Exception as selective_error:
             if isinstance(selective_error, ToolDeadlineExceeded):
                 raise
+            if isinstance(selective_error, GraphQLResponseTooLarge):
+                ctx.mark_error("GraphQLResponseTooLarge: bounded selective read exceeded its safety limit")
+                return json.dumps(
+                    {
+                        "error": "response_too_large",
+                        "message": "The bounded W&B comparison response was too large; request fewer keys.",
+                        "retryable": False,
+                    }
+                )
             raise_for_wandb_server_busy(selective_error)
-            try:
-                run_a = api.run(f"{path}/{run_id_a}")
-                run_b = api.run(f"{path}/{run_id_b}")
-            except Exception as e:
-                raise_for_wandb_server_busy(e)
-                ctx.mark_error(f"{type(e).__name__}: {e}")
-                return json.dumps({"error": "run_not_found", "message": str(e)[:500]})
-
-            run_config_a = dict(getattr(run_a, "config", {}) or {})
-            run_config_b = dict(getattr(run_b, "config", {}) or {})
-            run_summary_a = dict(getattr(run_a, "summary", {}) or {})
-            run_summary_b = dict(getattr(run_b, "summary", {}) or {})
-            if config_keys is None:
-                selected_config = sorted(
-                    key for key in (set(run_config_a) | set(run_config_b)) if not key.startswith(("_", "wandb"))
-                )[:_AUTO_CONFIG_LIMIT]
-            if summary_keys is None:
-                selected_summary = sorted(
-                    key
-                    for key in (set(run_summary_a) | set(run_summary_b))
-                    if not key.startswith(("_", "wandb/"))
-                    and isinstance(run_summary_a.get(key, run_summary_b.get(key)), (int, float))
-                )[:_AUTO_SUMMARY_LIMIT]
-            projected_a = {
-                "id": run_id_a,
-                "display_name": getattr(run_a, "name", run_id_a),
-                "state": getattr(run_a, "state", "unknown"),
-                "created_at": getattr(run_a, "created_at", None),
-                "heartbeat_at": getattr(run_a, "heartbeat_at", None),
-                "tags": getattr(run_a, "tags", []),
-                "group": getattr(run_a, "group", None),
-                "config": {key: run_config_a[key] for key in selected_config if key in run_config_a},
-                "summary": {key: run_summary_a[key] for key in selected_summary if key in run_summary_a},
-            }
-            projected_b = {
-                "id": run_id_b,
-                "display_name": getattr(run_b, "name", run_id_b),
-                "state": getattr(run_b, "state", "unknown"),
-                "created_at": getattr(run_b, "created_at", None),
-                "heartbeat_at": getattr(run_b, "heartbeat_at", None),
-                "tags": getattr(run_b, "tags", []),
-                "group": getattr(run_b, "group", None),
-                "config": {key: run_config_b[key] for key in selected_config if key in run_config_b},
-                "summary": {key: run_summary_b[key] for key in selected_summary if key in run_summary_b},
-            }
-            selection_source = "bounded_sdk_compatibility"
-            compatibility_caveat = (
-                f"{type(selective_error).__name__}: selective fields unavailable; "
-                "loaded exactly two SDK runs and retained only the disclosed bounded keys"
+            ctx.mark_error(f"{type(selective_error).__name__}: selective comparison read unavailable")
+            return json.dumps(
+                {
+                    "error": "selective_read_unavailable",
+                    "message": "The W&B server could not provide the bounded fields required for this comparison.",
+                    "retryable": False,
+                }
             )
 
         config_a = dict(projected_a.get("config") or {})
@@ -333,17 +309,40 @@ def compare_runs(
 
         if include_history_overlap:
             try:
-                run_a = api.run(f"{path}/{run_id_a}")
-                run_b = api.run(f"{path}/{run_id_b}")
                 common_keys = list(history_keys or selected_summary)[:MCP_MAX_HISTORY_KEYS]
-                history_kwargs = {
-                    "keys": common_keys,
-                    "samples": history_samples,
-                    "pandas": False,
-                    "x_axis": x_axis,
-                }
-                hist_a = list(run_a.history(**history_kwargs)) if common_keys else []
-                hist_b = list(run_b.history(**history_kwargs)) if common_keys else []
+                history_a = (
+                    json.loads(
+                        get_run_history(
+                            entity_name,
+                            project_name,
+                            run_id_a,
+                            keys=common_keys,
+                            samples=history_samples,
+                            x_axis=x_axis,
+                        )
+                    )
+                    if common_keys
+                    else {"rows": []}
+                )
+                history_b = (
+                    json.loads(
+                        get_run_history(
+                            entity_name,
+                            project_name,
+                            run_id_b,
+                            keys=common_keys,
+                            samples=history_samples,
+                            x_axis=x_axis,
+                        )
+                    )
+                    if common_keys
+                    else {"rows": []}
+                )
+                for history_result in (history_a, history_b):
+                    if history_result.get("error"):
+                        raise ValueError(str(history_result["error"]))
+                hist_a = list(history_a.get("rows") or [])
+                hist_b = list(history_b.get("rows") or [])
                 result["history_comparison"] = {
                     "keys": common_keys,
                     "x_axis": x_axis,
@@ -360,7 +359,14 @@ def compare_runs(
                     ],
                 }
             except Exception as e:
+                if isinstance(e, ToolDeadlineExceeded):
+                    raise
                 raise_for_wandb_server_busy(e)
-                result["history_comparison"] = {"error": str(e)[:300], "sampled": True}
+                ctx.mark_error(f"{type(e).__name__}: bounded history comparison unavailable")
+                result["history_comparison"] = {
+                    "error": "history_fetch_failed",
+                    "message": "The bounded W&B history required for this comparison was unavailable.",
+                    "sampled": True,
+                }
 
         return json.dumps(result, default=str)

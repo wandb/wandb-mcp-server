@@ -53,10 +53,13 @@ projection, batches at most eight series per upstream request, then merges the
 series by `_step` or the selected x-axis. This avoids sending the combined-key
 spec that triggers Server 0.82's within-spec all-keys filter, without one
 network roundtrip per metric. Reads spanning multiple batches use one freshly
-observed upper-step boundary. Metrics do not need to occur in the same
-`wandb.log()` call or at
-the same cadence. Duplicate axis values retain their per-series occurrence
-order.
+observed upper-step boundary. A fixed snapshot query reads identity fields and
+one complete, resume-oriented `historyTail` row; the MCP does not materialize
+full config, summary, system metrics, or the complete history-key index before
+reading history. The tail row itself is not field-projected and is subject to
+the post-protobuf GraphQL processing safeguards described below.
+Metrics do not need to occur in the same `wandb.log()` call or at the same
+cadence. Duplicate axis values retain their per-series occurrence order.
 
 A custom x-axis remains in each metric's independent series specification. The
 axis and metric must therefore occur on the same history row; the server does
@@ -73,9 +76,18 @@ presenting partial data as complete.
 The existing response fields remain compatible. Additive diagnostics include
 `requested_keys`, `join="outer"`, `matching_rows`, `matching_rows_exact`,
 `key_row_counts`, `unobserved_keys`, `missing_keys`,
-`keys_omitted_by_limits`, `key_counts_exact`, and `source_truncated`.
+`keys_omitted_by_limits`, `key_counts_exact`, `source_truncated`, and
+`source_values_truncated`. The latter counts source rows containing an
+oversized value replaced by a bounded sentinel and contributes to
+`truncated=true`.
 `unobserved_keys` means no usable finite/non-null value appeared for a key in the
 bounded/sample result; `missing_keys` is emitted only when the count is exact.
+`source_truncated` means the source scan was clipped by its configured step-window
+or row cap, including when duplicate or forked rows exceed the step span.
+`non_finite_counts` separately reports NaN and positive/negative Infinity
+observations seen for each requested key. Non-finite values are omitted from
+returned rows, and these counts describe the bounded source rather than the
+entire run unless `key_counts_exact=true`.
 The fixed projection is
 revalidated as query-only and accepts no caller-selected GraphQL, so this
 behavior is available with `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`.
@@ -83,4 +95,11 @@ behavior is available with `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`.
 The compatibility tool accepts exactly one query operation and rejects
 mutations, subscriptions, mixed/multiple operations, nested or multiple
 paginated connections, and oversized documents. Its item, page, complexity, and
-response limits apply in every deployment.
+output limits apply in every deployment. On the supported W&B ServiceApi path,
+the MCP checks the protobuf `data_json` string at 16 MiB before `json.loads`,
+then enforces a 500,000-node ceiling on the decoded object. That protects MCP
+JSON/object/output processing and returns `response_too_large`; it occurs after
+the SDK has received and deserialized the protobuf envelope and therefore does
+not limit wire bytes, protobuf allocation, or W&B backend work. Lightweight
+adapter transports can only apply these checks after their response is already
+decoded.
