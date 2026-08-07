@@ -24,11 +24,63 @@ from typing import Optional
 from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
 # Bearer token security scheme
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+class MCPAuthASGIMiddleware:
+    """Apply the existing W&B bearer context for an entire ASGI request.
+
+    FastMCP's streamable HTTP responses may outlive the point at which an HTTP
+    middleware receives the response object, so this pure ASGI middleware keeps
+    the request-scoped ContextVar set until the response body is fully sent.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not scope.get("path", "").startswith("/mcp"):
+            await self.app(scope, receive, send)
+            return
+
+        if os.environ.get("MCP_AUTH_DISABLED", "false").lower() == "true":
+            logger.warning("MCP authentication is disabled - endpoints are publicly accessible")
+            await self.app(scope, receive, send)
+            return
+
+        headers = {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in scope.get("headers", [])}
+        authorization = headers.get("authorization", "")
+        credentials = None
+        if authorization.startswith("Bearer "):
+            credentials = HTTPAuthorizationCredentials(
+                scheme="Bearer",
+                credentials=authorization[7:].strip(),
+            )
+
+        try:
+            wandb_api_key = await validate_bearer_token(credentials, MCPAuthConfig())
+        except HTTPException as exc:
+            response = JSONResponse(
+                status_code=exc.status_code,
+                content={"error": exc.detail},
+                headers=exc.headers,
+            )
+            await response(scope, receive, send)
+            return
+
+        from wandb_mcp_server.api_client import WandBApiManager
+
+        scope.setdefault("state", {})["wandb_api_key"] = wandb_api_key
+        context_token = WandBApiManager.set_context_api_key(wandb_api_key)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            WandBApiManager.reset_context_api_key(context_token)
 
 
 class MCPAuthConfig:

@@ -9,6 +9,7 @@ This server provides tools for:
 - Creating shareable reports with visualizations
 - Getting help via wandbot support agent
 - Discovering available entities and projects
+- Starting and polling asynchronous conversations with ARIA
 """
 
 import asyncio
@@ -27,6 +28,7 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
 from wandb_mcp_server.config import WANDB_BASE_URL
+from wandb_mcp_server.auth import MCPAuthASGIMiddleware
 
 # Import Weave for tracing MCP tool calls
 try:
@@ -42,6 +44,12 @@ from wandb_mcp_server.mcp_tools.automations import (
     LIST_INTEGRATIONS_TOOL_DESCRIPTION,
     list_automations,
     list_integrations,
+)
+from wandb_mcp_server.mcp_tools.aria import (
+    ARIA_GET_TURN_TOOL_DESCRIPTION,
+    ARIA_SEND_MESSAGE_TOOL_DESCRIPTION,
+    get_aria_turn,
+    send_aria_message,
 )
 from wandb_mcp_server.mcp_tools.count_traces import (
     COUNT_WEAVE_TRACES_TOOL_DESCRIPTION,
@@ -290,6 +298,15 @@ async def _count_traces_or_none(
         return None
 
 
+class AuthenticatedFastMCP(FastMCP):
+    """FastMCP server with the repo's request-scoped W&B bearer auth attached."""
+
+    def streamable_http_app(self):
+        app = super().streamable_http_app()
+        app.add_middleware(MCPAuthASGIMiddleware)
+        return app
+
+
 # ===============================================================================
 # SECTION 1: W&B AUTHENTICATION & API KEY SETUP
 # ===============================================================================
@@ -497,6 +514,8 @@ def register_tools(mcp_instance: FastMCP) -> None:
     - search_weave_agents_tool: Search messages, grouped by conversation
     - get_weave_agent_trace_tool: Chat/trajectory view for one trace (a turn)
     - get_weave_agent_conversation_tool: Multi-turn chat view for a conversation
+    - aria_send_message: Start or continue an asynchronous ARIA conversation
+    - aria_get_turn: Poll an ARIA turn and retrieve its current result
 
     Args:
         mcp_instance: The FastMCP instance to register tools on
@@ -1146,6 +1165,26 @@ def register_tools(mcp_instance: FastMCP) -> None:
             )
             _remove_registered_tools(mcp_instance, group.tool_names)
 
+    @mcp_instance.tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
+    async def aria_send_message(
+        message: str,
+        entity: Optional[str] = None,
+        project: Optional[str] = None,
+        parent_turn_id: Optional[str] = None,
+        wait_seconds: int = 0,
+    ) -> Dict[str, Any]:
+        return await send_aria_message(
+            message=message,
+            entity=entity,
+            project=project,
+            parent_turn_id=parent_turn_id,
+            wait_seconds=wait_seconds,
+        )
+
+    @mcp_instance.tool(description=ARIA_GET_TURN_TOOL_DESCRIPTION)
+    async def aria_get_turn(turn_id: str, wait_seconds: int = 0) -> Dict[str, Any]:
+        return await get_aria_turn(turn_id=turn_id, wait_seconds=wait_seconds)
+
 
 # ===============================================================================
 # SECTION 4: MCP SERVER SETUP (STDIO & HTTP)
@@ -1175,7 +1214,7 @@ def create_mcp_server(transport: str, host: str = "localhost", port: Optional[in
     if transport == "http":
         port = port if port is not None else 8080
         logger.info(f"Configuring HTTP server on {host}:{port}")
-        mcp = FastMCP("weave-mcp-server", host=host, port=port, stateless_http=True)
+        mcp = AuthenticatedFastMCP("weave-mcp-server", host=host, port=port, stateless_http=True)
 
         # Log authentication status for HTTP
         if os.environ.get("MCP_AUTH_DISABLED", "false").lower() == "true":
@@ -1221,6 +1260,7 @@ def cli():
         WEAVE_SILENT                Set to "False" to enable Weave output (default: True)
         WANDB_DEBUG                 Set to "true" to enable W&B debug logging
         MCP_AUTH_DISABLED           Set to "true" to disable HTTP auth (dev only)
+        WB_AGENT_BASE_URL           ARIA service URL (default: https://wb-agent.wandb.ai)
     """
     print("Starting W&B MCP Server...", file=sys.stderr)
 
