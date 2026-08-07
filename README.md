@@ -83,6 +83,8 @@ deployment settings, and the complete customer-visible summary.
 | **compare_artifact_versions_tool** | Diff two artifact versions | *"Compare model v1 vs v2"* |
 | **list_wandb_automations_tool** | List W&B Automations | *"What automations alert on run metrics or status for my team's runs?"* |
 | **list_wandb_integrations_tool** | List registered integrations for W&B automations (e.g. Slack, webhook) | *"Which Slack channels can my automations target?"* |
+| **aria_send_message** | Start or continue async work with the hosted W&B agent | *"Ask ARIA to diagnose these failed evals"* |
+| **aria_get_turn** | Poll an ARIA turn for progress or its final result | *"Check whether that ARIA analysis finished"* |
 
 **Read-only deployment mode:** Set `WANDB_MCP_READ_ONLY=true` to omit the two write tools,
 `create_wandb_report_tool` and `log_analysis_to_wandb`, while keeping every existing read tool.

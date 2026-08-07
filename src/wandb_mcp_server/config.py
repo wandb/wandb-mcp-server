@@ -82,6 +82,11 @@ WF_TRACE_SERVER_URL: str = (
     os.getenv("WF_TRACE_SERVER_URL") or os.getenv("WEAVE_TRACE_SERVER_URL") or "https://trace.wandb.ai"
 )
 
+# Hosted W&B Agent (ARIA) service URL. This is intentionally separate from
+# WANDB_BASE_URL: ARIA is a distinct asynchronous service, even when the MCP
+# server itself is run locally or points its other tools at W&B Dedicated.
+WB_AGENT_BASE_URL: str = os.getenv("WB_AGENT_BASE_URL", "https://wb-agent.wandb.ai").rstrip("/")
+
 # Token budget for response truncation. When a query result exceeds this
 # budget, least-recent traces are dropped and a truncation note is appended.
 MAX_RESPONSE_TOKENS: int = _env_int("MAX_RESPONSE_TOKENS", 30_000, maximum=100_000)
