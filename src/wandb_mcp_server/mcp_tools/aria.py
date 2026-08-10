@@ -439,6 +439,55 @@ def _latest_assistant_response(turn: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _is_nonzero_exit_code(value: Any) -> bool:
+    """Recognize normalized executor exit codes without treating booleans as ints."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        try:
+            return int(value.strip()) != 0
+        except ValueError:
+            return False
+    return False
+
+
+def _tool_response_has_error(record: Any) -> bool:
+    """Detect tool-protocol errors and recovered executor command failures."""
+    if not isinstance(record, dict) or record.get("type") != "response":
+        return False
+    if record.get("is_error") is True:
+        return True
+
+    # Hosted shell responses use is_error for the tool protocol itself. A
+    # successfully delivered shell result can therefore have is_error=false
+    # while its normalized executor outcome has a nonzero exit_code nested in
+    # the response payload. Inspect structure only; never parse or expose raw
+    # stdout/stderr text.
+    stack = [record]
+    seen: set[int] = set()
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            value_id = id(value)
+            if value_id in seen:
+                continue
+            seen.add(value_id)
+            for key, child in value.items():
+                if key == "exit_code" and _is_nonzero_exit_code(child):
+                    return True
+                if isinstance(child, (dict, list)):
+                    stack.append(child)
+        elif isinstance(value, list):
+            value_id = id(value)
+            if value_id in seen:
+                continue
+            seen.add(value_id)
+            stack.extend(child for child in value if isinstance(child, (dict, list)))
+    return False
+
+
 def _progress_summary(turn: Dict[str, Any]) -> Dict[str, Any]:
     messages = turn.get("messages")
     tool_calls = turn.get("tool_calls")
@@ -449,14 +498,11 @@ def _progress_summary(turn: Dict[str, Any]) -> Dict[str, Any]:
         "tool_call_record_count": (len(tool_calls) if isinstance(tool_calls, list) else 0),
     }
     if isinstance(tool_calls, list):
-        tool_error_count = sum(
-            isinstance(record, dict) and record.get("type") == "response" and record.get("is_error") is True
-            for record in tool_calls
-        )
+        tool_error_count = sum(_tool_response_has_error(record) for record in tool_calls)
         if tool_error_count:
             summary["tool_error_count"] = tool_error_count
             summary["internal_error_note"] = (
-                f"ARIA encountered {tool_error_count} internal tool error(s) and continued working."
+                f"ARIA encountered {tool_error_count} internal tool or executor error(s) and continued working."
             )
     if isinstance(tool_calls, list) and tool_calls:
         latest = tool_calls[-1]
@@ -464,6 +510,8 @@ def _progress_summary(turn: Dict[str, Any]) -> Dict[str, Any]:
             latest_activity = {
                 key: latest[key] for key in ("type", "name", "call_id", "is_error", "timestamp") if key in latest
             }
+            if _tool_response_has_error(latest):
+                latest_activity["recovered_error"] = True
             summary["latest_tool_activity"] = latest_activity
 
     if state == "queued":
@@ -476,7 +524,7 @@ def _progress_summary(turn: Dict[str, Any]) -> Dict[str, Any]:
     elif state == "in_progress" and summary.get("latest_tool_activity"):
         activity = summary["latest_tool_activity"]
         tool_name = activity.get("name") or "an internal tool"
-        if activity.get("type") == "response" and activity.get("is_error"):
+        if activity.get("type") == "response" and activity.get("recovered_error"):
             status_text = f"ARIA's latest {tool_name} attempt failed internally; ARIA is still working."
         elif activity.get("type") == "response":
             status_text = f"ARIA received a result from {tool_name} and is still working."

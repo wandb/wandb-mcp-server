@@ -375,6 +375,77 @@ def test_compact_progress_surfaces_recovered_internal_tool_errors() -> None:
     assert "stderr" not in json.dumps(result)
 
 
+def test_compact_progress_detects_nonzero_executor_exit_code() -> None:
+    turn = _turn(
+        "in_progress",
+        tool_calls=[
+            {"type": "invocation", "name": "shell", "call_id": "call-1"},
+            {
+                "type": "response",
+                "name": "shell",
+                "call_id": "call-1",
+                "is_error": False,
+                "response": {
+                    "result": {
+                        "exit_code": 7,
+                        "stdout": "recovery details " * 10_000,
+                    }
+                },
+            },
+        ],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=turn, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn("turn-1", api_key="token", client=client)
+
+    result = asyncio.run(run())
+
+    assert result["progress"]["tool_error_count"] == 1
+    assert "executor error" in result["progress"]["internal_error_note"]
+    assert result["progress"]["latest_tool_activity"] == {
+        "type": "response",
+        "name": "shell",
+        "call_id": "call-1",
+        "is_error": False,
+        "recovered_error": True,
+    }
+    assert result["progress"]["status_text"].startswith("ARIA's latest shell attempt failed")
+    assert "stdout" not in json.dumps(result)
+
+
+def test_compact_progress_does_not_treat_zero_exit_code_as_error() -> None:
+    turn = _turn(
+        "in_progress",
+        tool_calls=[
+            {
+                "type": "response",
+                "name": "shell",
+                "call_id": "call-1",
+                "is_error": False,
+                "response": {"exit_code": 0},
+            }
+        ],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=turn, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn("turn-1", api_key="token", client=client)
+
+    result = asyncio.run(run())
+
+    assert "tool_error_count" not in result["progress"]
+    assert "internal_error_note" not in result["progress"]
+    assert "recovered_error" not in result["progress"]["latest_tool_activity"]
+    assert result["progress"]["status_text"].startswith("ARIA received a result")
+
+
 def test_get_turn_service_error_is_retryable_and_keeps_handle() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
