@@ -1,30 +1,68 @@
 import asyncio
-import json
-from typing import Any, Dict
+from types import SimpleNamespace
 
 import httpx
+from fastapi.responses import JSONResponse
+from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.routing import Route
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.auth import MCPAuthASGIMiddleware
+from wandb_mcp_server.auth import mcp_auth_middleware
 from wandb_mcp_server.server import AuthenticatedFastMCP, create_mcp_server
 
 
-async def _context_echo_app(scope: Dict[str, Any], receive: Any, send: Any) -> None:
+class _FakeSessionManager:
+    def __init__(self) -> None:
+        self.sessions: dict[str, str] = {}
+
+    def get_session(self, session_id: str):
+        return self.sessions.get(session_id)
+
+    def create_session(self, api_key: str, session_id: str) -> str:
+        existing = self.sessions.get(session_id)
+        if existing is not None and existing != api_key:
+            raise ValueError("Session API key mismatch")
+        self.sessions[session_id] = api_key
+        return session_id
+
+
+class _FakeTracker:
+    def track_user_session(self, **kwargs) -> None:
+        pass
+
+    def track_request(self, **kwargs) -> None:
+        pass
+
+
+def _patch_auth_dependencies(monkeypatch) -> None:
+    fake_api = SimpleNamespace(viewer=SimpleNamespace(username="tester", entity="test-team"))
+    monkeypatch.setattr(WandBApiManager, "get_api", staticmethod(lambda api_key=None: fake_api))
+
+    import wandb_mcp_server.analytics as analytics
+    import wandb_mcp_server.session_manager as session_manager
+
+    manager = _FakeSessionManager()
+    tracker = _FakeTracker()
+    monkeypatch.setattr(session_manager, "get_session_manager", lambda: manager)
+    monkeypatch.setattr(analytics, "get_analytics_tracker", lambda: tracker)
+
+
+async def _context_echo(request: Request) -> JSONResponse:
     await asyncio.sleep(0)
-    api_key = WandBApiManager.get_api_key()
-    body = json.dumps({"api_key": api_key}).encode()
-    await send(
-        {
-            "type": "http.response.start",
-            "status": 200,
-            "headers": [(b"content-type", b"application/json")],
-        }
-    )
-    await send({"type": "http.response.body", "body": body})
+    return JSONResponse({"api_key": WandBApiManager.get_api_key()})
 
 
-def test_http_bearer_tokens_are_isolated_per_concurrent_request() -> None:
-    app = MCPAuthASGIMiddleware(_context_echo_app)
+def _auth_app() -> Starlette:
+    app = Starlette(routes=[Route("/mcp", _context_echo)])
+    app.add_middleware(BaseHTTPMiddleware, dispatch=mcp_auth_middleware)
+    return app
+
+
+def test_http_bearer_tokens_are_isolated_per_concurrent_request(monkeypatch) -> None:
+    _patch_auth_dependencies(monkeypatch)
+    app = _auth_app()
 
     async def run() -> list[str]:
         transport = httpx.ASGITransport(app=app)
@@ -49,7 +87,7 @@ def test_http_bearer_tokens_are_isolated_per_concurrent_request() -> None:
 
 
 def test_http_mcp_rejects_missing_bearer_token() -> None:
-    app = MCPAuthASGIMiddleware(_context_echo_app)
+    app = _auth_app()
 
     async def run() -> httpx.Response:
         transport = httpx.ASGITransport(app=app)
@@ -59,19 +97,21 @@ def test_http_mcp_rejects_missing_bearer_token() -> None:
     response = asyncio.run(run())
 
     assert response.status_code == 401
-    assert response.headers["www-authenticate"] == 'Bearer realm="W&B MCP"'
+    assert "www-authenticate" not in response.headers
     assert "Authorization required" in response.json()["error"]
 
 
-def test_http_server_attaches_auth_middleware() -> None:
+def test_http_server_attaches_existing_auth_middleware() -> None:
     mcp = create_mcp_server("http")
 
     assert isinstance(mcp, AuthenticatedFastMCP)
     app = mcp.streamable_http_app()
-    assert any(middleware.cls is MCPAuthASGIMiddleware for middleware in app.user_middleware)
+    middleware = next(item for item in app.user_middleware if item.cls is BaseHTTPMiddleware)
+    assert middleware.kwargs["dispatch"] is mcp_auth_middleware
 
 
-def test_http_tool_call_sees_callers_bearer_token() -> None:
+def test_http_tool_call_sees_callers_bearer_token(monkeypatch) -> None:
+    _patch_auth_dependencies(monkeypatch)
     mcp = AuthenticatedFastMCP("auth-integration", stateless_http=True, json_response=True)
 
     @mcp.tool()
@@ -103,6 +143,7 @@ def test_http_tool_call_sees_callers_bearer_token() -> None:
     response = asyncio.run(run())
 
     assert response.status_code == 200
+    assert response.headers["mcp-session-id"].startswith("sess_")
     result = response.json()["result"]
     assert result["content"][0]["text"] == "26"
     assert WandBApiManager.get_api_key() is None

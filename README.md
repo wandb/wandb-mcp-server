@@ -55,9 +55,10 @@ Query and analyze your Weights & Biases data using natural language through the 
 | **list_wandb_integrations_tool** | List registered integrations for W&B automations (e.g. Slack, webhook) | *"Which Slack channels can my automations target?"* |
 | **aria_send_message** | Start or continue async work with the hosted W&B agent | *"Ask ARIA to diagnose these failed evals"* |
 | **aria_get_turn** | Poll an ARIA turn for progress or its final result | *"Check whether that ARIA analysis finished"* |
+| **aria_get_turns** | Poll up to 20 ARIA turns concurrently | *"Check all of those ARIA analyses in one bounded wait"* |
 
-**Read-only deployment mode:** Set `WANDB_MCP_READ_ONLY=true` to omit the two write tools,
-`create_wandb_report_tool` and `log_analysis_to_wandb`, while keeping every existing read tool.
+**Read-only deployment mode:** Set `WANDB_MCP_READ_ONLY=true` to omit the three write-capable tools,
+`create_wandb_report_tool`, `log_analysis_to_wandb`, and `aria_send_message`, while keeping every existing read tool.
 `query_wandb_tool` is query-only in every mode, regardless of this setting.
 
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
@@ -83,6 +84,8 @@ These tools are disabled by default. Enable them with `WANDB_MCP_ENABLE_WEAVE_AG
 **Chart panels:** `create_wandb_report_tool` accepts a `panels` parameter for LinePlots, BarPlots, run comparisons, custom Vega charts, and ordered report layouts. Use `panel_grid` when multiple charts should share one runset, and use `heading` plus `markdown` blocks to interleave narrative sections with charts.
 
 **Docs search:** `search_wandb_docs_tool` proxies [docs.wandb.ai](https://docs.wandb.ai) so you get data tools + documentation search from a single MCP connection. Disable with `WANDB_MCP_PROXY_DOCS=false` if you connect the docs MCP separately.
+
+**ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when the complete raw service snapshot is needed.
 
 </details>
 
@@ -524,6 +527,7 @@ When running the server locally, you can customize its behavior with command lin
 |----------|-------------|----------|
 | `WANDB_API_KEY` | Your W&B API key (alternative to `--wandb_api_key` flag) | Yes |
 | `WANDB_BASE_URL` | Custom W&B instance URL (for dedicated/on-prem instances) | No |
+| `WB_AGENT_BASE_URL` | Hosted ARIA service URL (default: `https://wb-agent.wandb.ai`) | No |
 | `MCP_SERVER_LOG_LEVEL` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` | No |
 | `WANDB_SILENT` | Set to `"False"` to suppress W&B output | No |
 | `WEAVE_SILENT` | Set to `"False"` to suppress Weave output | No |
@@ -532,7 +536,7 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
 | `WANDB_MCP_ENABLE_WEAVE_TOOLS` | Enable Weave trace tools (default: `true`; set `false` for installs without a trace backend) | No |
 | `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS` | Enable Weave Agents (OTel/GenAI) tools (default: `false`) | No |
-| `WANDB_MCP_READ_ONLY` | Omit report creation and analysis logging write tools (default: `false`) | No |
+| `WANDB_MCP_READ_ONLY` | Omit report creation, analysis logging, and ARIA message submission (default: `false`) | No |
 | `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events. Useful as a workaround for older stdio builds that wrote analytics to stdout. | No |
 | `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |
 

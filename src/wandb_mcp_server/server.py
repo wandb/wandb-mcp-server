@@ -26,9 +26,11 @@ from typing import Any, Callable, Collection, Dict, List, Optional, Union
 import wandb
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from starlette.middleware.base import BaseHTTPMiddleware
 
+from wandb_mcp_server.auth import mcp_auth_middleware
 from wandb_mcp_server.config import WANDB_BASE_URL
-from wandb_mcp_server.auth import MCPAuthASGIMiddleware
 
 # Import Weave for tracing MCP tool calls
 try:
@@ -47,8 +49,12 @@ from wandb_mcp_server.mcp_tools.automations import (
 )
 from wandb_mcp_server.mcp_tools.aria import (
     ARIA_GET_TURN_TOOL_DESCRIPTION,
+    ARIA_GET_TURNS_TOOL_DESCRIPTION,
     ARIA_SEND_MESSAGE_TOOL_DESCRIPTION,
+    AriaMCPToolError,
     get_aria_turn,
+    get_aria_turns,
+    raise_for_aria_error,
     send_aria_message,
 )
 from wandb_mcp_server.mcp_tools.count_traces import (
@@ -298,12 +304,24 @@ async def _count_traces_or_none(
         return None
 
 
-class AuthenticatedFastMCP(FastMCP):
+class WandBFastMCP(FastMCP):
+    """FastMCP variant that preserves structured ARIA failures as MCP errors."""
+
+    async def call_tool(self, name: str, arguments: Dict[str, Any]):
+        try:
+            return await super().call_tool(name, arguments)
+        except ToolError as exc:
+            if isinstance(exc.__cause__, AriaMCPToolError):
+                raise exc.__cause__
+            raise
+
+
+class AuthenticatedFastMCP(WandBFastMCP):
     """FastMCP server with the repo's request-scoped W&B bearer auth attached."""
 
     def streamable_http_app(self):
         app = super().streamable_http_app()
-        app.add_middleware(MCPAuthASGIMiddleware)
+        app.add_middleware(BaseHTTPMiddleware, dispatch=mcp_auth_middleware)
         return app
 
 
@@ -516,6 +534,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
     - get_weave_agent_conversation_tool: Multi-turn chat view for a conversation
     - aria_send_message: Start or continue an asynchronous ARIA conversation
     - aria_get_turn: Poll an ARIA turn and retrieve its current result
+    - aria_get_turns: Poll several ARIA turns concurrently
 
     Args:
         mcp_instance: The FastMCP instance to register tools on
@@ -1165,25 +1184,55 @@ def register_tools(mcp_instance: FastMCP) -> None:
             )
             _remove_registered_tools(mcp_instance, group.tool_names)
 
-    @mcp_instance.tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
-    async def aria_send_message(
-        message: str,
-        entity: Optional[str] = None,
-        project: Optional[str] = None,
-        parent_turn_id: Optional[str] = None,
-        wait_seconds: int = 0,
-    ) -> Dict[str, Any]:
-        return await send_aria_message(
-            message=message,
-            entity=entity,
-            project=project,
-            parent_turn_id=parent_turn_id,
-            wait_seconds=wait_seconds,
-        )
+    if not WANDB_MCP_READ_ONLY:
+
+        @mcp_instance.tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
+        async def aria_send_message(
+            message: str,
+            entity: Optional[str] = None,
+            project: Optional[str] = None,
+            parent_turn_id: Optional[str] = None,
+            wait_seconds: int = 0,
+            include_turn: bool = False,
+        ) -> Dict[str, Any]:
+            return raise_for_aria_error(
+                await send_aria_message(
+                    message=message,
+                    entity=entity,
+                    project=project,
+                    parent_turn_id=parent_turn_id,
+                    wait_seconds=wait_seconds,
+                    include_turn=include_turn,
+                )
+            )
 
     @mcp_instance.tool(description=ARIA_GET_TURN_TOOL_DESCRIPTION)
-    async def aria_get_turn(turn_id: str, wait_seconds: int = 0) -> Dict[str, Any]:
-        return await get_aria_turn(turn_id=turn_id, wait_seconds=wait_seconds)
+    async def aria_get_turn(
+        turn_id: str,
+        wait_seconds: int = 0,
+        include_turn: bool = False,
+    ) -> Dict[str, Any]:
+        return raise_for_aria_error(
+            await get_aria_turn(
+                turn_id=turn_id,
+                wait_seconds=wait_seconds,
+                include_turn=include_turn,
+            )
+        )
+
+    @mcp_instance.tool(description=ARIA_GET_TURNS_TOOL_DESCRIPTION)
+    async def aria_get_turns(
+        turn_ids: List[str],
+        wait_seconds: int = 0,
+        include_turn: bool = False,
+    ) -> Dict[str, Any]:
+        return raise_for_aria_error(
+            await get_aria_turns(
+                turn_ids=turn_ids,
+                wait_seconds=wait_seconds,
+                include_turn=include_turn,
+            )
+        )
 
 
 # ===============================================================================
@@ -1224,7 +1273,7 @@ def create_mcp_server(transport: str, host: str = "localhost", port: Optional[in
 
     elif transport == "stdio":
         logger.info("Configuring stdio server")
-        mcp = FastMCP("weave-mcp-server")
+        mcp = WandBFastMCP("weave-mcp-server")
         logger.info("STDIO transport uses environment variable authentication")
     else:
         raise ValueError(f"Invalid transport type: {transport}. Must be 'stdio' or 'http'")

@@ -13,6 +13,8 @@ def _turn(state: str = "queued", **overrides: Any) -> Dict[str, Any]:
         "id": "turn-1",
         "thread_id": "thread-1",
         "parent_turn_id": None,
+        "wandb_entity": "team",
+        "wandb_project": "project",
         "state": state,
         "updated_at": "2026-08-07T12:00:00Z",
         "messages": [],
@@ -73,6 +75,8 @@ def test_send_root_turn_uses_bearer_auth_and_openapi_payload(monkeypatch) -> Non
     assert result["state"] == "queued"
     assert result["is_terminal"] is False
     assert result["poll_after_seconds"] == 2
+    assert result["scope"] == {"entity": "team", "project": "project"}
+    assert "turn" not in result
 
 
 def test_send_reuses_request_scoped_wandb_token(monkeypatch) -> None:
@@ -127,6 +131,42 @@ def test_send_continuation_uses_parent_and_omits_scope() -> None:
         "parent_turn_id": "turn-0",
     }
     assert result["parent_turn_id"] == "turn-0"
+
+
+def test_send_project_only_resolves_default_entity(monkeypatch) -> None:
+    captured: Dict[str, Any] = {}
+
+    async def resolve_default_entity(api_key: str) -> str:
+        assert api_key == "token"
+        return "default-team"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            202,
+            json=_turn(wandb_entity="default-team", wandb_project="evals"),
+            request=request,
+        )
+
+    monkeypatch.setattr(aria, "_resolve_default_entity", resolve_default_entity)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.send_aria_message(
+                "Inspect this project",
+                project="evals",
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+
+    assert captured == {
+        "user_prompt": "Inspect this project",
+        "entity": "default-team",
+        "project": "evals",
+    }
+    assert result["scope"] == {"entity": "default-team", "project": "evals"}
 
 
 def test_send_rejects_scope_on_continuation_without_calling_service() -> None:
@@ -250,8 +290,89 @@ def test_get_turn_returns_partial_progress() -> None:
             "call_id": "call-1",
             "timestamp": "2026-08-07T12:00:01Z",
         },
+        "phase": "responding",
+        "status_text": "ARIA has produced a partial response but is still working; keep polling.",
     }
-    assert result["turn"] == partial
+    assert "turn" not in result
+
+
+def test_get_turn_can_include_full_snapshot() -> None:
+    turn = _turn("completed", messages=[{"role": "assistant", "content": "Done"}])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=turn, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn(
+                "turn-1",
+                include_turn=True,
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+
+    assert result["turn"] == turn
+
+
+def test_compact_poll_omits_large_internal_snapshot_fields() -> None:
+    turn = _turn(
+        "in_progress",
+        messages=[{"role": "assistant", "content": "Partial answer"}],
+        tool_calls=[
+            {
+                "type": "invocation",
+                "name": "shell",
+                "call_id": "call-1",
+                "arguments": {"encrypted_reasoning": "x" * 100_000},
+            }
+        ],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=turn, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn("turn-1", api_key="token", client=client)
+
+    result = asyncio.run(run())
+    serialized = json.dumps(result)
+
+    assert "turn" not in result
+    assert "encrypted_reasoning" not in serialized
+    assert len(serialized) < 2_000
+
+
+def test_compact_progress_surfaces_recovered_internal_tool_errors() -> None:
+    turn = _turn(
+        "in_progress",
+        tool_calls=[
+            {"type": "invocation", "name": "shell", "call_id": "call-1"},
+            {
+                "type": "response",
+                "name": "shell",
+                "call_id": "call-1",
+                "is_error": True,
+                "response": {"stderr": "x" * 100_000},
+            },
+        ],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=turn, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn("turn-1", api_key="token", client=client)
+
+    result = asyncio.run(run())
+
+    assert result["progress"]["tool_error_count"] == 1
+    assert "continued working" in result["progress"]["internal_error_note"]
+    assert result["progress"]["status_text"].startswith("ARIA's latest shell attempt failed")
+    assert "stderr" not in json.dumps(result)
 
 
 def test_get_turn_service_error_is_retryable_and_keeps_handle() -> None:
@@ -321,9 +442,122 @@ def test_auth_rejection_is_legible_and_does_not_expose_token() -> None:
     assert "super-secret-token" not in serialized
 
 
+def test_validation_details_remain_structured() -> None:
+    validation_details = [
+        {
+            "type": "value_error",
+            "loc": ["body", "project"],
+            "msg": "entity must be provided when project is provided",
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"detail": validation_details}, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.send_aria_message(
+                "Analyze runs",
+                entity="team",
+                project="project",
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+
+    assert result["error"]["details"] == validation_details
+    assert isinstance(result["error"]["details"], list)
+
+
 def test_wait_is_capped() -> None:
     result = asyncio.run(aria.get_aria_turn("turn-1", wait_seconds=31, api_key="token"))
 
     assert result["ok"] is False
     assert result["error"]["type"] == "invalid_request"
     assert "between 0 and 30" in result["error"]["message"]
+
+
+def test_get_turns_fetches_concurrently_and_preserves_order() -> None:
+    active = 0
+    max_active = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        turn_id = request.url.path.rsplit("/", 1)[-1]
+        active -= 1
+        return httpx.Response(
+            200,
+            json=_turn("completed", id=turn_id, thread_id=f"thread-{turn_id}"),
+            request=request,
+        )
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turns(
+                ["turn-3", "turn-1", "turn-2"],
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+
+    assert result["ok"] is True
+    assert max_active == 3
+    assert [item["turn_id"] for item in result["results"]] == ["turn-3", "turn-1", "turn-2"]
+    assert result["terminal_count"] == 3
+    assert result["pending_count"] == 0
+    assert result["error_count"] == 0
+
+
+def test_get_turns_uses_one_shared_polling_window(monkeypatch) -> None:
+    calls: Dict[str, int] = {"turn-1": 0, "turn-2": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        turn_id = request.url.path.rsplit("/", 1)[-1]
+        calls[turn_id] += 1
+        state = "queued" if calls[turn_id] == 1 else "completed"
+        return httpx.Response(200, json=_turn(state, id=turn_id), request=request)
+
+    monkeypatch.setattr(aria, "POLL_INTERVAL_SECONDS", 0)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turns(
+                ["turn-1", "turn-2"],
+                wait_seconds=1,
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+
+    assert calls == {"turn-1": 2, "turn-2": 2}
+    assert result["terminal_count"] == 2
+
+
+def test_get_turns_returns_successes_with_per_turn_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        turn_id = request.url.path.rsplit("/", 1)[-1]
+        if turn_id == "missing":
+            return httpx.Response(404, json={"detail": "not found"}, request=request)
+        return httpx.Response(200, json=_turn("completed", id=turn_id), request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turns(
+                ["turn-1", "missing"],
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+
+    assert result["ok"] is True
+    assert result["terminal_count"] == 1
+    assert result["error_count"] == 1
+    assert result["failed_turn_ids"] == ["missing"]
+    assert result["results"][1]["error"]["type"] == "turn_not_found"
