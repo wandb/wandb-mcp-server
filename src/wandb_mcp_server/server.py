@@ -29,7 +29,6 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from wandb_mcp_server.auth import mcp_auth_middleware
 from wandb_mcp_server.config import WANDB_BASE_URL
 
 # Import Weave for tracing MCP tool calls
@@ -320,6 +319,11 @@ class AuthenticatedFastMCP(WandBFastMCP):
     """FastMCP server with the repo's request-scoped W&B bearer auth attached."""
 
     def streamable_http_app(self):
+        # FastAPI is an optional dependency used only by the HTTP transport.
+        # Keep it out of the stdio/package-import path so a core wheel install
+        # remains usable without the ``http`` extra.
+        from wandb_mcp_server.auth import mcp_auth_middleware
+
         app = super().streamable_http_app()
         app.add_middleware(BaseHTTPMiddleware, dispatch=mcp_auth_middleware)
         return app
