@@ -9,6 +9,7 @@ This server provides tools for:
 - Creating shareable reports with visualizations
 - Getting help via wandbot support agent
 - Discovering available entities and projects
+- Starting and polling asynchronous conversations with ARIA
 """
 
 import asyncio
@@ -25,6 +26,8 @@ from typing import Any, Callable, Collection, Dict, List, Optional, Union
 import wandb
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from wandb_mcp_server.config import WANDB_BASE_URL
 
@@ -42,6 +45,16 @@ from wandb_mcp_server.mcp_tools.automations import (
     LIST_INTEGRATIONS_TOOL_DESCRIPTION,
     list_automations,
     list_integrations,
+)
+from wandb_mcp_server.mcp_tools.aria import (
+    ARIA_GET_TURN_TOOL_DESCRIPTION,
+    ARIA_GET_TURNS_TOOL_DESCRIPTION,
+    ARIA_SEND_MESSAGE_TOOL_DESCRIPTION,
+    AriaMCPToolError,
+    get_aria_turn,
+    get_aria_turns,
+    raise_for_aria_error,
+    send_aria_message,
 )
 from wandb_mcp_server.mcp_tools.count_traces import (
     COUNT_WEAVE_TRACES_TOOL_DESCRIPTION,
@@ -290,6 +303,32 @@ async def _count_traces_or_none(
         return None
 
 
+class WandBFastMCP(FastMCP):
+    """FastMCP variant that preserves structured ARIA failures as MCP errors."""
+
+    async def call_tool(self, name: str, arguments: Dict[str, Any]):
+        try:
+            return await super().call_tool(name, arguments)
+        except ToolError as exc:
+            if isinstance(exc.__cause__, AriaMCPToolError):
+                raise exc.__cause__
+            raise
+
+
+class AuthenticatedFastMCP(WandBFastMCP):
+    """FastMCP server with the repo's request-scoped W&B bearer auth attached."""
+
+    def streamable_http_app(self):
+        # FastAPI is an optional dependency used only by the HTTP transport.
+        # Keep it out of the stdio/package-import path so a core wheel install
+        # remains usable without the ``http`` extra.
+        from wandb_mcp_server.auth import mcp_auth_middleware
+
+        app = super().streamable_http_app()
+        app.add_middleware(BaseHTTPMiddleware, dispatch=mcp_auth_middleware)
+        return app
+
+
 # ===============================================================================
 # SECTION 1: W&B AUTHENTICATION & API KEY SETUP
 # ===============================================================================
@@ -497,6 +536,9 @@ def register_tools(mcp_instance: FastMCP) -> None:
     - search_weave_agents_tool: Search messages, grouped by conversation
     - get_weave_agent_trace_tool: Chat/trajectory view for one trace (a turn)
     - get_weave_agent_conversation_tool: Multi-turn chat view for a conversation
+    - aria_send_message: Start or continue an asynchronous ARIA conversation
+    - aria_get_turn: Poll an ARIA turn and retrieve its current result
+    - aria_get_turns: Poll several ARIA turns concurrently
 
     Args:
         mcp_instance: The FastMCP instance to register tools on
@@ -1146,6 +1188,56 @@ def register_tools(mcp_instance: FastMCP) -> None:
             )
             _remove_registered_tools(mcp_instance, group.tool_names)
 
+    if not WANDB_MCP_READ_ONLY:
+
+        @mcp_instance.tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
+        async def aria_send_message(
+            message: str,
+            entity: Optional[str] = None,
+            project: Optional[str] = None,
+            parent_turn_id: Optional[str] = None,
+            wait_seconds: int = 0,
+            include_turn: bool = False,
+        ) -> Dict[str, Any]:
+            return raise_for_aria_error(
+                await send_aria_message(
+                    message=message,
+                    entity=entity,
+                    project=project,
+                    parent_turn_id=parent_turn_id,
+                    wait_seconds=wait_seconds,
+                    include_turn=include_turn,
+                )
+            )
+
+    @mcp_instance.tool(description=ARIA_GET_TURN_TOOL_DESCRIPTION)
+    async def aria_get_turn(
+        turn_id: str,
+        wait_seconds: int = 0,
+        include_turn: bool = False,
+    ) -> Dict[str, Any]:
+        return raise_for_aria_error(
+            await get_aria_turn(
+                turn_id=turn_id,
+                wait_seconds=wait_seconds,
+                include_turn=include_turn,
+            )
+        )
+
+    @mcp_instance.tool(description=ARIA_GET_TURNS_TOOL_DESCRIPTION)
+    async def aria_get_turns(
+        turn_ids: List[str],
+        wait_seconds: int = 0,
+        include_turn: bool = False,
+    ) -> Dict[str, Any]:
+        return raise_for_aria_error(
+            await get_aria_turns(
+                turn_ids=turn_ids,
+                wait_seconds=wait_seconds,
+                include_turn=include_turn,
+            )
+        )
+
 
 # ===============================================================================
 # SECTION 4: MCP SERVER SETUP (STDIO & HTTP)
@@ -1175,7 +1267,7 @@ def create_mcp_server(transport: str, host: str = "localhost", port: Optional[in
     if transport == "http":
         port = port if port is not None else 8080
         logger.info(f"Configuring HTTP server on {host}:{port}")
-        mcp = FastMCP("weave-mcp-server", host=host, port=port, stateless_http=True)
+        mcp = AuthenticatedFastMCP("weave-mcp-server", host=host, port=port, stateless_http=True)
 
         # Log authentication status for HTTP
         if os.environ.get("MCP_AUTH_DISABLED", "false").lower() == "true":
@@ -1185,7 +1277,7 @@ def create_mcp_server(transport: str, host: str = "localhost", port: Optional[in
 
     elif transport == "stdio":
         logger.info("Configuring stdio server")
-        mcp = FastMCP("weave-mcp-server")
+        mcp = WandBFastMCP("weave-mcp-server")
         logger.info("STDIO transport uses environment variable authentication")
     else:
         raise ValueError(f"Invalid transport type: {transport}. Must be 'stdio' or 'http'")
@@ -1221,6 +1313,7 @@ def cli():
         WEAVE_SILENT                Set to "False" to enable Weave output (default: True)
         WANDB_DEBUG                 Set to "true" to enable W&B debug logging
         MCP_AUTH_DISABLED           Set to "true" to disable HTTP auth (dev only)
+        WB_AGENT_BASE_URL           ARIA service URL (default: https://wb-agent.wandb.ai)
     """
     print("Starting W&B MCP Server...", file=sys.stderr)
 
