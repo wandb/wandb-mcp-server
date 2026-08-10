@@ -27,7 +27,6 @@ from typing import Any, Callable, Collection, Dict, List, Literal, Optional, Uni
 import wandb
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-
 from wandb_mcp_server.config import (
     MCP_COUNT_TOOL_WORKERS,
     MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
@@ -55,8 +54,12 @@ from wandb_mcp_server.mcp_tools.automations import (
 )
 from wandb_mcp_server.mcp_tools.aria import (
     ARIA_GET_TURN_TOOL_DESCRIPTION,
+    ARIA_GET_TURNS_TOOL_DESCRIPTION,
     ARIA_SEND_MESSAGE_TOOL_DESCRIPTION,
+    AriaMCPToolError,
     get_aria_turn,
+    get_aria_turns,
+    raise_for_aria_error,
     send_aria_message,
 )
 from wandb_mcp_server.mcp_tools.count_traces import (
@@ -530,6 +533,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
     - get_weave_agent_conversation_tool: Multi-turn chat view for a conversation
     - aria_send_message: Start or continue an asynchronous ARIA conversation
     - aria_get_turn: Poll an ARIA turn and retrieve its current result
+    - aria_get_turns: Poll several ARIA turns concurrently
 
     Args:
         mcp_instance: The FastMCP instance to register tools on
@@ -1254,25 +1258,55 @@ def register_tools(mcp_instance: FastMCP) -> None:
             )
             _remove_registered_tools(mcp_instance, group.tool_names)
 
-    @mcp_instance.tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
-    async def aria_send_message(
-        message: str,
-        entity: Optional[str] = None,
-        project: Optional[str] = None,
-        parent_turn_id: Optional[str] = None,
-        wait_seconds: int = 0,
-    ) -> Dict[str, Any]:
-        return await send_aria_message(
-            message=message,
-            entity=entity,
-            project=project,
-            parent_turn_id=parent_turn_id,
-            wait_seconds=wait_seconds,
-        )
+    if not WANDB_MCP_READ_ONLY:
+
+        @mcp_instance.tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
+        async def aria_send_message(
+            message: str,
+            entity: Optional[str] = None,
+            project: Optional[str] = None,
+            parent_turn_id: Optional[str] = None,
+            wait_seconds: int = 0,
+            include_turn: bool = False,
+        ) -> Dict[str, Any]:
+            return raise_for_aria_error(
+                await send_aria_message(
+                    message=message,
+                    entity=entity,
+                    project=project,
+                    parent_turn_id=parent_turn_id,
+                    wait_seconds=wait_seconds,
+                    include_turn=include_turn,
+                )
+            )
 
     @mcp_instance.tool(description=ARIA_GET_TURN_TOOL_DESCRIPTION)
-    async def aria_get_turn(turn_id: str, wait_seconds: int = 0) -> Dict[str, Any]:
-        return await get_aria_turn(turn_id=turn_id, wait_seconds=wait_seconds)
+    async def aria_get_turn(
+        turn_id: str,
+        wait_seconds: int = 0,
+        include_turn: bool = False,
+    ) -> Dict[str, Any]:
+        return raise_for_aria_error(
+            await get_aria_turn(
+                turn_id=turn_id,
+                wait_seconds=wait_seconds,
+                include_turn=include_turn,
+            )
+        )
+
+    @mcp_instance.tool(description=ARIA_GET_TURNS_TOOL_DESCRIPTION)
+    async def aria_get_turns(
+        turn_ids: List[str],
+        wait_seconds: int = 0,
+        include_turn: bool = False,
+    ) -> Dict[str, Any]:
+        return raise_for_aria_error(
+            await get_aria_turns(
+                turn_ids=turn_ids,
+                wait_seconds=wait_seconds,
+                include_turn=include_turn,
+            )
+        )
 
 
 # ===============================================================================

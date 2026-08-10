@@ -21,11 +21,14 @@ NON_WEAVE_TOOLS = {
     "list_artifact_versions_tool",
     "compare_runs_tool",
     "probe_project_tool",
+    "aria_get_turn",
+    "aria_get_turns",
 }
 
 WRITE_TOOLS = {
     "create_wandb_report_tool",
     "log_analysis_to_wandb",
+    "aria_send_message",
 }
 
 # Agents (OTel) tools read a separate agent-spans data plane and are opt-in.
