@@ -511,7 +511,7 @@ def test_count_mode_uses_public_sdk_without_iterating(fake_api):
 @pytest.mark.asyncio
 async def test_public_query_tools_run_sync_sdk_work_off_event_loop(fake_api, monkeypatch):
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
-    monkeypatch.setattr("wandb_mcp_server.config.WANDB_MCP_ENABLE_RAW_GRAPHQL", True)
+    monkeypatch.setenv("WANDB_MCP_ENABLE_RAW_GRAPHQL", "true")
     server = create_mcp_server("stdio")
 
     for name in ("query_wandb_tool", "query_wandb_graphql_tool"):
