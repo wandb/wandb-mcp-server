@@ -131,15 +131,18 @@ Production actions require explicit approval:
 1. Mark the public release PR ready and obtain required review.
 2. Reconfirm that the staged evidence is bound to the final release-branch head
    and immutable image digest.
-3. Merge the release PR to `main` and record the resulting merge SHA.
-4. Verify that the merge commit's tree exactly matches the staged candidate's
-   tree. A merge-only SHA change does not require rebuilding; a tree difference
-   invalidates staging evidence and requires a new candidate and full retest.
-5. Promote the exact staged digest; do not rebuild it for production.
-6. Publish the package/image only after the required production gate passes.
-7. Update and merge the Helm chart PR with the published tag or digest.
-8. Run post-deployment health, authentication, registration, telemetry, and
-   representative read checks.
+3. Confirm the release branch is current with `main` and that the reviewed
+   merge result has the same tree as the staged candidate. Any tree difference
+   requires a new candidate and full staging validation before promotion.
+4. With explicit managed-production approval, promote the exact staged digest;
+   do not rebuild it. Run post-deployment health, authentication, registration,
+   telemetry, and representative read checks with automatic rollback armed.
+5. Merge the release PR to `main` normally and record the merge SHA.
+6. Verify again that the merge commit's tree exactly matches the staged
+   candidate's tree. A merge-only SHA change is expected; a tree difference is
+   a release-integrity failure and blocks publication.
+7. Publish the package/image only after the production gate and tree check pass.
+8. Update and merge the Helm chart PR with the published tag or digest.
 
 Never rebuild a different source state under an already validated release tag.
 
