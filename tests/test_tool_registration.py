@@ -230,6 +230,33 @@ def test_read_only_mode_is_independent_of_weave_and_agent_gates():
     assert "query_wandb_tool" in names
 
 
+def test_late_dotenv_registration_gates_fail_closed(monkeypatch):
+    """CLI-loaded flags must apply even when config was imported already."""
+    _reset_tool_gate_env()
+    monkeypatch.setenv("WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS", "true")
+    monkeypatch.setenv("WANDB_MCP_ENABLE_ARIA_TOOLS", "true")
+    monkeypatch.setenv("WANDB_MCP_READ_ONLY", "true")
+
+    names = _registered_tool_names()
+
+    assert len(names) == 30
+    assert WRITE_TOOLS.isdisjoint(names)
+    assert AGENT_TOOLS.issubset(names)
+    assert ARIA_TOOLS - {"aria_send_message"} <= names
+
+
+def test_late_dotenv_raw_graphql_flag_is_applied(monkeypatch):
+    """The opt-in compatibility tool also follows CLI-loaded configuration."""
+    _reset_tool_gate_env()
+    monkeypatch.setenv("WANDB_MCP_ENABLE_RAW_GRAPHQL", "true")
+    monkeypatch.setenv("WANDB_MCP_READ_ONLY", "true")
+
+    names = _registered_tool_names()
+
+    assert "query_wandb_graphql_tool" in names
+    assert WRITE_TOOLS.isdisjoint(names)
+
+
 def test_constructed_servers_use_public_boundary_instrumentation(monkeypatch):
     monkeypatch.delenv("MCP_TRANSPORT", raising=False)
     import wandb_mcp_server.analytics as analytics

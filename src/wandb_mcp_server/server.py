@@ -586,7 +586,11 @@ def register_tools(mcp_instance: FastMCP) -> None:
     Args:
         mcp_instance: The FastMCP instance to register tools on
     """
-    from wandb_mcp_server.config import WANDB_MCP_ENABLE_RAW_GRAPHQL, WANDB_MCP_READ_ONLY
+    # The CLI intentionally loads .env after this module is imported. Resolve
+    # registration gates here so late-loaded deployment configuration cannot
+    # leave write tools enabled or raw GraphQL disabled unexpectedly.
+    read_only = _env_bool("WANDB_MCP_READ_ONLY", False)
+    raw_graphql_enabled = _env_bool("WANDB_MCP_ENABLE_RAW_GRAPHQL", False)
 
     @mcp_instance.tool(description=QUERY_WEAVE_TRACES_TOOL_DESCRIPTION)
     async def query_weave_traces_tool(
@@ -908,7 +912,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             cursor=cursor,
         )
 
-    if WANDB_MCP_ENABLE_RAW_GRAPHQL:
+    if raw_graphql_enabled:
         from wandb_mcp_server.mcp_tools.query_wandb_gql import (
             QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION,
             query_paginated_wandb_gql,
@@ -923,7 +927,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         ) -> Dict[str, Any]:
             return query_paginated_wandb_gql(query, variables, max_items, items_per_page)
 
-    if not WANDB_MCP_READ_ONLY:
+    if not read_only:
 
         @mcp_instance.tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
         def create_wandb_report_tool(
@@ -1312,7 +1316,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         # here so a late configuration can never silently fall back to a
         # different credential-bearing origin.
         resolve_aria_base_url()
-        if not WANDB_MCP_READ_ONLY:
+        if not read_only:
 
             @mcp_instance.tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
             async def aria_send_message(
