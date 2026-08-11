@@ -6,22 +6,94 @@ schema at https://wb-agent.wandb.ai/openapi.json.
 
 import asyncio
 import json
+import logging
+import math
+import threading
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
+from weakref import WeakKeyDictionary
 
 import httpx
 
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.config import WB_AGENT_BASE_URL
+from wandb_mcp_server.admission import current_tool_deadline
+from wandb_mcp_server.config import MAX_RESPONSE_TOKENS, WB_AGENT_BASE_URL, validate_aria_base_url
+from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text, sanitize_sensitive_value
+from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
 
+TURN_STATES = frozenset({"queued", "in_progress", "completed", "errored", "cancelled"})
 TERMINAL_STATES = frozenset({"completed", "errored", "cancelled"})
 MAX_WAIT_SECONDS = 30
 MAX_BATCH_TURNS = 20
+MAX_BATCH_CONCURRENCY = 8
+MAX_BATCH_GET_REQUESTS = 100
+MAX_MESSAGE_BYTES = 32 * 1024
+MAX_IDENTIFIER_LENGTH = 512
+MAX_SCOPE_LENGTH = 512
+MAX_UPSTREAM_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_PROGRESS_TOOL_RECORDS = 100
+MAX_PROGRESS_NODES_PER_RECORD = 200
+MAX_PROGRESS_NESTING_DEPTH = 8
 POLL_INTERVAL_SECONDS = 1.0
+POLL_DEADLINE_SAFETY_SECONDS = 0.5
+MIN_RETRY_AFTER_MS = 1_000
+MAX_RETRY_AFTER_MS = 30_000
+_OVERLOAD_ERROR_TYPES = frozenset({"rate_limited", "service_unavailable"})
+_OUTBOUND_LIMITERS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = WeakKeyDictionary()
+_OUTBOUND_LIMITERS_LOCK = threading.Lock()
+
+
+def _outbound_limiter() -> asyncio.Semaphore:
+    """Return the shared eight-request limiter for the active server loop."""
+    loop = asyncio.get_running_loop()
+    with _OUTBOUND_LIMITERS_LOCK:
+        limiter = _OUTBOUND_LIMITERS.get(loop)
+        if limiter is None:
+            limiter = asyncio.Semaphore(MAX_BATCH_CONCURRENCY)
+            _OUTBOUND_LIMITERS[loop] = limiter
+        return limiter
+
+
+class _SanitizeAriaHTTPLogFilter(logging.Filter):
+    """Remove ARIA origins, turn identifiers, and internal hosts from HTTP logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        marker = "/api/v1/turns"
+        if isinstance(record.args, tuple) and len(record.args) >= 2:
+            rendered_url = str(record.args[1])
+            if marker in rendered_url:
+                suffix = f"{marker}/<redacted>" if f"{marker}/" in rendered_url else marker
+                args = list(record.args)
+                args[1] = f"<aria-service>{suffix}"
+                record.args = tuple(args)
+
+        # httpcore debug records do not always expose a URL argument. Render
+        # once and run the shared infrastructure/credential sanitizer over the
+        # complete record so a custom internal ARIA origin cannot escape.
+        rendered = record.getMessage()
+        sanitized = sanitize_sensitive_text(rendered, max_chars=4_096)
+        if sanitized != rendered:
+            record.msg = sanitized
+            record.args = ()
+        return True
+
+
+for _http_logger_name in (
+    "httpx",
+    "httpcore.connection",
+    "httpcore.http11",
+    "httpcore.http2",
+    "httpcore.proxy",
+):
+    _http_logger = logging.getLogger(_http_logger_name)
+    if not any(isinstance(item, _SanitizeAriaHTTPLogFilter) for item in _http_logger.filters):
+        _http_logger.addFilter(_SanitizeAriaHTTPLogFilter())
 
 ARIA_SEND_MESSAGE_TOOL_DESCRIPTION = """Start or continue an asynchronous conversation with ARIA, the hosted Weights & Biases agent (also called wb-agent).
 
@@ -38,23 +110,23 @@ This tool returns promptly by default because ARIA turns are asynchronous. Keep 
 
 Root turns may omit both entity and project. If only project is supplied, this
 tool resolves the caller's default W&B entity before creating the turn. Results
-are compact by default; set include_turn=true only when the complete raw ARIA
-turn snapshot is actually needed.
+are compact by default; set include_turn=true only when a bounded raw ARIA turn
+snapshot is actually needed. Oversized snapshots include `_truncation` metadata.
 
 Parameters
 ----------
 message : str
-    A focused request for ARIA. Include relevant W&B entity/project names, run IDs, call IDs, URLs, metrics, time windows, and the desired output shape.
+    A focused request for ARIA, limited to 32 KiB of UTF-8 text. Include relevant W&B entity/project names, run IDs, call IDs, URLs, metrics, time windows, and the desired output shape.
 entity : str, optional
-    W&B entity for a new conversation. Omit to let ARIA use the account default. Must be omitted for continuations.
+    W&B entity for a new conversation, up to 512 characters. Omit to let ARIA use the account default. Must be omitted for continuations.
 project : str, optional
-    W&B project for a new conversation. Omit to let ARIA use the default. Must be omitted for continuations.
+    W&B project for a new conversation, up to 512 characters. Omit to let ARIA use the default. Must be omitted for continuations.
 parent_turn_id : str, optional
-    Completed ARIA turn to continue. Use the exact turn_id returned by the prior call.
+    Completed ARIA turn to continue, up to 512 characters. Use the exact turn_id returned by the prior call.
 wait_seconds : int
     Seconds to poll before returning, from 0 to 30. Default 0 returns the initial asynchronous handle immediately.
 include_turn : bool
-    Include the full raw turn snapshot. Default false avoids very large responses.
+    Include a bounded raw turn snapshot. Oversized data is truncated with metadata. Default false avoids very large responses.
 
 Returns
 -------
@@ -73,16 +145,16 @@ of latest_response because ARIA can emit a partial response while still working.
 
 With wait_seconds=0 this performs one poll; with 1-30 it polls only for that bounded interval and returns early if the turn completes, errors, or is cancelled. In-progress results include a phase, meaningful status text, message/tool counts, and latest tool activity, plus a suggested poll interval. Reuse the same turn_id until is_terminal is true.
 
-When state is completed, latest_response contains ARIA's newest assistant answer. Continue the conversation with aria_send_message(parent_turn_id=turn_id). When state is errored, inspect error_info. A transport/service error uses the MCP error state and keeps turn_id in its JSON payload so this tool can be retried safely. Results are compact by default; set include_turn=true only for the full raw snapshot.
+When state is completed, latest_response contains ARIA's newest assistant answer. Continue the conversation with aria_send_message(parent_turn_id=turn_id). When state is errored, inspect error_info. A transport/service error uses the MCP error state and keeps turn_id in its JSON payload so this tool can be retried safely. Results are compact by default; set include_turn=true only for a bounded raw snapshot, which may contain `_truncation` metadata.
 
 Parameters
 ----------
 turn_id : str
-    Exact ARIA turn_id returned by aria_send_message.
+    Exact ARIA turn_id returned by aria_send_message, up to 512 characters.
 wait_seconds : int
     Seconds to poll before returning, from 0 to 30. Default 0 performs one status request.
 include_turn : bool
-    Include the full raw turn snapshot. Default false avoids very large responses.
+    Include a bounded raw turn snapshot. Oversized data is truncated with metadata. Default false avoids very large responses.
 
 Returns
 -------
@@ -107,35 +179,17 @@ Results are compact by default.
 Parameters
 ----------
 turn_ids : list of str
-    One to 20 distinct ARIA turn IDs.
+    One to 20 distinct ARIA turn IDs, each up to 512 characters.
 wait_seconds : int
     Shared polling window from 0 to 30 seconds. Default 0 performs one concurrent status request.
 include_turn : bool
-    Include each full raw turn snapshot. Default false avoids very large responses.
+    Include each bounded raw turn snapshot. Oversized data is truncated with metadata. Default false avoids very large responses.
 
 Returns
 -------
 dict
     Ordered per-turn results plus terminal, pending, and error counts and retry guidance.
 """
-
-
-class AriaMCPToolError(Exception):
-    """Signal a structured ARIA failure through MCP's native error channel."""
-
-    def __init__(self, result: Dict[str, Any]) -> None:
-        super().__init__()
-        self.result = result
-
-    def __str__(self) -> str:
-        return json.dumps(self.result, default=str, separators=(",", ":"))
-
-
-def raise_for_aria_error(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Raise a JSON-preserving error when an ARIA operation failed entirely."""
-    if result.get("ok") is False:
-        raise AriaMCPToolError(result)
-    return result
 
 
 class AriaAPIError(Exception):
@@ -149,6 +203,7 @@ class AriaAPIError(Exception):
         retryable: bool,
         status_code: Optional[int] = None,
         details: Optional[Any] = None,
+        retry_after_ms: Optional[int] = None,
     ) -> None:
         super().__init__(message)
         self.error_type = error_type
@@ -156,25 +211,34 @@ class AriaAPIError(Exception):
         self.retryable = retryable
         self.status_code = status_code
         self.details = details
+        self.retry_after_ms = retry_after_ms
 
     def as_result(self, *, turn_id: Optional[str] = None, operation: str) -> Dict[str, Any]:
+        ambiguous_send = operation == "send" and self.error_type in {
+            "request_timeout",
+            "network_error",
+            "invalid_response",
+            "response_too_large",
+        }
         error: Dict[str, Any] = {
-            "type": self.error_type,
-            "message": self.message,
-            "retryable": self.retryable,
+            "type": "outcome_unknown" if ambiguous_send else self.error_type,
+            "message": (
+                "ARIA did not confirm whether the message submission created a turn."
+                if ambiguous_send
+                else self.message
+            ),
+            "retryable": False if ambiguous_send else self.retryable,
         }
         if self.status_code is not None:
             error["status_code"] = self.status_code
+        if self.retry_after_ms is not None:
+            error["retry_after_ms"] = self.retry_after_ms
         if self.details:
             error["details"] = self.details
 
         if turn_id and self.retryable:
             next_action = "Retry aria_get_turn with the same turn_id; the ARIA turn remains server-side."
-        elif operation == "send" and self.error_type in {
-            "request_timeout",
-            "service_unavailable",
-            "network_error",
-        }:
+        elif ambiguous_send or (operation == "send" and self.error_type == "service_unavailable"):
             next_action = (
                 "ARIA did not return a turn handle. The submission outcome may be "
                 "unknown, so do not retry blindly if duplicate work matters."
@@ -192,6 +256,251 @@ class AriaAPIError(Exception):
         if turn_id:
             result["turn_id"] = turn_id
         return result
+
+
+def _normalize_bounded_string(
+    value: Any,
+    *,
+    name: str,
+    max_length: int,
+    max_bytes: Optional[int] = None,
+) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise AriaAPIError(
+            "invalid_request",
+            f"{name} must be a non-empty string.",
+            retryable=False,
+        )
+    normalized = value.strip()
+    if len(normalized) > max_length or (max_bytes is not None and len(normalized.encode("utf-8")) > max_bytes):
+        unit = "bytes" if max_bytes is not None else "characters"
+        limit = max_bytes if max_bytes is not None else max_length
+        raise AriaAPIError(
+            "invalid_request",
+            f"{name} must contain at most {limit} UTF-8 {unit}.",
+            retryable=False,
+        )
+    return normalized
+
+
+def _replace_exact_secrets(value: Any, secrets: tuple[str, ...], *, depth: int = 0) -> Any:
+    """Redact request-local credentials not visible to the central sanitizer."""
+    if isinstance(value, str):
+        result = value
+        for secret in secrets:
+            if len(secret) >= 8:
+                result = result.replace(secret, "<redacted>")
+        return result
+    if depth >= 12:
+        return "<value omitted>"
+    if isinstance(value, dict):
+        return {
+            _replace_exact_secrets(key, secrets, depth=depth + 1): _replace_exact_secrets(
+                item,
+                secrets,
+                depth=depth + 1,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_replace_exact_secrets(item, secrets, depth=depth + 1) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_replace_exact_secrets(item, secrets, depth=depth + 1) for item in value)
+    return value
+
+
+def normalize_aria_json_value(value: Any) -> Any:
+    """Return a JSON-safe ARIA value with explicit non-finite sentinels."""
+    if isinstance(value, float) and not math.isfinite(value):
+        if math.isnan(value):
+            label = "NaN"
+        elif value > 0:
+            label = "Infinity"
+        else:
+            label = "-Infinity"
+        return f"<non-finite float: {label}>"
+    if isinstance(value, dict):
+        return {str(key): normalize_aria_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [normalize_aria_json_value(item) for item in value]
+    return value
+
+
+def _estimate_response_tokens(value: Any) -> int:
+    return count_tokens_conservative(
+        json.dumps(
+            value,
+            default=str,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    )
+
+
+def _compact_response_value(
+    value: Any,
+    *,
+    depth: int = 0,
+    max_depth: int = 5,
+    max_string_chars: int = 2_048,
+    max_items: int = 20,
+    stats: Optional[Dict[str, int]] = None,
+) -> Any:
+    stats = stats if stats is not None else {}
+    if isinstance(value, str):
+        if len(value) <= max_string_chars:
+            return value
+        omitted = len(value) - max_string_chars
+        stats["strings_truncated"] = stats.get("strings_truncated", 0) + 1
+        stats["string_characters_omitted"] = stats.get("string_characters_omitted", 0) + omitted
+        return f"{value[:max_string_chars]}… <truncated {omitted} chars>"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if depth >= max_depth:
+        stats["values_omitted_by_depth"] = stats.get("values_omitted_by_depth", 0) + 1
+        return "<value omitted>"
+    if isinstance(value, dict):
+        items = list(value.items())
+        result = {
+            str(key)[:200]: _compact_response_value(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_string_chars=max_string_chars,
+                max_items=max_items,
+                stats=stats,
+            )
+            for key, item in items[:max_items]
+        }
+        if len(items) > max_items:
+            omitted = len(items) - max_items
+            result["_truncated_keys"] = omitted
+            stats["mapping_keys_omitted"] = stats.get("mapping_keys_omitted", 0) + omitted
+        return result
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+        result = [
+            _compact_response_value(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_string_chars=max_string_chars,
+                max_items=max_items,
+                stats=stats,
+            )
+            for item in items[:max_items]
+        ]
+        if len(items) > max_items:
+            omitted = len(items) - max_items
+            result.append({"_truncated_items": omitted})
+            stats["list_items_omitted"] = stats.get("list_items_omitted", 0) + omitted
+        return result
+    return sanitize_sensitive_text(value, max_chars=max_string_chars)
+
+
+def _minimal_bounded_result(result: Dict[str, Any], truncation: Dict[str, Any]) -> Dict[str, Any]:
+    minimal: Dict[str, Any] = {
+        "ok": result.get("ok") is not False,
+        "_truncation": truncation,
+    }
+    for key in ("turn_id", "state", "is_terminal", "poll_after_seconds"):
+        if key in result:
+            minimal[key] = result[key]
+    if "turn" in result:
+        minimal["turn"] = {
+            "_truncated": True,
+            "reason": "response_token_budget",
+        }
+    error = result.get("error")
+    if isinstance(error, dict):
+        minimal["error"] = {
+            key: error[key] for key in ("type", "message", "retryable", "status_code", "retry_after_ms") if key in error
+        }
+    minimal["next_action"] = (
+        "The ARIA response exceeded the MCP response budget. Poll the turn again "
+        "without include_turn or narrow the request."
+    )
+    return minimal
+
+
+def _finalize_result(
+    value: Dict[str, Any],
+    *,
+    extra_secrets: tuple[str, ...] = (),
+) -> Dict[str, Any]:
+    """Sanitize every ARIA result and enforce the configured token budget."""
+    sanitized = sanitize_sensitive_value(value, _error_context=value.get("ok") is False)
+    sanitized = _replace_exact_secrets(sanitized, extra_secrets)
+    sanitized = normalize_aria_json_value(sanitized)
+    if not isinstance(sanitized, dict):
+        sanitized = {
+            "ok": False,
+            "error": {
+                "type": "invalid_response",
+                "message": "ARIA produced an unsupported result shape.",
+                "retryable": False,
+            },
+        }
+
+    original_tokens = _estimate_response_tokens(sanitized)
+    if original_tokens <= MAX_RESPONSE_TOKENS:
+        return sanitized
+
+    omitted_fields: list[str] = []
+    candidate = dict(sanitized)
+    if "turn" in candidate:
+        turn = candidate.pop("turn")
+        marker: Dict[str, Any] = {
+            "_truncated": True,
+            "reason": "response_token_budget",
+        }
+        if isinstance(turn, dict):
+            marker.update(
+                {key: turn[key] for key in ("id", "thread_id", "parent_turn_id", "state", "updated_at") if key in turn}
+            )
+        candidate["turn"] = marker
+        omitted_fields.append("turn")
+
+    truncation: Dict[str, Any] = {
+        "applied": True,
+        "reason": "response_token_budget",
+        "max_tokens": MAX_RESPONSE_TOKENS,
+        "original_estimated_tokens": original_tokens,
+    }
+    if omitted_fields:
+        truncation["omitted_fields"] = omitted_fields
+    candidate["_truncation"] = truncation
+    if _estimate_response_tokens(candidate) <= MAX_RESPONSE_TOKENS:
+        return candidate
+
+    compaction: Dict[str, int] = {}
+    candidate = _compact_response_value(candidate, stats=compaction)
+    if isinstance(candidate, dict):
+        if compaction:
+            truncation["compaction"] = compaction
+        candidate["_truncation"] = truncation
+        if _estimate_response_tokens(candidate) <= MAX_RESPONSE_TOKENS:
+            return candidate
+
+    minimal = _minimal_bounded_result(sanitized, truncation)
+    if _estimate_response_tokens(minimal) <= MAX_RESPONSE_TOKENS:
+        return minimal
+
+    # Extremely small operator budgets may not fit the normal metadata. Keep a
+    # stable, truthful error rather than returning the oversized upstream body.
+    return {
+        "ok": False,
+        "error": {
+            "type": "response_too_large",
+            "message": "The ARIA result exceeded the configured response budget.",
+            "retryable": True,
+        },
+        "_truncation": {
+            "applied": True,
+            "reason": "response_token_budget",
+        },
+    }
 
 
 def _validate_wait_seconds(wait_seconds: int) -> None:
@@ -223,8 +532,12 @@ def _resolve_api_key(api_key: Optional[str]) -> str:
 async def _resolve_default_entity(api_key: str) -> str:
     """Resolve project-only requests through the caller's W&B account default."""
     try:
-        api = WandBApiManager.get_api(api_key)
-        entity = await asyncio.to_thread(lambda: api.default_entity)
+        # Keep this blocking SDK read in the shared bounded worker pool. When a
+        # hosted call is cancelled or times out, InstrumentedFastMCP can then
+        # retain its admission permit until the physical SDK work finishes.
+        from wandb_mcp_server.instrumented_server import run_sync_in_current_tool
+
+        entity = await run_sync_in_current_tool(lambda: WandBApiManager.get_api(api_key).default_entity)
     except Exception as exc:
         raise AriaAPIError(
             "scope_resolution_error",
@@ -251,10 +564,11 @@ async def _resolve_default_entity(api_key: str) -> str:
 
 def _new_http_client(api_key: str) -> httpx.AsyncClient:
     return httpx.AsyncClient(
-        base_url=WB_AGENT_BASE_URL,
+        base_url=validate_aria_base_url(WB_AGENT_BASE_URL),
         headers={
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
+            "Accept-Encoding": "identity",
             "Content-Type": "application/json",
         },
         timeout=httpx.Timeout(15.0, connect=5.0),
@@ -267,14 +581,20 @@ def _bounded_details(value: Any, *, depth: int = 0) -> Any:
     if depth >= 4:
         return "<truncated>"
     if isinstance(value, str):
-        return value[:1000]
+        # Sanitize the complete scalar before shortening it. Truncating first
+        # can leave a credential prefix or remove the `.svc` suffix that lets
+        # the shared sanitizer recognize an internal host.
+        return sanitize_sensitive_text(value, max_chars=1000)
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, list):
         return [_bounded_details(item, depth=depth + 1) for item in value[:20]]
     if isinstance(value, dict):
-        return {str(key)[:200]: _bounded_details(item, depth=depth + 1) for key, item in list(value.items())[:20]}
-    return str(value)[:1000]
+        return {
+            sanitize_sensitive_text(key, max_chars=200): _bounded_details(item, depth=depth + 1)
+            for key, item in list(value.items())[:20]
+        }
+    return sanitize_sensitive_text(value, max_chars=1000)
 
 
 def _response_details(response: httpx.Response) -> Optional[Any]:
@@ -290,9 +610,106 @@ def _response_details(response: httpx.Response) -> Optional[Any]:
     return _bounded_details(body)
 
 
+def _bounded_retry_after_ms(response: httpx.Response) -> Optional[int]:
+    raw_value = response.headers.get("Retry-After")
+    if raw_value is None:
+        return None
+    raw_value = raw_value.strip()
+    try:
+        seconds = float(raw_value)
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(raw_value)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            seconds = (parsed - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if not math.isfinite(seconds):
+        return None
+    if seconds < 0:
+        seconds = 0
+    milliseconds = int(seconds * 1_000)
+    return max(MIN_RETRY_AFTER_MS, min(milliseconds, MAX_RETRY_AFTER_MS))
+
+
+async def _read_bounded_response(response: httpx.Response) -> bytes:
+    """Read an upstream response without buffering an unbounded service body."""
+    content_encoding = response.headers.get("Content-Encoding", "")
+    encodings = [item.strip().lower() for item in content_encoding.split(",") if item.strip()]
+    if any(encoding != "identity" for encoding in encodings):
+        # httpx decodes a complete compressed wire chunk before yielding from
+        # aiter_bytes(), so checking the decoded length afterward cannot bound
+        # decompression memory. Request identity and fail closed if an upstream
+        # ignores it.
+        raise AriaAPIError(
+            "invalid_response",
+            "ARIA returned an unsupported compressed response.",
+            retryable=False,
+            status_code=response.status_code,
+        )
+    raw_length = response.headers.get("Content-Length")
+    if raw_length is not None:
+        try:
+            content_length = int(raw_length)
+        except (TypeError, ValueError):
+            content_length = None
+        if content_length is not None and content_length > MAX_UPSTREAM_RESPONSE_BYTES:
+            raise AriaAPIError(
+                "response_too_large",
+                "ARIA returned a response larger than the permitted service-response budget.",
+                retryable=False,
+                status_code=response.status_code,
+            )
+
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        body.extend(chunk)
+        if len(body) > MAX_UPSTREAM_RESPONSE_BYTES:
+            raise AriaAPIError(
+                "response_too_large",
+                "ARIA returned a response larger than the permitted service-response budget.",
+                retryable=False,
+                status_code=response.status_code,
+            )
+    return bytes(body)
+
+
+async def _perform_bounded_request(
+    client: httpx.AsyncClient,
+    method: str,
+    path: str,
+    *,
+    payload: Optional[Dict[str, Any]],
+) -> httpx.Response:
+    async with _outbound_limiter():
+        async with client.stream(
+            method,
+            path,
+            json=payload,
+            headers={"Accept-Encoding": "identity"},
+        ) as streamed:
+            body = await _read_bounded_response(streamed)
+            # `aiter_bytes()` yields decoded bytes. Reusing compression or transfer
+            # headers on the in-memory response would make httpx decode them a
+            # second time and would leave a stale wire Content-Length.
+            headers = [
+                (name, value)
+                for name, value in streamed.headers.multi_items()
+                if name.lower() not in {"content-encoding", "content-length", "transfer-encoding"}
+            ]
+            return httpx.Response(
+                streamed.status_code,
+                headers=headers,
+                content=body,
+                request=streamed.request,
+            )
+
+
 def _http_error(response: httpx.Response, *, safe_to_retry: bool) -> AriaAPIError:
     status_code = response.status_code
     details = _response_details(response)
+    retry_after_ms = _bounded_retry_after_ms(response)
 
     if status_code in {401, 403}:
         return AriaAPIError(
@@ -333,6 +750,7 @@ def _http_error(response: httpx.Response, *, safe_to_retry: bool) -> AriaAPIErro
             retryable=safe_to_retry,
             status_code=status_code,
             details=details,
+            retry_after_ms=retry_after_ms,
         )
     if status_code >= 500:
         return AriaAPIError(
@@ -341,6 +759,7 @@ def _http_error(response: httpx.Response, *, safe_to_retry: bool) -> AriaAPIErro
             retryable=safe_to_retry,
             status_code=status_code,
             details=details,
+            retry_after_ms=retry_after_ms if status_code == 503 else None,
         )
     return AriaAPIError(
         "upstream_error",
@@ -360,7 +779,21 @@ async def _request_turn(
 ) -> Dict[str, Any]:
     safe_to_retry = method == "GET"
     try:
-        response = await client.request(method, path, json=payload)
+        outer_deadline = current_tool_deadline.get()
+        if outer_deadline is None:
+            response = await _perform_bounded_request(client, method, path, payload=payload)
+        else:
+            request_seconds = outer_deadline - POLL_DEADLINE_SAFETY_SECONDS - time.monotonic()
+            if request_seconds <= 0:
+                raise TimeoutError
+            async with asyncio.timeout(request_seconds):
+                response = await _perform_bounded_request(client, method, path, payload=payload)
+    except TimeoutError as exc:
+        raise AriaAPIError(
+            "request_timeout",
+            "The ARIA request stopped before the MCP tool deadline.",
+            retryable=safe_to_retry,
+        ) from exc
     except httpx.TimeoutException as exc:
         raise AriaAPIError(
             "request_timeout",
@@ -387,10 +820,25 @@ async def _request_turn(
             status_code=response.status_code,
         ) from exc
 
-    if not isinstance(turn, dict) or not turn.get("id") or not turn.get("state"):
+    if not isinstance(turn, dict):
         raise AriaAPIError(
             "invalid_response",
             "ARIA returned a response without the required turn id or state.",
+            retryable=safe_to_retry,
+            status_code=response.status_code,
+        )
+    turn_id = turn.get("id")
+    state = turn.get("state")
+    if (
+        not isinstance(turn_id, str)
+        or not turn_id
+        or len(turn_id) > MAX_IDENTIFIER_LENGTH
+        or not isinstance(state, str)
+        or state not in TURN_STATES
+    ):
+        raise AriaAPIError(
+            "invalid_response",
+            "ARIA returned an invalid turn id or state.",
             retryable=safe_to_retry,
             status_code=response.status_code,
         )
@@ -399,7 +847,14 @@ async def _request_turn(
 
 async def _fetch_turn(client: httpx.AsyncClient, turn_id: str) -> Dict[str, Any]:
     encoded_turn_id = quote(turn_id, safe="")
-    return await _request_turn(client, "GET", f"/api/v1/turns/{encoded_turn_id}")
+    turn = await _request_turn(client, "GET", f"/api/v1/turns/{encoded_turn_id}")
+    if turn["id"] != turn_id:
+        raise AriaAPIError(
+            "invalid_response",
+            "ARIA returned a different turn than the one requested.",
+            retryable=False,
+        )
+    return turn
 
 
 async def _poll_turn(
@@ -411,12 +866,28 @@ async def _poll_turn(
         return turn
 
     deadline = time.monotonic() + wait_seconds
+    outer_deadline = current_tool_deadline.get()
+    if outer_deadline is not None:
+        deadline = min(deadline, outer_deadline - POLL_DEADLINE_SAFETY_SECONDS)
     while turn.get("state") not in TERMINAL_STATES:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         await asyncio.sleep(min(POLL_INTERVAL_SECONDS, remaining))
-        turn = await _fetch_turn(client, str(turn["id"]))
+        if deadline - time.monotonic() <= 0:
+            break
+        try:
+            turn = await _fetch_turn(client, str(turn["id"]))
+        except AriaAPIError as exc:
+            # The public dispatch timeout must remain available to serialize a
+            # truthful pending result. If the request consumed that headroom,
+            # return the last confirmed turn rather than racing the outer timer.
+            outer_remaining = (
+                None if outer_deadline is None else outer_deadline - POLL_DEADLINE_SAFETY_SECONDS - time.monotonic()
+            )
+            if exc.error_type == "request_timeout" and outer_remaining is not None and outer_remaining <= 0:
+                break
+            raise
     return turn
 
 
@@ -425,6 +896,9 @@ def _latest_assistant_response(turn: Dict[str, Any]) -> Optional[str]:
     for messages in message_sets:
         if not isinstance(messages, list):
             continue
+        # The decoded upstream response is already capped at 4 MiB, so this
+        # reverse scan is finite while preserving the newest assistant answer
+        # even when many tool records follow it.
         for record in reversed(messages):
             if not isinstance(record, dict):
                 continue
@@ -453,39 +927,60 @@ def _is_nonzero_exit_code(value: Any) -> bool:
     return False
 
 
-def _tool_response_has_error(record: Any) -> bool:
+def _inspect_tool_response(record: Any) -> tuple[bool, bool]:
     """Detect tool-protocol errors and recovered executor command failures."""
     if not isinstance(record, dict) or record.get("type") != "response":
-        return False
+        return False, True
     if record.get("is_error") is True:
-        return True
+        return True, True
 
     # Hosted shell responses use is_error for the tool protocol itself. A
     # successfully delivered shell result can therefore have is_error=false
     # while its normalized executor outcome has a nonzero exit_code nested in
     # the response payload. Inspect structure only; never parse or expose raw
     # stdout/stderr text.
-    stack = [record]
+    stack: list[tuple[Any, int]] = [(record, 0)]
     seen: set[int] = set()
-    while stack:
-        value = stack.pop()
+    nodes_inspected = 0
+    complete = True
+    while stack and nodes_inspected < MAX_PROGRESS_NODES_PER_RECORD:
+        value, depth = stack.pop()
+        nodes_inspected += 1
+        if depth >= MAX_PROGRESS_NESTING_DEPTH:
+            if isinstance(value, (dict, list)) and value:
+                complete = False
+            continue
         if isinstance(value, dict):
             value_id = id(value)
             if value_id in seen:
                 continue
             seen.add(value_id)
-            for key, child in value.items():
+            remaining_capacity = MAX_PROGRESS_NODES_PER_RECORD - nodes_inspected - len(stack)
+            if len(value) > remaining_capacity:
+                complete = False
+            for index, (key, child) in enumerate(value.items()):
+                if index >= remaining_capacity:
+                    break
                 if key == "exit_code" and _is_nonzero_exit_code(child):
-                    return True
+                    return True, True
                 if isinstance(child, (dict, list)):
-                    stack.append(child)
+                    stack.append((child, depth + 1))
         elif isinstance(value, list):
             value_id = id(value)
             if value_id in seen:
                 continue
             seen.add(value_id)
-            stack.extend(child for child in value if isinstance(child, (dict, list)))
-    return False
+            remaining_capacity = MAX_PROGRESS_NODES_PER_RECORD - nodes_inspected - len(stack)
+            if len(value) > remaining_capacity:
+                complete = False
+            for child in value[:remaining_capacity]:
+                if isinstance(child, (dict, list)):
+                    stack.append((child, depth + 1))
+    return False, complete and not stack
+
+
+def _tool_response_has_error(record: Any) -> bool:
+    return _inspect_tool_response(record)[0]
 
 
 def _progress_summary(turn: Dict[str, Any]) -> Dict[str, Any]:
@@ -498,11 +993,19 @@ def _progress_summary(turn: Dict[str, Any]) -> Dict[str, Any]:
         "tool_call_record_count": (len(tool_calls) if isinstance(tool_calls, list) else 0),
     }
     if isinstance(tool_calls, list):
-        tool_error_count = sum(_tool_response_has_error(record) for record in tool_calls)
+        inspected_tool_calls = tool_calls[-MAX_PROGRESS_TOOL_RECORDS:]
+        inspections = [_inspect_tool_response(record) for record in inspected_tool_calls]
+        tool_error_count = sum(has_error for has_error, _ in inspections)
+        summary["tool_call_records_inspected"] = len(inspected_tool_calls)
+        summary["tool_error_count_exact"] = len(inspected_tool_calls) == len(tool_calls) and all(
+            complete for _, complete in inspections
+        )
         if tool_error_count:
             summary["tool_error_count"] = tool_error_count
+            qualifier = "" if summary["tool_error_count_exact"] else "at least "
             summary["internal_error_note"] = (
-                f"ARIA encountered {tool_error_count} internal tool or executor error(s) and continued working."
+                f"ARIA encountered {qualifier}{tool_error_count} internal tool or executor error(s) "
+                "in the bounded progress window and continued working."
             )
     if isinstance(tool_calls, list) and tool_calls:
         latest = tool_calls[-1]
@@ -602,54 +1105,53 @@ async def send_aria_message(
 ) -> Dict[str, Any]:
     """Create a root or continuation ARIA turn and optionally poll it briefly."""
     owns_client = client is None
+    resolved_api_key: Optional[str] = None
     try:
-        if not isinstance(message, str) or not message.strip():
-            raise AriaAPIError(
-                "invalid_request",
-                "message must be a non-empty string.",
-                retryable=False,
-            )
+        message = _normalize_bounded_string(
+            message,
+            name="message",
+            max_length=MAX_MESSAGE_BYTES,
+            max_bytes=MAX_MESSAGE_BYTES,
+        )
         _validate_wait_seconds(wait_seconds)
 
         if entity is not None:
-            if not isinstance(entity, str) or not entity.strip():
-                raise AriaAPIError(
-                    "invalid_request",
-                    "entity must be a non-empty string when provided.",
-                    retryable=False,
-                )
-            entity = entity.strip()
+            entity = _normalize_bounded_string(
+                entity,
+                name="entity",
+                max_length=MAX_SCOPE_LENGTH,
+            )
         if project is not None:
-            if not isinstance(project, str) or not project.strip():
-                raise AriaAPIError(
-                    "invalid_request",
-                    "project must be a non-empty string when provided.",
-                    retryable=False,
-                )
-            project = project.strip()
+            project = _normalize_bounded_string(
+                project,
+                name="project",
+                max_length=MAX_SCOPE_LENGTH,
+            )
 
         if parent_turn_id is not None:
-            if not isinstance(parent_turn_id, str) or not parent_turn_id.strip():
-                raise AriaAPIError(
-                    "invalid_request",
-                    "parent_turn_id cannot be empty.",
-                    retryable=False,
-                )
+            parent_turn_id = _normalize_bounded_string(
+                parent_turn_id,
+                name="parent_turn_id",
+                max_length=MAX_IDENTIFIER_LENGTH,
+            )
             if entity is not None or project is not None:
                 raise AriaAPIError(
                     "invalid_request",
                     "entity and project must be omitted when parent_turn_id is set.",
                     retryable=False,
                 )
-            parent_turn_id = parent_turn_id.strip()
 
         resolved_api_key = _resolve_api_key(api_key)
         if parent_turn_id is None and project is not None and entity is None:
-            entity = await _resolve_default_entity(resolved_api_key)
+            entity = _normalize_bounded_string(
+                await _resolve_default_entity(resolved_api_key),
+                name="resolved entity",
+                max_length=MAX_SCOPE_LENGTH,
+            )
         if client is None:
             client = _new_http_client(resolved_api_key)
 
-        payload: Dict[str, Any] = {"user_prompt": message.strip()}
+        payload: Dict[str, Any] = {"user_prompt": message}
         if parent_turn_id is not None:
             payload["parent_turn_id"] = parent_turn_id
         else:
@@ -659,18 +1161,33 @@ async def send_aria_message(
                 payload["project"] = project
 
         logger.info(
-            "Submitting ARIA turn: continuation=%s entity=%s project=%s wait=%ss",
+            "Submitting ARIA turn: continuation=%s scoped=%s wait=%ss",
             parent_turn_id is not None,
-            entity,
-            project,
+            entity is not None or project is not None,
             wait_seconds,
         )
         turn = await _request_turn(client, "POST", "/api/v1/turns", payload=payload)
-        turn = await _poll_turn(client, turn, wait_seconds)
-        return _turn_result(turn, include_turn=include_turn)
+        try:
+            turn = await _poll_turn(client, turn, wait_seconds)
+        except AriaAPIError as exc:
+            # The non-idempotent POST was confirmed and returned a durable
+            # handle. A later GET failure must never erase that handle or imply
+            # that the submission outcome is unknown: the caller can safely
+            # resume polling the same turn instead of creating duplicate work.
+            return _finalize_result(
+                exc.as_result(turn_id=str(turn["id"]), operation="get"),
+                extra_secrets=(resolved_api_key,),
+            )
+        return _finalize_result(
+            _turn_result(turn, include_turn=include_turn),
+            extra_secrets=(resolved_api_key,),
+        )
     except AriaAPIError as exc:
         logger.warning("ARIA send failed: %s", exc.error_type)
-        return exc.as_result(operation="send")
+        return _finalize_result(
+            exc.as_result(operation="send"),
+            extra_secrets=(resolved_api_key,) if resolved_api_key else (),
+        )
     finally:
         if owns_client and client is not None:
             await client.aclose()
@@ -686,13 +1203,13 @@ async def get_aria_turn(
 ) -> Dict[str, Any]:
     """Fetch an ARIA turn and optionally poll until terminal or a short deadline."""
     owns_client = client is None
+    resolved_api_key: Optional[str] = None
     try:
-        if not isinstance(turn_id, str) or not turn_id.strip():
-            raise AriaAPIError(
-                "invalid_request",
-                "turn_id must be a non-empty string.",
-                retryable=False,
-            )
+        turn_id = _normalize_bounded_string(
+            turn_id,
+            name="turn_id",
+            max_length=MAX_IDENTIFIER_LENGTH,
+        )
         _validate_wait_seconds(wait_seconds)
         resolved_api_key = _resolve_api_key(api_key)
         if client is None:
@@ -700,10 +1217,17 @@ async def get_aria_turn(
 
         turn = await _fetch_turn(client, turn_id)
         turn = await _poll_turn(client, turn, wait_seconds)
-        return _turn_result(turn, include_turn=include_turn)
+        return _finalize_result(
+            _turn_result(turn, include_turn=include_turn),
+            extra_secrets=(resolved_api_key,),
+        )
     except AriaAPIError as exc:
-        logger.warning("ARIA get failed for turn %s: %s", turn_id, exc.error_type)
-        return exc.as_result(turn_id=turn_id, operation="get")
+        logger.warning("ARIA get failed: %s", exc.error_type)
+        safe_turn_id = turn_id if isinstance(turn_id, str) and len(turn_id) <= MAX_IDENTIFIER_LENGTH else None
+        return _finalize_result(
+            exc.as_result(turn_id=safe_turn_id, operation="get"),
+            extra_secrets=(resolved_api_key,) if resolved_api_key else (),
+        )
     finally:
         if owns_client and client is not None:
             await client.aclose()
@@ -714,12 +1238,37 @@ async def _fetch_turn_as_result(
     turn_id: str,
     *,
     include_turn: bool,
+    extra_secrets: tuple[str, ...],
 ) -> Dict[str, Any]:
     try:
         turn = await _fetch_turn(client, turn_id)
-        return _turn_result(turn, include_turn=include_turn)
+        return _finalize_result(
+            _turn_result(turn, include_turn=include_turn),
+            extra_secrets=extra_secrets,
+        )
     except AriaAPIError as exc:
-        return exc.as_result(turn_id=turn_id, operation="get")
+        return _finalize_result(
+            exc.as_result(turn_id=turn_id, operation="get"),
+            extra_secrets=extra_secrets,
+        )
+
+
+async def _fetch_batch_wave(
+    client: httpx.AsyncClient,
+    turn_ids: List[str],
+    *,
+    include_turn: bool,
+    extra_secrets: tuple[str, ...],
+) -> List[Dict[str, Any]]:
+    async def fetch_one(turn_id: str) -> Dict[str, Any]:
+        return await _fetch_turn_as_result(
+            client,
+            turn_id,
+            include_turn=include_turn,
+            extra_secrets=extra_secrets,
+        )
+
+    return list(await asyncio.gather(*(fetch_one(turn_id) for turn_id in turn_ids)))
 
 
 async def get_aria_turns(
@@ -732,6 +1281,7 @@ async def get_aria_turns(
 ) -> Dict[str, Any]:
     """Fetch and briefly poll several ARIA turns concurrently."""
     owns_client = client is None
+    resolved_api_key: Optional[str] = None
     try:
         _validate_wait_seconds(wait_seconds)
         if not isinstance(turn_ids, list) or not turn_ids:
@@ -749,13 +1299,13 @@ async def get_aria_turns(
 
         normalized_ids: List[str] = []
         for turn_id in turn_ids:
-            if not isinstance(turn_id, str) or not turn_id.strip():
-                raise AriaAPIError(
-                    "invalid_request",
-                    "Every turn_id must be a non-empty string.",
-                    retryable=False,
+            normalized_ids.append(
+                _normalize_bounded_string(
+                    turn_id,
+                    name="Every turn_id",
+                    max_length=MAX_IDENTIFIER_LENGTH,
                 )
-            normalized_ids.append(turn_id.strip())
+            )
         if len(set(normalized_ids)) != len(normalized_ids):
             raise AriaAPIError(
                 "invalid_request",
@@ -768,14 +1318,43 @@ async def get_aria_turns(
             client = _new_http_client(resolved_api_key)
 
         deadline = time.monotonic() + wait_seconds
+        outer_deadline = current_tool_deadline.get()
+        if outer_deadline is not None:
+            deadline = min(deadline, outer_deadline - POLL_DEADLINE_SAFETY_SECONDS)
         pending_ids = list(normalized_ids)
         results_by_id: Dict[str, Dict[str, Any]] = {}
+        get_requests_made = 0
+        request_budget_exhausted = False
+        wave_number = 0
 
         while pending_ids:
-            fetched = await asyncio.gather(
-                *(_fetch_turn_as_result(client, turn_id, include_turn=include_turn) for turn_id in pending_ids)
+            if wave_number > 0 and deadline - time.monotonic() <= 0:
+                break
+            if get_requests_made + len(pending_ids) > MAX_BATCH_GET_REQUESTS:
+                request_budget_exhausted = True
+                break
+
+            fetched = await _fetch_batch_wave(
+                client,
+                pending_ids,
+                include_turn=include_turn,
+                extra_secrets=(resolved_api_key,),
             )
+            get_requests_made += len(pending_ids)
+            wave_number += 1
             for turn_id, result in zip(pending_ids, fetched):
+                previous = results_by_id.get(turn_id)
+                timed_out_at_outer_deadline = (
+                    previous is not None
+                    and previous.get("ok") is True
+                    and previous.get("is_terminal") is False
+                    and result.get("ok") is False
+                    and result.get("error", {}).get("type") == "request_timeout"
+                    and outer_deadline is not None
+                    and time.monotonic() >= deadline
+                )
+                if timed_out_at_outer_deadline:
+                    continue
                 results_by_id[turn_id] = result
 
             pending_ids = [
@@ -785,6 +1364,7 @@ async def get_aria_turns(
                 or (
                     results_by_id[turn_id].get("ok") is False
                     and results_by_id[turn_id].get("error", {}).get("retryable") is True
+                    and results_by_id[turn_id].get("error", {}).get("type") not in _OVERLOAD_ERROR_TYPES
                 )
             ]
             remaining = deadline - time.monotonic()
@@ -808,40 +1388,55 @@ async def get_aria_turns(
 
         if error_count == len(ordered_results):
             retryable = all(result.get("error", {}).get("retryable") is True for result in ordered_results)
-            return {
-                "ok": False,
-                "error": {
-                    "type": "batch_lookup_failed",
-                    "message": "ARIA could not retrieve any of the requested turns.",
-                    "retryable": retryable,
-                    "details": {"results": ordered_results},
+            return _finalize_result(
+                {
+                    "ok": False,
+                    "error": {
+                        "type": "batch_lookup_failed",
+                        "message": "ARIA could not retrieve any of the requested turns.",
+                        "retryable": retryable,
+                        "details": {"results": ordered_results},
+                    },
+                    "turn_ids": normalized_ids,
+                    "get_requests_made": get_requests_made,
+                    "get_request_limit": MAX_BATCH_GET_REQUESTS,
+                    "request_budget_exhausted": request_budget_exhausted,
+                    "next_action": (
+                        "Retry aria_get_turns with the same turn_ids."
+                        if retryable
+                        else "Inspect each turn error and correct credentials or turn IDs."
+                    ),
                 },
-                "turn_ids": normalized_ids,
-                "next_action": (
-                    "Retry aria_get_turns with the same turn_ids."
-                    if retryable
-                    else "Inspect each turn error and correct credentials or turn IDs."
-                ),
-            }
+                extra_secrets=(resolved_api_key,),
+            )
 
-        return {
-            "ok": True,
-            "requested_count": len(normalized_ids),
-            "terminal_count": terminal_count,
-            "pending_count": len(still_pending),
-            "error_count": error_count,
-            "pending_turn_ids": still_pending,
-            "failed_turn_ids": failed_turn_ids,
-            "results": ordered_results,
-            "next_action": (
-                "Call aria_get_turns again with pending_turn_ids."
-                if still_pending
-                else "All retrievable turns are terminal; continue completed conversations with aria_send_message."
-            ),
-        }
+        return _finalize_result(
+            {
+                "ok": True,
+                "requested_count": len(normalized_ids),
+                "terminal_count": terminal_count,
+                "pending_count": len(still_pending),
+                "error_count": error_count,
+                "pending_turn_ids": still_pending,
+                "failed_turn_ids": failed_turn_ids,
+                "get_requests_made": get_requests_made,
+                "get_request_limit": MAX_BATCH_GET_REQUESTS,
+                "request_budget_exhausted": request_budget_exhausted,
+                "results": ordered_results,
+                "next_action": (
+                    "Call aria_get_turns again with pending_turn_ids."
+                    if still_pending
+                    else "All retrievable turns are terminal; continue completed conversations with aria_send_message."
+                ),
+            },
+            extra_secrets=(resolved_api_key,),
+        )
     except AriaAPIError as exc:
         logger.warning("ARIA batch get failed: %s", exc.error_type)
-        return exc.as_result(operation="get")
+        return _finalize_result(
+            exc.as_result(operation="get"),
+            extra_secrets=(resolved_api_key,) if resolved_api_key else (),
+        )
     finally:
         if owns_client and client is not None:
             await client.aclose()

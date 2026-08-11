@@ -51,7 +51,24 @@ from wandb_mcp_server.harness import (
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
-_NON_IDEMPOTENT_WRITE_TOOLS = frozenset({"create_wandb_report_tool", "log_analysis_to_wandb"})
+_NON_IDEMPOTENT_WRITE_TOOLS = frozenset(
+    {
+        "create_wandb_report_tool",
+        "log_analysis_to_wandb",
+        "aria_send_message",
+    }
+)
+_ARIA_TOOL_COSTS = {
+    "aria_send_message": ("heavy", 4),
+    "aria_get_turn": ("light", 1),
+    "aria_get_turns": ("heavy", 4),
+}
+
+
+def _dispatch_tool_cost(name: str, arguments: dict[str, Any]) -> tuple[str, int]:
+    """Return boundary costs for optional tools before the shared fallback."""
+    aria_cost = _ARIA_TOOL_COSTS.get(name)
+    return aria_cost if aria_cost is not None else tool_cost(name, arguments)
 
 
 @dataclass
@@ -272,7 +289,7 @@ class InstrumentedFastMCP(FastMCP):
         error: str | None = None
         lease = None
         deadline_token = None
-        cost_class, weight = tool_cost(name, arguments)
+        cost_class, weight = _dispatch_tool_cost(name, arguments)
         admission_outcome = "disabled"
         queue_ms = 0.0
         try:
@@ -346,6 +363,23 @@ class InstrumentedFastMCP(FastMCP):
                     )
                 ) from exc
             except BaseException as exc:
+                if name in _ARIA_TOOL_COSTS:
+                    # ARIA already maps its own response codes, bounded
+                    # Retry-After value, and submission ambiguity. Handle that
+                    # contract before the generic W&B overload classifier so a
+                    # caller does not lose its ARIA turn handle or retry policy.
+                    # ARIA errors can contain turn handles and customer scope;
+                    # preserve the sanitized native MCP error for the caller,
+                    # while keeping logs and analytics categorical.
+                    success = False
+                    error = "aria_error: ARIA tool returned a structured failure"
+                    sanitized_message = sanitize_sensitive_text(
+                        str(exc),
+                        max_chars=MAX_EXTERNAL_ERROR_CHARS,
+                    )
+                    if sanitized_message != str(exc):
+                        raise ToolError(sanitized_message) from exc
+                    raise
                 if name in _NON_IDEMPOTENT_WRITE_TOOLS and wandb_write_outcome_unknown_from_exception(exc):
                     success = False
                     error = "outcome_unknown: W&B did not confirm the write result"

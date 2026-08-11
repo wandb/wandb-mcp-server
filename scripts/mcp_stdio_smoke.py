@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -40,6 +41,17 @@ _CLIENTS = (
     ("claude-code", "claude_code", "anthropic"),
     ("cursor-vscode", "cursor", "cursor"),
 )
+_AGENT_TOOL_NAMES = {
+    "list_weave_agents_tool",
+    "list_weave_agent_versions_tool",
+    "query_weave_agent_spans_tool",
+    "get_weave_agent_span_stats_tool",
+    "list_weave_agent_custom_attributes_tool",
+    "search_weave_agents_tool",
+    "get_weave_agent_trace_tool",
+    "get_weave_agent_conversation_tool",
+}
+_ARIA_TOOL_NAMES = {"aria_send_message", "aria_get_turn", "aria_get_turns"}
 
 
 class _FakeWandBHandler(BaseHTTPRequestHandler):
@@ -119,6 +131,14 @@ def _server_environment(base_url: str, home: str, *, unsafe_stdout_override: boo
         "MCP_SEGMENT_FORWARD": "false",
         "MCP_DATADOG_FORWARD": "false",
         "WANDB_MCP_ENABLE_RAW_GRAPHQL": "false",
+        "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS": os.environ.get(
+            "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
+            "false",
+        ),
+        "WANDB_MCP_ENABLE_ARIA_TOOLS": os.environ.get(
+            "WANDB_MCP_ENABLE_ARIA_TOOLS",
+            "false",
+        ),
         "WANDB_MCP_READ_ONLY": "false",
     }
 
@@ -162,6 +182,18 @@ async def _exercise_profile(
 
                             listed = await session.list_tools()
                             tools_by_name = {tool.name: tool for tool in listed.tools}
+                            agent_tools_enabled = (
+                                os.environ.get("WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS", "false").lower() == "true"
+                            )
+                            aria_tools_enabled = (
+                                os.environ.get("WANDB_MCP_ENABLE_ARIA_TOOLS", "false").lower() == "true"
+                            )
+                            expected_tool_count = (
+                                22 + (8 if agent_tools_enabled else 0) + (3 if aria_tools_enabled else 0)
+                            )
+                            assert len(tools_by_name) == expected_tool_count
+                            assert _AGENT_TOOL_NAMES.issubset(tools_by_name) is agent_tools_enabled
+                            assert _ARIA_TOOL_NAMES.issubset(tools_by_name) is aria_tools_enabled
                             assert "list_entities_tool" in tools_by_name
                             assert "query_wandb_tool" in tools_by_name
                             assert "query_wandb_graphql_tool" not in tools_by_name

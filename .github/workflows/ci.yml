@@ -59,11 +59,13 @@ jobs:
           "$SMOKE_ENV/bin/python" -c "import wandb_mcp_server; print('ok')"
           "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; from packaging.version import Version; resolved = Version(version('mcp')); assert Version('1.28.1') <= resolved < Version('2'); print('fresh-wheel mcp', resolved)"
           "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py --server-command "$SMOKE_ENV/bin/wandb_mcp_server"
+          WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=true WANDB_MCP_ENABLE_ARIA_TOOLS=true "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py --server-command "$SMOKE_ENV/bin/wandb_mcp_server"
           WANDB_MCP_ENABLE_RAW_GRAPHQL=true "$SMOKE_ENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; from wandb_mcp_server.server import register_tools; mcp = FastMCP('smoke'); register_tools(mcp); assert 'query_wandb_graphql_tool' in mcp._tool_manager._tools; print('raw graphql ok')"
           uv pip install --python "$SMOKE_ENV/bin/python" "mcp[cli]==1.28.1"
           uv pip check --python "$SMOKE_ENV/bin/python"
           "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; assert version('mcp') == '1.28.1'; print('minimum mcp', version('mcp'))"
           "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py --server-command "$SMOKE_ENV/bin/wandb_mcp_server"
+          WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=true WANDB_MCP_ENABLE_ARIA_TOOLS=true "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py --server-command "$SMOKE_ENV/bin/wandb_mcp_server"
         env:
           WANDB_SILENT: "True"
           WEAVE_SILENT: "True"
@@ -97,6 +99,8 @@ jobs:
           uv run --no-sync pytest \
             tests/test_query_wandb_sdk.py \
             tests/test_query_wandb_hardening.py \
+            tests/test_aria.py \
+            tests/test_aria_registration.py \
             tests/test_probe_project.py \
             tests/test_wandb_selective_reads.py \
             tests/test_run_history.py \

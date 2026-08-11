@@ -21,15 +21,20 @@ NON_WEAVE_TOOLS = {
     "list_artifact_versions_tool",
     "compare_runs_tool",
     "probe_project_tool",
+}
+
+BASE_WRITE_TOOLS = {
+    "create_wandb_report_tool",
+    "log_analysis_to_wandb",
+}
+
+ARIA_TOOLS = {
+    "aria_send_message",
     "aria_get_turn",
     "aria_get_turns",
 }
 
-WRITE_TOOLS = {
-    "create_wandb_report_tool",
-    "log_analysis_to_wandb",
-    "aria_send_message",
-}
+WRITE_TOOLS = BASE_WRITE_TOOLS | {"aria_send_message"}
 
 # Agents (OTel) tools read a separate agent-spans data plane and are opt-in.
 AGENT_TOOLS = {
@@ -47,6 +52,7 @@ AGENT_TOOLS = {
 def _reset_tool_gate_env() -> None:
     os.environ.pop("WANDB_MCP_ENABLE_WEAVE_TOOLS", None)
     os.environ.pop("WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS", None)
+    os.environ.pop("WANDB_MCP_ENABLE_ARIA_TOOLS", None)
     os.environ.pop("WANDB_MCP_READ_ONLY", None)
     os.environ.pop("WANDB_MCP_ENABLE_RAW_GRAPHQL", None)
 
@@ -66,9 +72,11 @@ def test_weave_tools_registered_by_default():
 
     assert WEAVE_TOOLS.issubset(names)
     assert NON_WEAVE_TOOLS.issubset(names)
-    assert WRITE_TOOLS.issubset(names)
+    assert BASE_WRITE_TOOLS.issubset(names)
     assert AGENT_TOOLS.isdisjoint(names)
+    assert ARIA_TOOLS.isdisjoint(names)
     assert "query_wandb_graphql_tool" not in names
+    assert len(names) == 22
 
 
 def test_raw_graphql_tool_is_opt_in_and_independent():
@@ -89,6 +97,7 @@ def test_raw_graphql_tool_is_opt_in_and_independent():
     assert "query_wandb_tool" in names
     assert "query_wandb_graphql_tool" in names
     assert WRITE_TOOLS.isdisjoint(names)
+    assert ARIA_TOOLS.isdisjoint(names)
     assert WEAVE_TOOLS.isdisjoint(names)
     assert AGENT_TOOLS.issubset(names)
 
@@ -107,7 +116,8 @@ def test_weave_tools_can_be_disabled():
     assert WEAVE_TOOLS.isdisjoint(names)
     assert AGENT_TOOLS.isdisjoint(names)
     assert NON_WEAVE_TOOLS.issubset(names)
-    assert WRITE_TOOLS.issubset(names)
+    assert BASE_WRITE_TOOLS.issubset(names)
+    assert ARIA_TOOLS.isdisjoint(names)
 
 
 def test_agent_tools_enabled_via_flag():
@@ -125,7 +135,9 @@ def test_agent_tools_enabled_via_flag():
     assert WEAVE_TOOLS.issubset(names)
     assert AGENT_TOOLS.issubset(names)
     assert NON_WEAVE_TOOLS.issubset(names)
-    assert WRITE_TOOLS.issubset(names)
+    assert BASE_WRITE_TOOLS.issubset(names)
+    assert ARIA_TOOLS.isdisjoint(names)
+    assert len(names) == 30
 
 
 def test_agent_and_weave_flags_are_independent():
@@ -144,11 +156,32 @@ def test_agent_and_weave_flags_are_independent():
     assert WEAVE_TOOLS.isdisjoint(names)
     assert AGENT_TOOLS.issubset(names)
     assert NON_WEAVE_TOOLS.issubset(names)
-    assert WRITE_TOOLS.issubset(names)
+    assert BASE_WRITE_TOOLS.issubset(names)
+    assert ARIA_TOOLS.isdisjoint(names)
+
+
+def test_agent_and_aria_tools_have_exact_full_manifest():
+    _reset_tool_gate_env()
+    os.environ["WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS"] = "true"
+    os.environ["WANDB_MCP_ENABLE_ARIA_TOOLS"] = "true"
+    import wandb_mcp_server.config as cfg
+
+    try:
+        importlib.reload(cfg)
+        names = _registered_tool_names()
+    finally:
+        _reset_tool_gate_env()
+        importlib.reload(cfg)
+
+    assert AGENT_TOOLS.issubset(names)
+    assert ARIA_TOOLS.issubset(names)
+    assert len(names) == 33
 
 
 def test_read_only_mode_removes_exactly_the_write_tools():
     _reset_tool_gate_env()
+    os.environ["WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS"] = "true"
+    os.environ["WANDB_MCP_ENABLE_ARIA_TOOLS"] = "true"
     import wandb_mcp_server.config as cfg
 
     importlib.reload(cfg)
@@ -168,7 +201,10 @@ def test_read_only_mode_removes_exactly_the_write_tools():
     assert NON_WEAVE_TOOLS.issubset(read_only_names)
     assert "query_wandb_tool" in read_only_names
     assert WEAVE_TOOLS.issubset(read_only_names)
-    assert AGENT_TOOLS.isdisjoint(read_only_names)
+    assert AGENT_TOOLS.issubset(read_only_names)
+    assert ARIA_TOOLS - {"aria_send_message"} <= read_only_names
+    assert len(default_names) == 33
+    assert len(read_only_names) == 30
 
 
 def test_read_only_mode_is_independent_of_weave_and_agent_gates():
@@ -176,6 +212,7 @@ def test_read_only_mode_is_independent_of_weave_and_agent_gates():
     os.environ["WANDB_MCP_READ_ONLY"] = "true"
     os.environ["WANDB_MCP_ENABLE_WEAVE_TOOLS"] = "false"
     os.environ["WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS"] = "true"
+    os.environ["WANDB_MCP_ENABLE_ARIA_TOOLS"] = "true"
     import wandb_mcp_server.config as cfg
 
     try:
@@ -189,6 +226,7 @@ def test_read_only_mode_is_independent_of_weave_and_agent_gates():
     assert WEAVE_TOOLS.isdisjoint(names)
     assert AGENT_TOOLS.issubset(names)
     assert NON_WEAVE_TOOLS.issubset(names)
+    assert ARIA_TOOLS - {"aria_send_message"} <= names
     assert "query_wandb_tool" in names
 
 
