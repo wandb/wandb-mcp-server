@@ -18,6 +18,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 README = REPOSITORY_ROOT / "README.md"
 QUERY_CAPABILITIES = REPOSITORY_ROOT / "docs" / "query-capabilities.md"
 RELEASE_NOTES = REPOSITORY_ROOT / "docs" / "releases" / "v0.4.0.md"
+ENV_EXAMPLE = REPOSITORY_ROOT / "env.example"
+REPO_SKILLS = REPOSITORY_ROOT / ".agents" / "skills"
 FEATURE_FLAGS = (
     "WANDB_MCP_ENABLE_RAW_GRAPHQL",
     "WANDB_MCP_ENABLE_ARIA_TOOLS",
@@ -33,6 +35,12 @@ def _durable_markdown_files() -> list[Path]:
     return [
         *sorted(REPOSITORY_ROOT.glob("*.md")),
         *sorted((REPOSITORY_ROOT / "docs").rglob("*.md")),
+    ]
+
+
+def _repo_skill_files() -> list[Path]:
+    return [
+        path for path in sorted(REPO_SKILLS.rglob("*")) if path.is_file() and path.suffix in {".md", ".yaml", ".yml"}
     ]
 
 
@@ -64,7 +72,7 @@ def test_documentation_json_examples_are_valid():
 
 def test_relative_documentation_links_resolve():
     broken: list[str] = []
-    for path in _durable_markdown_files():
+    for path in (*_durable_markdown_files(), *_repo_skill_files()):
         for raw_target in MARKDOWN_LINK.findall(path.read_text()):
             target = raw_target.strip().strip("<>")
             parsed = urlsplit(target)
@@ -146,3 +154,56 @@ def test_removed_wandbot_is_not_documented_or_shipped():
         text = path.read_text().lower()
         assert "wandbot" not in text
         assert "supportbot" not in text
+
+
+def test_public_docs_do_not_embed_restricted_release_details():
+    public_text = "\n".join(
+        [
+            *(path.read_text() for path in _durable_markdown_files()),
+            *(path.read_text() for path in _repo_skill_files()),
+            ENV_EXAMPLE.read_text(),
+        ]
+    ).lower()
+
+    for forbidden in (
+        "wandb-mcp-server-test",
+        "wandbagentfactory",
+        ".svc.cluster.local",
+        "http://<release>-api",
+        "http://<release>-app",
+        "http://wandb-api",
+    ):
+        assert forbidden not in public_text
+
+
+def test_repo_local_maintainer_skills_are_complete():
+    expected_skills = {
+        "develop-wandb-mcp-tools",
+        "release-wandb-mcp-server",
+    }
+
+    discovered_skills = {path.name for path in REPO_SKILLS.iterdir() if path.is_dir()}
+    assert expected_skills <= discovered_skills
+    for name in expected_skills:
+        skill_text = (REPO_SKILLS / name / "SKILL.md").read_text()
+        agent_text = (REPO_SKILLS / name / "agents" / "openai.yaml").read_text()
+        assert skill_text.startswith(f"---\nname: {name}\n")
+        assert "[TODO" not in skill_text
+        assert f"${name}" in agent_text
+
+
+def test_obsolete_live_validation_helpers_are_removed():
+    assert not (REPOSITORY_ROOT / "scripts" / "test_local_changes.sh").exists()
+    assert not (REPOSITORY_ROOT / "scripts" / "validate_tools_live.py").exists()
+
+
+def test_live_harnesses_do_not_discover_or_parse_env_files():
+    script = (REPOSITORY_ROOT / "scripts" / "report_layout_live_harness.py").read_text()
+    assert "load_dotenv" not in script
+    assert "--env-file" not in script
+    assert "WandBAgentFactory" not in script
+    assert "wandb-mcp-server-test" not in script
+
+    conftest = (REPOSITORY_ROOT / "tests" / "conftest.py").read_text()
+    assert "load_dotenv" not in conftest
+    assert not (REPOSITORY_ROOT / "scripts" / "report_agent_harness.py").exists()

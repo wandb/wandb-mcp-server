@@ -38,6 +38,9 @@ Version 0.4.0 makes W&B reads SDK-first, bounded, and workload-aware:
   continue to use `WANDB_BASE_URL`.
 - Raw GraphQL is disabled by default and remains query-only when explicitly
   enabled. Mutations and subscriptions are rejected.
+- Three opt-in ARIA tools support bounded asynchronous submission and polling
+  when a deployment has an approved hosted W&B Agent path. Dedicated and
+  Self-Managed deployments keep this integration disabled by default.
 - Tool telemetry is bounded, excludes raw arguments and API keys, and correctly
   attributes supported clients such as Codex, Claude Code, and Cursor.
 
@@ -111,7 +114,7 @@ Recommended deployment presets:
 
 | Deployment | Settings |
 |---|---|
-| Hosted production | `WANDB_MCP_READ_ONLY=false`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`, `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=false`, `WANDB_MCP_ENABLE_ARIA_TOOLS=false` |
+| W&B-hosted | W&B-managed feature profile; caller-supplied raw GraphQL remains disabled. Weave Agent and ARIA tools are enabled only where W&B has validated their service paths. |
 | Strict customer read-only | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`, `WANDB_MCP_ENABLE_ARIA_TOOLS=false` |
 | Trusted read-only compatibility | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=true`, `WANDB_MCP_ENABLE_ARIA_TOOLS=false`, `MCP_MAX_GQL_ITEMS=50`, `MCP_MAX_GQL_ITEMS_PER_PAGE=20` |
 
@@ -687,8 +690,10 @@ uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
 
 **With Weave Tracing (log MCP calls to W&B):**
 ```bash
+export MCP_AUTH_DISABLED=true
 uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
   --transport http \
+  --host 127.0.0.1 \
   --port 8080 \
   --weave_entity my-team \
   --weave_project mcp-monitoring
@@ -703,6 +708,10 @@ uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server --help
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** -- Development setup, testing, PR process, architecture overview
 - **[RELEASING.md](RELEASING.md)** -- Version bumping, release checklist, deployment pipeline
+- **[Query capability matrix](docs/query-capabilities.md)** -- Typed reads and the opt-in compatibility path
+- **[Observability](docs/OBSERVABILITY.md)** -- Logging, telemetry privacy, and supported collection modes
+- **[Tool-development skill](.agents/skills/develop-wandb-mcp-tools/SKILL.md)** -- Safe implementation and validation workflow
+- **[Release skill](.agents/skills/release-wandb-mcp-server/SKILL.md)** -- Exact-candidate release validation and handoff
 
 ### Key Resources
 
@@ -733,7 +742,6 @@ resp = client.responses.create(
             "server_description": "Query W&B data",
             "server_url": "https://mcp.withwandb.com/mcp",
             "authorization": os.getenv('WANDB_API_KEY'),
-            "require_approval": "never",
         },
     ],
     input="How many traces are in wandb-smle/hiring-agent-demo-public?",
@@ -756,16 +764,12 @@ uv run pytest tests/ -m "not integration" -v
 
 CI runs automatically on every push and PR via GitHub Actions.
 
-#### Repository Model
+#### Release artifact model
 
-| Repo | Visibility | Contains |
-|------|-----------|----------|
-| `wandb/wandb-mcp-server` | Public | Tool logic, core server, unit tests |
-| `wandb/wandb-mcp-server-test` | Private | Managed wrapper, load tests, image build, Cloud Run CI/CD |
-| `wandb/helm-charts` | Public | Dedicated and Self-Managed chart configuration |
-
-The managed wrapper pins the public repository to an exact commit SHA. The Helm
-chart pins a published MCP image tag.
+The public Python source, W&B-managed deployment image, and Dedicated/Self-Managed
+chart are independently versioned artifacts. Managed builds pin this repository
+to an exact commit, and the chart pins a published MCP image. See
+[RELEASING.md](RELEASING.md) for the required SHA and digest handoff checks.
 
 ### Support
 

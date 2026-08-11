@@ -55,11 +55,14 @@ HTTP, for local transport testing:
 
 ```bash
 export WANDB_API_KEY=your-key
+export MCP_AUTH_DISABLED=true
 uv run wandb_mcp_server --transport http --host 127.0.0.1 --port 8080
 curl --fail http://127.0.0.1:8080/health
 ```
 
-Do not expose the development HTTP server directly to the internet.
+`MCP_AUTH_DISABLED=true` is an explicit acknowledgement that this development
+transport has no bearer-authentication middleware. The server permits loopback
+binding only; do not expose it directly to the internet.
 
 ## Branches and pull requests
 
@@ -105,6 +108,8 @@ src/wandb_mcp_server/
 │   ├── query_wandb_gql.py    # Optional, query-only raw GraphQL escape hatch
 │   ├── run_history.py        # Bounded history reads
 │   ├── query_weave.py        # Weave trace queries
+│   ├── agents.py             # Opt-in Weave Agent read tools
+│   ├── aria.py               # Opt-in hosted ARIA submission and polling
 │   └── ...
 └── weave_api/                # Weave trace-server HTTP client
 ```
@@ -134,16 +139,47 @@ For any tool change:
 9. Update the README when the public interface or operator configuration
    changes.
 
+Non-idempotent writes must not be retried automatically. If a timeout makes the
+write outcome ambiguous, return that uncertainty explicitly. Optional external
+services must be feature-gated off by default, validate their endpoint, and
+bound input size, concurrency, polling, and response size.
+
 Raw GraphQL is an opt-in compatibility escape hatch, not the default
 implementation path. Application-owned documents must remain query-only.
+
+Repo-local maintainer skills are available under `.agents/skills/`:
+
+- `develop-wandb-mcp-tools` for implementing and validating tool changes.
+- `release-wandb-mcp-server` for assembling and validating a release candidate.
+
+Each skill is guidance, not additional authorization for live writes,
+deployment, publication, or branch-protection bypasses.
+
+## Live validation
+
+Routine development and CI are mock-based. Run live validation only against an
+approved test entity/project and only when the task explicitly authorizes it.
+
+- Supply credentials through the process environment. Never inspect, print,
+  echo, copy, or report metadata about an `.env` file, token, token length, or
+  secret-manager payload. A user-approved environment file may be sourced with
+  shell tracing disabled; CI should prefer injected environment secrets.
+- Prefer read-only calls. Use unique fixtures for authorized writes and delete
+  them in `finally`; cleanup failure fails validation.
+- Never use customer data or include resource identifiers, prompts, raw
+  responses, internal routes, or credentials in test artifacts.
+- State clearly which behavior was mocked, exercised against staging, or not
+  verified.
 
 ## Documentation
 
 - Keep examples executable and JSON examples valid JSON.
 - Avoid embedding temporary PR numbers, staging revisions, customer names, or
   current test counts in durable documentation.
-- Put release-specific customer changes in `docs/releases/`.
+- Put release-specific customer-visible changes in `docs/releases/`.
 - Put maintainer release mechanics in [RELEASING.md](RELEASING.md).
+- Keep operational credentials, private repository details, internal service
+  routes, and transient release evidence out of public documentation.
 - Remove documentation for deleted APIs instead of preserving misleading
   compatibility instructions.
 

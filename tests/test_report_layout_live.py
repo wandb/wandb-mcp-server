@@ -1,8 +1,8 @@
 """Opt-in live tests for MCP report layout creation.
 
 These tests hit W&B. They are skipped unless `MCP_REPORT_LIVE=1` is set.
-The harness loads `.env` files before checking credentials, so local runs can
-use the same env files as manual MCP validation.
+Credentials and the test target must be supplied explicitly through the process
+environment; the harness never opens or searches for `.env` files.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ import os
 from types import SimpleNamespace
 
 import pytest
+import wandb
+import wandb_workspaces.reports.v2 as wr
 
 import scripts.report_layout_live_harness as harness
 
@@ -18,37 +20,8 @@ import scripts.report_layout_live_harness as harness
 pytestmark = pytest.mark.integration
 
 
-def test_env_file_candidates_deduplicates_explicit_path(tmp_path, monkeypatch):
-    """The explicit .env path is first and duplicate paths are removed."""
-    env_file = tmp_path / ".env"
-    env_file.write_text("WANDB_API_KEY=test-key\n")
-    monkeypatch.chdir(tmp_path)
-
-    candidates = harness.env_file_candidates(str(env_file))
-
-    assert candidates[0] == env_file.resolve()
-    assert len(candidates) == len(set(candidates))
-
-
-def test_load_harness_env_does_not_override_existing_shell_env(
-    tmp_path,
-    monkeypatch,
-):
-    """Shell env wins over .env values so callers can override safely."""
-    env_file = tmp_path / ".env"
-    env_file.write_text("WANDB_API_KEY=from-file\nMCP_REPORT_TEST_ENTITY=file-entity\n")
-    monkeypatch.setenv("WANDB_API_KEY", "from-shell")
-    monkeypatch.delenv("MCP_REPORT_TEST_ENTITY", raising=False)
-
-    loaded = harness.load_harness_env(str(env_file))
-
-    assert env_file.resolve() in loaded
-    assert os.environ["WANDB_API_KEY"] == "from-shell"
-    assert os.environ["MCP_REPORT_TEST_ENTITY"] == "file-entity"
-
-
 def test_resolve_settings_prefers_explicit_entity_and_project(monkeypatch):
-    """Explicit CLI-style args should win over .env-derived values."""
+    """Explicit CLI-style args should win over process environment values."""
     monkeypatch.setenv("WANDB_API_KEY", "test-key")
     monkeypatch.setenv("MCP_REPORT_TEST_ENTITY", "env-entity")
     monkeypatch.setenv("MCP_REPORT_TEST_PROJECT", "env-project")
@@ -88,10 +61,86 @@ def test_resolve_settings_rejects_unknown_data_mode(monkeypatch):
 def test_resolve_settings_requires_api_key(monkeypatch):
     """Missing credentials fail before any W&B network call is attempted."""
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
-    monkeypatch.setattr(harness, "env_file_candidates", lambda *_: [])
 
     with pytest.raises(RuntimeError, match="WANDB_API_KEY is required"):
         harness.resolve_settings(entity="entity", project="project")
+
+
+def test_resolve_settings_requires_explicit_target(monkeypatch):
+    """The live harness must never infer a write target from account identity."""
+    monkeypatch.setenv("WANDB_API_KEY", "test-key")
+    for name in (
+        "MCP_REPORT_TEST_ENTITY",
+        "MCP_REPORT_TEST_PROJECT",
+        "WANDB_ENTITY",
+        "WANDB_PROJECT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(RuntimeError, match="explicit test entity"):
+        harness.resolve_settings()
+
+    with pytest.raises(RuntimeError, match="explicit test project"):
+        harness.resolve_settings(entity="entity")
+
+
+def test_delete_live_fixtures_removes_report_and_runs(monkeypatch):
+    """Successful live validation must clean up every temporary write."""
+    deleted: list[str] = []
+
+    class FakeReport:
+        def delete(self):
+            deleted.append("report")
+            return True
+
+    class FakeRun:
+        def __init__(self, path):
+            self.path = path
+
+        def delete(self):
+            deleted.append(self.path)
+
+    fake_api = SimpleNamespace(run=lambda path: FakeRun(path))
+    monkeypatch.setattr(wr.Report, "from_url", lambda *_args, **_kwargs: FakeReport())
+    monkeypatch.setattr(wandb, "Api", lambda **_kwargs: fake_api)
+
+    harness._delete_live_fixtures(
+        entity="entity",
+        project="project",
+        api_key="test-key",
+        report_url="https://example.test/report",
+        run_ids=("run-a", "run-b"),
+    )
+
+    assert deleted == ["report", "entity/project/run-a", "entity/project/run-b"]
+
+
+def test_delete_live_fixtures_fails_without_leaking_upstream_details(monkeypatch):
+    """Cleanup errors fail validation but exclude credentials and resource URLs."""
+
+    class FakeRun:
+        def delete(self):
+            raise RuntimeError("secret-key at https://internal.example/entity/project/run-a")
+
+    fake_api = SimpleNamespace(run=lambda _path: FakeRun())
+    monkeypatch.setattr(wr.Report, "from_url", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("secret")))
+    monkeypatch.setattr(wandb, "Api", lambda **_kwargs: fake_api)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        harness._delete_live_fixtures(
+            entity="entity",
+            project="project",
+            api_key="secret-key",
+            report_url="https://internal.example/report",
+            run_ids=("run-a",),
+        )
+
+    message = str(exc_info.value)
+    assert "ValueError" in message
+    assert "RuntimeError" in message
+    assert "secret-key" not in message
+    assert "internal.example" not in message
+    assert "entity/project" not in message
 
 
 def test_report_layout_panels_cover_summary_and_history_tables():
@@ -180,7 +229,8 @@ def test_live_report_layout_harness_creates_expected_report():
         pytest.skip("Set MCP_REPORT_LIVE=1 to run live W&B report layout tests.")
 
     settings = harness.resolve_settings(
-        explicit_env_file=os.getenv("MCP_REPORT_TEST_ENV_FILE"),
+        entity=os.getenv("MCP_REPORT_TEST_ENTITY"),
+        project=os.getenv("MCP_REPORT_TEST_PROJECT"),
     )
     result = harness.run_live_report_layout_verification(settings)
 

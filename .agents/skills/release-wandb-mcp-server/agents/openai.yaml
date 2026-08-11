@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release W&B MCP Server"
+  short_description: "Validate and prepare a public MCP release"
+  default_prompt: "Use $release-wandb-mcp-server to prepare and validate a W&B MCP Server release candidate."
