@@ -152,13 +152,23 @@ def log_analysis(
 
         except Exception as e:
             raise_for_wandb_server_busy(e)
-            logger.error(f"Failed to update analysis run: {e}", exc_info=True)
+            # Analysis names, run identifiers, entity/project names, and SDK
+            # exception text may all contain customer-supplied data. Keep the
+            # operational signal categorical so it is safe for shared logs.
+            logger.error(
+                "Failed to update W&B analysis run (error_type=%s)",
+                type(e).__name__[:64],
+            )
             raise
 
         run_id = run.id
         run_url = public_wandb_url(entity_name, project_name, "runs", run_id)
 
-        logger.info(f"Logged analysis '{analysis_name}' to run {run_id}")
+        logger.info(
+            "Logged W&B analysis run (rows=%d summary_keys=%d)",
+            len(data),
+            len(summary_data),
+        )
 
         return {
             "run_id": run_id,

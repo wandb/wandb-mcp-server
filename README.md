@@ -83,9 +83,12 @@ deployment settings, and the complete customer-visible summary.
 | **compare_artifact_versions_tool** | Diff two artifact versions | *"Compare model v1 vs v2"* |
 | **list_wandb_automations_tool** | List W&B Automations | *"What automations alert on run metrics or status for my team's runs?"* |
 | **list_wandb_integrations_tool** | List registered integrations for W&B automations (e.g. Slack, webhook) | *"Which Slack channels can my automations target?"* |
+| **aria_send_message** *(opt-in)* | Start or continue async work with the hosted W&B agent | *"Ask ARIA to diagnose these failed evals"* |
+| **aria_get_turn** *(opt-in)* | Poll an ARIA turn for progress or its final result | *"Check whether that ARIA analysis finished"* |
+| **aria_get_turns** *(opt-in)* | Poll up to 20 ARIA turns concurrently | *"Check all of those ARIA analyses in one bounded wait"* |
 
-**Read-only deployment mode:** Set `WANDB_MCP_READ_ONLY=true` to omit the two write tools,
-`create_wandb_report_tool` and `log_analysis_to_wandb`, while keeping every existing read tool.
+**Read-only deployment mode:** Set `WANDB_MCP_READ_ONLY=true` to omit the three write-capable tools,
+`create_wandb_report_tool`, `log_analysis_to_wandb`, and `aria_send_message`, while keeping every existing read tool.
 `query_wandb_tool` is read-only in every mode. It normally uses documented W&B
 APIs and may use fixed, application-owned query-only projections to avoid
 per-result fan-out; callers cannot supply GraphQL to this tool.
@@ -108,9 +111,9 @@ Recommended deployment presets:
 
 | Deployment | Settings |
 |---|---|
-| Hosted production | `WANDB_MCP_READ_ONLY=false`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`, `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=false` |
-| Strict customer read-only | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=false` |
-| Trusted read-only compatibility | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=true`, `MCP_MAX_GQL_ITEMS=50`, `MCP_MAX_GQL_ITEMS_PER_PAGE=20` |
+| Hosted production | `WANDB_MCP_READ_ONLY=false`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`, `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=false`, `WANDB_MCP_ENABLE_ARIA_TOOLS=false` |
+| Strict customer read-only | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`, `WANDB_MCP_ENABLE_ARIA_TOOLS=false` |
+| Trusted read-only compatibility | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=true`, `WANDB_MCP_ENABLE_ARIA_TOOLS=false`, `MCP_MAX_GQL_ITEMS=50`, `MCP_MAX_GQL_ITEMS_PER_PAGE=20` |
 
 **Migration from v0.3.7:** `query_wandb_tool` now accepts structured SDK parameters
 (`entity_name`, `project_name`, `resource`, filters, ordering, and identifiers) instead
@@ -164,6 +167,10 @@ These tools are disabled by default. Enable them with `WANDB_MCP_ENABLE_WEAVE_AG
 **Chart panels:** `create_wandb_report_tool` accepts a `panels` parameter for LinePlots, BarPlots, run comparisons, custom Vega charts, and ordered report layouts. Use `panel_grid` when multiple charts should share one runset, and use `heading` plus `markdown` blocks to interleave narrative sections with charts.
 
 **Docs search:** `search_wandb_docs_tool` proxies [docs.wandb.ai](https://docs.wandb.ai) so you get data tools + documentation search from a single MCP connection. Disable with `WANDB_MCP_PROXY_DOCS=false` if you connect the docs MCP separately.
+
+**ARIA tools are opt-in:** Set `WANDB_MCP_ENABLE_ARIA_TOOLS=true` only when the deployment has an approved HTTPS path to the hosted W&B Agent service. The default is `false`, including Dedicated/Self-Managed deployments, so customer credentials are never forwarded to the public ARIA service implicitly. `WANDB_MCP_READ_ONLY=true` additionally omits `aria_send_message` while retaining polling when the ARIA group is explicitly enabled.
+
+**ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
 
 </details>
 
@@ -614,6 +621,7 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_API_KEY` | Your W&B API key (alternative to `--wandb_api_key` flag) | Yes |
 | `WANDB_BASE_URL` | Public W&B instance URL used for credentials and user-facing links | No |
 | `WANDB_INTERNAL_BASE_URL` | Optional server-side W&B Models/API URL; Dedicated charts set this to the in-cluster API service. Weave trace routing remains controlled by `WF_TRACE_SERVER_URL`. | No |
+| `WB_AGENT_BASE_URL` | Hosted ARIA service URL (default: `https://wb-agent.wandb.ai`) | No |
 | `MCP_SERVER_LOG_LEVEL` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` | No |
 | `WANDB_SILENT` | Set to `"True"` to suppress W&B SDK output (default: `true`) | No |
 | `WEAVE_SILENT` | Set to `"True"` to suppress Weave SDK output (default: `true`) | No |
@@ -622,7 +630,8 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
 | `WANDB_MCP_ENABLE_WEAVE_TOOLS` | Enable Weave trace tools (default: `true`; set `false` for installs without a trace backend) | No |
 | `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS` | Enable Weave Agents (OTel/GenAI) tools (default: `false`) | No |
-| `WANDB_MCP_READ_ONLY` | Omit report creation and analysis logging write tools (default: `false`) | No |
+| `WANDB_MCP_ENABLE_ARIA_TOOLS` | Enable hosted ARIA submission and polling tools (default: `false`; keep disabled for Dedicated unless explicitly approved) | No |
+| `WANDB_MCP_READ_ONLY` | Omit report creation, analysis logging, and ARIA message submission (default: `false`) | No |
 | `WANDB_MCP_ENABLE_RAW_GRAPHQL` | Register the bounded query-only GraphQL compatibility tool (default: `false`) | No |
 | `MCP_MAX_GQL_ITEMS` | Maximum items returned by the opt-in raw GraphQL tool (profile default) | No |
 | `MCP_MAX_GQL_ITEMS_PER_PAGE` | Maximum raw GraphQL connection page size (profile default) | No |

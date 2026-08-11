@@ -123,6 +123,7 @@ def test_worker_pool_cannot_exceed_process_admission_capacity(worker_variable: s
         "MCP_ADMISSION_CONTROL_ENABLED",
         "WANDB_MCP_ENABLE_WEAVE_TOOLS",
         "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
+        "WANDB_MCP_ENABLE_ARIA_TOOLS",
         "WANDB_MCP_READ_ONLY",
         "WANDB_MCP_ENABLE_RAW_GRAPHQL",
         "MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS",
@@ -142,6 +143,72 @@ def test_runtime_booleans_reject_typos(variable: str) -> None:
 
     assert result.returncode != 0
     assert variable in result.stderr
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://wb-agent.example",
+        "wb-agent.example",
+        "https://user:secret@wb-agent.example",
+        "https://wb-agent.example:not-a-port",
+        "https://exa mple.com",
+        "https://-invalid.example",
+        "https://wb-agent.example/api",
+        "https://wb-agent.example?",
+        "https://wb-agent.example?token=secret",
+        "https://wb-agent.example#",
+        "https://wb-agent.example#fragment",
+    ],
+)
+def test_enabled_aria_rejects_unsafe_base_urls(value: str) -> None:
+    environment = os.environ.copy()
+    environment["WANDB_MCP_ENABLE_ARIA_TOOLS"] = "true"
+    environment["WB_AGENT_BASE_URL"] = value
+    result = subprocess.run(
+        [sys.executable, "-c", _LOAD_CONFIG],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "WB_AGENT_BASE_URL" in result.stderr
+
+
+def test_disabled_aria_does_not_require_network_endpoint_configuration() -> None:
+    environment = os.environ.copy()
+    environment["WANDB_MCP_ENABLE_ARIA_TOOLS"] = "false"
+    environment["WB_AGENT_BASE_URL"] = "http://legacy.invalid"
+    result = subprocess.run(
+        [sys.executable, "-c", _LOAD_CONFIG],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_enabled_aria_requires_response_budget_large_enough_for_safe_error() -> None:
+    environment = os.environ.copy()
+    environment["WANDB_MCP_ENABLE_ARIA_TOOLS"] = "true"
+    environment["MAX_RESPONSE_TOKENS"] = "63"
+    result = subprocess.run(
+        [sys.executable, "-c", _LOAD_CONFIG],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "MAX_RESPONSE_TOKENS" in result.stderr
 
 
 @pytest.mark.parametrize(

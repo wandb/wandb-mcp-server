@@ -9,6 +9,7 @@ This server provides tools for:
 - Creating shareable reports with visualizations
 - Searching official W&B documentation
 - Discovering available entities and projects
+- Starting and polling asynchronous conversations with ARIA
 """
 
 import asyncio
@@ -26,12 +27,17 @@ from typing import Any, Callable, Collection, Dict, List, Literal, Optional, Uni
 import wandb
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from pydantic import PositiveInt
 
 from wandb_mcp_server.config import (
     MCP_COUNT_TOOL_WORKERS,
     MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
     WANDB_API_BASE_URL,
+    _env_bool,
+    resolve_aria_base_url,
 )
+from wandb_mcp_server.error_sanitizer import MAX_EXTERNAL_ERROR_CHARS, sanitize_sensitive_text, sanitize_sensitive_value
 from wandb_mcp_server.instrumented_server import (
     InstrumentedFastMCP,
     register_current_sync_future,
@@ -51,6 +57,15 @@ from wandb_mcp_server.mcp_tools.automations import (
     LIST_INTEGRATIONS_TOOL_DESCRIPTION,
     list_automations,
     list_integrations,
+)
+from wandb_mcp_server.mcp_tools.aria import (
+    ARIA_GET_TURN_TOOL_DESCRIPTION,
+    ARIA_GET_TURNS_TOOL_DESCRIPTION,
+    ARIA_SEND_MESSAGE_TOOL_DESCRIPTION,
+    get_aria_turn,
+    get_aria_turns,
+    normalize_aria_json_value,
+    send_aria_message,
 )
 from wandb_mcp_server.mcp_tools.count_traces import (
     COUNT_WEAVE_TRACES_TOOL_DESCRIPTION,
@@ -110,8 +125,6 @@ from wandb_mcp_server.mcp_tools.agents import (
     search_agents,
 )
 from wandb_mcp_server.utils import ServerMCPArgs, get_rich_logger, get_server_args
-
-from pydantic import PositiveInt
 
 # Export key functions for HF Spaces app
 __all__ = [
@@ -210,6 +223,51 @@ def _remove_registered_tools(mcp_instance: FastMCP, tool_names: Collection[str])
         return
     for tool_name in tool_names:
         tools.pop(tool_name, None)
+
+
+def _aria_result_or_tool_error(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Turn a complete ARIA failure into a safe native MCP tool error."""
+    result = normalize_aria_json_value(sanitize_sensitive_value(result, _error_context=result.get("ok") is False))
+    if result.get("ok") is not False:
+        return result
+    safe_result = result
+    payload = json.dumps(safe_result, default=str, separators=(",", ":"))
+    if len(payload.encode("utf-8")) > MAX_EXTERNAL_ERROR_CHARS:
+        error = safe_result.get("error") if isinstance(safe_result, dict) else None
+        error = error if isinstance(error, dict) else {}
+        error_type = sanitize_sensitive_text(error.get("type") or "aria_error", max_chars=64)
+        if not error_type.isascii() or not all(character.isalnum() or character in "_.-" for character in error_type):
+            error_type = "aria_error"
+        compact_error: Dict[str, Any] = {
+            "type": error_type,
+            "message": sanitize_sensitive_text(
+                error.get("message") or "ARIA returned an oversized error response.",
+                max_chars=512,
+            ),
+            "retryable": error.get("retryable") is True,
+        }
+        for key in ("status_code", "retry_after_ms"):
+            if isinstance(error.get(key), int) and 0 <= error[key] <= 60_000:
+                compact_error[key] = error[key]
+        compact: Dict[str, Any] = {
+            "ok": False,
+            "error": compact_error,
+            "_truncation": {
+                "applied": True,
+                "reason": "mcp_error_budget",
+            },
+        }
+        turn_id = safe_result.get("turn_id") if isinstance(safe_result, dict) else None
+        if isinstance(turn_id, str) and len(turn_id) <= 512:
+            candidate = {**compact, "turn_id": turn_id}
+            candidate_payload = json.dumps(candidate, default=str, separators=(",", ":"))
+            if len(candidate_payload.encode("utf-8")) <= MAX_EXTERNAL_ERROR_CHARS:
+                compact = candidate
+        payload = json.dumps(compact, default=str, separators=(",", ":"))
+        if len(payload.encode("utf-8")) > MAX_EXTERNAL_ERROR_CHARS:
+            compact_error["message"] = "ARIA returned an oversized error response."
+            payload = json.dumps(compact, default=str, separators=(",", ":"))
+    raise ToolError(payload)
 
 
 _COUNT_EXECUTOR = ThreadPoolExecutor(
@@ -521,11 +579,18 @@ def register_tools(mcp_instance: FastMCP) -> None:
     - search_weave_agents_tool: Search messages, grouped by conversation
     - get_weave_agent_trace_tool: Chat/trajectory view for one trace (a turn)
     - get_weave_agent_conversation_tool: Multi-turn chat view for a conversation
+    - aria_send_message: Start or continue an asynchronous ARIA conversation
+    - aria_get_turn: Poll an ARIA turn and retrieve its current result
+    - aria_get_turns: Poll several ARIA turns concurrently
 
     Args:
         mcp_instance: The FastMCP instance to register tools on
     """
-    from wandb_mcp_server.config import WANDB_MCP_ENABLE_RAW_GRAPHQL, WANDB_MCP_READ_ONLY
+    # The CLI intentionally loads .env after this module is imported. Resolve
+    # registration gates here so late-loaded deployment configuration cannot
+    # leave write tools enabled or raw GraphQL disabled unexpectedly.
+    read_only = _env_bool("WANDB_MCP_READ_ONLY", False)
+    raw_graphql_enabled = _env_bool("WANDB_MCP_ENABLE_RAW_GRAPHQL", False)
 
     @mcp_instance.tool(description=QUERY_WEAVE_TRACES_TOOL_DESCRIPTION)
     async def query_weave_traces_tool(
@@ -847,7 +912,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             cursor=cursor,
         )
 
-    if WANDB_MCP_ENABLE_RAW_GRAPHQL:
+    if raw_graphql_enabled:
         from wandb_mcp_server.mcp_tools.query_wandb_gql import (
             QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION,
             query_paginated_wandb_gql,
@@ -862,7 +927,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         ) -> Dict[str, Any]:
             return query_paginated_wandb_gql(query, variables, max_items, items_per_page)
 
-    if not WANDB_MCP_READ_ONLY:
+    if not read_only:
 
         @mcp_instance.tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
         def create_wandb_report_tool(
@@ -917,8 +982,16 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 
                 raise_for_wandb_server_busy(e)
-                logger.error(f"Error in log_analysis_to_wandb: {e}", exc_info=True)
-                return json.dumps({"error": "log_failed", "message": str(e)[:500]})
+                logger.error(
+                    "W&B analysis logging failed (error_type=%s)",
+                    type(e).__name__[:64],
+                )
+                return json.dumps(
+                    {
+                        "error": "log_failed",
+                        "message": "The W&B analysis run could not be logged.",
+                    }
+                )
 
     @mcp_instance.tool(description=LIST_ENTITIES_TOOL_DESCRIPTION)
     def list_entities_tool() -> str:
@@ -1234,8 +1307,68 @@ def register_tools(mcp_instance: FastMCP) -> None:
     for tool in _AGENT_TOOLS:
         mcp_instance.tool(name=tool.name, description=tool.description)(tool.impl)
 
-    from wandb_mcp_server.config import _env_bool
+    # ARIA forwards the caller's credential to a distinct hosted service and
+    # includes a write operation. Register it only after explicit opt-in;
+    # never rely on removing it through private FastMCP internals.
+    aria_enabled = _env_bool("WANDB_MCP_ENABLE_ARIA_TOOLS", False)
+    if aria_enabled:
+        # The CLI loads .env after module imports. Resolve and validate again
+        # here so a late configuration can never silently fall back to a
+        # different credential-bearing origin.
+        resolve_aria_base_url()
+        if not read_only:
 
+            @mcp_instance.tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
+            async def aria_send_message(
+                message: str,
+                entity: Optional[str] = None,
+                project: Optional[str] = None,
+                parent_turn_id: Optional[str] = None,
+                wait_seconds: int = 0,
+                include_turn: bool = False,
+            ) -> Dict[str, Any]:
+                return _aria_result_or_tool_error(
+                    await send_aria_message(
+                        message=message,
+                        entity=entity,
+                        project=project,
+                        parent_turn_id=parent_turn_id,
+                        wait_seconds=wait_seconds,
+                        include_turn=include_turn,
+                    )
+                )
+
+        @mcp_instance.tool(description=ARIA_GET_TURN_TOOL_DESCRIPTION)
+        async def aria_get_turn(
+            turn_id: str,
+            wait_seconds: int = 0,
+            include_turn: bool = False,
+        ) -> Dict[str, Any]:
+            return _aria_result_or_tool_error(
+                await get_aria_turn(
+                    turn_id=turn_id,
+                    wait_seconds=wait_seconds,
+                    include_turn=include_turn,
+                )
+            )
+
+        @mcp_instance.tool(description=ARIA_GET_TURNS_TOOL_DESCRIPTION)
+        async def aria_get_turns(
+            turn_ids: List[str],
+            wait_seconds: int = 0,
+            include_turn: bool = False,
+        ) -> Dict[str, Any]:
+            return _aria_result_or_tool_error(
+                await get_aria_turns(
+                    turn_ids=turn_ids,
+                    wait_seconds=wait_seconds,
+                    include_turn=include_turn,
+                )
+            )
+
+    # Optional groups are registered first and removed last so each feature
+    # gate controls the complete public surface without bypassing the shared
+    # InstrumentedFastMCP dispatch boundary.
     for group in _OPTIONAL_TOOL_GROUPS:
         if not _env_bool(group.env_var, group.default_enabled):
             logger.info(
@@ -1359,6 +1492,7 @@ def cli():
         WEAVE_SILENT                Set to "False" to enable Weave output (default: True)
         WANDB_DEBUG                 Set to "true" to enable W&B debug logging
         MCP_AUTH_DISABLED           Must be "true" for loopback HTTP development
+        WB_AGENT_BASE_URL           ARIA service URL (default: https://wb-agent.wandb.ai)
     """
     print("Starting W&B MCP Server...", file=sys.stderr)
 

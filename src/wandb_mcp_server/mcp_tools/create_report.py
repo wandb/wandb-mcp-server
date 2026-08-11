@@ -16,7 +16,6 @@ from wandb_mcp_server.api_client import (
     WandBWriteOutcomeUnknown,
     raise_for_wandb_server_busy,
 )
-from wandb_mcp_server.error_sanitizer import MAX_EXTERNAL_ERROR_CHARS, sanitize_sensitive_text
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_report_writer import save_report_bounded
@@ -299,10 +298,10 @@ def create_report(
                         else:
                             data_uri = content
                         blocks.append(wr.Image(url=data_uri, caption=label))
-                        logger.info(f"Added SVG Image block: {label}")
+                        logger.info("Added report content block (kind=svg)")
                     elif content:
                         blocks.append(wr.MarkdownBlock(content))
-                        logger.info(f"Added HTML MarkdownBlock: {label}")
+                        logger.info("Added report content block (kind=html)")
 
             security_notice = wr.P("*Report created via W&B MCP Server*")
             report.blocks = [security_notice] + blocks
@@ -322,7 +321,11 @@ def create_report(
             api = WandBApiManager.get_api(api_key)
             save_report_bounded(report, api)
 
-            logger.info(f"Created report: {title} (panels={len(panels or [])})")
+            logger.info(
+                "Created W&B report (panels=%d blocks=%d)",
+                len(panels or []),
+                len(report.blocks),
+            )
 
             return {"url": publicize_wandb_url(report.url)}
 
@@ -331,8 +334,12 @@ def create_report(
             if isinstance(e, WandBWriteOutcomeUnknown):
                 logger.error("W&B did not confirm the bounded report write")
                 raise
-            safe_error = sanitize_sensitive_text(e, max_chars=MAX_EXTERNAL_ERROR_CHARS)
-            logger.error("Report creation failed after a bounded W&B write: %s", safe_error)
+            # Workspaces exceptions may interpolate report titles, scope, or
+            # other customer values. Preserve only a bounded categorical type.
+            logger.error(
+                "Report creation failed after a bounded W&B write (error_type=%s)",
+                type(e).__name__[:64],
+            )
             raise WandBReportCreationFailed() from e
 
 
@@ -352,10 +359,13 @@ def _build_panel_blocks(
             if block is not None:
                 blocks.append(block)
             elif panel_type not in _KNOWN_PANEL_TYPES:
-                logger.warning(f"Unknown panel type: {panel_type}")
+                logger.warning("Skipped unsupported report panel type")
 
         except Exception as e:
-            logger.warning(f"Failed to build panel '{panel_title}': {e}", exc_info=True)
+            logger.warning(
+                "Failed to build report panel (error_type=%s)",
+                type(e).__name__[:64],
+            )
             blocks.append(wr.P(f"*Panel '{panel_title}' could not be rendered.*"))
 
     return blocks
@@ -572,14 +582,17 @@ def _build_layout_blocks(
             block = _build_layout_block(panel_spec, entity_name, project_name)
             if block is None:
                 if panel_type not in _KNOWN_PANEL_TYPES and panel_type not in _LAYOUT_BLOCK_TYPES:
-                    logger.warning(f"Unknown panel type: {panel_type}")
+                    logger.warning("Skipped unsupported report layout block type")
                 continue
             if isinstance(block, list):
                 blocks.extend(block)
             else:
                 blocks.append(block)
         except Exception as e:
-            logger.warning(f"Failed to build layout block '{panel_title}': {e}", exc_info=True)
+            logger.warning(
+                "Failed to build report layout block (error_type=%s)",
+                type(e).__name__[:64],
+            )
             blocks.append(wr.P(f"*Panel '{panel_title}' could not be rendered.*"))
     return blocks
 

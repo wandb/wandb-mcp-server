@@ -1,4 +1,7 @@
 import os
+import ipaddress
+import re
+from urllib.parse import urlsplit
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -65,6 +68,52 @@ def _env_float(
     return value
 
 
+def validate_aria_base_url(value: str) -> str:
+    """Validate the operator-controlled ARIA endpoint before forwarding credentials."""
+    normalized = value.strip().rstrip("/")
+    if not normalized or any(
+        character.isspace() or ord(character) < 32 or ord(character) == 127 for character in normalized
+    ):
+        raise ValueError("WB_AGENT_BASE_URL must be a valid absolute HTTPS URL")
+    try:
+        parsed = urlsplit(normalized)
+        # Accessing port forces urllib to reject malformed port declarations.
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("WB_AGENT_BASE_URL must be a valid absolute HTTPS URL") from exc
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("WB_AGENT_BASE_URL must be an absolute HTTPS URL")
+    hostname = parsed.hostname
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            ascii_hostname = hostname.encode("idna").decode("ascii").rstrip(".")
+        except UnicodeError as exc:
+            raise ValueError("WB_AGENT_BASE_URL must contain a valid hostname") from exc
+        labels = ascii_hostname.split(".")
+        if (
+            not ascii_hostname
+            or len(ascii_hostname) > 253
+            or any(
+                not label
+                or len(label) > 63
+                or label.startswith("-")
+                or label.endswith("-")
+                or re.fullmatch(r"[A-Za-z0-9-]+", label) is None
+                for label in labels
+            )
+        ):
+            raise ValueError("WB_AGENT_BASE_URL must contain a valid hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("WB_AGENT_BASE_URL must not include credentials")
+    if parsed.query or parsed.fragment or "?" in normalized or "#" in normalized:
+        raise ValueError("WB_AGENT_BASE_URL must not include a query string or fragment")
+    if parsed.path not in {"", "/"}:
+        raise ValueError("WB_AGENT_BASE_URL must not include a path")
+    return normalized
+
+
 # Centralized configuration for base URLs used across the project.
 # Values are read from environment variables with production defaults.
 
@@ -81,6 +130,18 @@ WANDB_API_BASE_URL: str = WANDB_INTERNAL_BASE_URL or WANDB_BASE_URL
 WF_TRACE_SERVER_URL: str = (
     os.getenv("WF_TRACE_SERVER_URL") or os.getenv("WEAVE_TRACE_SERVER_URL") or "https://trace.wandb.ai"
 )
+
+# Hosted W&B Agent (ARIA) service URL. This is intentionally separate from
+# WANDB_BASE_URL: ARIA is a distinct asynchronous service, even when the MCP
+# server itself is run locally or points its other tools at W&B Dedicated.
+WB_AGENT_BASE_URL: str = (os.getenv("WB_AGENT_BASE_URL") or "https://wb-agent.wandb.ai").strip().rstrip("/")
+
+
+def resolve_aria_base_url(fallback: str | None = None) -> str:
+    """Read and validate the effective ARIA URL after CLI dotenv loading."""
+    configured = os.getenv("WB_AGENT_BASE_URL")
+    return validate_aria_base_url(configured or fallback or WB_AGENT_BASE_URL)
+
 
 # Token budget for response truncation. When a query result exceeds this
 # budget, least-recent traces are dropped and a truncation note is appended.
@@ -285,8 +346,13 @@ WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS: bool = _env_bool(
     "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
     False,
 )
+WANDB_MCP_ENABLE_ARIA_TOOLS: bool = _env_bool("WANDB_MCP_ENABLE_ARIA_TOOLS", False)
 WANDB_MCP_READ_ONLY: bool = _env_bool("WANDB_MCP_READ_ONLY", False)
 WANDB_MCP_ENABLE_RAW_GRAPHQL: bool = _env_bool("WANDB_MCP_ENABLE_RAW_GRAPHQL", False)
+if WANDB_MCP_ENABLE_ARIA_TOOLS:
+    WB_AGENT_BASE_URL = resolve_aria_base_url()
+    if MAX_RESPONSE_TOKENS < 64:
+        raise ValueError("MAX_RESPONSE_TOKENS must be at least 64 when WANDB_MCP_ENABLE_ARIA_TOOLS is enabled")
 MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS: bool = _env_bool(
     "MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS",
     False,

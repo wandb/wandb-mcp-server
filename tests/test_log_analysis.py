@@ -58,6 +58,69 @@ class TestLogAnalysis:
 
     @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
     @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
+    def test_success_log_omits_customer_identifiers(
+        self,
+        mock_api_manager,
+        mock_wandb,
+    ):
+        import wandb_mcp_server.mcp_tools.log_analysis as log_analysis_module
+
+        entity = "private-analysis-entity-canary"
+        project = "private-analysis-project-canary"
+        analysis_name = "private-analysis-name-canary"
+        run_id = "private-analysis-run-canary"
+        mock_api_manager.get_api_key.return_value = "test-key"
+        mock_api, mock_run = self._make_mock_api()
+        mock_run.id = run_id
+        mock_wandb.Api.return_value = mock_api
+
+        with patch.object(log_analysis_module.logger, "info") as info_log:
+            log_analysis_module.log_analysis(entity, project, analysis_name, [{"metric": 1}])
+
+        info_log.assert_called_once_with(
+            "Logged W&B analysis run (rows=%d summary_keys=%d)",
+            1,
+            2,
+        )
+        rendered = " ".join(map(str, info_log.call_args.args))
+        for canary in (entity, project, analysis_name, run_id):
+            assert canary not in rendered
+
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
+    def test_failure_log_omits_customer_identifiers_and_exception_text(
+        self,
+        mock_api_manager,
+        mock_wandb,
+    ):
+        import wandb_mcp_server.mcp_tools.log_analysis as log_analysis_module
+
+        entity = "private-failed-entity-canary"
+        project = "private-failed-project-canary"
+        analysis_name = "private-failed-analysis-canary"
+        run_id = "private-failed-run-canary"
+        mock_api_manager.get_api_key.return_value = "test-key"
+        mock_api, mock_run = self._make_mock_api()
+        mock_run.id = run_id
+        mock_run.update.side_effect = RuntimeError(f"failed for {entity}/{project}/{analysis_name}/{run_id}")
+        mock_wandb.Api.return_value = mock_api
+
+        with (
+            patch.object(log_analysis_module.logger, "error") as error_log,
+            pytest.raises(RuntimeError),
+        ):
+            log_analysis_module.log_analysis(entity, project, analysis_name, [{"metric": 1}])
+
+        error_log.assert_called_once_with(
+            "Failed to update W&B analysis run (error_type=%s)",
+            "RuntimeError",
+        )
+        rendered = " ".join(map(str, error_log.call_args.args))
+        for canary in (entity, project, analysis_name, run_id):
+            assert canary not in rendered
+
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
     def test_with_explicit_scalars(self, mock_api_manager, mock_wandb):
         from wandb_mcp_server.mcp_tools.log_analysis import log_analysis
 
