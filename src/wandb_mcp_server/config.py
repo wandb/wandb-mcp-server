@@ -136,6 +136,13 @@ WF_TRACE_SERVER_URL: str = (
 # server itself is run locally or points its other tools at W&B Dedicated.
 WB_AGENT_BASE_URL: str = (os.getenv("WB_AGENT_BASE_URL") or "https://wb-agent.wandb.ai").strip().rstrip("/")
 
+
+def resolve_aria_base_url(fallback: str | None = None) -> str:
+    """Read and validate the effective ARIA URL after CLI dotenv loading."""
+    configured = os.getenv("WB_AGENT_BASE_URL")
+    return validate_aria_base_url(configured or fallback or WB_AGENT_BASE_URL)
+
+
 # Token budget for response truncation. When a query result exceeds this
 # budget, least-recent traces are dropped and a truncation note is appended.
 MAX_RESPONSE_TOKENS: int = _env_int("MAX_RESPONSE_TOKENS", 30_000, maximum=100_000)
@@ -343,7 +350,7 @@ WANDB_MCP_ENABLE_ARIA_TOOLS: bool = _env_bool("WANDB_MCP_ENABLE_ARIA_TOOLS", Fal
 WANDB_MCP_READ_ONLY: bool = _env_bool("WANDB_MCP_READ_ONLY", False)
 WANDB_MCP_ENABLE_RAW_GRAPHQL: bool = _env_bool("WANDB_MCP_ENABLE_RAW_GRAPHQL", False)
 if WANDB_MCP_ENABLE_ARIA_TOOLS:
-    WB_AGENT_BASE_URL = validate_aria_base_url(WB_AGENT_BASE_URL)
+    WB_AGENT_BASE_URL = resolve_aria_base_url()
     if MAX_RESPONSE_TOKENS < 64:
         raise ValueError("MAX_RESPONSE_TOKENS must be at least 64 when WANDB_MCP_ENABLE_ARIA_TOOLS is enabled")
 MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS: bool = _env_bool(

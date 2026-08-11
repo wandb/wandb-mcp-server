@@ -20,7 +20,7 @@ import httpx
 
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.admission import current_tool_deadline
-from wandb_mcp_server.config import MAX_RESPONSE_TOKENS, WB_AGENT_BASE_URL, validate_aria_base_url
+from wandb_mcp_server.config import MAX_RESPONSE_TOKENS, WB_AGENT_BASE_URL, resolve_aria_base_url
 from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text, sanitize_sensitive_value
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
@@ -564,7 +564,7 @@ async def _resolve_default_entity(api_key: str) -> str:
 
 def _new_http_client(api_key: str) -> httpx.AsyncClient:
     return httpx.AsyncClient(
-        base_url=validate_aria_base_url(WB_AGENT_BASE_URL),
+        base_url=resolve_aria_base_url(WB_AGENT_BASE_URL),
         headers={
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",

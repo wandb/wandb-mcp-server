@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import httpx
+import pytest
 from mcp.server.fastmcp import FastMCP
 
 import wandb_mcp_server.server as server
@@ -42,6 +43,14 @@ def test_disabled_aria_is_never_registered_even_if_legacy_removal_breaks(monkeyp
 
     names = {tool.name for tool in asyncio.run(mcp.list_tools())}
     assert {"aria_send_message", "aria_get_turn", "aria_get_turns"}.isdisjoint(names)
+
+
+def test_enabled_aria_revalidates_late_base_url_before_registration(monkeypatch) -> None:
+    monkeypatch.setenv("WANDB_MCP_ENABLE_ARIA_TOOLS", "true")
+    monkeypatch.setenv("WB_AGENT_BASE_URL", "http://unsafe.example")
+
+    with pytest.raises(ValueError, match="WB_AGENT_BASE_URL"):
+        register_tools(FastMCP("test"))
 
 
 def test_aria_failure_sets_native_mcp_error_with_json_payload(monkeypatch) -> None:

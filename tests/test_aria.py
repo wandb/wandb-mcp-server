@@ -765,6 +765,7 @@ def test_get_turns_returns_successes_with_per_turn_errors() -> None:
     ],
 )
 def test_new_client_rejects_unsafe_base_urls(monkeypatch, base_url: str) -> None:
+    monkeypatch.delenv("WB_AGENT_BASE_URL", raising=False)
     monkeypatch.setattr(aria, "WB_AGENT_BASE_URL", base_url)
 
     with pytest.raises(ValueError, match="WB_AGENT_BASE_URL"):
@@ -772,11 +773,23 @@ def test_new_client_rejects_unsafe_base_urls(monkeypatch, base_url: str) -> None
 
 
 def test_new_client_disables_redirects(monkeypatch) -> None:
+    monkeypatch.delenv("WB_AGENT_BASE_URL", raising=False)
     monkeypatch.setattr(aria, "WB_AGENT_BASE_URL", "https://wb-agent.example/")
     client = aria._new_http_client("token")
     try:
         assert client.follow_redirects is False
         assert str(client.base_url) == "https://wb-agent.example"
+    finally:
+        asyncio.run(client.aclose())
+
+
+def test_new_client_honors_safe_base_url_configured_after_import(monkeypatch) -> None:
+    monkeypatch.setattr(aria, "WB_AGENT_BASE_URL", "https://stale.example")
+    monkeypatch.setenv("WB_AGENT_BASE_URL", "https://late-config.example/")
+
+    client = aria._new_http_client("token")
+    try:
+        assert str(client.base_url) == "https://late-config.example"
     finally:
         asyncio.run(client.aclose())
 

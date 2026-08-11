@@ -34,6 +34,8 @@ from wandb_mcp_server.config import (
     MCP_COUNT_TOOL_WORKERS,
     MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
     WANDB_API_BASE_URL,
+    _env_bool,
+    resolve_aria_base_url,
 )
 from wandb_mcp_server.error_sanitizer import MAX_EXTERNAL_ERROR_CHARS, sanitize_sensitive_text, sanitize_sensitive_value
 from wandb_mcp_server.instrumented_server import (
@@ -1301,12 +1303,15 @@ def register_tools(mcp_instance: FastMCP) -> None:
     for tool in _AGENT_TOOLS:
         mcp_instance.tool(name=tool.name, description=tool.description)(tool.impl)
 
-    from wandb_mcp_server.config import _env_bool
-
     # ARIA forwards the caller's credential to a distinct hosted service and
     # includes a write operation. Register it only after explicit opt-in;
     # never rely on removing it through private FastMCP internals.
-    if _env_bool("WANDB_MCP_ENABLE_ARIA_TOOLS", False):
+    aria_enabled = _env_bool("WANDB_MCP_ENABLE_ARIA_TOOLS", False)
+    if aria_enabled:
+        # The CLI loads .env after module imports. Resolve and validate again
+        # here so a late configuration can never silently fall back to a
+        # different credential-bearing origin.
+        resolve_aria_base_url()
         if not WANDB_MCP_READ_ONLY:
 
             @mcp_instance.tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
