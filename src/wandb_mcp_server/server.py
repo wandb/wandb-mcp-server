@@ -976,8 +976,16 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 
                 raise_for_wandb_server_busy(e)
-                logger.error(f"Error in log_analysis_to_wandb: {e}", exc_info=True)
-                return json.dumps({"error": "log_failed", "message": str(e)[:500]})
+                logger.error(
+                    "W&B analysis logging failed (error_type=%s)",
+                    type(e).__name__[:64],
+                )
+                return json.dumps(
+                    {
+                        "error": "log_failed",
+                        "message": "The W&B analysis run could not be logged.",
+                    }
+                )
 
     @mcp_instance.tool(description=LIST_ENTITIES_TOOL_DESCRIPTION)
     def list_entities_tool() -> str:

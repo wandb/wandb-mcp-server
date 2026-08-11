@@ -321,7 +321,12 @@ async def test_public_boundary_maps_upsert_timeout_to_non_retryable_unknown(
 
 
 def test_create_report_sanitizes_upstream_failures(monkeypatch) -> None:
-    upstream_error = RuntimeError(f"POST {_INTERNAL_URL}/graphql failed: Authorization=Bearer {_API_KEY}")
+    entity = "private-report-entity-canary"
+    project = "private-report-project-canary"
+    title = "private-report-title-canary"
+    upstream_error = RuntimeError(
+        f"POST {_INTERNAL_URL}/graphql failed for {entity}/{project}/{title}: Authorization=Bearer {_API_KEY}"
+    )
     api = _FakeApi(error=upstream_error)
     monkeypatch.setenv("WANDB_INTERNAL_BASE_URL", _INTERNAL_URL)
 
@@ -337,7 +342,7 @@ def test_create_report_sanitizes_upstream_failures(monkeypatch) -> None:
         patch.object(create_report_module.logger, "error") as error_log,
         pytest.raises(WandBReportCreationFailed) as exc_info,
     ):
-        create_report("entity", "project", "Report")
+        create_report(entity, project, title)
 
     external_error = str(exc_info.value)
     assert _API_KEY not in external_error
@@ -345,13 +350,14 @@ def test_create_report_sanitizes_upstream_failures(monkeypatch) -> None:
     assert "wandb-api.test.svc" not in external_error
     assert external_error == "The W&B report could not be created."
     error_log.assert_called_once()
-    log_template, logged_error = error_log.call_args.args
-    assert log_template == "Report creation failed after a bounded W&B write: %s"
-    assert _API_KEY not in logged_error
-    assert _INTERNAL_URL not in logged_error
-    assert "wandb-api.test.svc" not in logged_error
-    assert "<redacted>" in logged_error
-    assert "<internal W&B API>" in logged_error
+    log_template, logged_error_type = error_log.call_args.args
+    assert log_template == "Report creation failed after a bounded W&B write (error_type=%s)"
+    assert logged_error_type == "RuntimeError"
+    rendered_log_args = " ".join(map(str, error_log.call_args.args))
+    assert _API_KEY not in rendered_log_args
+    assert _INTERNAL_URL not in rendered_log_args
+    for canary in (entity, project, title):
+        assert canary not in rendered_log_args
     assert len(api._service_api.calls) == 1
 
 
