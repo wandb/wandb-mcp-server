@@ -629,6 +629,8 @@ def test_auth_rejection_is_legible_and_does_not_expose_token() -> None:
     assert result["error"]["type"] == "authentication_error"
     assert result["error"]["status_code"] == 403
     assert result["error"]["retryable"] is False
+    assert "details" not in result["error"]
+    assert "entity is not enabled" not in serialized
     assert "super-secret-token" not in serialized
 
 
@@ -751,6 +753,7 @@ def test_get_turns_returns_successes_with_per_turn_errors() -> None:
     assert result["error_count"] == 1
     assert result["failed_turn_ids"] == ["missing"]
     assert result["results"][1]["error"]["type"] == "turn_not_found"
+    assert "details" not in result["results"][1]["error"]
 
 
 @pytest.mark.parametrize(

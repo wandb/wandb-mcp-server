@@ -708,7 +708,6 @@ async def _perform_bounded_request(
 
 def _http_error(response: httpx.Response, *, safe_to_retry: bool) -> AriaAPIError:
     status_code = response.status_code
-    details = _response_details(response)
     retry_after_ms = _bounded_retry_after_ms(response)
 
     if status_code in {401, 403}:
@@ -717,7 +716,6 @@ def _http_error(response: httpx.Response, *, safe_to_retry: bool) -> AriaAPIErro
             "ARIA rejected the W&B token or the user does not have ARIA access.",
             retryable=False,
             status_code=status_code,
-            details=details,
         )
     if status_code == 404:
         return AriaAPIError(
@@ -725,8 +723,11 @@ def _http_error(response: httpx.Response, *, safe_to_retry: bool) -> AriaAPIErro
             "ARIA could not find a turn visible to the current W&B user.",
             retryable=False,
             status_code=status_code,
-            details=details,
         )
+    # Authentication and visibility failures intentionally use only stable
+    # local messages. Other bounded upstream errors may retain sanitized
+    # details when they are useful for correcting a request.
+    details = _response_details(response)
     if status_code == 409:
         return AriaAPIError(
             "turn_conflict",
