@@ -1,0 +1,4 @@
+interface:
+  display_name: "Develop W&B MCP Tools"
+  short_description: "Safely add and improve MCP tools"
+  default_prompt: "Use $develop-wandb-mcp-tools to implement and validate a W&B MCP tool change."

@@ -9,7 +9,7 @@ variables that control them, and when to pick each.
 | Deployment target | Recommended mode | What to set |
 |---|---|---|
 | Managed Kubernetes (dedicated cloud, self-managed) | **Agent mode** | Install DD Agent DaemonSet once per cluster; set `MCP_LOG_FORMAT=json` on the pod. No DD credentials on the workload. |
-| Serverless (Cloud Run, Lambda) | **Forwarder mode** | `MCP_DATADOG_FORWARD=true` + `DD_API_KEY` (env or GCP Secret Manager) |
+| Serverless | **Forwarder mode** | `MCP_DATADOG_FORWARD=true` plus a secret-backed `DD_API_KEY` |
 | Local dev | No Datadog | Leave `MCP_DATADOG_FORWARD` unset; `MCP_LOG_FORMAT` defaults to `rich` |
 
 ## Two collection modes
@@ -55,9 +55,9 @@ Required environment variables:
 |---|---|
 | `MCP_DATADOG_FORWARD=true` | Enables the in-app HTTP forwarder. |
 | `DD_API_KEY` | API key. Read from env first, then GCP Secret Manager if `MCP_SERVER_SECRETS_PROVIDER=gcp` is set. |
-| `DD_SITE` | Datadog site (default `datadoghq.com`; W&B uses `us5.datadoghq.com`). |
+| `DD_SITE` | Datadog site (default `datadoghq.com`). |
 | `DD_SERVICE`, `DD_ENV`, `DD_VERSION` | Unified Service Tagging on every forwarded event. |
-| `MCP_SERVER_SECRETS_PROVIDER=gcp` | Optional: if set, `DD_API_KEY` is fetched from `mcp-server-datadog-api-key` in GCP Secret Manager instead of env. |
+| `MCP_SERVER_SECRETS_PROVIDER=gcp` | Optional: resolve `DD_API_KEY` from the configured secret provider instead of plain environment configuration. |
 | `MCP_SERVER_SECRETS_PROJECT` | Required when `MCP_SERVER_SECRETS_PROVIDER=gcp`. |
 
 If `MCP_DATADOG_FORWARD=true` but `DD_API_KEY` resolves empty, the forwarder disables
@@ -114,14 +114,13 @@ instead of being auto-classified as `status:error` due to rich-formatter text sh
 
 One explicit exclusion: `wandb_mcp_server.analytics` is intentionally NOT reconfigured.
 It already uses its own `_StructuredJsonFormatter` ([`src/wandb_mcp_server/analytics.py`](../src/wandb_mcp_server/analytics.py))
-whose schema downstream GCP Cloud Logging -> BigQuery pipelines depend on. Touching
-it would silently break analytics ingestion.
+whose schema downstream structured-log consumers depend on. Changing it without
+a coordinated schema migration would break analytics ingestion.
 
 For MCP stdio transport, stdout is the JSON-RPC wire. The CLI reconfigures
 `wandb_mcp_server.analytics` to write structured analytics to stderr in stdio
-mode, while HTTP/container deployments keep stdout for Cloud Logging ingestion.
-If an older stdio build writes analytics JSON to stdout, set
-`MCP_ANALYTICS_DISABLED=true` to suppress analytics as a workaround.
+mode, while HTTP/container deployments may keep structured logs on stdout for
+their configured collector.
 
 ### Defensive analytics propagation lock
 
@@ -162,22 +161,18 @@ runs at every level.
 | Deployment | Recommended level | How it's set |
 |---|---|---|
 | Local dev | `off` (unset) | env-var default |
-| Cloud Run (W&B-managed, feeds BigQuery analytics) | `off` explicit | `deploy.sh` passes `MCP_LOG_PRIVACY_LEVEL=off` |
+| Managed serverless | Deployment-selected | Set explicitly in the managed deployment configuration |
 | Customer K8s via helm chart | `standard` | chart injects from `mcp-server.privacy.logLevel` (default `standard`) |
 | Regulated / privacy-sensitive K8s | `strict` | override chart value to `strict` |
 
 ### Why the split
 
-Cloud Run's analytics logger emits directly to GCP Cloud Logging, which pipes
-to BigQuery for product analytics. Schema 1.1 uses a pseudonymous `actor_id`
-derived from the API-key digest and compact usage dimensions, so cohort and
-adoption analysis no longer requires raw customer identifiers or arguments.
-
-Customer K8s installs do NOT feed W&B's BigQuery; their analytics logger goes
-to the container log stream for the local Datadog Agent to collect into the
-customer's own Datadog tenant. Compact dimensions reduce storage and indexing
-cost in either topology. `standard` remains the safe application-log default;
-`strict` also hashes legacy identity fields for regulated customers.
+Schema 1.1 uses a pseudonymous `actor_id` derived from the API-key digest and
+compact usage dimensions, so product analysis does not require raw resource
+identifiers or tool arguments. Kubernetes agent mode keeps collection within
+the operator-selected logging path. Compact dimensions reduce storage and
+indexing cost in either topology. `standard` remains the safe application-log
+default; `strict` also hashes legacy identity fields for regulated deployments.
 
 ### Datadog product dimensions
 
@@ -188,8 +183,8 @@ messages remain attributes to avoid high-cardinality indexing costs.
 
 ## MCP client harness dimensions
 
-Hosted MCP analytics include a small client dimension for Datadog incident
-analysis and Hex adoption analysis. These fields are derived from allowlisted MCP
+MCP analytics include a small client dimension for operational and product
+analysis. These fields are derived from allowlisted MCP
 signals such as `initialize.params.clientInfo`, session metadata, and
 `User-Agent` fallback. They are untrusted analytics dimensions only and must not
 be used for authentication, authorization, rate-limit bypasses, or protocol
@@ -223,7 +218,7 @@ Recommended Datadog views:
 - Unknown-client rate by `mcp_client_source`.
 - Initialize failures by `mcp_protocol_version` and `agent_harness`.
 
-Recommended Hex analyses:
+Recommended product analyses:
 
 - Daily active actors, sessions, and tool calls by `client_vendor` and
   `agent_harness`.
