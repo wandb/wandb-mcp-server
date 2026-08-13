@@ -3,6 +3,10 @@
 Thank you for improving the W&B MCP server. This repository contains the public
 tool implementations, protocol boundary, configuration, and unit tests.
 
+This guide covers development and pull requests. Release operators must use
+the machine-enforced process in [RELEASING.md](RELEASING.md); ad hoc build,
+tag, deployment, and publication commands are unsupported.
+
 ## Development setup
 
 Prerequisites:
@@ -27,11 +31,10 @@ Run the same core checks as CI:
 
 ```bash
 uv lock --check
-uv run ruff check src/ tests/
-uv run ruff format --check src/ tests/
-uv run pytest tests/ -m "not integration" -x -v --tb=short -q
-uv run bandit -q -r src -ll
-uv build
+uv run --no-sync ruff check .
+uv run --no-sync ruff format --check .
+uv run --no-sync pytest tests/ -m "not integration" -x -v --tb=short -q
+uv run --no-sync bandit -q -r src -ll
 ```
 
 CI runs the non-integration suite and a fresh-wheel smoke test on Python 3.11
@@ -73,7 +76,7 @@ git fetch origin
 git switch -c fix/short-description origin/main
 ```
 
-Release integration branches such as `staging/0.4.0` are maintainer-owned.
+Release integration branches such as `staging/<version>` are maintainer-owned.
 Only target one when the release owner has explicitly assigned the change to
 that release.
 
@@ -154,6 +157,12 @@ Repo-local maintainer skills are available under `.agents/skills/`:
 
 Each skill is guidance, not additional authorization for live writes,
 deployment, publication, or branch-protection bypasses.
+
+The public tool contract is generated from
+[`release/public-contract.json`](release/public-contract.json). When a tool is
+added, removed, renamed, feature-gated, or reclassified as a write, update that
+contract in the same PR. The release CI compares the contract against the real
+installed-wheel MCP `tools/list` response for every feature/read-only profile.
 
 ## Live validation
 

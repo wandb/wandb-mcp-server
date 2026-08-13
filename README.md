@@ -47,6 +47,19 @@ Version 0.4.0 makes W&B reads SDK-first, bounded, and workload-aware:
 See the [v0.4.0 release notes](docs/releases/v0.4.0.md) for migration guidance,
 deployment settings, and the complete customer-visible summary.
 
+### Release availability
+
+v0.4.0 is a release candidate until its signed source tag and each deployment
+artifact are independently verified. The
+[release index](docs/releases/README.md) is the source of truth for public
+source, W&B-hosted, Dedicated/Self-Managed, and customer-container availability.
+Do not infer availability from a branch, mutable tag, or version string in this
+README.
+
+The official artifacts are the verified signed source tag and GitHub Release,
+plus channel-specific immutable container digests recorded there. PyPI and
+mutable image tags such as `latest` are not supported release channels.
+
 ## What Can This Server Do?
 
 <details open>
@@ -358,7 +371,7 @@ notepad %APPDATA%\Claude\claude_desktop_config.json
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/wandb/wandb-mcp-server",
+        "git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z",
         "wandb_mcp_server"
       ],
       "env": {
@@ -389,7 +402,7 @@ The easiest way is using our hosted server at `https://mcp.withwandb.com/mcp`.
 
 **Benefits:**
 - ✅ Zero installation
-- ✅ Always up-to-date
+- ✅ Managed, reviewed release updates
 - ✅ Managed workload limits
 - ✅ No server maintenance
 
@@ -413,9 +426,9 @@ installation.**
 # Install uv if needed
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Run the current server from GitHub with STDIO transport
+# Replace vX.Y.Z with a signed, available release from the release index.
 export WANDB_API_KEY="your-api-key"
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server
 ```
 
 > 📖 For complete command line options and environment variables, see the [Command Line Reference](#command-line-reference) in the More Information section.
@@ -430,7 +443,7 @@ Add to your MCP client config (for detailed client-specific configs see below):
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/wandb/wandb-mcp-server",
+        "git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z",
         "wandb_mcp_server"
       ],
       "env": {
@@ -469,7 +482,7 @@ Manual local (dedicated or on-prem) config in `mcp.json`:
   "command": "uvx",
     "args": [
       "--from",
-      "git+https://github.com/wandb/wandb-mcp-server",
+      "git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z",
       "wandb_mcp_server"
     ],
     "env": {
@@ -485,13 +498,13 @@ Manual local (dedicated or on-prem) config in `mcp.json`:
 codex mcp add wandb \
     --env WANDB_API_KEY=your_api_key_here \
     --env WANDB_BASE_URL=https://your-wandb-instance.example.com \
-    -- uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
+    -- uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server
 ```
 
 ### Claude Code
 Add `--scope user` for global config.
 ```bash
-claude mcp add wandb -e WANDB_API_KEY=your-api-key -e WANDB_BASE_URL=your-base-url -- uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
+claude mcp add wandb -e WANDB_API_KEY=your-api-key -e WANDB_BASE_URL=your-base-url -- uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server
 ```
 
 ### Claude Desktop
@@ -511,7 +524,7 @@ notepad %APPDATA%\Claude\claude_desktop_config.json
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/wandb/wandb-mcp-server",
+        "git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z",
         "wandb_mcp_server"
       ],
       "env": {
@@ -545,13 +558,13 @@ For lightweight experimentation and testing, you can run the FastMCP HTTP transp
 ```bash
 # Basic loopback HTTP server
 export MCP_AUTH_DISABLED=true
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server \
   --transport http \
   --host 127.0.0.1 \
   --port 8080
 
 # With Weave tracing enabled
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server \
   --transport http \
   --host 127.0.0.1 \
   --port 8080 \
@@ -577,14 +590,15 @@ mcp-server:
   install: true
 ```
 
-The server becomes accessible at `https://<your-instance>/mcp`. The v0.4.0 chart
-configuration keeps this public URL for clients and user-facing links while
-routing server-side W&B API calls to the namespace-local API service.
+When an MCP-capable chart release is available, the server becomes accessible
+at `https://<your-instance>/mcp`. The chart keeps this public URL for clients
+and user-facing links while routing server-side W&B API calls to the
+namespace-local API service.
 
 **Requirements:**
 - `weave-trace` must be installed (`weave-trace.install: true`)
-- An `operator-wandb` release that includes MCP server v0.4.0 support
-- Published image `wandb/mcp-server:0.4.0`
+- An `operator-wandb` release whose notes explicitly include MCP support
+- The immutable MCP image digest recorded by that chart release
 
 **Client configuration** for dedicated instances:
 
@@ -621,7 +635,7 @@ When running the server locally, you can customize its behavior with command lin
 | `--transport` | string | `stdio` | Transport type: `stdio` for local MCP client communication or `http` for HTTP server |
 | `--host` | string | `localhost` | Host to bind HTTP server to (only used with `--transport http`) |
 | `--port` | integer | `8080` | Port to run the HTTP server on (only used with `--transport http`) |
-| `--wandb_api_key` | string | None | Weights & Biases API key for authentication |
+| `--wandb_api_key` | string | None | Compatibility-only API key input; prefer `WANDB_API_KEY` so the key is not exposed in process arguments |
 | `--weave_entity` | string | None | The W&B entity to log traced MCP server calls to |
 | `--weave_project` | string | `weave-mcp-server` | The W&B project to log traced MCP server calls to |
 
@@ -639,11 +653,6 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_DEBUG` | Set to `"true"` to enable detailed W&B logging | No |
 | `MCP_AUTH_DISABLED` | Must be `true` to acknowledge unauthenticated loopback HTTP development | No |
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
-| `WANDB_MCP_ENABLE_WEAVE_TOOLS` | Enable Weave trace tools (default: `true`; set `false` for installs without a trace backend) | No |
-| `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS` | Enable Weave Agents (OTel/GenAI) tools (default: `false`) | No |
-| `WANDB_MCP_ENABLE_ARIA_TOOLS` | Enable hosted ARIA submission and polling tools (default: `false`; keep disabled for Dedicated unless explicitly approved) | No |
-| `WANDB_MCP_READ_ONLY` | Omit report creation, analysis logging, and ARIA message submission (default: `false`) | No |
-| `WANDB_MCP_ENABLE_RAW_GRAPHQL` | Register the bounded query-only GraphQL compatibility tool (default: `false`) | No |
 | `MCP_MAX_GQL_ITEMS` | Maximum items returned by the opt-in raw GraphQL tool (profile default) | No |
 | `MCP_MAX_GQL_ITEMS_PER_PAGE` | Maximum raw GraphQL connection page size (profile default) | No |
 | `MCP_HOSTED_MODE` | Marks an HTTP deployment as hosted; defaults the workload profile to `shared` | No |
@@ -661,6 +670,39 @@ When running the server locally, you can customize its behavior with command lin
 | `MCP_LOG_PRIVACY_LEVEL` | Telemetry privacy level: `off`, `standard`, or `strict` (default: `off`) | No |
 | `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |
 
+<!-- BEGIN GENERATED: PUBLIC FEATURE PROFILES -->
+<!-- Generated by scripts/public_release.py docs. Do not edit this block. -->
+
+Release-controlled feature variables:
+
+| Variable | Default | Effect |
+|---|---:|---|
+| `WANDB_MCP_ENABLE_WEAVE_TOOLS` | `true` | Registers the `weave` group (5 tools). |
+| `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS` | `false` | Registers the `agents` group (8 tools). |
+| `WANDB_MCP_ENABLE_ARIA_TOOLS` | `false` | Registers the `aria` group (3 tools). |
+| `WANDB_MCP_ENABLE_RAW_GRAPHQL` | `false` | Registers the `raw_graphql` group (1 tools). |
+| `WANDB_MCP_READ_ONLY` | `false` | Removes all tools classified as writes. |
+
+Named exact tool profiles:
+
+| Profile | Weave | Agents | ARIA | Raw GraphQL | Read-only | Exact tools |
+|---|---:|---:|---:|---:|---:|---:|
+| `default` | `true` | `false` | `false` | `false` | `false` | 22 |
+| `models-only` | `false` | `false` | `false` | `false` | `false` | 17 |
+| `agents` | `true` | `true` | `false` | `false` | `false` | 30 |
+| `aria` | `true` | `false` | `true` | `false` | `false` | 25 |
+| `full` | `true` | `true` | `true` | `true` | `false` | 34 |
+| `strict-read-only` | `true` | `false` | `false` | `false` | `true` | 20 |
+
+Use `python scripts/public_release.py profiles --all` for every exact feature/read-only combination and tool name.
+<!-- END GENERATED: PUBLIC FEATURE PROFILES -->
+
+For the standalone console entrypoint, credential resolution is command-line
+compatibility input, then the `.netrc` entry for `WANDB_BASE_URL`, then
+`WANDB_API_KEY` (including a repository-root `.env` loaded by the CLI). Prefer
+the environment and remove stale `.netrc` entries for the same host; never pass
+a key in release automation or a process argument.
+
 Workload profiles provide one deployment-level choice while preserving the
 individual `MCP_MAX_*` overrides for advanced operators:
 
@@ -676,10 +718,7 @@ individual `MCP_MAX_*` overrides for advanced operators:
 ```bash
 # Basic usage with environment variable
 export WANDB_API_KEY="your-api-key"
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
-
-# Or with API key as argument
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server --wandb_api_key your-api-key
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server
 ```
 
 For stdio clients such as Claude Desktop, stdout is reserved for MCP JSON-RPC
@@ -690,7 +729,7 @@ diagnostics as protocol messages.
 ```bash
 # Basic HTTP server on localhost:8080
 export MCP_AUTH_DISABLED=true
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server \
   --transport http \
   --host 127.0.0.1 \
   --port 8080
@@ -699,7 +738,7 @@ uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
 **With Weave Tracing (log MCP calls to W&B):**
 ```bash
 export MCP_AUTH_DISABLED=true
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server \
   --transport http \
   --host 127.0.0.1 \
   --port 8080 \
@@ -709,13 +748,14 @@ uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server \
 
 **View all options:**
 ```bash
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server --help
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server --help
 ```
 
 ### Contributing & Releasing
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** -- Development setup, testing, PR process, architecture overview
 - **[RELEASING.md](RELEASING.md)** -- Version bumping, release checklist, deployment pipeline
+- **[Release index](docs/releases/README.md)** -- Availability and immutable artifacts by channel
 - **[Query capability matrix](docs/query-capabilities.md)** -- Typed reads and the opt-in compatibility path
 - **[Observability](docs/OBSERVABILITY.md)** -- Logging, telemetry privacy, and supported collection modes
 - **[Tool-development skill](.agents/skills/develop-wandb-mcp-tools/SKILL.md)** -- Safe implementation and validation workflow
@@ -776,8 +816,11 @@ CI runs automatically on every push and PR via GitHub Actions.
 
 The public Python source, W&B-managed deployment image, and Dedicated/Self-Managed
 chart are independently versioned artifacts. Managed builds pin this repository
-to an exact commit, and the chart pins a published MCP image. See
-[RELEASING.md](RELEASING.md) for the required SHA and digest handoff checks.
+to a signed source tag, and the chart pins a verified image digest. Local
+source installs should use `@vX.Y.Z` with a version marked available in the
+[release index](docs/releases/README.md); an unqualified GitHub branch is a
+development input, not an immutable release. See [RELEASING.md](RELEASING.md)
+for the required attestation and digest handoff checks.
 
 ### Support
 

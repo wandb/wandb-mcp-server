@@ -14,7 +14,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -41,8 +41,8 @@ jobs:
 
       - name: Lint with ruff
         run: |
-          uv run --no-sync ruff check src/ tests/ scripts/mcp_stdio_smoke.py
-          uv run --no-sync ruff format --check src/ tests/ scripts/mcp_stdio_smoke.py
+          uv run --no-sync ruff check .
+          uv run --no-sync ruff format --check .
 
       - name: Run unit tests
         run: uv run --no-sync pytest tests/ -m "not integration" -x -v --tb=short -q
@@ -51,24 +51,50 @@ jobs:
           WEAVE_SILENT: "True"
 
       - name: Build and smoke test wheel install
+        id: public-artifact
         run: |
-          uv build
+          VERSION="$(uv run --no-sync python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          ARTIFACT_DIR="$RUNNER_TEMP/public-artifacts-${{ matrix.python-version }}"
+          uv run --no-sync python scripts/public_release.py preflight --version "$VERSION" --gate candidate
+          uv run --no-sync python scripts/public_release.py build --version "$VERSION" --output-dir "$ARTIFACT_DIR"
+          WHEEL="$(find "$ARTIFACT_DIR" -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "$WHEEL"
           SMOKE_ENV="$RUNNER_TEMP/wandb-mcp-install-smoke"
           uv venv "$SMOKE_ENV" --python ${{ matrix.python-version }}
-          uv pip install --python "$SMOKE_ENV/bin/python" --refresh-package mcp dist/*.whl
+          uv export --frozen --no-dev --no-emit-project --output-file "$RUNNER_TEMP/runtime-${{ matrix.python-version }}.txt"
+          uv pip install --python "$SMOKE_ENV/bin/python" --requirement "$RUNNER_TEMP/runtime-${{ matrix.python-version }}.txt"
+          uv pip install --python "$SMOKE_ENV/bin/python" --no-deps "$WHEEL"
+          uv pip check --python "$SMOKE_ENV/bin/python"
           "$SMOKE_ENV/bin/python" -c "import wandb_mcp_server; print('ok')"
           "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; from packaging.version import Version; resolved = Version(version('mcp')); assert Version('1.28.1') <= resolved < Version('2'); print('fresh-wheel mcp', resolved)"
-          "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py --server-command "$SMOKE_ENV/bin/wandb_mcp_server"
-          WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=true WANDB_MCP_ENABLE_ARIA_TOOLS=true "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py --server-command "$SMOKE_ENV/bin/wandb_mcp_server"
-          WANDB_MCP_ENABLE_RAW_GRAPHQL=true "$SMOKE_ENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; from wandb_mcp_server.server import register_tools; mcp = FastMCP('smoke'); register_tools(mcp); assert 'query_wandb_graphql_tool' in mcp._tool_manager._tools; print('raw graphql ok')"
+          "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py \
+            --server-command "$SMOKE_ENV/bin/wandb_mcp_server" \
+            --contract release/public-contract.json \
+            --all-profiles \
+            --source-sha "$GITHUB_SHA" \
+            --wheel "$WHEEL" \
+            --evidence-out "$ARTIFACT_DIR/profile-evidence.json"
           uv pip install --python "$SMOKE_ENV/bin/python" "mcp[cli]==1.28.1"
           uv pip check --python "$SMOKE_ENV/bin/python"
           "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; assert version('mcp') == '1.28.1'; print('minimum mcp', version('mcp'))"
-          "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py --server-command "$SMOKE_ENV/bin/wandb_mcp_server"
-          WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=true WANDB_MCP_ENABLE_ARIA_TOOLS=true "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py --server-command "$SMOKE_ENV/bin/wandb_mcp_server"
+          "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py \
+            --server-command "$SMOKE_ENV/bin/wandb_mcp_server" \
+            --contract release/public-contract.json \
+            --profile default \
+            --profile full \
+            --profile strict-read-only
+          echo "artifact-dir=$ARTIFACT_DIR" >> "$GITHUB_OUTPUT"
         env:
           WANDB_SILENT: "True"
           WEAVE_SILENT: "True"
+
+      - name: Upload candidate build and exact-profile evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-candidate-${{ matrix.python-version }}
+          path: ${{ steps.public-artifact.outputs.artifact-dir }}
+          if-no-files-found: error
+          retention-days: 30
 
   wandb-latest-compatibility:
     runs-on: ubuntu-latest

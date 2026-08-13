@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "package": "wandb_mcp_server",
+  "python_versions": [
+    "3.11",
+    "3.12"
+  ],
+  "mcp": {
+    "minimum": "1.28.1",
+    "locked": "1.29.0",
+    "maximum_exclusive": "2"
+  },
+  "locked_runtime": {
+    "wandb": "0.28.0",
+    "wandb-workspaces": "0.4.4",
+    "weave": "0.52.35"
+  },
+  "build_requirements": "release/build-requirements.lock",
+  "qualification_tests": [
+    "scripts/mcp_stdio_smoke.py",
+    "tests/test_public_release.py"
+  ],
+  "required_pr_checks": [
+    "Dependency vulnerabilities",
+    "Python source security",
+    "Socket Security: Project Report",
+    "Socket Security: Pull Request Alerts",
+    "test (3.11)",
+    "test (3.12)",
+    "wandb-latest-compatibility"
+  ],
+  "base_tools": [
+    "compare_artifact_versions_tool",
+    "compare_runs_tool",
+    "create_wandb_report_tool",
+    "diagnose_run_tool",
+    "get_artifact_details_tool",
+    "get_run_history_tool",
+    "list_artifact_versions_tool",
+    "list_entities_tool",
+    "list_registries_tool",
+    "list_registry_collections_tool",
+    "list_wandb_automations_tool",
+    "list_wandb_integrations_tool",
+    "log_analysis_to_wandb",
+    "probe_project_tool",
+    "query_wandb_entity_projects",
+    "query_wandb_tool",
+    "search_wandb_docs_tool"
+  ],
+  "feature_groups": {
+    "weave": {
+      "environment": "WANDB_MCP_ENABLE_WEAVE_TOOLS",
+      "default": true,
+      "tools": [
+        "count_weave_traces_tool",
+        "infer_trace_schema_tool",
+        "query_weave_traces_tool",
+        "resolve_trace_roots_tool",
+        "summarize_evaluation_tool"
+      ]
+    },
+    "agents": {
+      "environment": "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
+      "default": false,
+      "tools": [
+        "get_weave_agent_conversation_tool",
+        "get_weave_agent_span_stats_tool",
+        "get_weave_agent_trace_tool",
+        "list_weave_agent_custom_attributes_tool",
+        "list_weave_agent_versions_tool",
+        "list_weave_agents_tool",
+        "query_weave_agent_spans_tool",
+        "search_weave_agents_tool"
+      ]
+    },
+    "aria": {
+      "environment": "WANDB_MCP_ENABLE_ARIA_TOOLS",
+      "default": false,
+      "tools": [
+        "aria_get_turn",
+        "aria_get_turns",
+        "aria_send_message"
+      ]
+    },
+    "raw_graphql": {
+      "environment": "WANDB_MCP_ENABLE_RAW_GRAPHQL",
+      "default": false,
+      "tools": [
+        "query_wandb_graphql_tool"
+      ]
+    }
+  },
+  "read_only_environment": "WANDB_MCP_READ_ONLY",
+  "write_tools": [
+    "aria_send_message",
+    "create_wandb_report_tool",
+    "log_analysis_to_wandb"
+  ],
+  "named_profiles": {
+    "default": {},
+    "models-only": {
+      "weave": false
+    },
+    "agents": {
+      "agents": true
+    },
+    "aria": {
+      "aria": true
+    },
+    "full": {
+      "agents": true,
+      "aria": true,
+      "raw_graphql": true
+    },
+    "strict-read-only": {
+      "read_only": true
+    }
+  }
+}

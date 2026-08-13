@@ -9,18 +9,42 @@ parser and fails the run.
 from __future__ import annotations
 
 import argparse
+from importlib.metadata import version as installed_version
 import json
 import logging
 import os
 from pathlib import Path
+import platform
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import anyio
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
+
+if __package__:
+    from scripts.public_release import (
+        DEFAULT_CONTRACT,
+        Profile,
+        canonical_json,
+        exhaustive_profiles,
+        load_contract,
+        named_profile,
+        sha256_file,
+    )
+else:
+    from public_release import (
+        DEFAULT_CONTRACT,
+        Profile,
+        canonical_json,
+        exhaustive_profiles,
+        load_contract,
+        named_profile,
+        sha256_file,
+    )
 
 
 _TEST_API_KEY = "k" * 40
@@ -117,9 +141,27 @@ def _contains_none(value: Any) -> bool:
     return False
 
 
-def _server_environment(base_url: str, home: str, *, unsafe_stdout_override: bool) -> dict[str, str]:
-    return {
+def _server_environment(
+    base_url: str,
+    home: str,
+    *,
+    unsafe_stdout_override: bool,
+    profile_environment: dict[str, str] | None = None,
+) -> dict[str, str]:
+    # The release harness is hermetic: all functional traffic targets the
+    # loopback fake below, and every other HTTP(S) destination is forced to a
+    # closed loopback port. This prevents SDK diagnostics or optional telemetry
+    # from escaping a qualification run.
+    environment = {
         "HOME": home,
+        "HTTP_PROXY": "http://127.0.0.1:9",
+        "HTTPS_PROXY": "http://127.0.0.1:9",
+        "ALL_PROXY": "http://127.0.0.1:9",
+        "NO_PROXY": "127.0.0.1,localhost",
+        "http_proxy": "http://127.0.0.1:9",
+        "https_proxy": "http://127.0.0.1:9",
+        "all_proxy": "http://127.0.0.1:9",
+        "no_proxy": "127.0.0.1,localhost",
         "WANDB_API_KEY": _TEST_API_KEY,
         "WANDB_BASE_URL": base_url,
         "WANDB_INTERNAL_BASE_URL": "",
@@ -130,7 +172,12 @@ def _server_environment(base_url: str, home: str, *, unsafe_stdout_override: boo
         "MCP_SEGMENT_DRY_RUN": "true",
         "MCP_SEGMENT_FORWARD": "false",
         "MCP_DATADOG_FORWARD": "false",
+        "WANDB_MCP_PROXY_DOCS": "true",
         "WANDB_MCP_ENABLE_RAW_GRAPHQL": "false",
+        "WANDB_MCP_ENABLE_WEAVE_TOOLS": os.environ.get(
+            "WANDB_MCP_ENABLE_WEAVE_TOOLS",
+            "true",
+        ),
         "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS": os.environ.get(
             "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
             "false",
@@ -141,6 +188,9 @@ def _server_environment(base_url: str, home: str, *, unsafe_stdout_override: boo
         ),
         "WANDB_MCP_READ_ONLY": "false",
     }
+    if profile_environment:
+        environment.update(profile_environment)
+    return environment
 
 
 async def _exercise_profile(
@@ -151,6 +201,7 @@ async def _exercise_profile(
     expected_harness: str,
     expected_vendor: str,
     unsafe_stdout_override: bool = False,
+    profile: Profile | None = None,
 ) -> None:
     parse_capture = _ProtocolParseCapture()
     protocol_logger = logging.getLogger("mcp.client.stdio")
@@ -165,6 +216,7 @@ async def _exercise_profile(
                 base_url,
                 temp_dir,
                 unsafe_stdout_override=unsafe_stdout_override,
+                profile_environment=profile.environment if profile else None,
             ),
             cwd=temp_dir,
         )
@@ -182,21 +234,37 @@ async def _exercise_profile(
 
                             listed = await session.list_tools()
                             tools_by_name = {tool.name: tool for tool in listed.tools}
-                            agent_tools_enabled = (
-                                os.environ.get("WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS", "false").lower() == "true"
-                            )
-                            aria_tools_enabled = (
-                                os.environ.get("WANDB_MCP_ENABLE_ARIA_TOOLS", "false").lower() == "true"
-                            )
-                            expected_tool_count = (
-                                22 + (8 if agent_tools_enabled else 0) + (3 if aria_tools_enabled else 0)
-                            )
-                            assert len(tools_by_name) == expected_tool_count
+                            if profile is not None:
+                                assert set(tools_by_name) == set(profile.tools), (
+                                    profile.name,
+                                    sorted(set(profile.tools) - set(tools_by_name)),
+                                    sorted(set(tools_by_name) - set(profile.tools)),
+                                )
+                                agent_tools_enabled = profile.features["agents"]
+                                aria_tools_enabled = profile.features["aria"]
+                            else:
+                                agent_tools_enabled = (
+                                    os.environ.get("WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS", "false").lower() == "true"
+                                )
+                                aria_tools_enabled = (
+                                    os.environ.get("WANDB_MCP_ENABLE_ARIA_TOOLS", "false").lower() == "true"
+                                )
+                                expected_tool_count = (
+                                    22 + (8 if agent_tools_enabled else 0) + (3 if aria_tools_enabled else 0)
+                                )
+                                assert len(tools_by_name) == expected_tool_count
                             assert _AGENT_TOOL_NAMES.issubset(tools_by_name) is agent_tools_enabled
-                            assert _ARIA_TOOL_NAMES.issubset(tools_by_name) is aria_tools_enabled
+                            if aria_tools_enabled:
+                                expected_aria_tools = _ARIA_TOOL_NAMES - (
+                                    {"aria_send_message"} if profile and profile.read_only else set()
+                                )
+                                assert expected_aria_tools <= tools_by_name.keys()
+                            else:
+                                assert _ARIA_TOOL_NAMES.isdisjoint(tools_by_name)
                             assert "list_entities_tool" in tools_by_name
                             assert "query_wandb_tool" in tools_by_name
-                            assert "query_wandb_graphql_tool" not in tools_by_name
+                            raw_graphql_enabled = profile.features["raw_graphql"] if profile else False
+                            assert ("query_wandb_graphql_tool" in tools_by_name) is raw_graphql_enabled
 
                             query_schema = tools_by_name["query_wandb_tool"].inputSchema
                             query_properties = query_schema["properties"]
@@ -323,6 +391,42 @@ async def _run(server_command: str) -> None:
         thread.join(timeout=5)
 
 
+async def _run_contract_profiles(server_command: str, profiles: tuple[Profile, ...]) -> None:
+    fake_wandb = ThreadingHTTPServer(("127.0.0.1", 0), _FakeWandBHandler)
+    thread = threading.Thread(target=fake_wandb.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{fake_wandb.server_port}"
+    try:
+        for profile in profiles:
+            await _exercise_profile(
+                server_command,
+                base_url,
+                client_name="codex-mcp-client",
+                expected_harness="codex",
+                expected_vendor="openai",
+                profile=profile,
+            )
+        # Exact-profile qualification must also preserve the real client
+        # negotiation/telemetry checks that this harness historically covered.
+        # One already-qualified profile is sufficient for those independent
+        # client-identity assertions.
+        representative_profile = profiles[0]
+        for client_name, expected_harness, expected_vendor in _CLIENTS[1:]:
+            await _exercise_profile(
+                server_command,
+                base_url,
+                client_name=client_name,
+                expected_harness=expected_harness,
+                expected_vendor=expected_vendor,
+                profile=representative_profile,
+            )
+        await _exercise_missing_credentials(server_command, base_url)
+    finally:
+        fake_wandb.shutdown()
+        fake_wandb.server_close()
+        thread.join(timeout=5)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -330,11 +434,61 @@ def main() -> None:
         required=True,
         help="Path to the installed wandb_mcp_server console entrypoint.",
     )
+    parser.add_argument(
+        "--contract",
+        type=Path,
+        default=DEFAULT_CONTRACT,
+        help="Version-neutral public tool contract.",
+    )
+    parser.add_argument("--profile", action="append", default=[], help="Named profile to verify (repeatable).")
+    parser.add_argument("--all-profiles", action="store_true", help="Verify every feature/read-only combination.")
+    parser.add_argument("--evidence-out", type=Path, help="Write deterministic exact-profile evidence after success.")
+    parser.add_argument("--source-sha", help="Exact source commit used to build the installed wheel.")
+    parser.add_argument("--wheel", type=Path, help="Exact installed wheel, used to bind evidence to its digest.")
     args = parser.parse_args()
     server_command = str(Path(args.server_command).resolve())
     if not Path(server_command).is_file():
         parser.error(f"Server command does not exist: {server_command}")
-    anyio.run(_run, server_command)
+    contract = load_contract(args.contract)
+    if args.all_profiles:
+        profiles = exhaustive_profiles(contract)
+    elif args.profile:
+        profiles = tuple(named_profile(contract, name) for name in args.profile)
+    else:
+        profiles = ()
+
+    if args.evidence_out and (not args.all_profiles or not args.source_sha or not args.wheel):
+        parser.error("--evidence-out requires --all-profiles, --source-sha, and --wheel")
+    if args.wheel and not args.wheel.is_file():
+        parser.error(f"wheel does not exist: {args.wheel}")
+
+    started = time.monotonic()
+    if profiles:
+        anyio.run(_run_contract_profiles, server_command, profiles)
+    else:
+        anyio.run(_run, server_command)
+
+    if args.evidence_out:
+        evidence = {
+            "schema_version": 1,
+            "status": "passed",
+            "version": installed_version("wandb_mcp_server"),
+            "source_sha": args.source_sha,
+            "wheel_sha256": sha256_file(args.wheel),
+            "contract_sha256": sha256_file(args.contract),
+            "harness_sha256": sha256_file(Path(__file__)),
+            "mcp_version": installed_version("mcp"),
+            "locked_runtime": {
+                "wandb": installed_version("wandb"),
+                "wandb-workspaces": installed_version("wandb-workspaces"),
+                "weave": installed_version("weave"),
+            },
+            "python_version": ".".join(platform.python_version_tuple()[:2]),
+            "profiles": [profile.as_dict() for profile in profiles],
+            "duration_ms": round((time.monotonic() - started) * 1000),
+        }
+        args.evidence_out.parent.mkdir(parents=True, exist_ok=True)
+        args.evidence_out.write_bytes(canonical_json(evidence))
     print("STDIO protocol smoke passed")
 
 

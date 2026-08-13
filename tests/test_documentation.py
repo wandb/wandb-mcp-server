@@ -18,6 +18,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 README = REPOSITORY_ROOT / "README.md"
 QUERY_CAPABILITIES = REPOSITORY_ROOT / "docs" / "query-capabilities.md"
 RELEASE_NOTES = REPOSITORY_ROOT / "docs" / "releases" / "v0.4.0.md"
+RELEASE_INDEX = REPOSITORY_ROOT / "docs" / "releases" / "README.md"
+RELEASE_TEMPLATE = REPOSITORY_ROOT / "docs" / "releases" / "TEMPLATE.md"
+PUBLIC_RELEASE_CONTRACT = REPOSITORY_ROOT / "release" / "public-contract.json"
 ENV_EXAMPLE = REPOSITORY_ROOT / "env.example"
 REPO_SKILLS = REPOSITORY_ROOT / ".agents" / "skills"
 FEATURE_FLAGS = (
@@ -87,6 +90,40 @@ def test_relative_documentation_links_resolve():
                 broken.append(f"{path.relative_to(REPOSITORY_ROOT)} -> {target}")
 
     assert not broken, "Broken relative documentation links:\n" + "\n".join(broken)
+
+
+def test_every_versioned_release_note_is_indexed():
+    index = RELEASE_INDEX.read_text()
+    notes = sorted(
+        path for path in (REPOSITORY_ROOT / "docs" / "releases").glob("v*.md") if path.name != RELEASE_TEMPLATE.name
+    )
+
+    assert notes
+    for note in notes:
+        assert f"({note.name})" in index
+    assert "Public source" in RELEASE_TEMPLATE.read_text()
+    assert "Dedicated/Self-Managed" in RELEASE_TEMPLATE.read_text()
+
+
+def test_readme_uses_immutable_source_install_examples():
+    readme = README.read_text()
+    moving_source = "git+https://github.com/wandb/wandb-mcp-server"
+
+    assert moving_source in readme
+    assert not re.search(rf"{re.escape(moving_source)}(?=[\s\"'])", readme)
+    assert "@vX.Y.Z" in readme
+    assert "docs/releases/README.md" in readme
+
+
+def test_feature_environments_are_documented_and_contract_driven():
+    contract = json.loads(PUBLIC_RELEASE_CONTRACT.read_text())
+    readme = README.read_text()
+
+    environments = {group["environment"] for group in contract["feature_groups"].values()} | {
+        contract["read_only_environment"]
+    }
+    for environment in environments:
+        assert f"`{environment}`" in readme
 
 
 def test_every_former_named_graphql_example_has_a_typed_v040_route():
