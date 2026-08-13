@@ -1,0 +1,326 @@
+name: Public source release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+  statuses: read
+
+concurrency:
+  group: public-source-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Verify signed tag and build once
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          version: "0.11.27"
+
+      - name: Verify signed annotated tag on main
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          TAG_OBJECT="$(git rev-parse "refs/tags/$GITHUB_REF_NAME")"
+          test "$(git cat-file -t "$TAG_OBJECT")" = "tag"
+          test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
+          test "$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$TAG_OBJECT" --jq '.verification.verified')" = "true"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify approved current-head release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/public_release.py source-gate \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/candidate-pr-evidence.json"
+
+      - name: Qualify source and build isolated artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          uv python install 3.12
+          uv sync --frozen --extra test --extra http --python 3.12
+          uv run --no-sync python scripts/public_release.py \
+            preflight --version "$VERSION" --gate source-released --tag-verification github
+          uv lock --check
+          uv run --no-sync ruff check .
+          uv run --no-sync ruff format --check .
+          uv run --no-sync python scripts/public_release.py docs --check
+          uv run --no-sync bandit -q -r src -ll
+          uv run --no-sync pytest tests/ -m "not integration" -x -v --tb=short -q
+          ARTIFACT_DIR="$RUNNER_TEMP/public-source"
+          uv run --no-sync python scripts/public_release.py \
+            build --version "$VERSION" --output-dir "$ARTIFACT_DIR"
+          cp "$RUNNER_TEMP/candidate-pr-evidence.json" "$ARTIFACT_DIR/candidate-pr-evidence.json"
+
+      - name: Upload immutable build input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-source-build
+          path: ${{ runner.temp }}/public-source
+          if-no-files-found: error
+          retention-days: 90
+
+  exact-profiles:
+    name: Installed wheel / Python ${{ matrix.python-version }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          version: "0.11.27"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: public-source-build
+          path: ${{ runner.temp }}/public-source
+
+      - name: Verify every exact public profile
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          WANDB_SILENT: "True"
+          WEAVE_SILENT: "True"
+        run: |
+          set -euo pipefail
+          uv python install "${{ matrix.python-version }}"
+          TEST_ENV="$RUNNER_TEMP/profile-${{ matrix.python-version }}"
+          uv venv "$TEST_ENV" --python "${{ matrix.python-version }}"
+          WHEEL="$(find "$RUNNER_TEMP/public-source" -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "$WHEEL"
+          uv export --frozen --no-dev --no-emit-project --output-file "$RUNNER_TEMP/runtime-${{ matrix.python-version }}.txt"
+          uv pip install --python "$TEST_ENV/bin/python" --requirement "$RUNNER_TEMP/runtime-${{ matrix.python-version }}.txt"
+          uv pip install --python "$TEST_ENV/bin/python" --no-deps "$WHEEL"
+          uv pip check --python "$TEST_ENV/bin/python"
+          "$TEST_ENV/bin/python" scripts/mcp_stdio_smoke.py \
+            --server-command "$TEST_ENV/bin/wandb_mcp_server" \
+            --contract release/public-contract.json \
+            --all-profiles \
+            --source-sha "$GITHUB_SHA" \
+            --wheel "$WHEEL" \
+            --evidence-out "$RUNNER_TEMP/profile-evidence-${{ matrix.python-version }}.json"
+
+      - name: Upload exact-profile evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-profile-evidence-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/profile-evidence-${{ matrix.python-version }}.json
+          if-no-files-found: error
+          retention-days: 90
+
+  attest:
+    name: SBOM, vulnerability report, provenance, and draft release
+    needs: [build, exact-profiles]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: public-source-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          version: "0.11.27"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: public-*
+          path: ${{ runner.temp }}/evidence
+          merge-multiple: true
+
+      - name: Create an exact runtime environment
+        run: |
+          set -euo pipefail
+          uv python install 3.12
+          RUNTIME_ENV="$RUNNER_TEMP/release-runtime"
+          uv venv "$RUNTIME_ENV" --python 3.12
+          WHEEL="$(find "$RUNNER_TEMP/evidence" -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "$WHEEL"
+          uv export --frozen --no-dev --no-emit-project --output-file "$RUNNER_TEMP/release-requirements.txt"
+          uv pip install --python "$RUNTIME_ENV/bin/python" --requirement "$RUNNER_TEMP/release-requirements.txt"
+          uv pip install --python "$RUNTIME_ENV/bin/python" --no-deps "$WHEEL"
+          uv pip check --python "$RUNTIME_ENV/bin/python"
+
+      - name: Generate SPDX SBOM for the resolved runtime
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: ${{ runner.temp }}/release-runtime
+          format: spdx-json
+          output-file: ${{ runner.temp }}/evidence/wandb_mcp_server-${{ needs.build.outputs.version }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Scan the exact runtime SBOM
+        id: grype
+        continue-on-error: true
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          sbom: ${{ runner.temp }}/evidence/wandb_mcp_server-${{ needs.build.outputs.version }}.spdx.json
+          fail-build: true
+          severity-cutoff: high
+          output-format: json
+          output-file: ${{ runner.temp }}/evidence/wandb_mcp_server-${{ needs.build.outputs.version }}.vulnerabilities.json
+          grype-version: "v0.112.0"
+
+      - name: Enforce complete High/Critical vulnerability policy
+        if: always()
+        env:
+          GRYPE_OUTCOME: ${{ steps.grype.outcome }}
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/evidence/wandb_mcp_server-${{ needs.build.outputs.version }}.vulnerabilities.json"
+          test "$GRYPE_OUTCOME" = "success"
+
+      - name: Create the public qualification predicate
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          WHEEL="$(find "$RUNNER_TEMP/evidence" -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          SDIST="$(find "$RUNNER_TEMP/evidence" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+          SBOM="$RUNNER_TEMP/evidence/wandb_mcp_server-$VERSION.spdx.json"
+          VULNS="$RUNNER_TEMP/evidence/wandb_mcp_server-$VERSION.vulnerabilities.json"
+          BUILD_MANIFEST="$RUNNER_TEMP/evidence/build-manifest.json"
+          BUILD_CHECKSUMS="$RUNNER_TEMP/evidence/SHA256SUMS"
+          python3 scripts/public_release.py attest \
+            --version "$VERSION" \
+            --profile-evidence "$RUNNER_TEMP/evidence/profile-evidence-3.11.json" \
+            --profile-evidence "$RUNNER_TEMP/evidence/profile-evidence-3.12.json" \
+            --artifact "$WHEEL" \
+            --artifact "$SDIST" \
+            --artifact "$SBOM" \
+            --artifact "$VULNS" \
+            --build-manifest "$BUILD_MANIFEST" \
+            --build-checksums "$BUILD_CHECKSUMS" \
+            --parent-evidence "$RUNNER_TEMP/evidence/candidate-pr-evidence.json" \
+            --output "$RUNNER_TEMP/evidence/public-release-predicate.json"
+          find "$RUNNER_TEMP/evidence" -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed "s#$RUNNER_TEMP/evidence/##" > "$RUNNER_TEMP/evidence/SHA256SUMS"
+
+      - name: Attest source artifacts with SLSA provenance
+        id: provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: ${{ runner.temp }}/evidence/SHA256SUMS
+
+      - name: Bind the runtime SBOM to the wheel
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: ${{ runner.temp }}/evidence/*.whl
+          sbom-path: ${{ runner.temp }}/evidence/wandb_mcp_server-${{ needs.build.outputs.version }}.spdx.json
+
+      - name: Sign the public release qualification predicate
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: ${{ runner.temp }}/evidence/SHA256SUMS
+          predicate-type: https://wandb.ai/attestations/mcp-public-release/v1
+          predicate-path: ${{ runner.temp }}/evidence/public-release-predicate.json
+
+      - name: Verify source artifact attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SIGNER="$GITHUB_REPOSITORY/.github/workflows/release-source.yml"
+          for artifact in "$RUNNER_TEMP/evidence"/*.whl "$RUNNER_TEMP/evidence"/*.tar.gz; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$SIGNER" --source-digest "$GITHUB_SHA" \
+              --source-ref "$GITHUB_REF" --deny-self-hosted-runners \
+              --predicate-type https://slsa.dev/provenance/v1
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$SIGNER" --source-digest "$GITHUB_SHA" \
+              --source-ref "$GITHUB_REF" --deny-self-hosted-runners \
+              --predicate-type https://wandb.ai/attestations/mcp-public-release/v1
+          done
+          gh attestation verify "$RUNNER_TEMP/evidence"/*.whl --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$SIGNER" --source-digest "$GITHUB_SHA" \
+            --source-ref "$GITHUB_REF" --deny-self-hosted-runners \
+            --predicate-type https://spdx.dev/Document/v2.3
+
+      - name: Create or refresh the draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          ASSETS=("$RUNNER_TEMP/evidence"/*.whl "$RUNNER_TEMP/evidence"/*.tar.gz)
+          ASSETS+=("$RUNNER_TEMP/evidence/SHA256SUMS")
+          ASSETS+=("$RUNNER_TEMP/evidence"/*.spdx.json "$RUNNER_TEMP/evidence"/*.vulnerabilities.json)
+          ASSETS+=("$RUNNER_TEMP/evidence"/profile-evidence-*.json)
+          ASSETS+=("$RUNNER_TEMP/evidence/public-release-predicate.json")
+          ASSETS+=("$RUNNER_TEMP/evidence/build-manifest.json")
+          ASSETS+=("$RUNNER_TEMP/evidence/candidate-pr-evidence.json")
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')" = "true"
+            ASSET_DIR="$RUNNER_TEMP/existing-release-assets"
+            mkdir "$ASSET_DIR"
+            gh release download "$GITHUB_REF_NAME" --dir "$ASSET_DIR"
+            printf '%s\n' "${ASSETS[@]##*/}" | sort > "$RUNNER_TEMP/expected-assets.txt"
+            find "$ASSET_DIR" -maxdepth 1 -type f -exec basename {} \; | sort > "$RUNNER_TEMP/actual-assets.txt"
+            diff -u "$RUNNER_TEMP/expected-assets.txt" "$RUNNER_TEMP/actual-assets.txt"
+            for asset in "${ASSETS[@]}"; do
+              existing="$ASSET_DIR/$(basename "$asset")"
+              test -f "$existing"
+              test "$(sha256sum "$asset" | cut -d' ' -f1)" = "$(sha256sum "$existing" | cut -d' ' -f1)"
+            done
+          else
+            gh release create "$GITHUB_REF_NAME" "${ASSETS[@]}" \
+              --verify-tag \
+              --draft \
+              --title "W&B MCP Server v$VERSION" \
+              --notes-file "docs/releases/v$VERSION.md"
+          fi
+
+      - name: Upload signed-source evidence transport copy
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-source-release-evidence
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 90
