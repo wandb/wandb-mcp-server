@@ -190,7 +190,7 @@ def tool_cost(name: str, arguments: Mapping[str, Any] | None = None) -> tuple[st
     if name == "get_artifact_details_tool" and arguments.get("include_files"):
         return "heavy", 4
     if name == "list_artifact_versions_tool":
-        if arguments.get("created_after") or arguments.get("created_before"):
+        if arguments.get("tags") or arguments.get("created_after") or arguments.get("created_before"):
             return "heavy", 4
         return "expensive", 2
     if name == "count_weave_traces_tool":

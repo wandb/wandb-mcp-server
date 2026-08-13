@@ -140,6 +140,7 @@ def test_tool_costs_are_stable_and_unknown_is_heavy() -> None:
     assert tool_cost("get_run_history_tool", {"target_x": 100}) == ("heavy", 4)
     assert tool_cost("get_run_history_tool", {"min_step": 0, "max_step": 100}) == ("heavy", 4)
     assert tool_cost("list_artifact_versions_tool") == ("expensive", 2)
+    assert tool_cost("list_artifact_versions_tool", {"tags": ["production"]}) == ("heavy", 4)
     assert tool_cost("list_artifact_versions_tool", {"created_after": "2026-01-01"}) == ("heavy", 4)
     assert tool_cost("query_wandb_tool", {"resource": "runs", "response_mode": "count"}) == ("light", 1)
     assert tool_cost(

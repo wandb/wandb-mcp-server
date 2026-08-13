@@ -169,7 +169,7 @@ def list_artifact_versions(
             order_value = _normalize_order(order)
             after_dt = _parse_timestamp(created_after)
             before_dt = _parse_timestamp(created_before)
-            needs_local_filter_scan = bool(created_after or created_before or (source == "registry" and tags))
+            needs_local_filter_scan = bool(created_after or created_before or tags)
             scan_limit = MCP_MAX_WANDB_QUERY_ITEMS + 1 if needs_local_filter_scan else max_items + 1
             api = WandBApiManager.get_api()
             compatibility_caveat: str | None = None
@@ -213,7 +213,13 @@ def list_artifact_versions(
                     type_name=type_name,
                     name=qualified_name,
                     order=order_value,
-                    tags=tags,
+                    # W&B 0.28 applies ``tags`` while converting each SDK
+                    # page. A missing tag can therefore make every converted
+                    # page empty and cause the paginator to scan the entire
+                    # collection before MCP can enforce its row cap. Fetch a
+                    # bounded raw page and apply the identical all-tags
+                    # predicate below instead.
+                    tags=None,
                     per_page=min(scan_limit, 100),
                 )
                 if not tags and created_after is None and created_before is None:
@@ -221,7 +227,11 @@ def list_artifact_versions(
                         exact_total = len(versions_iter)
                     except (TypeError, NotImplementedError):
                         exact_total = None
-                raw_versions, upstream_has_more = bounded_sdk_page(versions_iter, scan_limit)
+                raw_versions, upstream_has_more = bounded_sdk_page(
+                    versions_iter,
+                    scan_limit,
+                    allow_partial_on_request_limit=True,
+                )
 
             matching = [
                 _serialize_artifact_summary(artifact)
