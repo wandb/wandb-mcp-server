@@ -88,13 +88,13 @@ async def validate_bearer_token(credentials: Optional[HTTPAuthorizationCredentia
 
     # Basic format validation
     if not is_valid_wandb_api_key(token):
-        logger.debug(f"Rejected API key: length={len(token)}")
+        logger.debug("Rejected an invalid W&B API key format")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid W&B API key format. Get your key at: https://wandb.ai/authorize",
         )
 
-    logger.debug(f"Bearer token validated successfully (length: {len(token)})")
+    logger.debug("Bearer token format validated successfully")
     return token
 
 
@@ -143,7 +143,7 @@ async def mcp_auth_middleware(request: Request, call_next):
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"error": e.detail}, headers=e.headers)
     except Exception as e:
-        logger.error(f"Authentication error: {e}")
+        logger.error("Authentication failed (%s)", type(e).__name__)
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"error": "Authentication failed"},
@@ -204,7 +204,7 @@ async def mcp_auth_middleware(request: Request, call_next):
         except Exception:
             logger.debug("Session creation failed on mismatch retry (non-fatal)")
     except Exception as sm_err:
-        logger.debug(f"Session manager unavailable (non-fatal): {sm_err}")
+        logger.debug("Session manager unavailable (non-fatal; %s)", type(sm_err).__name__)
 
     request.state.session_id = session_id
     session_ctx_token = current_session_id.set(session_id)
@@ -222,7 +222,7 @@ async def mcp_auth_middleware(request: Request, call_next):
                 api_key_hash=api_key_hash,
             )
         except Exception as analytics_err:
-            logger.debug(f"Analytics tracking failed (non-fatal): {analytics_err}")
+            logger.debug("Analytics tracking failed (non-fatal; %s)", type(analytics_err).__name__)
 
     # --- Execute request (errors here propagate as 500, not 401) ----------
     request_start = time.monotonic()

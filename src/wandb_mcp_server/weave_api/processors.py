@@ -68,7 +68,7 @@ class TraceProcessor:
             try:
                 # Handle special case for inputs/outputs that might have complex object references
                 if "__type__" in value or "_type" in value:
-                    logger.info(f"Found potential complex object: {value.get('__type__') or value.get('_type')}")
+                    logger.info("Found a complex object during trace truncation")
                     # For very small max_length, return empty dict to ensure proper truncation tests pass
                     if max_length < 50:
                         return {}
@@ -78,21 +78,21 @@ class TraceProcessor:
                 result = {k: TraceProcessor.truncate_value(v, max_length) for k, v in value.items()}
                 return result
             except Exception as e:
-                logger.warning(f"Error truncating dict: {e}, returning empty dict")
+                logger.warning("Error truncating trace mapping (%s); returning an empty mapping", type(e).__name__)
                 return {}
         elif isinstance(value, list):
             try:
                 result = [TraceProcessor.truncate_value(v, max_length) for v in value]
                 return result
             except Exception as e:
-                logger.warning(f"Error truncating list: {e}, returning empty list")
+                logger.warning("Error truncating trace list (%s); returning an empty list", type(e).__name__)
                 return []
         # For datetime objects and other non-JSON serializable types, convert to string
         elif not isinstance(value, (int, float, bool)):
             try:
                 return str(value)[:max_length] + "..." if len(str(value)) > max_length else str(value)
             except Exception as e:
-                logger.warning(f"Error converting value to string: {e}, returning None")
+                logger.warning("Error converting trace value (%s); returning null", type(e).__name__)
                 return None
         return value
 
@@ -110,7 +110,7 @@ class TraceProcessor:
             encoding = tiktoken.get_encoding("cl100k_base")  # Using OpenAI's encoding
             return len(encoding.encode(text))
         except Exception as e:
-            logger.warning(f"Error counting tokens with tiktoken: {e}, falling back to approximation")
+            logger.warning("Token counting failed (%s); using the bounded approximation", type(e).__name__)
             # Fallback to approximate token count if tiktoken fails
             return len(text.split())
 
@@ -447,16 +447,6 @@ class TraceProcessor:
             f"Processing {len(traces)} traces, truncate_length={truncate_length}, return_full_data={return_full_data}"
         )
 
-        if traces:
-            # Handle both dict traces and WeaveTrace Pydantic objects
-            trace_ids = []
-            for t in traces:
-                if hasattr(t, "id"):  # Pydantic WeaveTrace object
-                    trace_ids.append(t.id)
-                elif isinstance(t, dict) and "id" in t:  # Dictionary
-                    trace_ids.append(t.get("id"))
-            logger.debug(f"First few trace IDs: {trace_ids[:3]}")
-
         # Generate metadata
         metadata = TraceMetadata(
             total_traces=len(traces),
@@ -568,7 +558,7 @@ class TraceProcessor:
                     total += float(val)
                     found = True
             except Exception as e:
-                logger.warning(f"Error converting cost to float: {e}")
+                logger.warning("Could not convert a returned cost value (%s)", type(e).__name__)
 
         return total if found else 0.0
 

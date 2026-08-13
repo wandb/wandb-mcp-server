@@ -218,15 +218,13 @@ class TraceService:
                     # Valid nested field (e.g., "summary.weave.latency_ms", "attributes.foo")
                     if col_name not in filtered_columns_for_api:
                         filtered_columns_for_api.append(col_name)
-                    logger.info(f"Nested column field '{col_name}' requested, added to API columns.")
+                    logger.info("A validated nested column was added to the API projection")
                 else:
-                    logger.warning(
-                        f"Invalid base field '{base_field}' in nested column '{col_name}'. It will be ignored."
-                    )
+                    logger.warning("An invalid nested column was ignored")
                     invalid_columns_reported.add(col_name)
             else:
                 # Neither a direct valid column, nor a recognized synthetic, nor a valid-looking nested path
-                logger.warning(f"Invalid column '{col_name}' requested. It will be ignored.")
+                logger.warning("An invalid column was ignored")
                 invalid_columns_reported.add(col_name)
 
         # Ensure filtered_columns_for_api does not have duplicates and maintains order as much as possible
@@ -305,7 +303,7 @@ class TraceService:
                     logger.debug(f"Adding synthetic 'costs' column with {len(costs_data)} providers")
                     updated_trace["costs"] = costs_data
                 else:
-                    logger.warning(f"No costs data found in trace {trace.get('id')}")
+                    logger.warning("No costs data found in a returned trace")
                     updated_trace["costs"] = {}
 
             # Add status from summary if requested
@@ -315,10 +313,10 @@ class TraceService:
                     # Extract from summary.weave.status
                     status = trace.get("summary", {}).get("weave", {}).get("status")
                     if status:
-                        logger.debug(f"Adding synthetic 'status' from summary: {status}")
+                        logger.debug("Adding synthetic status from summary")
                         updated_trace["status"] = status
                     else:
-                        logger.warning(f"No status data found in trace {trace.get('id')}")
+                        logger.warning("No status data found in a returned trace")
                         updated_trace["status"] = None
 
             # Add latency_ms from summary if requested
@@ -328,10 +326,10 @@ class TraceService:
                     # Extract from summary.weave.latency_ms
                     latency = trace.get("summary", {}).get("weave", {}).get("latency_ms")
                     if latency is not None:
-                        logger.debug(f"Adding synthetic 'latency_ms' from summary: {latency}")
+                        logger.debug("Adding synthetic latency from summary")
                         updated_trace["latency_ms"] = latency
                     else:
-                        logger.warning(f"No latency_ms data found in trace {trace.get('id')}")
+                        logger.warning("No latency data found in a returned trace")
                         updated_trace["latency_ms"] = None
 
             # Add warnings for invalid columns
@@ -399,7 +397,7 @@ class TraceService:
 
         # Handle latency field mapping
         if sort_by in self.LATENCY_FIELD_MAPPING:
-            logger.info(f"Mapping sort field '{sort_by}' to '{self.LATENCY_FIELD_MAPPING[sort_by]}'")
+            logger.info("Mapping a supported synthetic sort field to its server field")
             server_sort_by = self.LATENCY_FIELD_MAPPING[sort_by]
             server_sort_direction = sort_direction
         elif client_side_cost_sort:
@@ -407,25 +405,21 @@ class TraceService:
             server_sort_by = "started_at"
             server_sort_direction = sort_direction
         elif sort_by == "latency_ms":  # Added specific handling for latency_ms sort
-            logger.info(
-                f"Sort by 'latency_ms' requested. Will sort by server field '{self.LATENCY_FIELD_MAPPING['latency_ms']}'."
-            )
+            logger.info("Mapping the latency sort field to its server field")
             server_sort_by = self.LATENCY_FIELD_MAPPING["latency_ms"]
             server_sort_direction = sort_direction
         elif "." in sort_by:  # Handles general dot-separated paths
             base_field = sort_by.split(".")[0]
             if base_field in VALID_COLUMNS:
-                logger.info(f"Using nested sort field for server: {sort_by}")
+                logger.info("Using a validated nested server sort field")
                 server_sort_by = sort_by
                 server_sort_direction = sort_direction
             else:
-                logger.warning(
-                    f"Invalid base field '{base_field}' in sort_by '{sort_by}', falling back to 'started_at'."
-                )
+                logger.warning("Invalid nested sort field; using the default sort")
                 server_sort_by = "started_at"
                 server_sort_direction = sort_direction
         elif sort_by not in VALID_COLUMNS:
-            logger.warning(f"Invalid sort field '{sort_by}', falling back to 'started_at'.")
+            logger.warning("Invalid sort field; using the default sort")
             server_sort_by = "started_at"
             server_sort_direction = sort_direction
         else:  # sort_by is in VALID_COLUMNS and not a special case
@@ -496,7 +490,7 @@ class TraceService:
 
         # Client-side cost-based sorting if needed
         if client_side_cost_sort and all_traces:
-            logger.info(f"Performing client-side sorting by {sort_by}")
+            logger.info("Performing a bounded client-side cost sort")
             # Sort traces by cost
             all_traces.sort(
                 key=lambda t: TraceProcessor.get_cost(t, sort_by),
@@ -508,7 +502,7 @@ class TraceService:
 
         # If we need to synthesize fields, do it
         if synthetic_fields:
-            logger.info(f"Synthesizing fields: {synthetic_fields}")
+            logger.info("Synthesizing %d requested fields", len(synthetic_fields))
             all_traces = [TraceProcessor.synthesize_fields(trace, synthetic_fields) for trace in all_traces]
 
         # Process traces
@@ -625,20 +619,20 @@ class TraceService:
         effective_sort_by = "started_at"  # Default
         if sort_by == "latency_ms":
             effective_sort_by = self.LATENCY_FIELD_MAPPING["latency_ms"]
-            logger.info(f"Paginated sort by 'latency_ms', server will use '{effective_sort_by}'.")
+            logger.info("Mapping the paginated latency sort field to its server field")
         elif "." in sort_by:
             base_field = sort_by.split(".")[0]
             if base_field in VALID_COLUMNS:
                 effective_sort_by = sort_by
-                logger.info(f"Paginated sort by nested field '{sort_by}', server will use it directly.")
+                logger.info("Using a validated nested sort field for pagination")
             else:
-                logger.warning(f"Paginated sort by invalid nested field '{sort_by}', defaulting to 'started_at'.")
+                logger.warning("Invalid nested pagination sort field; using the default sort")
         elif (
             sort_by in VALID_COLUMNS and sort_by not in self.COST_FIELDS
         ):  # Exclude COST_FIELDS as they are client-sorted
             effective_sort_by = sort_by
         elif sort_by not in self.COST_FIELDS:  # If not valid and not cost, warn and default
-            logger.warning(f"Paginated sort by invalid field '{sort_by}', defaulting to 'started_at'.")
+            logger.warning("Invalid pagination sort field; using the default sort")
 
         # Validate and filter columns using CallSchema
         # Pass the original 'columns'
@@ -655,7 +649,7 @@ class TraceService:
         # filtered_api_columns = self._ensure_required_columns_for_synthetic(filtered_api_columns, rs_columns)
 
         if client_side_cost_sort:
-            logger.info(f"Cost-based sorting detected: {sort_by}")
+            logger.info("Cost-based pagination sort selected")
             all_traces = self._query_for_cost_sorting(
                 entity_name=entity_name,
                 project_name=project_name,
@@ -818,7 +812,7 @@ class TraceService:
             else [t["id"] for t in filtered_results if "id" in t]
         )
 
-        logger.info(f"After sorting by {sort_by}, selected {len(top_ids)} trace IDs")
+        logger.info("Selected %d traces after bounded cost sorting", len(top_ids))
 
         if not top_ids:
             return []

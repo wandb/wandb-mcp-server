@@ -104,6 +104,37 @@ def test_trace_count_attempts_once_and_preserves_retry_after(monkeypatch: pytest
     }
 
 
+def test_trace_count_never_logs_customer_request_content(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request_canary = "customer-filter-canary"
+    with _overloaded_weave_server(
+        status_code=400,
+        retry_after="0",
+        body=b"upstream-response-canary",
+    ) as (server_url, _attempts):
+        monkeypatch.setattr(count_module.WandBApiManager, "get_api_key", lambda: "test-key")
+        monkeypatch.setattr(count_module.WandBApiManager, "get_api", lambda: object())
+        monkeypatch.setattr("wandb_mcp_server.config.WF_TRACE_SERVER_URL", server_url)
+
+        with caplog.at_level("DEBUG"):
+            with pytest.raises(Exception):
+                count_module.count_traces(
+                    "customer-entity",
+                    "customer-project",
+                    filters={"trace_id": request_canary},
+                )
+
+    for protected in (
+        request_canary,
+        "customer-entity",
+        "customer-project",
+        "upstream-response-canary",
+    ):
+        assert protected not in caplog.text
+
+
 def test_trace_count_default_uses_validated_wandb_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 

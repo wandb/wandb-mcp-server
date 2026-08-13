@@ -91,17 +91,11 @@ class WeaveApiClient:
         url = f"{self.server_url}/calls/stream_query"
         headers = self._get_auth_headers()
 
-        # Demote the raw-body log to DEBUG at standard+ privacy levels. The body
-        # is a customer-supplied Weave filter expression that may contain PII-ish
-        # run/project identifiers or inline values; product analytics receives
-        # only bounded usage dimensions from the public tool boundary.
-        from wandb_mcp_server.analytics import is_verbose_log_site_gated
-
-        if is_verbose_log_site_gated():
-            logger.debug(f"Sending request to Weave server:\n{json.dumps(query_params, indent=2)[:1000]}...\n")
-        else:
-            logger.info(f"Sending request to Weave server:\n{json.dumps(query_params, indent=2)[:1000]}...\n")
-        logger.debug(f"Full query parameters:\n{json.dumps(query_params, indent=2)}\n")
+        # Never log the customer-supplied query. It may contain entity/project
+        # identifiers, filters, prompts, trace IDs, or other customer content.
+        # Product analytics receives only bounded allowlisted dimensions from
+        # the public MCP tool boundary.
+        logger.debug("Sending bounded request to the Weave trace service")
 
         try:
             response = self.session.post(
@@ -114,8 +108,8 @@ class WeaveApiClient:
 
             # Check for errors
             if response.status_code != 200:
-                error_msg = f"Error {response.status_code}: {response.text}"
-                logger.error(error_msg)
+                error_msg = f"Error {response.status_code}"
+                logger.error("Weave trace request failed with HTTP %s", response.status_code)
                 # Keep the response (including Retry-After) attached so the
                 # common MCP boundary can produce a stable server_busy result.
                 raise requests.HTTPError(error_msg, response=response)
@@ -127,17 +121,14 @@ class WeaveApiClient:
                 if line:
                     # Parse the JSON line
                     trace_data = json.loads(line.decode("utf-8"))
-                    logger.debug(f"Received trace data with ID: {trace_data.get('id')}")
                     yield trace_data
 
         except requests.RequestException as e:
-            logger.error(
-                f"Error executing HTTP request to Weave server: {e}. Request body snippet: {str(query_params)[:1000]}"
-            )
-            raise Exception(f"Failed to query Weave traces due to network error: {e}") from e
+            logger.error("Weave trace HTTP request failed (%s)", type(e).__name__)
+            raise Exception("Failed to query Weave traces due to a network error") from e
         except json.JSONDecodeError as e:
-            logger.error(f"Error decoding JSON from Weave server: {e}")
-            raise Exception(f"Failed to parse Weave API response: {e}")
+            logger.error("Weave trace response contained invalid JSON")
+            raise Exception("Failed to parse the Weave trace response") from e
         except Exception as e:
-            logger.error(f"Unexpected error during HTTP request to Weave server: {e}")
+            logger.error("Unexpected Weave trace request failure (%s)", type(e).__name__)
             raise

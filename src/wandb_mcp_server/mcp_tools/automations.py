@@ -214,9 +214,14 @@ def list_automations(
 
         except Exception as e:
             raise_for_wandb_server_busy(e)
-            logger.error(f"Error in list_automations: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            logger.error("Automation listing failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "api_error",
+                    "message": "The W&B automation query failed.",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +338,11 @@ def list_integrations(
 
         except Exception as e:
             raise_for_wandb_server_busy(e)
-            logger.error(f"Error in list_integrations: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            logger.error("Integration listing failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "api_error",
+                    "message": "The W&B integration query failed.",
+                }
+            )

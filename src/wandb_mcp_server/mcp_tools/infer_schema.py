@@ -148,9 +148,14 @@ def infer_trace_schema(
             from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 
             raise_for_wandb_server_busy(e)
-            logger.error(f"Failed to query traces for schema inference: {e}")
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": f"Failed to infer schema for {entity_name}/{project_name}: {type(e).__name__}"})
+            logger.error("Trace schema inference failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "schema_query_failed",
+                    "message": "The Weave trace schema query failed.",
+                }
+            )
 
         traces = result.traces if hasattr(result, "traces") else []
         if not traces:

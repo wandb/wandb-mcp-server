@@ -179,13 +179,14 @@ class TestResolveTraceRootsTool:
         from wandb_mcp_server.mcp_tools.resolve_trace_roots import resolve_trace_roots
 
         mock_svc = MagicMock()
-        mock_svc.resolve_trace_roots.side_effect = ValueError("connection failed")
+        mock_svc.resolve_trace_roots.side_effect = ValueError("customer-error-canary")
         mock_get_svc.return_value = mock_svc
 
         result = json.loads(resolve_trace_roots("entity", "project", ["t1"]))
 
         assert result["error"] == "resolve_failed"
-        assert "connection failed" in result["message"]
+        assert result["message"] == "Trace-root resolution failed."
+        assert "customer-error-canary" not in json.dumps(result)
 
     @patch("wandb_mcp_server.mcp_tools.resolve_trace_roots.get_trace_service")
     def test_tool_deduplicates_in_response(self, mock_get_svc):

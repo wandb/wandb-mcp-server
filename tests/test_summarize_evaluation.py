@@ -258,12 +258,13 @@ class TestSummarizeEvaluation:
     def test_query_failure_returns_error(self, mock_get_svc, _mock_count):
         mock_service = MagicMock()
         mock_get_svc.return_value = mock_service
-        mock_service.query_traces.side_effect = Exception("Connection refused")
+        mock_service.query_traces.side_effect = Exception("customer-error-canary")
 
         result = json.loads(summarize_evaluation("ent", "proj"))
 
         assert result["error"] == "evaluation_query_failed"
-        assert "Connection refused" in result["message"]
+        assert result["message"] == "The evaluation trace query failed."
+        assert "customer-error-canary" not in json.dumps(result)
 
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.count_traces", side_effect=[1, 0])
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")

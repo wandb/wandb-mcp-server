@@ -832,7 +832,7 @@ class AnalyticsTracker:
                 extra={"json_fields": event, "labels": labels},
             )
         except Exception as exc:
-            logger.debug(f"Analytics emit failed (non-fatal): {exc}")
+            logger.debug("Analytics emit failed (non-fatal; %s)", type(exc).__name__)
 
         try:
             from wandb_mcp_server.analytics_segment import get_segment_forwarder
@@ -841,7 +841,7 @@ class AnalyticsTracker:
             if forwarder.enabled:
                 forwarder.forward(event)
         except Exception as exc:
-            logger.debug(f"Segment forwarding failed (non-fatal): {exc}")
+            logger.debug("Segment forwarding failed (non-fatal; %s)", type(exc).__name__)
 
         try:
             from wandb_mcp_server.analytics_datadog import get_datadog_forwarder
@@ -850,7 +850,7 @@ class AnalyticsTracker:
             if dd_forwarder.enabled:
                 dd_forwarder.forward(event)
         except Exception as exc:
-            logger.debug(f"Datadog forwarding failed (non-fatal): {exc}")
+            logger.debug("Datadog forwarding failed (non-fatal; %s)", type(exc).__name__)
 
     @staticmethod
     def _apply_identity_privacy(
@@ -917,7 +917,7 @@ class AnalyticsTracker:
                 },
             )
         except Exception as exc:
-            logger.warning(f"Failed to track user session: {exc}")
+            logger.warning("Failed to track user session (%s)", type(exc).__name__)
 
     def track_tool_call(
         self,
@@ -964,7 +964,7 @@ class AnalyticsTracker:
                 labels,
             )
         except Exception as exc:
-            logger.warning(f"Failed to track tool call: {exc}")
+            logger.warning("Failed to track tool call (%s)", type(exc).__name__)
 
     def track_request(
         self,
@@ -1011,7 +1011,7 @@ class AnalyticsTracker:
                 },
             )
         except Exception as exc:
-            logger.warning(f"Failed to track request: {exc}")
+            logger.warning("Failed to track request (%s)", type(exc).__name__)
 
 
 # -- Singleton access -------------------------------------------------------

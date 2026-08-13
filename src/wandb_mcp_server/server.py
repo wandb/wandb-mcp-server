@@ -364,7 +364,7 @@ async def _count_traces_or_none(
         from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 
         raise_for_wandb_server_busy(exc)
-        logger.info("count_traces skipped after timeout or error", exc_info=True)
+        logger.info("Trace preflight count skipped after timeout or error")
         return None
 
 
@@ -391,12 +391,11 @@ def validate_api_key(api_key: str) -> bool:
             overrides={"base_url": WANDB_API_BASE_URL},
             timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
         )
-        viewer = api.viewer  # This will fail if the key is invalid
-        viewer_id = getattr(viewer, "username", None) or getattr(viewer, "entity", None) or "<unknown>"
-        logger.info(f"W&B API key validated successfully. Viewer: {viewer_id}")
+        api.viewer  # This will fail if the key is invalid
+        logger.info("W&B API key validated successfully")
         return True
     except Exception as e:
-        logger.error(f"Invalid W&B API key: {e}")
+        logger.error("W&B API key validation failed (%s)", type(e).__name__)
         return False
 
 
@@ -471,7 +470,7 @@ def configure_wandb_logging() -> None:
         )
         logger.debug("W&B configured for silent operation")
     except Exception as e:
-        logger.warning(f"Could not apply wandb.setup settings: {e}")
+        logger.warning("Could not apply W&B SDK settings (%s)", type(e).__name__)
 
     # Silence specific loggers that might interfere with MCP
     weave_logger = get_rich_logger("weave")
@@ -517,7 +516,7 @@ def initialize_weave_tracing() -> bool:
 
     try:
         weave_project = f"{entity}/{project}"
-        logger.info(f"Initializing Weave tracing for MCP operations: {weave_project}")
+        logger.info("Initializing Weave tracing for MCP operations")
 
         # Set optional MCP configuration for list operations tracing
         if os.environ.get("MCP_TRACE_LIST_OPERATIONS", "").lower() == "true":
@@ -530,7 +529,7 @@ def initialize_weave_tracing() -> bool:
         logger.info("Weave tracing initialized - FastMCP operations will be automatically traced")
         return True
     except Exception as e:
-        logger.error(f"Failed to initialize Weave tracing: {e}")
+        logger.error("Failed to initialize Weave tracing (%s)", type(e).__name__)
         return False
 
 
@@ -737,7 +736,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 if matching_count is not None:
                     result_model.metadata.total_matching_count = matching_count
             except Exception:
-                logger.debug("count_traces for total_matching_count failed", exc_info=True)
+                logger.debug("Trace total-count enrichment failed")
 
             # Normalize traces to plain dicts -- the processor may return
             # WeaveTrace Pydantic objects which aren't JSON-serializable by
@@ -782,7 +781,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
 
             return response_json
         except MemoryError:
-            logger.error("MemoryError in query_weave_traces_tool", exc_info=True)
+            logger.error("Memory limit reached in Weave trace query")
             return json.dumps(
                 {
                     "error": "out_of_memory",
@@ -798,11 +797,11 @@ def register_tools(mcp_instance: FastMCP) -> None:
             from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 
             raise_for_wandb_server_busy(e)
-            logger.error(f"Error in query_weave_traces_tool: {e}", exc_info=True)
+            logger.error("Weave trace query failed (%s)", type(e).__name__)
             return json.dumps(
                 {
                     "error": "query_failed",
-                    "message": str(e)[:500],
+                    "message": "The Weave trace query failed.",
                 }
             )
 
@@ -857,8 +856,13 @@ def register_tools(mcp_instance: FastMCP) -> None:
             from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 
             raise_for_wandb_server_busy(e)
-            logger.error(f"Error in count_weave_traces_tool: {e}")
-            return json.dumps({"error": f"Error counting traces: {str(e)}"})
+            logger.error("Weave trace count failed (%s)", type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "count_failed",
+                    "message": "The Weave trace count failed.",
+                }
+            )
 
     from wandb_mcp_server.mcp_tools.resolve_trace_roots import (
         RESOLVE_TRACE_ROOTS_TOOL_DESCRIPTION,
@@ -1095,8 +1099,13 @@ def register_tools(mcp_instance: FastMCP) -> None:
             from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 
             raise_for_wandb_server_busy(e)
-            logger.error(f"Error in get_run_history_tool: {e}")
-            return json.dumps({"error": str(e)})
+            logger.error("Run-history query failed (%s)", type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "history_query_failed",
+                    "message": "The W&B run-history query failed.",
+                }
+            )
 
     # --- Registry & Artifact tools ---
 

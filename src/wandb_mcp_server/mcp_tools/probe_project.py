@@ -273,7 +273,10 @@ def probe_project(
                 )
             except SelectiveReadUnavailable as exc:
                 raise_for_wandb_server_busy(exc)
-                logger.warning("Project selective read unavailable; using bounded SDK fallback: %s", exc)
+                logger.warning(
+                    "Project selective read unavailable; using bounded SDK fallback (%s)",
+                    type(exc).__name__,
+                )
                 counts, fields, run_samples = _sdk_fallback(
                     api,
                     entity_name=entity_name,

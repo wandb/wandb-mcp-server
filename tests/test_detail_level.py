@@ -106,6 +106,17 @@ class TestProcessTracesDetailLevel:
         assert trace["id"] == "t1"
         assert "inputs" not in trace
 
+    def test_process_traces_never_logs_trace_identifiers(self, caplog):
+        traces = self._make_traces()
+        traces[0]["id"] = "customer-trace-id-canary"
+        traces[0]["trace_id"] = "customer-root-id-canary"
+
+        with caplog.at_level("DEBUG"):
+            process_traces(traces, detail_level="schema")
+
+        assert "customer-trace-id-canary" not in caplog.text
+        assert "customer-root-id-canary" not in caplog.text
+
 
 class TestSchemaProjection:
     """Verify detail_level='schema' passes server-side column projection."""

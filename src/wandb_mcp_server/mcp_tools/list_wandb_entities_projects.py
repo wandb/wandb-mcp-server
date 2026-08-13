@@ -96,9 +96,14 @@ def list_entity_projects(
                 entities_projects[ent] = projects_data
             except Exception as e:
                 raise_for_wandb_server_busy(e)
-                logger.warning(f"Failed to list projects for entity {ent}: {e}")
-                ctx.mark_error(f"{type(e).__name__}: {e}")
-                entities_projects[ent] = [{"error": str(e)}]
+                logger.warning("Failed to list projects for one entity (%s)", type(e).__name__)
+                ctx.mark_error(type(e).__name__)
+                entities_projects[ent] = [
+                    {
+                        "error": "project_query_failed",
+                        "message": "W&B project listing failed for this entity.",
+                    }
+                ]
 
         return json.dumps(
             {
