@@ -10,10 +10,18 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
 from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.config import MCP_MAX_WANDB_QUERY_ITEMS, MCP_WORKLOAD_PROFILE
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.registry_support import (
+    bounded_sdk_page,
+    fit_registry_response,
+    nullable_string,
+    registry_error_result,
+    require_registry,
+    resolve_registry_organization,
+    validate_optional_identifier,
+)
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_selective_reads import (
     SelectiveReadUnavailable,
@@ -122,15 +130,15 @@ def list_artifact_versions(
         "list_artifact_versions",
         None,
         {
-            "collection_name": collection_name,
-            "entity_name": entity_name,
-            "project_name": project_name,
-            "registry_name": registry_name,
-            "type_name": type_name,
             "source": source,
             "max_items": max_items,
             "order": order,
             "tag_count": len(tags or []),
+            "has_entity": entity_name is not None,
+            "has_project": project_name is not None,
+            "has_registry": registry_name is not None,
+            "has_type": type_name is not None,
+            "has_organization": organization is not None,
             "has_created_after": created_after is not None,
             "has_created_before": created_before is not None,
         },
@@ -149,6 +157,13 @@ def list_artifact_versions(
             )
             if validation_error:
                 return json.dumps({"error": "invalid_input", "message": validation_error})
+            if source == "registry":
+                try:
+                    validate_optional_identifier("collection_name", collection_name)
+                    validate_optional_identifier("registry_name", registry_name)
+                    validate_optional_identifier("organization", organization)
+                except ValueError as exc:
+                    return json.dumps(registry_error_result(exc))
 
             max_items = min(max_items, MCP_MAX_WANDB_QUERY_ITEMS)
             order_value = _normalize_order(order)
@@ -161,13 +176,13 @@ def list_artifact_versions(
             exact_total: int | None = None
 
             if source == "registry":
-                reg_kwargs: Dict[str, Any] = {}
-                if organization is not None:
-                    reg_kwargs["organization"] = organization
-                registry = api.registry(registry_name, **reg_kwargs)
-                resolved_organization = organization or getattr(registry, "organization", None)
-                if not isinstance(resolved_organization, str) or not resolved_organization:
-                    raise ValueError("Unable to resolve the registry organization")
+                resolved_organization = resolve_registry_organization(api, organization)
+                registry_search = api.registries(
+                    organization=resolved_organization,
+                    filter={"name": registry_name},
+                    per_page=1,
+                )
+                require_registry(registry_search)
                 try:
                     page = fetch_registry_artifact_versions(
                         api,
@@ -181,11 +196,11 @@ def list_artifact_versions(
                     upstream_has_more = page.has_more
                 except SelectiveReadUnavailable as exc:
                     raise_for_wandb_server_busy(exc)
-                    versions_iter = registry.collections(
+                    versions_iter = registry_search.collections(
                         filter={"name": collection_name},
                         per_page=min(scan_limit, 100),
                     ).versions(per_page=min(scan_limit, 100))
-                    raw_versions, upstream_has_more = _bounded_iterable(versions_iter, scan_limit)
+                    raw_versions, upstream_has_more = bounded_sdk_page(versions_iter, scan_limit)
                     compatibility_caveat = (
                         "This Dedicated backend lacks ordered registry-version projection; "
                         "a bounded SDK page was returned in backend order."
@@ -206,7 +221,7 @@ def list_artifact_versions(
                         exact_total = len(versions_iter)
                     except (TypeError, NotImplementedError):
                         exact_total = None
-                raw_versions, upstream_has_more = _bounded_iterable(versions_iter, scan_limit)
+                raw_versions, upstream_has_more = bounded_sdk_page(versions_iter, scan_limit)
 
             matching = [
                 _serialize_artifact_summary(artifact)
@@ -246,9 +261,19 @@ def list_artifact_versions(
             }
             if compatibility_caveat:
                 result["compatibility_caveat"] = compatibility_caveat
-            return json.dumps(result)
+            if source == "registry":
+                result = fit_registry_response(
+                    result,
+                    aliases=("versions",),
+                    optional_fields=("description", "tags", "aliases", "digest"),
+                )
+            return json.dumps(result, allow_nan=False)
 
         except Exception as e:
+            if source == "registry":
+                logger.error("Registry version listing failed (%s)", type(e).__name__)
+                ctx.mark_error(type(e).__name__)
+                return json.dumps(registry_error_result(e))
             raise_for_wandb_server_busy(e)
             logger.error(f"Error in list_artifact_versions: {e}", exc_info=True)
             ctx.mark_error(f"{type(e).__name__}: {e}")
@@ -509,7 +534,7 @@ def _serialize_artifact_summary(artifact: Any) -> Dict[str, Any]:
         "size": getattr(artifact, "size", None),
         "file_count": getattr(artifact, "file_count", None),
         "description": getattr(artifact, "description", None),
-        "created_at": str(getattr(artifact, "created_at", "")),
+        "created_at": nullable_string(getattr(artifact, "created_at", None)),
         "digest": getattr(artifact, "digest", None),
     }
 
@@ -544,10 +569,13 @@ def _validate_version_query(
         return str(exc)
     if after_dt and before_dt and after_dt > before_dt:
         return "created_after must not be later than created_before"
-    if tags is not None and (
-        not isinstance(tags, list) or any(not isinstance(tag, str) or not tag.strip() for tag in tags)
-    ):
-        return "tags must be a list of non-empty strings"
+    if tags is not None:
+        if not isinstance(tags, list) or any(not isinstance(tag, str) or not tag.strip() for tag in tags):
+            return "tags must be a list of non-empty strings"
+        if len(tags) > 100:
+            return "tags cannot contain more than 100 values"
+        if any(len(tag.encode("utf-8")) > 512 for tag in tags):
+            return "each tag must be at most 512 bytes"
     return None
 
 
@@ -609,23 +637,6 @@ def _matches_artifact_filters(
         (created_after is not None and created_at < created_after)
         or (created_before is not None and created_at > created_before)
     )
-
-
-def _bounded_iterable(values: Any, scan_limit: int) -> tuple[list[Any], bool]:
-    iterator = iter(values)
-    rows: list[Any] = []
-    for _ in range(scan_limit):
-        raise_if_tool_deadline_exceeded()
-        try:
-            rows.append(next(iterator))
-        except StopIteration:
-            return rows, False
-    raise_if_tool_deadline_exceeded()
-    try:
-        next(iterator)
-    except StopIteration:
-        return rows, False
-    return rows, True
 
 
 def _serialize_run_info(run: Any) -> Optional[Dict[str, Any]]:

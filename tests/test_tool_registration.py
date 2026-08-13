@@ -1,6 +1,7 @@
 import importlib
 import os
 
+import pytest
 from mcp.server.fastmcp import FastMCP
 
 from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
@@ -15,13 +16,27 @@ WEAVE_TOOLS = {
     "summarize_evaluation_tool",
 }
 
-NON_WEAVE_TOOLS = {
+MODELS_TOOLS = {
     "query_wandb_tool",
     "get_run_history_tool",
     "list_artifact_versions_tool",
+    "get_artifact_details_tool",
+    "compare_artifact_versions_tool",
     "compare_runs_tool",
+    "diagnose_run_tool",
     "probe_project_tool",
+    "list_entities_tool",
+    "query_wandb_entity_projects",
+    "list_registries_tool",
+    "list_registry_collections_tool",
+    "list_wandb_automations_tool",
+    "list_wandb_integrations_tool",
+    "search_wandb_docs_tool",
+    "create_wandb_report_tool",
+    "log_analysis_to_wandb",
 }
+
+NON_WEAVE_TOOLS = MODELS_TOOLS
 
 BASE_WRITE_TOOLS = {
     "create_wandb_report_tool",
@@ -178,6 +193,69 @@ def test_agent_and_aria_tools_have_exact_full_manifest():
     assert len(names) == 33
 
 
+@pytest.mark.parametrize(
+    ("weave", "agents", "aria", "expected"),
+    [
+        (False, False, False, MODELS_TOOLS),
+        (True, False, False, MODELS_TOOLS | WEAVE_TOOLS),
+        (False, True, False, MODELS_TOOLS | AGENT_TOOLS),
+        (True, False, True, MODELS_TOOLS | WEAVE_TOOLS | ARIA_TOOLS),
+        (True, True, False, MODELS_TOOLS | WEAVE_TOOLS | AGENT_TOOLS),
+        (True, True, True, MODELS_TOOLS | WEAVE_TOOLS | AGENT_TOOLS | ARIA_TOOLS),
+    ],
+)
+def test_feature_profiles_have_exact_manifests(weave, agents, aria, expected):
+    _reset_tool_gate_env()
+    os.environ["WANDB_MCP_ENABLE_WEAVE_TOOLS"] = str(weave).lower()
+    os.environ["WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS"] = str(agents).lower()
+    os.environ["WANDB_MCP_ENABLE_ARIA_TOOLS"] = str(aria).lower()
+    import wandb_mcp_server.config as cfg
+
+    try:
+        importlib.reload(cfg)
+        names = _registered_tool_names()
+    finally:
+        _reset_tool_gate_env()
+        importlib.reload(cfg)
+
+    assert names == expected
+    assert len(names) in {17, 22, 25, 30, 33}
+
+
+@pytest.mark.parametrize(
+    ("weave", "agents", "aria"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (True, False, True),
+        (True, True, False),
+        (True, True, True),
+    ],
+)
+def test_every_feature_profile_has_exact_read_only_variant(weave, agents, aria):
+    _reset_tool_gate_env()
+    os.environ["WANDB_MCP_ENABLE_WEAVE_TOOLS"] = str(weave).lower()
+    os.environ["WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS"] = str(agents).lower()
+    os.environ["WANDB_MCP_ENABLE_ARIA_TOOLS"] = str(aria).lower()
+    os.environ["WANDB_MCP_READ_ONLY"] = "false"
+    import wandb_mcp_server.config as cfg
+
+    importlib.reload(cfg)
+    writable = _registered_tool_names()
+    os.environ["WANDB_MCP_READ_ONLY"] = "true"
+    try:
+        importlib.reload(cfg)
+        read_only = _registered_tool_names()
+    finally:
+        _reset_tool_gate_env()
+        importlib.reload(cfg)
+
+    expected_removed = BASE_WRITE_TOOLS | ({"aria_send_message"} if aria else set())
+    assert writable - read_only == expected_removed
+    assert read_only == writable - expected_removed
+
+
 def test_read_only_mode_removes_exactly_the_write_tools():
     _reset_tool_gate_env()
     os.environ["WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS"] = "true"
@@ -198,7 +276,7 @@ def test_read_only_mode_removes_exactly_the_write_tools():
     assert default_names - read_only_names == WRITE_TOOLS
     assert read_only_names - default_names == set()
     assert WRITE_TOOLS.isdisjoint(read_only_names)
-    assert NON_WEAVE_TOOLS.issubset(read_only_names)
+    assert (NON_WEAVE_TOOLS - BASE_WRITE_TOOLS).issubset(read_only_names)
     assert "query_wandb_tool" in read_only_names
     assert WEAVE_TOOLS.issubset(read_only_names)
     assert AGENT_TOOLS.issubset(read_only_names)
@@ -225,7 +303,7 @@ def test_read_only_mode_is_independent_of_weave_and_agent_gates():
     assert WRITE_TOOLS.isdisjoint(names)
     assert WEAVE_TOOLS.isdisjoint(names)
     assert AGENT_TOOLS.issubset(names)
-    assert NON_WEAVE_TOOLS.issubset(names)
+    assert (NON_WEAVE_TOOLS - BASE_WRITE_TOOLS).issubset(names)
     assert ARIA_TOOLS - {"aria_send_message"} <= names
     assert "query_wandb_tool" in names
 

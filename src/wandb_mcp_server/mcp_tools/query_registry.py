@@ -7,12 +7,24 @@ collections via the ``wandb.Api`` public interface.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
-from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
+from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.config import MCP_MAX_WANDB_QUERY_ITEMS
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.registry_support import (
+    RegistryInputError,
+    bounded_sdk_page,
+    fit_registry_response,
+    nullable_string,
+    registry_error_result,
+    require_registry,
+    resolve_registry_organization,
+    validate_optional_identifier,
+    validate_registry_filter,
+)
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -42,8 +54,9 @@ Typical workflow:
 
 <critical_info>
 Requires the user's API key to have access to the organization. If no
-organization is specified, uses the default organization for the
-authenticated user.
+organization is specified, one accessible organization is selected. Accounts
+with more than one accessible organization receive `organization_required`
+with a bounded candidate list.
 Supports MongoDB-style filters on name, description, etc.
 (e.g., {"name": {"$regex": "model.*"}}).
 </critical_info>
@@ -51,7 +64,7 @@ Supports MongoDB-style filters on name, description, etc.
 Parameters
 ----------
 organization : str, optional
-    W&B organization name. Omit to use the authenticated user's default org.
+    W&B organization name. Omit to resolve one accessible organization.
 filter : dict, optional
     MongoDB-style filter dict (e.g., {"name": {"$regex": "model.*"}}).
 max_items : int, optional
@@ -76,38 +89,52 @@ def list_registries(
     with track_tool_execution(
         "list_registries",
         None,
-        {"organization": organization, "filter": filter, "max_items": max_items},
+        {
+            "has_organization": organization is not None,
+            "has_filter": filter is not None,
+            "max_items": max_items,
+        },
     ) as ctx:
         try:
-            if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 1:
-                return json.dumps({"error": "invalid_input", "message": "max_items must be a positive integer"})
+            _validate_request(
+                organization=organization,
+                registry_name=None,
+                filter=filter,
+                max_items=max_items,
+            )
             max_items = min(max_items, MCP_MAX_WANDB_QUERY_ITEMS)
             api = WandBApiManager.get_api()
-            kwargs: Dict[str, Any] = {"per_page": min(max_items + 1, 100)}
-            if organization is not None:
-                kwargs["organization"] = organization
+            resolved_organization = resolve_registry_organization(api, organization)
+            kwargs: Dict[str, Any] = {
+                "organization": resolved_organization,
+                "per_page": min(max_items + 1, 100),
+            }
             if filter is not None:
                 kwargs["filter"] = filter
 
-            page, has_more = _bounded_page(api.registries(**kwargs), max_items)
+            page, has_more = bounded_sdk_page(api.registries(**kwargs), max_items)
             registries: List[Dict[str, Any]] = []
             for reg in page:
+                artifact_types, artifact_types_truncated = _bounded_string_values(
+                    getattr(reg, "artifact_types", []),
+                )
                 registries.append(
                     {
-                        "name": getattr(reg, "name", None),
-                        "full_name": getattr(reg, "full_name", None),
-                        "organization": getattr(reg, "organization", None),
-                        "entity": getattr(reg, "entity", None),
-                        "description": getattr(reg, "description", None),
-                        "visibility": getattr(reg, "visibility", None),
-                        "artifact_types": list(getattr(reg, "artifact_types", [])),
-                        "created_at": str(getattr(reg, "created_at", "")),
-                        "updated_at": str(getattr(reg, "updated_at", "")),
+                        "name": _bounded_text(getattr(reg, "name", None)),
+                        "full_name": _bounded_text(getattr(reg, "full_name", None)),
+                        "organization": _bounded_text(getattr(reg, "organization", None)),
+                        "entity": _bounded_text(getattr(reg, "entity", None)),
+                        "description": _bounded_text(getattr(reg, "description", None)),
+                        "visibility": _bounded_text(getattr(reg, "visibility", None)),
+                        "artifact_types": artifact_types,
+                        "artifact_types_truncated": artifact_types_truncated,
+                        "created_at": nullable_string(getattr(reg, "created_at", None)),
+                        "updated_at": nullable_string(getattr(reg, "updated_at", None)),
                     }
                 )
 
             total_count = None if has_more else len(registries)
-            return json.dumps(
+            result = fit_registry_response(
                 {
                     "items": registries,
                     "registries": registries,
@@ -118,14 +145,15 @@ def list_registries(
                     "project_exhaustive": not has_more,
                     "count": len(registries),
                     "truncated": has_more,
-                }
+                },
+                aliases=("registries",),
             )
+            return json.dumps(result, allow_nan=False)
 
         except Exception as e:
-            raise_for_wandb_server_busy(e)
-            logger.error(f"Error in list_registries: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            logger.error("Registry listing failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(registry_error_result(e))
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +181,7 @@ Parameters
 registry_name : str
     The registry short name (e.g., "model", "dataset", "my-registry").
 organization : str, optional
-    W&B organization name. Omit to use default.
+    W&B organization name. Omit to resolve one accessible organization.
 filter : dict, optional
     MongoDB-style filter (e.g., {"tag": "production"}).
 max_items : int, optional
@@ -163,7 +191,9 @@ Returns
 -------
 JSON with:
   - registry: the queried registry name
-  - collections: list of collection objects with name, type, tags, aliases, etc.
+  - collections: list of collection objects with name, type, tags, and metadata.
+    Collection-wide aliases are intentionally not loaded; use
+    list_artifact_versions_tool for version aliases.
   - returned_count / total_count: returned and exact totals when known
   - has_more / project_exhaustive: explicit pagination scope
 """
@@ -181,49 +211,57 @@ def list_registry_collections(
         "list_registry_collections",
         None,
         {
-            "registry_name": registry_name,
-            "organization": organization,
-            "filter": filter,
+            "has_organization": organization is not None,
+            "has_filter": filter is not None,
             "max_items": max_items,
         },
     ) as ctx:
         try:
-            if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 1:
-                return json.dumps({"error": "invalid_input", "message": "max_items must be a positive integer"})
+            _validate_request(
+                organization=organization,
+                registry_name=registry_name,
+                filter=filter,
+                max_items=max_items,
+            )
             max_items = min(max_items, MCP_MAX_WANDB_QUERY_ITEMS)
             api = WandBApiManager.get_api()
-            reg_kwargs: Dict[str, Any] = {}
-            if organization is not None:
-                reg_kwargs["organization"] = organization
-            registry = api.registry(registry_name, **reg_kwargs)
+            resolved_organization = resolve_registry_organization(api, organization)
+            registry_search = api.registries(
+                organization=resolved_organization,
+                filter={"name": registry_name},
+                per_page=1,
+            )
+            require_registry(registry_search)
 
             coll_kwargs: Dict[str, Any] = {"per_page": min(max_items + 1, 100)}
             if filter is not None:
                 coll_kwargs["filter"] = filter
 
-            collection_iter = registry.collections(**coll_kwargs)
-            exact_total: int | None = None
-            try:
-                exact_total = len(collection_iter)
-            except (TypeError, NotImplementedError):
-                pass
-            page, has_more = _bounded_page(collection_iter, max_items)
+            collection_iter = registry_search.collections(**coll_kwargs)
+            page, has_more = bounded_sdk_page(collection_iter, max_items)
+            last_response = getattr(collection_iter, "last_response", None)
+            exact_total = getattr(last_response, "total_count", None)
+            if not isinstance(exact_total, int) or isinstance(exact_total, bool):
+                exact_total = None
             collections: List[Dict[str, Any]] = []
             for coll in page:
+                tags, tags_truncated = _bounded_string_values(getattr(coll, "tags", []))
                 collections.append(
                     {
-                        "name": getattr(coll, "name", None),
-                        "type": getattr(coll, "type", None),
-                        "description": getattr(coll, "description", None),
-                        "tags": getattr(coll, "tags", []),
-                        "aliases": getattr(coll, "aliases", []),
-                        "created_at": str(getattr(coll, "created_at", "")),
-                        "updated_at": str(getattr(coll, "updated_at", "")),
+                        "name": _bounded_text(getattr(coll, "name", None)),
+                        "type": _bounded_text(getattr(coll, "type", None)),
+                        "description": _bounded_text(getattr(coll, "description", None)),
+                        "tags": tags,
+                        "tags_truncated": tags_truncated,
+                        "aliases": None,
+                        "aliases_loaded": False,
+                        "created_at": nullable_string(getattr(coll, "created_at", None)),
+                        "updated_at": nullable_string(getattr(coll, "updated_at", None)),
                         "is_sequence": coll.is_sequence() if hasattr(coll, "is_sequence") else None,
                     }
                 )
 
-            return json.dumps(
+            result = fit_registry_response(
                 {
                     "registry": registry_name,
                     "items": collections,
@@ -235,24 +273,52 @@ def list_registry_collections(
                     "project_exhaustive": not has_more,
                     "count": len(collections),
                     "truncated": has_more,
-                }
+                },
+                aliases=("collections",),
             )
+            return json.dumps(result, allow_nan=False)
 
         except Exception as e:
-            raise_for_wandb_server_busy(e)
-            logger.error(f"Error in list_registry_collections: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            logger.error("Registry collection listing failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(registry_error_result(e))
 
 
-def _bounded_page(values: Any, limit: int) -> tuple[list[Any], bool]:
-    """Consume at most limit-plus-one values from a lazy SDK collection."""
-    rows: list[Any] = []
+def _validate_request(
+    *,
+    organization: str | None,
+    registry_name: str | None,
+    filter: Mapping[str, Any] | None,
+    max_items: int,
+) -> None:
+    if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 1:
+        raise RegistryInputError("max_items must be a positive integer")
+    validate_optional_identifier("organization", organization)
+    validate_optional_identifier("registry_name", registry_name)
+    validate_registry_filter(filter)
+
+
+def _bounded_text(value: Any, *, max_chars: int = 16_000) -> str | None:
+    rendered = nullable_string(value)
+    if rendered is None or len(rendered) <= max_chars:
+        return rendered
+    return f"{rendered[:max_chars]}…"
+
+
+def _bounded_string_values(values: Any, *, limit: int = 100) -> tuple[list[str], bool]:
+    if values is None:
+        return [], False
+    result: list[str] = []
     iterator = iter(values)
     for _ in range(limit + 1):
         raise_if_tool_deadline_exceeded()
         try:
-            rows.append(next(iterator))
+            value = next(iterator)
         except StopIteration:
-            break
-    return rows[:limit], len(rows) > limit
+            return result, False
+        if len(result) < limit:
+            name = value if isinstance(value, str) else getattr(value, "name", value)
+            rendered = _bounded_text(name, max_chars=512)
+            if rendered is not None:
+                result.append(rendered)
+    return result, True

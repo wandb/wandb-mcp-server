@@ -108,6 +108,7 @@ jobs:
             tests/test_diagnose_run.py \
             tests/test_query_artifacts.py \
             tests/test_query_registry.py \
+            tests/test_registry_read_correctness.py \
             tests/test_summarize_evaluation.py \
             tests/test_infer_schema.py \
             tests/test_tool_registration.py \

@@ -15,6 +15,37 @@ from wandb_mcp_server.wandb_graphql import GraphQLResponseTooLarge, execute_grap
 MAX_SAFE_HISTORY_STEP = (1 << 63) - 2
 
 
+REGISTRY_ORGANIZATION_QUERY = """
+query MCPRegistryOrganization($entity: String!, $hasEntity: Boolean!) {
+  entity(name: $entity) @include(if: $hasEntity) {
+    organization {
+      name
+      orgEntity {
+        name
+      }
+    }
+    user {
+      organizations {
+        name
+        orgEntity {
+          name
+        }
+      }
+    }
+  }
+  viewer @skip(if: $hasEntity) {
+    entity
+    organizations {
+      name
+      orgEntity {
+        name
+      }
+    }
+  }
+}
+"""
+
+
 PROJECTED_RUNS_QUERY = """
 query MCPProjectedRuns(
   $entity: String!
@@ -1764,10 +1795,14 @@ def fetch_registry_artifact_versions(
     cursor: str | None = None
     requests = 0
     has_next_page = False
+    seen_cursors: set[str] = set()
+    request_limit = _projected_page_request_limit(target, page_size)
     registry_filter = json.dumps({"name": f"wandb-registry-{registry_name}"}, separators=(",", ":"))
     collection_filter = json.dumps({"name": collection_name}, separators=(",", ":"))
 
     while len(items) < target:
+        if requests >= request_limit:
+            raise SelectiveReadUnavailable("ordered registry artifact query exceeded its request limit")
         raise_if_tool_deadline_exceeded()
         try:
             data = execute_graphql(
@@ -1791,27 +1826,33 @@ def fetch_registry_artifact_versions(
         if not isinstance(connection, Mapping):
             raise SelectiveReadUnavailable("ordered registry artifact query returned no version connection")
 
-        for edge in connection.get("edges") or []:
-            membership = edge.get("node") if isinstance(edge, Mapping) else None
+        edges, page_info, has_next_page = _projected_connection_page(
+            connection,
+            context="ordered registry artifact query",
+        )
+        remaining = target - len(items)
+        page_overflow = len(edges) > remaining
+        for edge in edges:
+            membership = edge.get("node")
             artifact = membership.get("artifact") if isinstance(membership, Mapping) else None
             if not isinstance(membership, Mapping) or not isinstance(artifact, Mapping):
-                continue
+                raise SelectiveReadUnavailable("ordered registry artifact query returned an invalid version")
             version_index = membership.get("versionIndex")
-            collection = membership.get("artifactCollection") or {}
+            collection = membership.get("artifactCollection")
+            if not isinstance(collection, Mapping):
+                raise SelectiveReadUnavailable("ordered registry artifact query returned an invalid collection")
+            aliases = membership.get("aliases")
+            tags = artifact.get("tags")
+            if not isinstance(aliases, list) or not all(isinstance(alias, Mapping) for alias in aliases):
+                raise SelectiveReadUnavailable("ordered registry artifact query returned invalid aliases")
+            if not isinstance(tags, list) or not all(isinstance(tag, Mapping) for tag in tags):
+                raise SelectiveReadUnavailable("ordered registry artifact query returned invalid tags")
             items.append(
                 {
                     "version": f"v{version_index}" if version_index is not None else None,
                     "name": collection.get("name"),
-                    "aliases": [
-                        alias.get("alias")
-                        for alias in membership.get("aliases") or []
-                        if isinstance(alias, Mapping) and alias.get("alias")
-                    ],
-                    "tags": [
-                        tag.get("name")
-                        for tag in artifact.get("tags") or []
-                        if isinstance(tag, Mapping) and tag.get("name")
-                    ],
+                    "aliases": [alias.get("alias") for alias in aliases if alias.get("alias")],
+                    "tags": [tag.get("name") for tag in tags if tag.get("name")],
                     "state": artifact.get("state"),
                     "size": artifact.get("size"),
                     "file_count": artifact.get("fileCount"),
@@ -1823,11 +1864,15 @@ def fetch_registry_artifact_versions(
             )
             if len(items) >= target:
                 break
-        page_info = connection.get("pageInfo") or {}
-        has_next_page = bool(page_info.get("hasNextPage"))
-        cursor = page_info.get("endCursor")
-        if not has_next_page or not cursor:
+        if not has_next_page:
+            has_next_page = page_overflow
             break
+        cursor = _next_projected_cursor(
+            context="ordered registry artifact query",
+            current=cursor,
+            candidate=page_info.get("endCursor"),
+            seen=seen_cursors,
+        )
 
     return ArtifactVersionPage(
         items=items,
@@ -1836,9 +1881,23 @@ def fetch_registry_artifact_versions(
     )
 
 
+def fetch_registry_organization_info(api: Any, *, entity: str | None) -> dict[str, Any]:
+    """Resolve registry organization candidates over the request-scoped transport."""
+    raise_if_tool_deadline_exceeded()
+    data = execute_graphql(
+        api,
+        REGISTRY_ORGANIZATION_QUERY,
+        {"entity": entity or "", "hasEntity": entity is not None},
+    )
+    if not isinstance(data, dict):
+        raise SelectiveReadUnavailable("registry organization query returned malformed data")
+    return data
+
+
 __all__ = [
     "ARTIFACT_INVENTORY_QUERY",
     "REGISTRY_ARTIFACT_VERSIONS_QUERY",
+    "REGISTRY_ORGANIZATION_QUERY",
     "METRIC_VALUE_STEPS_QUERY",
     "SAMPLED_HISTORY_SERIES_QUERY",
     "PROJECT_METADATA_QUERY",
@@ -1859,6 +1918,7 @@ __all__ = [
     "fetch_metric_value_steps",
     "fetch_sampled_history_series",
     "fetch_registry_artifact_versions",
+    "fetch_registry_organization_info",
     "fetch_project_counts",
     "fetch_project_metadata",
     "fetch_project_fields",

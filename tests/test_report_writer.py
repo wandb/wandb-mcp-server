@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -94,11 +95,12 @@ class _ProjectLookupService:
         self.error = error
         self.calls: list[tuple[str, dict]] = []
 
-    def execute_graphql(self, query, variables=None):
+    def execute_graphql(self, query, variables=None, *, parse=None, **kwargs):
         self.calls.append((query, dict(variables or {})))
         if self.error is not None:
             raise self.error
-        return {"project": None}
+        result = {"project": None}
+        return parse(json.dumps(result)) if callable(parse) else result
 
 
 class _PublicProjectLookupApi(_FakeApi):

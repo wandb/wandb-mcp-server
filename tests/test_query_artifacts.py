@@ -103,7 +103,7 @@ class TestListArtifactVersions:
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
         mock_registry = MagicMock()
-        mock_registry.organization = "my-org"
+        mock_registry.__iter__.side_effect = lambda: iter([MagicMock()])
         mock_collections = MagicMock()
         mock_collections.versions.return_value = iter(
             [
@@ -111,10 +111,17 @@ class TestListArtifactVersions:
             ]
         )
         mock_registry.collections.return_value = mock_collections
-        mock_api.registry.return_value = mock_registry
+        mock_api.registries.return_value = mock_registry
         mock_api_mgr.get_api.return_value = mock_api
 
-        result = json.loads(list_artifact_versions("my-model", registry_name="model-registry", source="registry"))
+        result = json.loads(
+            list_artifact_versions(
+                "my-model",
+                registry_name="model-registry",
+                organization="my-org",
+                source="registry",
+            )
+        )
 
         assert result["count"] == 1
         assert result["source"] == "registry"
@@ -161,6 +168,27 @@ class TestListArtifactVersions:
         )
 
         assert result["error"] == "invalid_input"
+        mock_api_mgr.get_api.assert_not_called()
+
+    @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
+    def test_oversized_tag_filters_do_not_construct_api(self, mock_api_mgr):
+        too_many = json.loads(
+            list_artifact_versions(
+                "team/project/my-model",
+                type_name="model",
+                tags=[f"tag-{index}" for index in range(101)],
+            )
+        )
+        too_large = json.loads(
+            list_artifact_versions(
+                "team/project/my-model",
+                type_name="model",
+                tags=["x" * 513],
+            )
+        )
+
+        assert too_many["error"] == "invalid_input"
+        assert too_large["error"] == "invalid_input"
         mock_api_mgr.get_api.assert_not_called()
 
     @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
