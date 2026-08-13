@@ -42,6 +42,7 @@ def test_send_root_turn_uses_bearer_auth_and_openapi_payload(monkeypatch) -> Non
         captured["method"] = request.method
         captured["path"] = request.url.path
         captured["authorization"] = request.headers["Authorization"]
+        captured["wandb_client"] = request.headers["X-Wandb-Client"]
         captured["body"] = json.loads(request.content)
         return httpx.Response(202, json=_turn(), request=request)
 
@@ -67,6 +68,7 @@ def test_send_root_turn_uses_bearer_auth_and_openapi_payload(monkeypatch) -> Non
         "method": "POST",
         "path": "/api/v1/turns",
         "authorization": "Bearer user-wandb-token",
+        "wandb_client": aria.ARIA_CLIENT_IDENTITY,
         "body": {
             "user_prompt": "Compare the latest eval runs",
             "entity": "team",
@@ -105,6 +107,31 @@ def test_send_reuses_request_scoped_wandb_token(monkeypatch) -> None:
 
     assert result["ok"] is True
     assert captured["authorization"] == "Bearer context-wandb-token-123"
+
+
+def test_every_aria_request_overrides_client_attribution_header() -> None:
+    captured: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append((request.method, request.headers["X-Wandb-Client"]))
+        return httpx.Response(200, json=_turn("completed"), request=request)
+
+    async def run() -> None:
+        async with httpx.AsyncClient(
+            base_url="https://wb-agent.example",
+            headers={"X-Wandb-Client": "caller-controlled"},
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            await aria._request_turn(client, "POST", "/api/v1/turns", payload={"user_prompt": "safe"})
+            await aria._request_turn(client, "GET", "/api/v1/turns/turn-1")
+
+    asyncio.run(run())
+
+    assert captured == [
+        ("POST", aria.ARIA_CLIENT_IDENTITY),
+        ("GET", aria.ARIA_CLIENT_IDENTITY),
+    ]
+    assert aria.ARIA_CLIENT_IDENTITY == "wandb-mcp-server/0.4.0"
 
 
 def test_concurrent_callers_keep_request_scoped_tokens_isolated(monkeypatch) -> None:
