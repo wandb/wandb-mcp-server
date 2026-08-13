@@ -275,6 +275,11 @@ def _structured_result_error_category(result: Any) -> str | None:
             return category
     if isinstance(result, Sequence) and not isinstance(result, (str, bytes, bytearray)):
         for block in result:
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                category = _structured_result_error_category(text)
+                if category:
+                    return category
             category = _structured_result_error_category(block)
             if category:
                 return category

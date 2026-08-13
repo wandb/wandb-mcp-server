@@ -8,6 +8,7 @@ import json
 from unittest.mock import patch
 
 import pytest
+from mcp.types import TextContent
 
 from wandb_mcp_server.analytics import reset_analytics_tracker
 from wandb_mcp_server.analytics_datadog import (
@@ -19,7 +20,11 @@ from wandb_mcp_server.analytics_segment import (
     reset_segment_forwarder,
 )
 from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.instrumented_server import InstrumentedFastMCP, structured_result_error
+from wandb_mcp_server.instrumented_server import (
+    InstrumentedFastMCP,
+    _structured_result_error_category,
+    structured_result_error,
+)
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 
 
@@ -219,6 +224,22 @@ def test_mcp_is_error_result_is_failed() -> None:
         isError = True
 
     assert structured_result_error(ErrorResult()) == "ToolError: MCP result marked as an error"
+
+
+def test_text_content_error_retains_allowlisted_telemetry_category() -> None:
+    result = [
+        TextContent(
+            type="text",
+            text=json.dumps(
+                {
+                    "error": "permission_denied",
+                    "message": "private-organization-canary",
+                }
+            ),
+        )
+    ]
+
+    assert _structured_result_error_category(result) == "permission_denied"
 
 
 @pytest.mark.usefixtures("_enable_analytics")
