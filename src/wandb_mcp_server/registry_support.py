@@ -291,7 +291,12 @@ def require_registry(registries: Any) -> Any:
     return page[0]
 
 
-def bounded_sdk_page(values: Any, limit: int) -> tuple[list[Any], bool]:
+def bounded_sdk_page(
+    values: Any,
+    limit: int,
+    *,
+    allow_partial_on_request_limit: bool = False,
+) -> tuple[list[Any], bool]:
     """Drive real W&B paginators one backend page at a time under a hard cap.
 
     W&B 0.28 registry paginator ``__next__`` implementations may internally
@@ -319,6 +324,8 @@ def bounded_sdk_page(values: Any, limit: int) -> tuple[list[Any], bool]:
 
     while len(rows) < target and bool(getattr(values, "more", False)):
         if requests >= request_limit:
+            if allow_partial_on_request_limit:
+                return rows[:limit], True
             raise RegistryMalformedResponse("registry pagination exceeded its request limit")
         raise_if_tool_deadline_exceeded()
         before_count = len(objects)
