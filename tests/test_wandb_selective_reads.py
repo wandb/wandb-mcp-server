@@ -22,6 +22,7 @@ from wandb_mcp_server.wandb_selective_reads import (
     PROJECT_FIELDS_QUERY,
     PROJECT_METADATA_QUERY,
     REGISTRY_ARTIFACT_VERSIONS_QUERY,
+    REGISTRY_ORGANIZATION_QUERY,
     SAMPLED_HISTORY_SERIES_QUERY,
     ProjectedReportCursorError,
     SelectiveReadUnavailable,
@@ -226,6 +227,7 @@ def test_every_application_owned_document_is_query_only():
         METRIC_VALUE_STEPS_QUERY,
         SAMPLED_HISTORY_SERIES_QUERY,
         REGISTRY_ARTIFACT_VERSIONS_QUERY,
+        REGISTRY_ORGANIZATION_QUERY,
     ):
         validate_read_only_graphql(document)
 
@@ -1350,3 +1352,98 @@ def test_registry_artifact_versions_use_fixed_ordered_query():
     assert json.loads(variables["registryFilter"]) == {"name": "wandb-registry-models"}
     assert json.loads(variables["collectionFilter"]) == {"name": "my-model"}
     assert variables["order"] == "-createdAt"
+
+
+def _registry_version_page(*, cursor, has_next, edges=None):
+    return {
+        "organization": {
+            "orgEntity": {
+                "artifactMemberships": {
+                    "edges": [] if edges is None else edges,
+                    "pageInfo": {"endCursor": cursor, "hasNextPage": has_next},
+                }
+            }
+        }
+    }
+
+
+def test_registry_artifact_versions_reject_repeated_cursor_without_amplification():
+    class RepeatingService:
+        def __init__(self):
+            self.calls = 0
+
+        def execute_graphql(self, query, variables=None):
+            self.calls += 1
+            return _registry_version_page(cursor="repeated", has_next=True)
+
+    service = RepeatingService()
+    api = type("Api", (), {"_service_api": service})()
+
+    with pytest.raises(SelectiveReadUnavailable, match="repeated a continuation cursor"):
+        fetch_registry_artifact_versions(
+            api,
+            organization="my-org",
+            registry_name="models",
+            collection_name="my-model",
+            order="-createdAt",
+            scan_limit=10,
+        )
+
+    assert service.calls == 2
+
+
+def test_registry_artifact_versions_enforce_empty_page_request_ceiling():
+    class EmptyPageService:
+        def __init__(self):
+            self.calls = 0
+
+        def execute_graphql(self, query, variables=None):
+            self.calls += 1
+            return _registry_version_page(cursor=f"page-{self.calls}", has_next=True)
+
+    service = EmptyPageService()
+    api = type("Api", (), {"_service_api": service})()
+
+    with pytest.raises(SelectiveReadUnavailable, match="request limit"):
+        fetch_registry_artifact_versions(
+            api,
+            organization="my-org",
+            registry_name="models",
+            collection_name="my-model",
+            order="-createdAt",
+            scan_limit=10,
+        )
+
+    assert service.calls == 2
+
+
+@pytest.mark.parametrize(
+    "connection",
+    [
+        {"edges": None, "pageInfo": {"endCursor": None, "hasNextPage": False}},
+        {"edges": [], "pageInfo": {"endCursor": None, "hasNextPage": "yes"}},
+        {"edges": [], "pageInfo": {"endCursor": None, "hasNextPage": True}},
+    ],
+)
+def test_registry_artifact_versions_reject_malformed_connections(connection):
+    class MalformedService:
+        calls = 0
+
+        def execute_graphql(self, query, variables=None):
+            self.calls += 1
+            return {"organization": {"orgEntity": {"artifactMemberships": connection}}}
+
+    service = MalformedService()
+    api = type("Api", (), {"_service_api": service})()
+
+    with pytest.raises(SelectiveReadUnavailable):
+        fetch_registry_artifact_versions(
+            api,
+            organization="my-org",
+            registry_name="models",
+            collection_name="my-model",
+            order="-createdAt",
+            scan_limit=10,
+        )
+
+    assert service.calls == 1

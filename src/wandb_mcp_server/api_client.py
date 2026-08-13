@@ -80,6 +80,26 @@ def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
                 pending.append(nested)
 
 
+def _http_status(value: object) -> int | None:
+    """Read status codes from requests/httpx and W&B service responses."""
+    for attr in ("status_code", "status", "http_status", "http_status_code"):
+        candidate = getattr(value, attr, None)
+        if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate > 0:
+            return candidate
+    return None
+
+
+def wandb_http_status_from_exception(exc: BaseException) -> int | None:
+    """Return the first HTTP status carried anywhere in a W&B exception chain."""
+    for current in _exception_chain(exc):
+        if status := _http_status(current):
+            return status
+        response = getattr(current, "response", None)
+        if response is not None and (status := _http_status(response)):
+            return status
+    return None
+
+
 def wandb_write_outcome_unknown_from_exception(exc: BaseException) -> bool:
     """Return whether an exception chain contains an unconfirmed W&B write."""
     return any(isinstance(current, WandBWriteOutcomeUnknown) for current in _exception_chain(exc))
@@ -120,13 +140,13 @@ def wandb_server_busy_from_exception(exc: BaseException) -> WandBServerBusy | No
             return current
         messages.append(str(current))
         response = getattr(current, "response", None)
-        candidate = getattr(response, "status_code", None)
+        candidate = _http_status(current) or (_http_status(response) if response is not None else None)
         if candidate in {429, 503}:
             status_code = int(candidate)
             headers = getattr(response, "headers", None)
             if isinstance(headers, Mapping):
                 retry_after = headers.get("Retry-After") or headers.get("retry-after")
-            for attr in ("reason", "text"):
+            for attr in ("reason", "text", "message"):
                 response_text = getattr(response, attr, None)
                 if response_text:
                     messages.append(str(response_text))

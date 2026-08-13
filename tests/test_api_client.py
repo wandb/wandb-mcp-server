@@ -7,6 +7,8 @@ from unittest.mock import MagicMock
 
 import pytest
 import requests
+from wandb.proto import wandb_api_pb2
+from wandb.sdk.lib.service.service_connection import WandbApiFailedError
 
 from wandb_mcp_server import api_client
 from wandb_mcp_server.api_client import (
@@ -141,6 +143,20 @@ def test_overload_service_unavailable_maps_to_server_busy() -> None:
 
     assert busy is not None
     assert busy.status_code == 503
+    assert busy.retry_after_ms == 1_000
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_real_wandb_service_error_shape_maps_to_server_busy(status: int) -> None:
+    response = wandb_api_pb2.ApiErrorResponse(
+        http_status=status,
+        message="Service unavailable: capacity exhausted",
+    )
+
+    busy = wandb_server_busy_from_exception(WandbApiFailedError("W&B API request failed", response))
+
+    assert busy is not None
+    assert busy.status_code == status
     assert busy.retry_after_ms == 1_000
 
 

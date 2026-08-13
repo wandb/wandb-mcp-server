@@ -114,7 +114,7 @@ Recommended deployment presets:
 
 | Deployment | Settings |
 |---|---|
-| W&B-hosted | W&B-managed feature profile; caller-supplied raw GraphQL remains disabled. Weave Agent and ARIA tools are enabled only where W&B has validated their service paths. |
+| W&B-hosted | Weave Agent tools enabled; ARIA and caller-supplied raw GraphQL disabled by default. ARIA is available only through a separately validated W&B-managed profile. |
 | Strict customer read-only | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`, `WANDB_MCP_ENABLE_ARIA_TOOLS=false` |
 | Trusted read-only compatibility | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=true`, `WANDB_MCP_ENABLE_ARIA_TOOLS=false`, `MCP_MAX_GQL_ITEMS=50`, `MCP_MAX_GQL_ITEMS_PER_PAGE=20` |
 
@@ -174,6 +174,14 @@ These tools are disabled by default. Enable them with `WANDB_MCP_ENABLE_WEAVE_AG
 **ARIA tools are opt-in:** Set `WANDB_MCP_ENABLE_ARIA_TOOLS=true` only when the deployment has an approved HTTPS path to the hosted W&B Agent service. The default is `false`, including Dedicated/Self-Managed deployments, so customer credentials are never forwarded to the public ARIA service implicitly. `WANDB_MCP_READ_ONLY=true` additionally omits `aria_send_message` while retaining polling when the ARIA group is explicitly enabled.
 
 **ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
+
+**Registry organization resolution:** Registry tools use the authenticated
+request's W&B client when `organization` is omitted. A single accessible
+organization is selected automatically; callers with access to multiple
+organizations receive `organization_required` with a bounded candidate list.
+Collection listings intentionally return `aliases: null` and
+`aliases_loaded: false` instead of loading every collection's version aliases.
+Use `list_artifact_versions_tool` when aliases are needed.
 
 </details>
 

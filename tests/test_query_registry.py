@@ -1,7 +1,7 @@
 """Tests for registry discovery tools (list_registries, list_registry_collections)."""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 from wandb_mcp_server.mcp_tools.query_registry import (
     LIST_REGISTRIES_TOOL_DESCRIPTION,
@@ -31,11 +31,17 @@ def _make_collection(name="my-model", **overrides):
     coll.type = overrides.get("type", "model")
     coll.description = overrides.get("description", "A test collection")
     coll.tags = overrides.get("tags", ["production"])
-    coll.aliases = overrides.get("aliases", ["latest"])
     coll.created_at = overrides.get("created_at", "2025-01-01T00:00:00")
     coll.updated_at = overrides.get("updated_at", "2025-06-01T00:00:00")
     coll.is_sequence.return_value = overrides.get("is_sequence", True)
     return coll
+
+
+def _make_registry_search(registries, collections=()):
+    search = MagicMock()
+    search.__iter__.side_effect = lambda: iter(registries)
+    search.collections.return_value = iter(collections)
+    return search
 
 
 class TestListRegistries:
@@ -51,7 +57,7 @@ class TestListRegistries:
         )
         mock_api_mgr.get_api.return_value = mock_api
 
-        result = json.loads(list_registries())
+        result = json.loads(list_registries(organization="my-org"))
 
         assert result["count"] == 2
         assert result["truncated"] is False
@@ -66,7 +72,7 @@ class TestListRegistries:
         mock_api_mgr.get_api.return_value = mock_api
 
         filt = {"name": {"$regex": "model.*"}}
-        list_registries(filter=filt)
+        list_registries(organization="my-org", filter=filt)
 
         call_kwargs = mock_api.registries.call_args[1]
         assert call_kwargs["filter"] == filt
@@ -80,7 +86,7 @@ class TestListRegistries:
         mock_api.registries.return_value = iter(regs)
         mock_api_mgr.get_api.return_value = mock_api
 
-        result = json.loads(list_registries(max_items=999))
+        result = json.loads(list_registries(organization="my-org", max_items=999))
 
         assert result["count"] == 200
         assert result["truncated"] is True
@@ -95,10 +101,10 @@ class TestListRegistries:
         mock_api.registries.side_effect = Exception("Connection refused")
         mock_api_mgr.get_api.return_value = mock_api
 
-        result = json.loads(list_registries())
+        result = json.loads(list_registries(organization="my-org"))
 
-        assert "error" in result
-        assert "Connection refused" in result["message"]
+        assert result["error"] == "registry_query_failed"
+        assert "Connection refused" not in result["message"]
 
     @patch("wandb_mcp_server.mcp_tools.query_registry.WandBApiManager")
     def test_empty_result(self, mock_api_mgr):
@@ -107,7 +113,7 @@ class TestListRegistries:
         mock_api.registries.return_value = iter([])
         mock_api_mgr.get_api.return_value = mock_api
 
-        result = json.loads(list_registries())
+        result = json.loads(list_registries(organization="my-org"))
 
         assert result["count"] == 0
         assert result["registries"] == []
@@ -119,17 +125,14 @@ class TestListRegistryCollections:
     def test_basic(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
-        mock_registry = MagicMock()
-        mock_registry.collections.return_value = iter(
-            [
-                _make_collection("model-a"),
-                _make_collection("model-b"),
-            ]
+        search = _make_registry_search(
+            [_make_registry("my-registry")],
+            [_make_collection("model-a"), _make_collection("model-b")],
         )
-        mock_api.registry.return_value = mock_registry
+        mock_api.registries.return_value = search
         mock_api_mgr.get_api.return_value = mock_api
 
-        result = json.loads(list_registry_collections("my-registry"))
+        result = json.loads(list_registry_collections("my-registry", organization="my-org"))
 
         assert result["registry"] == "my-registry"
         assert result["count"] == 2
@@ -143,12 +146,10 @@ class TestListRegistryCollections:
     def test_empty(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
-        mock_registry = MagicMock()
-        mock_registry.collections.return_value = iter([])
-        mock_api.registry.return_value = mock_registry
+        mock_api.registries.return_value = _make_registry_search([_make_registry("my-registry")])
         mock_api_mgr.get_api.return_value = mock_api
 
-        result = json.loads(list_registry_collections("my-registry"))
+        result = json.loads(list_registry_collections("my-registry", organization="my-org"))
 
         assert result["count"] == 0
         assert result["collections"] == []
@@ -157,30 +158,31 @@ class TestListRegistryCollections:
     def test_collection_properties(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
-        mock_registry = MagicMock()
         coll = _make_collection("prod-model", tags=["production", "v2"], is_sequence=True)
-        mock_registry.collections.return_value = iter([coll])
-        mock_api.registry.return_value = mock_registry
+        type(coll).aliases = PropertyMock(side_effect=AssertionError("aliases must stay lazy"))
+        mock_api.registries.return_value = _make_registry_search([_make_registry("my-registry")], [coll])
         mock_api_mgr.get_api.return_value = mock_api
 
-        result = json.loads(list_registry_collections("my-registry"))
+        result = json.loads(list_registry_collections("my-registry", organization="my-org"))
         c = result["collections"][0]
 
         assert c["name"] == "prod-model"
         assert c["tags"] == ["production", "v2"]
         assert c["is_sequence"] is True
+        assert c["aliases"] is None
+        assert c["aliases_loaded"] is False
 
     @patch("wandb_mcp_server.mcp_tools.query_registry.WandBApiManager")
     def test_api_error_returns_json(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
-        mock_api.registry.side_effect = Exception("Registry not found")
+        mock_api.registries.side_effect = Exception("Registry not found")
         mock_api_mgr.get_api.return_value = mock_api
 
-        result = json.loads(list_registry_collections("nonexistent"))
+        result = json.loads(list_registry_collections("nonexistent", organization="my-org"))
 
-        assert "error" in result
-        assert "Registry not found" in result["message"]
+        assert result["error"] == "resource_not_found"
+        assert "nonexistent" not in result["message"]
 
 
 class TestToolDescriptions:
