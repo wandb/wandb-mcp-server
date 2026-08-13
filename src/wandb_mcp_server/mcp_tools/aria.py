@@ -12,6 +12,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from importlib.metadata import PackageNotFoundError, version as distribution_version
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
@@ -47,6 +48,13 @@ MAX_RETRY_AFTER_MS = 30_000
 _OVERLOAD_ERROR_TYPES = frozenset({"rate_limited", "service_unavailable"})
 _OUTBOUND_LIMITERS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = WeakKeyDictionary()
 _OUTBOUND_LIMITERS_LOCK = threading.Lock()
+
+try:
+    _INSTALLED_VERSION = distribution_version("wandb-mcp-server")
+except PackageNotFoundError:  # pragma: no cover - source-only developer fallback
+    from wandb_mcp_server import __version__ as _INSTALLED_VERSION
+
+ARIA_CLIENT_IDENTITY = f"wandb-mcp-server/{_INSTALLED_VERSION}"
 
 
 def _outbound_limiter() -> asyncio.Semaphore:
@@ -687,7 +695,14 @@ async def _perform_bounded_request(
             method,
             path,
             json=payload,
-            headers={"Accept-Encoding": "identity"},
+            headers={
+                "Accept-Encoding": "identity",
+                # This is cooperative product attribution only. ARIA must not
+                # use it for authentication, authorization, routing, quotas,
+                # or billing. Supplying it per request also covers injected
+                # request-scoped clients used by hosted deployments.
+                "X-Wandb-Client": ARIA_CLIENT_IDENTITY,
+            },
         ) as streamed:
             body = await _read_bounded_response(streamed)
             # `aiter_bytes()` yields decoded bytes. Reusing compression or transfer
