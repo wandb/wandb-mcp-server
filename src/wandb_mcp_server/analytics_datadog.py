@@ -313,7 +313,7 @@ def _resolve_dd_api_key() -> str:
             if key_bytes:
                 return key_bytes.decode("utf-8").strip()
     except Exception as exc:
-        logger.debug(f"SecretsResolver failed for {_DD_SECRET_NAME}: {exc}")
+        logger.debug("Datadog credential resolution failed (%s)", type(exc).__name__)
     return ""
 
 
@@ -408,9 +408,9 @@ class DatadogForwarder:
                 },
             )
             if resp.status_code not in (200, 202):
-                logger.warning(f"Datadog forward failed: {resp.status_code} {resp.text[:200]}")
+                logger.warning("Datadog forwarding returned HTTP %s", resp.status_code)
         except Exception as exc:
-            logger.warning(f"Datadog forward error (non-fatal): {exc}")
+            logger.warning("Datadog forwarding failed (non-fatal; %s)", type(exc).__name__)
 
     def get_forwarded_payloads(self) -> List[Dict[str, Any]]:
         """Return all payloads that were forwarded (for testing/inspection)."""

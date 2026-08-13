@@ -160,10 +160,12 @@ class TestInferTraceSchema:
 
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
     def test_query_failure_returns_error(self, mock_count):
-        mock_count.side_effect = Exception("Network timeout")
+        mock_count.side_effect = Exception("customer-error-canary")
 
         result = json.loads(infer_trace_schema("e", "p"))
-        assert "error" in result
+        assert result["error"] == "schema_query_failed"
+        assert result["message"] == "The Weave trace schema query failed."
+        assert "customer-error-canary" not in json.dumps(result)
 
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
     def test_pydantic_trace_objects_handled(self, mock_count):

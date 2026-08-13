@@ -219,10 +219,10 @@ class SegmentForwarder:
                 headers={"Content-Type": "application/json"},
             )
             if resp.status_code != 200:
-                logger.warning(f"Segment forward failed: {resp.status_code} {resp.text[:200]}")
+                logger.warning("Segment forwarding returned HTTP %s", resp.status_code)
             return payload
         except Exception as exc:
-            logger.warning(f"Segment forward error (non-fatal): {exc}")
+            logger.warning("Segment forwarding failed (non-fatal; %s)", type(exc).__name__)
             return payload
 
     def get_forwarded_payloads(self) -> List[Dict[str, Any]]:

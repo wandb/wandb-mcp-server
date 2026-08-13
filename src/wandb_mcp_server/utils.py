@@ -534,7 +534,7 @@ def get_git_commit():
         result = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
         return str(result.stdout.strip())[:8]
     except Exception as e:
-        logger.warning(f"Failed to get git commit: {e}")
+        logger.warning("Failed to resolve git commit (%s)", type(e).__name__)
         return "unknown"
 
 

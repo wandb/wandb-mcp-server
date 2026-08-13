@@ -78,7 +78,16 @@ def _server() -> InstrumentedFastMCP:
 
     @server.tool(name="structured_error_tool")
     async def structured_error_tool() -> str:
-        return json.dumps({"error": "permission_denied", "message": "access denied"})
+        return json.dumps(
+            {
+                "error": "permission_denied",
+                "message": "access denied for private-organization-canary",
+            }
+        )
+
+    @server.tool(name="untrusted_error_tool")
+    async def untrusted_error_tool() -> str:
+        return json.dumps({"error": "private-organization-canary"})
 
     @server.tool(name="exception_tool")
     async def exception_tool() -> str:
@@ -164,7 +173,10 @@ async def test_exception_is_emitted_as_one_failed_public_call() -> None:
     datadog = dd_forwarder.get_forwarded_payloads()
     assert len(segment) == len(datadog) == 1
     assert segment[0]["properties"]["success"] is False
-    assert "ToolError" in segment[0]["properties"]["error"]
+    assert segment[0]["properties"]["error"] == "ToolError: tool failed"
+    assert "bad query" not in str(segment[0])
+    assert "bad query" not in str(datadog[0])
+    assert datadog[0]["attributes"]["error"]["kind"] == "ToolError"
     assert datadog[0]["status"] == "error"
 
 
@@ -179,7 +191,26 @@ async def test_structured_error_result_is_failed() -> None:
     segment = get_segment_forwarder().get_forwarded_payloads()[0]
     datadog = dd_forwarder.get_forwarded_payloads()[0]
     assert segment["properties"]["success"] is False
-    assert "access denied" in segment["properties"]["error"]
+    assert segment["properties"]["error"] == "permission_denied: tool failed"
+    assert "private-organization-canary" not in str(segment)
+    assert "private-organization-canary" not in str(datadog)
+    assert datadog["attributes"]["error"]["kind"] == "permission_denied"
+
+
+@pytest.mark.usefixtures("_enable_analytics")
+@pytest.mark.asyncio
+async def test_untrusted_error_value_is_not_used_as_telemetry_category() -> None:
+    server = _server()
+    dd_forwarder = get_datadog_forwarder()
+    with patch.object(dd_forwarder, "_post"):
+        await server.call_tool("untrusted_error_tool", {})
+
+    segment = get_segment_forwarder().get_forwarded_payloads()[0]
+    datadog = dd_forwarder.get_forwarded_payloads()[0]
+    assert segment["properties"]["error"] == "tool_error: tool failed"
+    assert datadog["attributes"]["error"]["kind"] == "tool_error"
+    assert "private-organization-canary" not in str(segment)
+    assert "private-organization-canary" not in str(datadog)
     assert datadog["status"] == "error"
 
 

@@ -604,13 +604,14 @@ class TestListAutomations:
         assert auto["updated_at"] is None
 
     def test_api_error_returns_error_dict(self, mock_api):
-        mock_api.automations.side_effect = RuntimeError("boom")
+        mock_api.automations.side_effect = RuntimeError("customer-automation-error-canary")
 
         from wandb_mcp_server.mcp_tools.automations import list_automations
 
         result = json.loads(list_automations())
         assert result["error"] == "api_error"
-        assert "boom" in result["message"]
+        assert result["message"] == "The W&B automation query failed."
+        assert "customer-automation-error-canary" not in json.dumps(result)
 
 
 # ---------------------------------------------------------------------------
@@ -717,13 +718,14 @@ class TestListIntegrations:
         assert result["truncated"] is True
 
     def test_api_error_returns_error_dict(self, mock_api):
-        mock_api.integrations.side_effect = RuntimeError("kapow")
+        mock_api.integrations.side_effect = RuntimeError("customer-integration-error-canary")
 
         from wandb_mcp_server.mcp_tools.automations import list_integrations
 
         result = json.loads(list_integrations())
         assert result["error"] == "api_error"
-        assert "kapow" in result["message"]
+        assert result["message"] == "The W&B integration query failed."
+        assert "customer-integration-error-canary" not in json.dumps(result)
 
     def test_unknown_typename_falls_back(self, mock_api):
         """Forward-compat: an Integration kind that's neither Slack nor Webhook

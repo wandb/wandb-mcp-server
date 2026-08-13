@@ -63,6 +63,47 @@ _ARIA_TOOL_COSTS = {
     "aria_get_turn": ("light", 1),
     "aria_get_turns": ("heavy", 4),
 }
+_TELEMETRY_RESULT_ERROR_CODES = frozenset(
+    {
+        "agents_api_unavailable",
+        "agents_query_failed",
+        "api_error",
+        "artifact_inventory_unavailable",
+        "auth_required",
+        "authentication_failed",
+        "count_failed",
+        "evaluation_query_failed",
+        "history_fetch_failed",
+        "history_query_failed",
+        "invalid_cursor",
+        "invalid_input",
+        "invalid_request",
+        "log_failed",
+        "malformed_response",
+        "organization_required",
+        "organization_resolution_failed",
+        "out_of_memory",
+        "pagination_cursor_unavailable",
+        "permission_denied",
+        "project_probe_failed",
+        "project_query_failed",
+        "query_failed",
+        "query_too_large",
+        "read_only_violation",
+        "registry_query_failed",
+        "report_creation_failed",
+        "resolve_failed",
+        "resource_not_found",
+        "response_too_large",
+        "run_not_found",
+        "schema_query_failed",
+        "selective_read_unavailable",
+        "server_busy",
+        "target_not_logged",
+        "tool_timeout",
+        "upstream_error",
+    }
+)
 
 
 def _dispatch_tool_cost(name: str, arguments: dict[str, Any]) -> tuple[str, int]:
@@ -171,6 +212,72 @@ def structured_result_error(result: Any) -> str | None:
             error = structured_result_error(block)
             if error:
                 return error
+    return None
+
+
+def _error_category_from_mapping(value: dict[str, Any]) -> str | None:
+    """Return a bounded categorical error without copying customer text."""
+    error = value.get("error")
+    if not error:
+        return None
+    if isinstance(error, dict):
+        candidate = error.get("code") or error.get("type") or "tool_error"
+    else:
+        candidate = error
+    return str(candidate) if candidate in _TELEMETRY_RESULT_ERROR_CODES else "tool_error"
+
+
+def _telemetry_error(category: str) -> str:
+    """Format a low-cardinality error so Datadog retains its error kind."""
+    return f"{category}: tool failed"
+
+
+def _exception_error_category(exc: BaseException) -> str:
+    """Return a bounded exception class name without copying exception text."""
+    candidate = type(exc).__name__
+    if (
+        0 < len(candidate) <= 64
+        and candidate[0].isalpha()
+        and all(character.isalnum() or character == "_" for character in candidate)
+    ):
+        return candidate
+    return "exception"
+
+
+def _structured_result_error_category(result: Any) -> str | None:
+    """Classify a structured MCP failure for telemetry without its message."""
+    if getattr(result, "isError", False) or getattr(result, "is_error", False):
+        return "mcp_error"
+    if isinstance(result, dict):
+        category = _error_category_from_mapping(result)
+        if category:
+            return category
+        if "result" in result:
+            return _structured_result_error_category(result["result"])
+        return None
+    if isinstance(result, str):
+        try:
+            decoded = json.loads(result)
+        except (TypeError, ValueError):
+            return None
+        return _error_category_from_mapping(decoded) if isinstance(decoded, dict) else None
+    content = getattr(result, "content", None)
+    if content is not None and content is not result:
+        category = _structured_result_error_category(content)
+        if category:
+            return category
+    structured_content = getattr(result, "structuredContent", None)
+    if structured_content is None:
+        structured_content = getattr(result, "structured_content", None)
+    if structured_content is not None and structured_content is not result:
+        category = _structured_result_error_category(structured_content)
+        if category:
+            return category
+    if isinstance(result, Sequence) and not isinstance(result, (str, bytes, bytearray)):
+        for block in result:
+            category = _structured_result_error_category(block)
+            if category:
+                return category
     return None
 
 
@@ -428,7 +535,7 @@ class InstrumentedFastMCP(FastMCP):
                     raise ToolError(json.dumps(busy.as_dict())) from exc
                 if success:
                     success = False
-                    error = sanitize_sensitive_text(f"{type(exc).__name__}: {str(exc)[:500]}")
+                    error = _telemetry_error(_exception_error_category(exc))
                 sanitized_message = sanitize_sensitive_text(
                     str(exc),
                     max_chars=MAX_EXTERNAL_ERROR_CHARS,
@@ -447,7 +554,7 @@ class InstrumentedFastMCP(FastMCP):
             if structured_error:
                 result = _bounded_error_result(result)
                 success = False
-                error = structured_result_error(result) or "ToolError: upstream error"
+                error = _telemetry_error(_structured_result_error_category(result) or "tool_error")
             return result
         finally:
             if deadline_token is not None:
@@ -465,9 +572,9 @@ class InstrumentedFastMCP(FastMCP):
                         await lease.release()
                     except Exception as release_error:
                         logger.error(
-                            "Tool admission release failed for %s: %s",
+                            "Tool admission release failed for %s (%s)",
                             name,
-                            release_error,
+                            type(release_error).__name__,
                         )
             duration_ms = round((time.monotonic() - started) * 1000, 2)
             try:
@@ -490,7 +597,7 @@ class InstrumentedFastMCP(FastMCP):
                     duration_ms=duration_ms,
                 )
             except Exception as analytics_error:
-                logger.debug("Tool analytics failed for %s: %s", name, analytics_error)
+                logger.debug("Tool analytics failed for %s (%s)", name, type(analytics_error).__name__)
             finally:
                 _current_sync_executor.reset(sync_executor_token)
                 _current_sync_call_state.reset(sync_state_token)
@@ -514,9 +621,9 @@ class InstrumentedFastMCP(FastMCP):
                 await lease.release()
             except Exception as release_error:
                 logger.error(
-                    "Deferred tool admission release failed for %s: %s",
+                    "Deferred tool admission release failed for %s (%s)",
                     tool_name,
-                    release_error,
+                    type(release_error).__name__,
                 )
 
         task = asyncio.create_task(_release_after_workers())

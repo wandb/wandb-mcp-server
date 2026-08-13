@@ -94,7 +94,7 @@ async def search_wandb_docs(query: str) -> str:
                 return json.dumps({"error": "No documentation results found for this query.", "query": query})
 
         except httpx.TimeoutException:
-            logger.warning(f"Docs MCP proxy timed out for query: {query}")
+            logger.warning("Docs MCP proxy timed out")
             ctx.mark_error("TimeoutException: docs search timed out")
             return json.dumps(
                 {
@@ -112,11 +112,11 @@ async def search_wandb_docs(query: str) -> str:
                 }
             )
         except Exception as e:
-            logger.warning(f"Docs MCP proxy error: {e}")
-            ctx.mark_error(f"{type(e).__name__}: {e}")
+            logger.warning("Docs MCP proxy failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
             return json.dumps(
                 {
-                    "error": f"Documentation search failed: {str(e)}",
+                    "error": "Documentation search failed.",
                     "query": query,
                 }
             )

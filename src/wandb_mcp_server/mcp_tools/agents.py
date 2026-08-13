@@ -4,8 +4,8 @@ Agent spans are ingested via OTel into a data plane separate from classic Weave
 calls, so these tools complement -- they do not duplicate -- the calls-based
 ``query_weave_traces_tool`` family. Each tool builds a request body and POSTs it
 to one ``/agents/*`` trace-server endpoint via ``_agents_request`` -- the same
-basic-auth + retry-session + ``track_tool_execution`` pattern as ``count_traces``
--- then trims the response to the token budget.
+basic-auth, no-retry, and ``track_tool_execution`` pattern as ``count_traces`` --
+then trims the response to the token budget.
 
 Request/response shapes mirror ``weave/trace_server/agents`` in github.com/wandb/weave.
 """
@@ -16,9 +16,11 @@ import base64
 import json
 from typing import Any, Dict, List, Optional
 
-from wandb_mcp_server.api_client import WandBApiManager
+import requests
+
+from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.config import MAX_RESPONSE_TOKENS, WF_TRACE_SERVER_URL, structured_error
-from wandb_mcp_server.mcp_tools.tools_utils import get_retry_session, track_tool_execution
+from wandb_mcp_server.mcp_tools.tools_utils import get_no_retry_session, track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.weave_api.processors import TraceProcessor
 
@@ -120,9 +122,11 @@ def _truncate_response(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _agents_request(tool_name: str, path: str, body: Dict[str, Any], track_params: Dict[str, Any]) -> str:
     """POST to an ``/agents/*`` endpoint and return a JSON string.
 
-    Mirrors ``count_traces``: a basic-auth POST to the trace server via
-    ``get_retry_session``, wrapped in ``track_tool_execution`` and the standard
+    Mirrors ``count_traces``: a basic-auth POST to the trace server via a
+    no-retry session, wrapped in ``track_tool_execution`` and the standard
     ``structured_error`` envelope, with the response trimmed to the token budget.
+    Retrying a read belongs to the MCP caller; doing it here would amplify an
+    already overloaded trace service.
     """
     api_key = WandBApiManager.get_api_key()
     if not api_key:
@@ -142,28 +146,44 @@ def _agents_request(tool_name: str, path: str, body: Dict[str, Any], track_param
         # Only the HTTP round-trip can raise here, so the try wraps just that;
         # the status-code branching below is plain control flow and stays outside.
         try:
-            response = get_retry_session().post(url, headers=headers, data=data, timeout=_REQUEST_TIMEOUT_SECONDS)
+            response = get_no_retry_session().post(
+                url,
+                headers=headers,
+                data=data,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
         except Exception as e:
-            logger.error(f"Agents API request to {path} failed: {e}", exc_info=True)
-            ctx.mark_error(str(e))
-            return json.dumps(structured_error("agents_query_failed", str(e)[:500]))
+            logger.error("Agents API request failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                structured_error(
+                    "agents_query_failed",
+                    "The Agents API request failed.",
+                )
+            )
 
         if response.status_code == 404:
             ctx.mark_error("agents_api_unavailable")
             return json.dumps(
                 structured_error(
                     "agents_api_unavailable",
-                    f"The trace server at {WF_TRACE_SERVER_URL} has no {path} endpoint (404); "
+                    "The configured trace server does not expose this Agents API endpoint (404); "
                     "it may predate the Weave Agents API.",
                     status_code=404,
                 )
             )
         if response.status_code != 200:
             ctx.mark_error(f"http_{response.status_code}")
+            if response.status_code in {429, 503}:
+                overload = requests.HTTPError(
+                    f"Agents API returned HTTP {response.status_code}",
+                    response=response,
+                )
+                raise_for_wandb_server_busy(overload)
             return json.dumps(
                 structured_error(
                     "agents_query_failed",
-                    f"Agents API {path} returned {response.status_code}: {response.text[:500]}",
+                    f"The Agents API returned HTTP {response.status_code}.",
                     status_code=response.status_code,
                 )
             )
@@ -172,9 +192,14 @@ def _agents_request(tool_name: str, path: str, body: Dict[str, Any], track_param
         try:
             result = response.json()
         except Exception as e:
-            logger.error(f"Agents API {path} returned a non-JSON body: {e}", exc_info=True)
-            ctx.mark_error(str(e))
-            return json.dumps(structured_error("agents_query_failed", str(e)[:500]))
+            logger.error("Agents API response was not valid JSON")
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                structured_error(
+                    "agents_query_failed",
+                    "The Agents API returned an invalid response.",
+                )
+            )
 
     return json.dumps(_truncate_response(result), default=str)
 

@@ -285,9 +285,14 @@ def list_artifact_versions(
                 ctx.mark_error(type(e).__name__)
                 return json.dumps(registry_error_result(e))
             raise_for_wandb_server_busy(e)
-            logger.error(f"Error in list_artifact_versions: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            logger.error("Artifact version listing failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "api_error",
+                    "message": "The W&B artifact version query failed.",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -384,9 +389,14 @@ def get_artifact_details(
 
         except Exception as e:
             raise_for_wandb_server_busy(e)
-            logger.error(f"Error in get_artifact_details: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            logger.error("Artifact detail query failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "api_error",
+                    "message": "The W&B artifact detail query failed.",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -521,9 +531,14 @@ def compare_artifact_versions(
 
         except Exception as e:
             raise_for_wandb_server_busy(e)
-            logger.error(f"Error in compare_artifact_versions: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            logger.error("Artifact comparison failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "api_error",
+                    "message": "The W&B artifact comparison failed.",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +683,7 @@ def _get_logged_by(artifact: Any) -> Optional[Dict[str, Any]]:
         return _serialize_run_info(run)
     except Exception as exc:
         raise_for_wandb_server_busy(exc)
-        logger.debug("logged_by() failed", exc_info=True)
+        logger.debug("Artifact logged-by lookup failed (%s)", type(exc).__name__)
         return None
 
 
@@ -689,7 +704,7 @@ def _build_lineage(artifact: Any) -> Dict[str, Any]:
                 used_by.append(_serialize_run_info(run))
     except Exception as exc:
         raise_for_wandb_server_busy(exc)
-        logger.debug("used_by() failed", exc_info=True)
+        logger.debug("Artifact used-by lookup failed (%s)", type(exc).__name__)
 
     source_artifact = None
     try:
@@ -698,7 +713,7 @@ def _build_lineage(artifact: Any) -> Dict[str, Any]:
             source_artifact = getattr(src, "source_qualified_name", None) or getattr(src, "name", None)
     except Exception as exc:
         raise_for_wandb_server_busy(exc)
-        logger.debug("source_artifact failed", exc_info=True)
+        logger.debug("Source-artifact lookup failed (%s)", type(exc).__name__)
 
     linked: Optional[List[str]] = None
     try:
@@ -711,7 +726,7 @@ def _build_lineage(artifact: Any) -> Dict[str, Any]:
                     linked.append(name)
     except Exception as exc:
         raise_for_wandb_server_busy(exc)
-        logger.debug("linked_artifacts failed", exc_info=True)
+        logger.debug("Linked-artifact lookup failed (%s)", type(exc).__name__)
 
     lineage: Dict[str, Any] = {
         "logged_by": logged_by,
@@ -740,7 +755,7 @@ def _list_files(artifact: Any, max_files: int) -> List[Dict[str, Any]]:
             )
     except Exception as exc:
         raise_for_wandb_server_busy(exc)
-        logger.debug("files() failed", exc_info=True)
+        logger.debug("Artifact file listing failed (%s)", type(exc).__name__)
     return files
 
 
@@ -773,7 +788,7 @@ def _compute_file_diff(art_a: Any, art_b: Any, max_entries: int) -> Dict[str, An
             files_a[getattr(f, "name", "")] = getattr(f, "digest", "")
     except Exception as exc:
         raise_for_wandb_server_busy(exc)
-        logger.debug("files() failed for artifact_a", exc_info=True)
+        logger.debug("First artifact file listing failed (%s)", type(exc).__name__)
 
     try:
         for f in art_b.files():
@@ -783,7 +798,7 @@ def _compute_file_diff(art_a: Any, art_b: Any, max_entries: int) -> Dict[str, An
             files_b[getattr(f, "name", "")] = getattr(f, "digest", "")
     except Exception as exc:
         raise_for_wandb_server_busy(exc)
-        logger.debug("files() failed for artifact_b", exc_info=True)
+        logger.debug("Second artifact file listing failed (%s)", type(exc).__name__)
 
     names_a, names_b = set(files_a.keys()), set(files_b.keys())
     added = sorted(names_b - names_a)

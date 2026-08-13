@@ -145,7 +145,6 @@ def count_traces(
 
     logger.debug("W&B API key: present")
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "count_traces",
         None,
@@ -245,7 +244,9 @@ def count_traces(
         # overloaded; the MCP client receives retryable backpressure instead.
         session = get_no_retry_session()
 
-        logger.debug(f"Posting to {url} with body: {json.dumps(request_body)}")
+        # The body may contain project identifiers, trace IDs, and arbitrary
+        # customer filters. Never log it, even at DEBUG.
+        logger.debug("Sending bounded request to the Weave trace-count service")
 
         try:
             response = session.post(
@@ -256,11 +257,8 @@ def count_traces(
             )
 
             if response.status_code != 200:
-                error_msg = f"Error querying Weave trace count: {response.status_code} - {response.text}"
-                logger.error(error_msg)
-                if "40 characters" in response.text:
-                    logger.error("W&B API key does not meet length requirements.")
-                logger.debug(f"Failed request body: {json.dumps(request_body)}")
+                error_msg = f"Error querying Weave trace count: {response.status_code}"
+                logger.error("Weave trace-count request failed with HTTP %s", response.status_code)
                 # Preserve status and Retry-After for the shared overload
                 # classifier at the public MCP dispatch boundary.
                 raise requests.HTTPError(error_msg, response=response)
@@ -269,11 +267,8 @@ def count_traces(
             return response_json.get("count", 0)
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"HTTP Request failed for project {project_id}: {e}")
-            logger.debug(f"Failed request body during exception for {project_id}: {json.dumps(request_body)}")
-            raise Exception(f"Failed to query Weave trace count for {project_id} due to network error: {e}") from e
+            logger.error("Weave trace-count HTTP request failed (%s)", type(e).__name__)
+            raise Exception("Failed to query Weave trace count due to a network error") from e
         except json.JSONDecodeError as e:
-            logger.error(
-                f"Failed to decode JSON response for {project_id}: {e}. Response text: {response.text if 'response' in locals() else 'N/A'}"
-            )
-            raise Exception(f"Failed to parse Weave API response for {project_id}: {e}")
+            logger.error("Weave trace-count response was not valid JSON")
+            raise Exception("Failed to parse the Weave trace-count response") from e

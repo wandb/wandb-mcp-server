@@ -126,7 +126,7 @@ class MultiTenantSessionManager:
                 self._hmac_sha256_key = key_bytes
                 logger.info("HMAC-SHA256 sessions enabled")
             except Exception as e:
-                logger.error("Failed to initialize HMAC-SHA256 sessions: %s", e)
+                logger.error("Failed to initialize HMAC-SHA256 sessions (%s)", type(e).__name__)
                 raise
         else:
             logger.warning(
@@ -483,7 +483,7 @@ class MultiTenantSessionManager:
                     time.sleep(60)  # Run every minute
                     self._cleanup_expired_sessions()
                 except Exception as e:
-                    logger.error(f"Error in cleanup task: {e}")
+                    logger.error("Session cleanup task failed (%s)", type(e).__name__)
 
         import threading
 

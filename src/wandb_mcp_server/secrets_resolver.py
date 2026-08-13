@@ -24,7 +24,9 @@ class SecretsResolver:
         if self._provider == "gcp" and not self._project:
             raise ValueError("GCP secrets provider requires a secrets_project")
 
-        logger.info("Initialized SecretsResolver (provider=%s, project=%s)", self._provider, self._project)
+        # The cloud project is infrastructure metadata and does not belong in
+        # shared application logs.
+        logger.info("Initialized SecretsResolver (provider=%s)", self._provider)
 
     def fetch_secret(self, secret_id: str) -> bytes:
         if not secret_id:

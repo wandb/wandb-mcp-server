@@ -479,13 +479,14 @@ class TestGetArtifactDetails:
     def test_api_error_returns_json(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
-        mock_api.artifact.side_effect = Exception("Artifact not found")
+        mock_api.artifact.side_effect = Exception("customer-artifact-error-canary")
         mock_api_mgr.get_api.return_value = mock_api
 
         result = json.loads(get_artifact_details("team/proj/model:v99"))
 
-        assert "error" in result
-        assert "Artifact not found" in result["message"]
+        assert result["error"] == "api_error"
+        assert result["message"] == "The W&B artifact detail query failed."
+        assert "customer-artifact-error-canary" not in json.dumps(result)
 
 
 class TestCompareArtifactVersions:
