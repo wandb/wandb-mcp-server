@@ -283,6 +283,23 @@ def test_source_release_workflow_is_tag_only_pinned_and_draft():
     assert not unpinned_actions
 
 
+def test_workflows_do_not_reference_pat_secrets():
+    secret_reference = re.compile(r"\bsecrets\.([A-Za-z0-9_]+)")
+    pat_segment = re.compile(r"(?:^|_)PAT(?:_|$)", re.IGNORECASE)
+    violations: dict[str, list[str]] = {}
+
+    for workflow in sorted((REPOSITORY_ROOT / ".github" / "workflows").glob("*.y*ml")):
+        secret_names = {
+            match.group(1)
+            for match in secret_reference.finditer(workflow.read_text())
+            if pat_segment.search(match.group(1))
+        }
+        if secret_names:
+            violations[workflow.name] = sorted(secret_names)
+
+    assert not violations, f"workflow PAT secret references are forbidden: {violations}"
+
+
 def test_generated_feature_documentation_is_current():
     result = public_release.update_generated_docs(CONTRACT_PATH, REPOSITORY_ROOT / "README.md", check=True)
 
