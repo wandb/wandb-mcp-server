@@ -3,7 +3,6 @@
 Query and analyze your Weights & Biases data using natural language through the Model Context Protocol.
 
 [![CI](https://github.com/wandb/wandb-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/wandb/wandb-mcp-server/actions/workflows/ci.yml)
-[![Eval](https://github.com/wandb/wandb-mcp-server/actions/workflows/eval.yml/badge.svg)](https://github.com/wandb/wandb-mcp-server/actions/workflows/eval.yml)
 <!-- BEGIN EVAL BADGES -->
 [![SDK](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wandb/wandb-mcp-server/main/.badges/sdk.json)](https://wandb.ai/wandb/mcp-server-ci/weave)
 [![MCP](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wandb/wandb-mcp-server/main/.badges/mcp.json)](https://wandb.ai/wandb/mcp-server-ci/weave)
