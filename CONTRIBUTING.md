@@ -144,10 +144,11 @@ For any tool change:
 
 Non-idempotent writes must not be retried automatically. If a timeout makes the
 write outcome ambiguous, return that uncertainty explicitly. Optional external
-services must be feature-gated off by default, validate their endpoint, and
-bound input size, concurrency, polling, and response size.
+services must require an explicit reviewed tool profile and typed endpoint,
+validate that endpoint, and bound input size, concurrency, polling, and response
+size. Tool visibility is never a substitute for request authorization.
 
-Raw GraphQL is an opt-in compatibility escape hatch, not the default
+Raw GraphQL is a local-only compatibility profile, not the default
 implementation path. Application-owned documents must remain query-only.
 
 Repo-local maintainer skills are available under `.agents/skills/`:
@@ -158,11 +159,14 @@ Repo-local maintainer skills are available under `.agents/skills/`:
 Each skill is guidance, not additional authorization for live writes,
 deployment, publication, or branch-protection bypasses.
 
-The public tool contract is generated from
-[`release/public-contract.json`](release/public-contract.json). When a tool is
-added, removed, renamed, feature-gated, or reclassified as a write, update that
-contract in the same PR. The release CI compares the contract against the real
-installed-wheel MCP `tools/list` response for every feature/read-only profile.
+The packaged
+[`runtime-contract.json`](src/wandb_mcp_server/runtime-contract.json) is the
+single source of truth for tool groups, risk/access metadata, exact profiles,
+managed workload policy, and capacity classes. The public release policy in
+[`release/public-contract.json`](release/public-contract.json) references and
+hashes it. When a tool or managed default changes, update the packaged contract
+in the same PR. Release CI compares it with the installed-wheel `tools/list`
+response for every supported tool-profile/access-mode pair.
 
 ## Live validation
 

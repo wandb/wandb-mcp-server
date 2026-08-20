@@ -185,7 +185,6 @@ async def test_public_boundary_returns_stable_busy_error(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_public_boundary_enforces_async_tool_deadline(monkeypatch) -> None:
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
-    monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_HOSTED_MODE", True)
     monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_TOOL_TIMEOUT_SECONDS", 0.01)
     server = InstrumentedFastMCP("deadline-test")
 
@@ -224,7 +223,6 @@ async def test_public_boundary_maps_upstream_rate_limit_without_retry(monkeypatc
 @pytest.mark.asyncio
 async def test_write_timeout_reports_unknown_outcome_and_is_not_retryable(monkeypatch) -> None:
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
-    monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_HOSTED_MODE", True)
     monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_TOOL_TIMEOUT_SECONDS", 0.01)
     server = InstrumentedFastMCP("write-timeout-test")
 
@@ -313,7 +311,6 @@ async def test_cancelled_admission_wait_is_recorded_as_cancelled(monkeypatch) ->
 
 def test_sync_tools_are_registered_as_async_threaded_calls_when_bounded(monkeypatch) -> None:
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
-    monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_HOSTED_MODE", True)
     server = InstrumentedFastMCP("threaded-test")
 
     @server.tool(name="sync_tool")
@@ -328,7 +325,6 @@ async def test_local_dispatch_keeps_sync_work_off_event_loop(monkeypatch) -> Non
     from wandb_mcp_server.instrumented_server import run_sync_in_current_tool
 
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
-    monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_HOSTED_MODE", False)
     monkeypatch.setattr(
         "wandb_mcp_server.instrumented_server.MCP_ADMISSION_CONTROL_ENABLED",
         False,
@@ -355,9 +351,26 @@ async def test_local_dispatch_keeps_sync_work_off_event_loop(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_local_dispatch_honors_capacity_workers_and_tool_deadline(monkeypatch) -> None:
+    monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
+    monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_ADMISSION_CONTROL_ENABLED", False)
+    monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_SYNC_TOOL_WORKERS", 2)
+    monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_TOOL_TIMEOUT_SECONDS", 0.01)
+    server = InstrumentedFastMCP("local-policy-test")
+
+    @server.tool(name="slow_local_tool")
+    async def slow_local_tool() -> str:
+        await asyncio.sleep(1)
+        return "late"
+
+    assert server._sync_executor._max_workers == 2
+    with pytest.raises(ToolError, match="tool_timeout"):
+        await server.call_tool("slow_local_tool", {})
+
+
+@pytest.mark.asyncio
 async def test_timed_out_sync_tool_holds_permit_until_worker_finishes(monkeypatch) -> None:
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
-    monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_HOSTED_MODE", True)
     monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_TOOL_TIMEOUT_SECONDS", 0.02)
     server = InstrumentedFastMCP("sync-timeout-test")
     server._admission_controller = WeightedAdmissionController(
@@ -403,7 +416,6 @@ async def test_timed_out_sync_tool_holds_permit_until_worker_finishes(monkeypatc
 @pytest.mark.asyncio
 async def test_cancelled_sync_tool_holds_permit_until_worker_finishes(monkeypatch) -> None:
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
-    monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_HOSTED_MODE", True)
     server = InstrumentedFastMCP("sync-cancel-test")
     server._admission_controller = WeightedAdmissionController(
         actor_capacity=1,
@@ -440,7 +452,6 @@ async def test_async_tool_blocking_section_uses_bounded_tracked_executor(monkeyp
     from wandb_mcp_server.instrumented_server import run_sync_in_current_tool
 
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
-    monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_HOSTED_MODE", True)
     monkeypatch.setattr("wandb_mcp_server.instrumented_server.MCP_TOOL_TIMEOUT_SECONDS", 0.02)
     server = InstrumentedFastMCP("async-sync-section-test")
     server._admission_controller = WeightedAdmissionController(

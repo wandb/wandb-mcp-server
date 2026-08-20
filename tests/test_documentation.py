@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import re
@@ -21,6 +22,7 @@ RELEASE_NOTES = REPOSITORY_ROOT / "docs" / "releases" / "v0.4.0.md"
 RELEASE_INDEX = REPOSITORY_ROOT / "docs" / "releases" / "README.md"
 RELEASE_TEMPLATE = REPOSITORY_ROOT / "docs" / "releases" / "TEMPLATE.md"
 PUBLIC_RELEASE_CONTRACT = REPOSITORY_ROOT / "release" / "public-contract.json"
+RUNTIME_CONTRACT = REPOSITORY_ROOT / "src" / "wandb_mcp_server" / "runtime-contract.json"
 ENV_EXAMPLE = REPOSITORY_ROOT / "env.example"
 REPO_SKILLS = REPOSITORY_ROOT / ".agents" / "skills"
 FEATURE_FLAGS = (
@@ -54,7 +56,7 @@ def test_readme_documents_every_default_tool(monkeypatch):
 
     server = FastMCP("documentation-test")
     register_tools(server)
-    tool_names = set(server._tool_manager._tools)
+    tool_names = {tool.name for tool in asyncio.run(server.list_tools())}
     readme = README.read_text()
 
     missing = sorted(name for name in tool_names if f"**{name}**" not in readme)
@@ -116,12 +118,12 @@ def test_readme_uses_immutable_source_install_examples():
 
 
 def test_feature_environments_are_documented_and_contract_driven():
-    contract = json.loads(PUBLIC_RELEASE_CONTRACT.read_text())
+    public_contract = json.loads(PUBLIC_RELEASE_CONTRACT.read_text())
+    contract = json.loads(RUNTIME_CONTRACT.read_text())
     readme = README.read_text()
 
-    environments = {group["environment"] for group in contract["feature_groups"].values()} | {
-        contract["read_only_environment"]
-    }
+    assert public_contract["runtime_contract"] == str(RUNTIME_CONTRACT.relative_to(REPOSITORY_ROOT))
+    environments = {selector["environment"] for selector in contract["selectors"].values()}
     for environment in environments:
         assert f"`{environment}`" in readme
 

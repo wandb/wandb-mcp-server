@@ -3,6 +3,8 @@ import ipaddress
 import re
 from urllib.parse import urlsplit
 
+from wandb_mcp_server.runtime_contract import CAPACITY_BOUNDS, WORKLOAD_LIMIT_BOUNDS, load_runtime_contract
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     """Read a strict boolean environment variable."""
@@ -32,11 +34,17 @@ def _env_int(
     """
     raw = os.getenv(name)
     if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except (ValueError, TypeError):
-        raise ValueError(f"{name} must be an integer") from None
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except (ValueError, TypeError):
+            raise ValueError(f"{name} must be an integer") from None
+    return _validate_int(name, value, minimum=minimum, maximum=maximum)
+
+
+def _validate_int(name: str, value: int, *, minimum: int, maximum: int | None) -> int:
+    """Validate an environment or packaged-policy integer against one bound."""
     if value < minimum:
         raise ValueError(f"{name} must be at least {minimum}")
     if maximum is not None and value > maximum:
@@ -143,175 +151,84 @@ def resolve_aria_base_url(fallback: str | None = None) -> str:
     return validate_aria_base_url(configured or fallback or WB_AGENT_BASE_URL)
 
 
-# Token budget for response truncation. When a query result exceeds this
-# budget, least-recent traces are dropped and a truncation note is appended.
-MAX_RESPONSE_TOKENS: int = _env_int("MAX_RESPONSE_TOKENS", 30_000, maximum=100_000)
-
-# Memory guard for trace queries. Stops accumulating trace data when this
-# threshold is reached, returning a partial result instead of OOM-crashing.
-MAX_ACCUMULATED_BYTES: int = _env_int(
-    "MAX_ACCUMULATED_BYTES",
-    1024 * 1024 * 1024,
-    maximum=1024 * 1024 * 1024,
-)
-
-# Workload profiles keep the common deployment choices simple while retaining
-# the existing per-setting environment overrides for advanced operators.
-MCP_HOSTED_MODE: bool = _env_bool("MCP_HOSTED_MODE", False)
-_default_workload_profile = "shared" if MCP_HOSTED_MODE else "local"
-MCP_WORKLOAD_PROFILE: str = (os.getenv("MCP_WORKLOAD_PROFILE") or _default_workload_profile).strip().lower()
-if MCP_WORKLOAD_PROFILE not in {"shared", "dedicated", "local"}:
+# Tool selection is resolved later, immediately before registration. Workload
+# limits are process-wide and come from the same packaged contract. Managed
+# profiles reject low-level overrides so the attested profile remains exact;
+# local mode retains bounded advanced tuning for standalone operators.
+_RUNTIME_CONTRACT = load_runtime_contract()
+MCP_WORKLOAD_PROFILE: str = (os.getenv("MCP_WORKLOAD_PROFILE") or "local").strip()
+if MCP_WORKLOAD_PROFILE not in _RUNTIME_CONTRACT["workload_profiles"]:
     raise ValueError("MCP_WORKLOAD_PROFILE must be one of: shared, dedicated, local")
+MCP_CAPACITY_CLASS: str = (os.getenv("MCP_CAPACITY_CLASS") or "small").strip()
+if MCP_CAPACITY_CLASS not in _RUNTIME_CONTRACT["capacity_classes"]:
+    raise ValueError("MCP_CAPACITY_CLASS must be one of: small, medium, large")
 
-_PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
-    "shared": {
-        "collection_items": 100,
-        "full_detail_items": 3,
-        "history_samples": 500,
-        "history_keys": 20,
-        "history_range_steps": 5_000,
-        "project_fields": 500,
-        "probe_runs": 6,
-        "evaluation_rows": 500,
-        "schema_rows": 100,
-        "actor_capacity": 4,
-        "process_capacity": 16,
-    },
-    "dedicated": {
-        "collection_items": 250,
-        "full_detail_items": 10,
-        "history_samples": 1_500,
-        "history_keys": 50,
-        "history_range_steps": 20_000,
-        "project_fields": 2_000,
-        "probe_runs": 12,
-        "evaluation_rows": 2_000,
-        "schema_rows": 250,
-        "actor_capacity": 8,
-        "process_capacity": 16,
-    },
-    "local": {
-        "collection_items": 1_000,
-        "full_detail_items": 25,
-        "history_samples": 5_000,
-        "history_keys": 100,
-        "history_range_steps": 100_000,
-        "project_fields": 5_000,
-        "probe_runs": 24,
-        "evaluation_rows": 5_000,
-        "schema_rows": 500,
-        "actor_capacity": 16,
-        "process_capacity": 16,
-    },
-}
-_profile_defaults = _PROFILE_DEFAULTS[MCP_WORKLOAD_PROFILE]
+_workload_policy = _RUNTIME_CONTRACT["workload_profiles"][MCP_WORKLOAD_PROFILE]
+_workload_defaults = _workload_policy["limits"]
+_capacity_defaults = _RUNTIME_CONTRACT["capacity_classes"][MCP_CAPACITY_CLASS]
+_managed_workload = bool(_workload_policy["managed"])
 
-MCP_TOOL_TIMEOUT_SECONDS: int = _env_int("MCP_TOOL_TIMEOUT_SECONDS", 30, maximum=300)
-MCP_WANDB_REQUEST_TIMEOUT_SECONDS: int = _env_int(
-    "MCP_WANDB_REQUEST_TIMEOUT_SECONDS",
-    20,
-    maximum=120,
-)
-MCP_ADMISSION_CONTROL_ENABLED: bool = _env_bool(
-    "MCP_ADMISSION_CONTROL_ENABLED",
-    MCP_WORKLOAD_PROFILE != "local",
-)
-MCP_ADMISSION_ACTOR_CAPACITY: int = _env_int(
-    "MCP_ADMISSION_ACTOR_CAPACITY",
-    _profile_defaults["actor_capacity"],
-    maximum=64,
-)
-MCP_ADMISSION_PROCESS_CAPACITY: int = _env_int(
-    "MCP_ADMISSION_PROCESS_CAPACITY",
-    _profile_defaults["process_capacity"],
-    maximum=64,
-)
-MCP_ADMISSION_WAIT_MS: int = _env_int(
-    "MCP_ADMISSION_WAIT_MS",
-    2000,
-    minimum=0,
-    maximum=30_000,
-)
-MCP_MAX_QUERY_LIMIT: int = _env_int(
-    "MCP_MAX_QUERY_LIMIT",
-    _profile_defaults["collection_items"],
-    maximum=10_000,
-)
-MCP_MAX_FULL_TRACE_LIMIT: int = _env_int(
-    "MCP_MAX_FULL_TRACE_LIMIT",
-    25 if MCP_WORKLOAD_PROFILE == "shared" else _profile_defaults["collection_items"],
-    maximum=1_000,
-)
-MCP_MAX_HISTORY_SAMPLES: int = _env_int(
-    "MCP_MAX_HISTORY_SAMPLES",
-    _profile_defaults["history_samples"],
-    maximum=10_000,
-)
-MCP_MAX_HISTORY_KEYS: int = _env_int(
-    "MCP_MAX_HISTORY_KEYS",
-    _profile_defaults["history_keys"],
-    maximum=500,
-)
-MCP_MAX_HISTORY_RANGE_STEPS: int = _env_int(
-    "MCP_MAX_HISTORY_RANGE_STEPS",
-    _profile_defaults["history_range_steps"],
-    maximum=1_000_000,
-)
-MCP_MAX_WANDB_QUERY_ITEMS: int = _env_int(
-    "MCP_MAX_WANDB_QUERY_ITEMS",
-    _profile_defaults["collection_items"],
-    maximum=10_000,
-)
-MCP_MAX_FULL_DETAIL_ITEMS: int = _env_int(
-    "MCP_MAX_FULL_DETAIL_ITEMS",
-    _profile_defaults["full_detail_items"],
-    maximum=100,
-)
-MCP_MAX_PROJECT_FIELDS: int = _env_int(
-    "MCP_MAX_PROJECT_FIELDS",
-    _profile_defaults["project_fields"],
-    maximum=10_000,
-)
-MCP_MAX_PROBE_RUNS: int = _env_int(
-    "MCP_MAX_PROBE_RUNS",
-    _profile_defaults["probe_runs"],
-    maximum=100,
-)
-MCP_MAX_EVALUATION_ROWS: int = _env_int(
-    "MCP_MAX_EVALUATION_ROWS",
-    _profile_defaults["evaluation_rows"],
-    maximum=10_000,
-)
-MCP_MAX_SCHEMA_SAMPLE_ROWS: int = _env_int(
-    "MCP_MAX_SCHEMA_SAMPLE_ROWS",
-    _profile_defaults["schema_rows"],
-    maximum=1_000,
-)
-MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE: int = _env_int(
-    "MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE",
-    50 if MCP_WORKLOAD_PROFILE == "shared" else 200,
-    maximum=500,
-)
-MCP_MAX_GQL_ITEMS: int = _env_int(
-    "MCP_MAX_GQL_ITEMS",
-    _profile_defaults["collection_items"],
-    maximum=1_000,
-)
-MCP_MAX_GQL_ITEMS_PER_PAGE: int = _env_int(
-    "MCP_MAX_GQL_ITEMS_PER_PAGE",
-    50 if MCP_WORKLOAD_PROFILE == "shared" else 200,
-    maximum=200,
-)
-MCP_SYNC_TOOL_WORKERS: int = _env_int(
-    "MCP_SYNC_TOOL_WORKERS",
-    min(MCP_ADMISSION_PROCESS_CAPACITY, 16),
-    maximum=16,
-)
-MCP_COUNT_TOOL_WORKERS: int = _env_int(
-    "MCP_COUNT_TOOL_WORKERS",
-    min(MCP_ADMISSION_PROCESS_CAPACITY, 8),
-    maximum=16,
-)
+if "MCP_HOSTED_MODE" in os.environ:
+    raise ValueError("MCP_HOSTED_MODE is internal; configure MCP_WORKLOAD_PROFILE")
+# Compatibility name for internal call sites. It is derived, never configured.
+MCP_HOSTED_MODE: bool = MCP_WORKLOAD_PROFILE != "local"
+
+
+def _profile_int(name: str) -> int:
+    default = int(_workload_defaults[name])
+    minimum, maximum = WORKLOAD_LIMIT_BOUNDS[name]
+    default = _validate_int(name, default, minimum=minimum, maximum=maximum)
+    if _managed_workload:
+        if name in os.environ:
+            raise ValueError(f"{name} cannot override managed MCP_WORKLOAD_PROFILE={MCP_WORKLOAD_PROFILE}")
+        return default
+    return _env_int(name, default, minimum=minimum, maximum=maximum)
+
+
+def _profile_bool(name: str) -> bool:
+    default = bool(_workload_defaults[name])
+    if _managed_workload:
+        if name in os.environ:
+            raise ValueError(f"{name} cannot override managed MCP_WORKLOAD_PROFILE={MCP_WORKLOAD_PROFILE}")
+        return default
+    return _env_bool(name, default)
+
+
+def _capacity_int(name: str, contract_key: str) -> int:
+    default = int(_capacity_defaults[contract_key])
+    minimum, maximum = CAPACITY_BOUNDS[contract_key]
+    default = _validate_int(name, default, minimum=minimum, maximum=maximum)
+    if _managed_workload:
+        if name in os.environ:
+            raise ValueError(f"{name} cannot override managed MCP_CAPACITY_CLASS={MCP_CAPACITY_CLASS}")
+        return default
+    return _env_int(name, default, minimum=minimum, maximum=maximum)
+
+
+MAX_RESPONSE_TOKENS: int = _profile_int("MAX_RESPONSE_TOKENS")
+MAX_ACCUMULATED_BYTES: int = _profile_int("MAX_ACCUMULATED_BYTES")
+MCP_TOOL_TIMEOUT_SECONDS: int = _profile_int("MCP_TOOL_TIMEOUT_SECONDS")
+MCP_WANDB_REQUEST_TIMEOUT_SECONDS: int = _profile_int("MCP_WANDB_REQUEST_TIMEOUT_SECONDS")
+MCP_ADMISSION_CONTROL_ENABLED: bool = _profile_bool("MCP_ADMISSION_CONTROL_ENABLED")
+MCP_ADMISSION_ACTOR_CAPACITY: int = _capacity_int("MCP_ADMISSION_ACTOR_CAPACITY", "actor_capacity")
+MCP_ADMISSION_PROCESS_CAPACITY: int = _capacity_int("MCP_ADMISSION_PROCESS_CAPACITY", "process_capacity")
+MCP_ADMISSION_WAIT_MS: int = _profile_int("MCP_ADMISSION_WAIT_MS")
+MCP_MAX_QUERY_LIMIT: int = _profile_int("MCP_MAX_QUERY_LIMIT")
+MCP_MAX_FULL_TRACE_LIMIT: int = _profile_int("MCP_MAX_FULL_TRACE_LIMIT")
+MCP_MAX_HISTORY_SAMPLES: int = _profile_int("MCP_MAX_HISTORY_SAMPLES")
+MCP_MAX_HISTORY_KEYS: int = _profile_int("MCP_MAX_HISTORY_KEYS")
+MCP_MAX_HISTORY_RANGE_STEPS: int = _profile_int("MCP_MAX_HISTORY_RANGE_STEPS")
+MCP_MAX_WANDB_QUERY_ITEMS: int = _profile_int("MCP_MAX_WANDB_QUERY_ITEMS")
+MCP_MAX_FULL_DETAIL_ITEMS: int = _profile_int("MCP_MAX_FULL_DETAIL_ITEMS")
+MCP_MAX_PROJECT_FIELDS: int = _profile_int("MCP_MAX_PROJECT_FIELDS")
+MCP_MAX_PROBE_RUNS: int = _profile_int("MCP_MAX_PROBE_RUNS")
+MCP_MAX_EVALUATION_ROWS: int = _profile_int("MCP_MAX_EVALUATION_ROWS")
+MCP_MAX_SCHEMA_SAMPLE_ROWS: int = _profile_int("MCP_MAX_SCHEMA_SAMPLE_ROWS")
+MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE: int = _profile_int("MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE")
+MCP_MAX_GQL_ITEMS: int = _profile_int("MCP_MAX_GQL_ITEMS")
+MCP_MAX_GQL_ITEMS_PER_PAGE: int = _profile_int("MCP_MAX_GQL_ITEMS_PER_PAGE")
+MCP_SYNC_TOOL_WORKERS: int = _capacity_int("MCP_SYNC_TOOL_WORKERS", "sync_workers")
+MCP_COUNT_TOOL_WORKERS: int = _capacity_int("MCP_COUNT_TOOL_WORKERS", "count_workers")
 MCP_ANALYTICS_QUEUE_CAPACITY: int = _env_int(
     "MCP_ANALYTICS_QUEUE_CAPACITY",
     256,
@@ -328,8 +245,8 @@ MCP_REQUEST_SUCCESS_SAMPLE_RATE: float = _env_float(
     minimum=0.0,
     maximum=1.0,
 )
-SESSION_TTL_SECONDS: int = _env_int("SESSION_TTL_SECONDS", 3600, maximum=86_400)
-MAX_SESSIONS_PER_KEY: int = _env_int("MAX_SESSIONS_PER_KEY", 10, maximum=1_000)
+SESSION_TTL_SECONDS: int = _profile_int("SESSION_TTL_SECONDS")
+MAX_SESSIONS_PER_KEY: int = _profile_int("MAX_SESSIONS_PER_KEY")
 
 if MCP_ADMISSION_ACTOR_CAPACITY > MCP_ADMISSION_PROCESS_CAPACITY:
     raise ValueError("MCP_ADMISSION_ACTOR_CAPACITY must not exceed MCP_ADMISSION_PROCESS_CAPACITY")
@@ -341,18 +258,6 @@ if MCP_SYNC_TOOL_WORKERS > MCP_ADMISSION_PROCESS_CAPACITY:
     raise ValueError("MCP_SYNC_TOOL_WORKERS must not exceed MCP_ADMISSION_PROCESS_CAPACITY")
 if MCP_COUNT_TOOL_WORKERS > MCP_ADMISSION_PROCESS_CAPACITY:
     raise ValueError("MCP_COUNT_TOOL_WORKERS must not exceed MCP_ADMISSION_PROCESS_CAPACITY")
-WANDB_MCP_ENABLE_WEAVE_TOOLS: bool = _env_bool("WANDB_MCP_ENABLE_WEAVE_TOOLS", True)
-WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS: bool = _env_bool(
-    "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
-    False,
-)
-WANDB_MCP_ENABLE_ARIA_TOOLS: bool = _env_bool("WANDB_MCP_ENABLE_ARIA_TOOLS", False)
-WANDB_MCP_READ_ONLY: bool = _env_bool("WANDB_MCP_READ_ONLY", False)
-WANDB_MCP_ENABLE_RAW_GRAPHQL: bool = _env_bool("WANDB_MCP_ENABLE_RAW_GRAPHQL", False)
-if WANDB_MCP_ENABLE_ARIA_TOOLS:
-    WB_AGENT_BASE_URL = resolve_aria_base_url()
-    if MAX_RESPONSE_TOKENS < 64:
-        raise ValueError("MAX_RESPONSE_TOKENS must be at least 64 when WANDB_MCP_ENABLE_ARIA_TOOLS is enabled")
 MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS: bool = _env_bool(
     "MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS",
     False,

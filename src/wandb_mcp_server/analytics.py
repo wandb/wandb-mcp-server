@@ -394,8 +394,11 @@ def _resolve_deployment_type(runtime_surface: str, transport: str) -> str:
     explicit = _env_stripped("MCP_DEPLOYMENT_TYPE")
     if explicit:
         return explicit
-    if _env_bool("MCP_HOSTED_MODE"):
+    workload_profile = (_env_stripped("MCP_WORKLOAD_PROFILE") or "local").lower()
+    if workload_profile == "shared":
         return "hosted"
+    if workload_profile == "dedicated":
+        return "dedicated"
     if runtime_surface.startswith("local") or transport == "stdio":
         return "local"
     return "unknown"
@@ -410,7 +413,7 @@ def _deployment_context() -> Dict[str, Any]:
         "transport": transport,
         "deployment_type": _resolve_deployment_type(runtime_surface, transport),
         "environment": _env_stripped("ENVIRONMENT") or _env_stripped("DD_ENV") or "unknown",
-        "hosted_mode": _env_bool("MCP_HOSTED_MODE"),
+        "hosted_mode": (_env_stripped("MCP_WORKLOAD_PROFILE") or "local").lower() == "shared",
     }
     wandb_base_host = _safe_wandb_base_host()
     if wandb_base_host:

@@ -12,12 +12,12 @@ import argparse
 from importlib.metadata import version as installed_version
 import json
 import logging
-import os
 from pathlib import Path
 import platform
 import tempfile
 import threading
 import time
+from zipfile import BadZipFile, ZipFile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -29,20 +29,26 @@ if __package__:
     from scripts.public_release import (
         DEFAULT_CONTRACT,
         Profile,
+        ReleaseError,
         canonical_json,
         exhaustive_profiles,
         load_contract,
         named_profile,
+        runtime_contract_payload_sha256,
+        runtime_contract_sha256,
         sha256_file,
     )
 else:
     from public_release import (
         DEFAULT_CONTRACT,
         Profile,
+        ReleaseError,
         canonical_json,
         exhaustive_profiles,
         load_contract,
         named_profile,
+        runtime_contract_payload_sha256,
+        runtime_contract_sha256,
         sha256_file,
     )
 
@@ -76,6 +82,7 @@ _AGENT_TOOL_NAMES = {
     "get_weave_agent_conversation_tool",
 }
 _ARIA_TOOL_NAMES = {"aria_send_message", "aria_get_turn", "aria_get_turns"}
+_WHEEL_RUNTIME_CONTRACT = "wandb_mcp_server/runtime-contract.json"
 
 
 class _FakeWandBHandler(BaseHTTPRequestHandler):
@@ -141,6 +148,22 @@ def _contains_none(value: Any) -> bool:
     return False
 
 
+def _wheel_runtime_contract_sha256(wheel: Path) -> str:
+    """Bind evidence to the packaged policy inside the exact installed wheel."""
+    try:
+        with ZipFile(wheel) as archive:
+            matches = [name for name in archive.namelist() if name == _WHEEL_RUNTIME_CONTRACT]
+            if len(matches) != 1:
+                raise ValueError("wheel must contain exactly one packaged MCP runtime contract")
+            try:
+                payload = json.loads(archive.read(matches[0]))
+            except (KeyError, json.JSONDecodeError, UnicodeDecodeError) as error:
+                raise ValueError("wheel contains an unreadable MCP runtime contract") from error
+    except BadZipFile as error:
+        raise ValueError("wheel is not a valid wheel archive") from error
+    return runtime_contract_payload_sha256(payload)
+
+
 def _server_environment(
     base_url: str,
     home: str,
@@ -165,6 +188,7 @@ def _server_environment(
         "WANDB_API_KEY": _TEST_API_KEY,
         "WANDB_BASE_URL": base_url,
         "WANDB_INTERNAL_BASE_URL": "",
+        "WF_TRACE_SERVER_URL": base_url,
         "WANDB_SILENT": "True",
         "WEAVE_SILENT": "True",
         "MCP_ANALYTICS_DISABLED": "false",
@@ -173,20 +197,11 @@ def _server_environment(
         "MCP_SEGMENT_FORWARD": "false",
         "MCP_DATADOG_FORWARD": "false",
         "WANDB_MCP_PROXY_DOCS": "true",
-        "WANDB_MCP_ENABLE_RAW_GRAPHQL": "false",
-        "WANDB_MCP_ENABLE_WEAVE_TOOLS": os.environ.get(
-            "WANDB_MCP_ENABLE_WEAVE_TOOLS",
-            "true",
-        ),
-        "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS": os.environ.get(
-            "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
-            "false",
-        ),
-        "WANDB_MCP_ENABLE_ARIA_TOOLS": os.environ.get(
-            "WANDB_MCP_ENABLE_ARIA_TOOLS",
-            "false",
-        ),
-        "WANDB_MCP_READ_ONLY": "false",
+        "WANDB_MCP_TOOL_PROFILE": "models-weave",
+        "WANDB_MCP_ACCESS_MODE": "read-write",
+        "MCP_WORKLOAD_PROFILE": "local",
+        "MCP_CAPACITY_CLASS": "small",
+        "WB_AGENT_BASE_URL": "https://127.0.0.1:9",
     }
     if profile_environment:
         environment.update(profile_environment)
@@ -240,19 +255,12 @@ async def _exercise_profile(
                                     sorted(set(profile.tools) - set(tools_by_name)),
                                     sorted(set(tools_by_name) - set(profile.tools)),
                                 )
-                                agent_tools_enabled = profile.features["agents"]
-                                aria_tools_enabled = profile.features["aria"]
+                                agent_tools_enabled = bool(_AGENT_TOOL_NAMES & set(profile.tools))
+                                aria_tools_enabled = bool(_ARIA_TOOL_NAMES & set(profile.tools))
                             else:
-                                agent_tools_enabled = (
-                                    os.environ.get("WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS", "false").lower() == "true"
-                                )
-                                aria_tools_enabled = (
-                                    os.environ.get("WANDB_MCP_ENABLE_ARIA_TOOLS", "false").lower() == "true"
-                                )
-                                expected_tool_count = (
-                                    22 + (8 if agent_tools_enabled else 0) + (3 if aria_tools_enabled else 0)
-                                )
-                                assert len(tools_by_name) == expected_tool_count
+                                agent_tools_enabled = False
+                                aria_tools_enabled = False
+                                assert len(tools_by_name) == 22
                             assert _AGENT_TOOL_NAMES.issubset(tools_by_name) is agent_tools_enabled
                             if aria_tools_enabled:
                                 expected_aria_tools = _ARIA_TOOL_NAMES - (
@@ -263,7 +271,7 @@ async def _exercise_profile(
                                 assert _ARIA_TOOL_NAMES.isdisjoint(tools_by_name)
                             assert "list_entities_tool" in tools_by_name
                             assert "query_wandb_tool" in tools_by_name
-                            raw_graphql_enabled = profile.features["raw_graphql"] if profile else False
+                            raw_graphql_enabled = bool(profile and "query_wandb_graphql_tool" in profile.tools)
                             assert ("query_wandb_graphql_tool" in tools_by_name) is raw_graphql_enabled
 
                             query_schema = tools_by_name["query_wandb_tool"].inputSchema
@@ -292,6 +300,41 @@ async def _exercise_profile(
                             )
                             invalid_payload = json.loads(_result_text(invalid_result))
                             assert invalid_payload["error"] == "invalid_request"
+
+                            if "query_weave_traces_tool" in tools_by_name:
+                                weave_result = await session.call_tool(
+                                    "query_weave_traces_tool",
+                                    {
+                                        "entity_name": "test-entity",
+                                        "project_name": "test-project",
+                                        "detail_level": "invalid",
+                                    },
+                                )
+                                assert weave_result.isError is True
+                                assert "detail_level" in _result_text(weave_result)
+
+                            if "list_weave_agents_tool" in tools_by_name:
+                                agent_result = await session.call_tool(
+                                    "list_weave_agents_tool",
+                                    {"entity_name": "test-entity", "project_name": "test-project"},
+                                )
+                                assert agent_result.isError is False
+                                agent_payload = json.loads(_result_text(agent_result))
+                                assert agent_payload["error"] == "agents_api_unavailable"
+
+                            if "aria_get_turn" in tools_by_name:
+                                aria_result = await session.call_tool("aria_get_turn", {"turn_id": ""})
+                                assert aria_result.isError is True
+                                assert "invalid_request" in _result_text(aria_result)
+
+                            if "query_wandb_graphql_tool" in tools_by_name:
+                                graphql_result = await session.call_tool(
+                                    "query_wandb_graphql_tool",
+                                    {"query": "mutation Forbidden { deleteRun(id: 1) }"},
+                                )
+                                assert graphql_result.isError is False
+                                graphql_payload = json.loads(_result_text(graphql_result))
+                                assert graphql_payload["errors"][0]["error"] == "read_only_violation"
 
                             unknown_result = await session.call_tool("not_a_real_tool", {})
                             assert unknown_result.isError is True
@@ -441,7 +484,7 @@ def main() -> None:
         help="Version-neutral public tool contract.",
     )
     parser.add_argument("--profile", action="append", default=[], help="Named profile to verify (repeatable).")
-    parser.add_argument("--all-profiles", action="store_true", help="Verify every feature/read-only combination.")
+    parser.add_argument("--all-profiles", action="store_true", help="Verify every supported profile/access mode.")
     parser.add_argument("--evidence-out", type=Path, help="Write deterministic exact-profile evidence after success.")
     parser.add_argument("--source-sha", help="Exact source commit used to build the installed wheel.")
     parser.add_argument("--wheel", type=Path, help="Exact installed wheel, used to bind evidence to its digest.")
@@ -461,6 +504,14 @@ def main() -> None:
         parser.error("--evidence-out requires --all-profiles, --source-sha, and --wheel")
     if args.wheel and not args.wheel.is_file():
         parser.error(f"wheel does not exist: {args.wheel}")
+    wheel_runtime_contract_sha256 = None
+    if args.wheel:
+        try:
+            wheel_runtime_contract_sha256 = _wheel_runtime_contract_sha256(args.wheel)
+        except (ReleaseError, ValueError) as error:
+            parser.error(str(error))
+        if wheel_runtime_contract_sha256 != runtime_contract_sha256(contract):
+            parser.error("wheel runtime contract does not match the reviewed checkout policy")
 
     started = time.monotonic()
     if profiles:
@@ -470,12 +521,13 @@ def main() -> None:
 
     if args.evidence_out:
         evidence = {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "passed",
             "version": installed_version("wandb_mcp_server"),
             "source_sha": args.source_sha,
             "wheel_sha256": sha256_file(args.wheel),
             "contract_sha256": sha256_file(args.contract),
+            "runtime_contract_sha256": wheel_runtime_contract_sha256,
             "harness_sha256": sha256_file(Path(__file__)),
             "mcp_version": installed_version("mcp"),
             "locked_runtime": {

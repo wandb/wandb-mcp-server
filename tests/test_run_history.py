@@ -1766,18 +1766,19 @@ class TestHistoryTruncation:
         mock_wandb_mod.errors = wandb.errors
 
         with (
-            patch("wandb_mcp_server.mcp_tools.run_history.MCP_HOSTED_MODE", True),
+            patch("wandb_mcp_server.mcp_tools.run_history.MCP_WORKLOAD_PROFILE", "dedicated"),
             patch("wandb_mcp_server.mcp_tools.run_history.MCP_MAX_HISTORY_SAMPLES", 5),
         ):
             result = json.loads(get_run_history("e", "p", "run1", keys=["loss"], samples=100))
 
         mock_run.history.assert_called_once()
         assert mock_run.history.call_args.kwargs["samples"] == 5
-        assert "hosted_limit_note" in result
+        assert "managed_limit_note" in result
+        assert "hosted_limit_note" not in result
 
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     def test_hosted_history_requires_explicit_keys(self, mock_api_mgr):
-        with patch("wandb_mcp_server.mcp_tools.run_history.MCP_HOSTED_MODE", True):
+        with patch("wandb_mcp_server.mcp_tools.run_history.MCP_WORKLOAD_PROFILE", "dedicated"):
             with pytest.raises(ValueError, match="explicit history keys"):
                 get_run_history("e", "p", "run1")
         mock_api_mgr.get_api_key.assert_not_called()
@@ -1785,7 +1786,7 @@ class TestHistoryTruncation:
     @patch("wandb_mcp_server.mcp_tools.run_history.WandBApiManager")
     def test_hosted_history_rejects_wide_step_range(self, mock_api_mgr):
         with (
-            patch("wandb_mcp_server.mcp_tools.run_history.MCP_HOSTED_MODE", True),
+            patch("wandb_mcp_server.mcp_tools.run_history.MCP_WORKLOAD_PROFILE", "dedicated"),
             patch("wandb_mcp_server.mcp_tools.run_history.MCP_MAX_HISTORY_RANGE_STEPS", 5000),
         ):
             with pytest.raises(ValueError, match="cannot exceed 5000"):

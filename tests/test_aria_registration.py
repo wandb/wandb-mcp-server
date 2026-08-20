@@ -14,8 +14,16 @@ from wandb_mcp_server.instrumented_server import (
 from wandb_mcp_server.server import register_tools
 
 
+def _enable_aria(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-weave-agents-aria")
+    monkeypatch.setenv("WANDB_MCP_ACCESS_MODE", "read-write")
+    monkeypatch.setenv("MCP_WORKLOAD_PROFILE", "local")
+    monkeypatch.setenv("MCP_CAPACITY_CLASS", "small")
+    monkeypatch.setenv("WB_AGENT_BASE_URL", "https://wb-agent.wandb.ai")
+
+
 def test_aria_tools_are_registered_with_self_guiding_descriptions(monkeypatch) -> None:
-    monkeypatch.setenv("WANDB_MCP_ENABLE_ARIA_TOOLS", "true")
+    _enable_aria(monkeypatch)
     mcp = FastMCP("test")
     register_tools(mcp)
 
@@ -34,9 +42,10 @@ def test_aria_tools_are_registered_with_self_guiding_descriptions(monkeypatch) -
     assert tools["aria_get_turns"].inputSchema["required"] == ["turn_ids"]
 
 
-def test_disabled_aria_is_never_registered_even_if_legacy_removal_breaks(monkeypatch) -> None:
-    monkeypatch.delenv("WANDB_MCP_ENABLE_ARIA_TOOLS", raising=False)
-    monkeypatch.setattr(server, "_remove_registered_tools", lambda *args, **kwargs: None)
+def test_default_profile_never_registers_aria(monkeypatch) -> None:
+    monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-weave")
+    monkeypatch.setenv("WANDB_MCP_ACCESS_MODE", "read-write")
+    monkeypatch.setenv("MCP_WORKLOAD_PROFILE", "local")
     mcp = FastMCP("test")
 
     register_tools(mcp)
@@ -46,7 +55,7 @@ def test_disabled_aria_is_never_registered_even_if_legacy_removal_breaks(monkeyp
 
 
 def test_enabled_aria_revalidates_late_base_url_before_registration(monkeypatch) -> None:
-    monkeypatch.setenv("WANDB_MCP_ENABLE_ARIA_TOOLS", "true")
+    _enable_aria(monkeypatch)
     monkeypatch.setenv("WB_AGENT_BASE_URL", "http://unsafe.example")
 
     with pytest.raises(ValueError, match="WB_AGENT_BASE_URL"):
@@ -69,7 +78,7 @@ def test_aria_failure_sets_native_mcp_error_with_json_payload(monkeypatch) -> No
     async def failed_get(**kwargs):
         return expected
 
-    monkeypatch.setenv("WANDB_MCP_ENABLE_ARIA_TOOLS", "true")
+    _enable_aria(monkeypatch)
     monkeypatch.setattr(server, "get_aria_turn", failed_get)
     mcp = InstrumentedFastMCP("test", stateless_http=True, json_response=True)
     register_tools(mcp)
@@ -127,7 +136,7 @@ def test_aria_rate_limit_preserves_its_retry_after_at_mcp_boundary(monkeypatch) 
     async def failed_get(**kwargs):
         return expected
 
-    monkeypatch.setenv("WANDB_MCP_ENABLE_ARIA_TOOLS", "true")
+    _enable_aria(monkeypatch)
     monkeypatch.setattr(server, "get_aria_turn", failed_get)
     mcp = InstrumentedFastMCP("test", stateless_http=True, json_response=True)
     register_tools(mcp)
@@ -182,7 +191,7 @@ def test_oversized_aria_error_remains_bounded_parseable_and_sanitized(monkeypatc
     async def failed_batch(**kwargs):
         return expected
 
-    monkeypatch.setenv("WANDB_MCP_ENABLE_ARIA_TOOLS", "true")
+    _enable_aria(monkeypatch)
     monkeypatch.setenv("WANDB_API_KEY", secret)
     monkeypatch.setattr(server, "get_aria_turns", failed_batch)
     mcp = InstrumentedFastMCP("test", stateless_http=True, json_response=True)
@@ -236,7 +245,7 @@ def test_unicode_oversized_aria_error_still_fits_utf8_budget(monkeypatch) -> Non
     async def failed_get(**kwargs):
         return expected
 
-    monkeypatch.setenv("WANDB_MCP_ENABLE_ARIA_TOOLS", "true")
+    _enable_aria(monkeypatch)
     monkeypatch.setattr(server, "get_aria_turn", failed_get)
     mcp = InstrumentedFastMCP("test", stateless_http=True, json_response=True)
     register_tools(mcp)
@@ -283,7 +292,7 @@ def test_mcp_boundary_normalizes_nonfinite_success_content_and_structure(monkeyp
     async def successful_get(**kwargs):
         return expected
 
-    monkeypatch.setenv("WANDB_MCP_ENABLE_ARIA_TOOLS", "true")
+    _enable_aria(monkeypatch)
     monkeypatch.setattr(server, "get_aria_turn", successful_get)
     mcp = InstrumentedFastMCP("test", stateless_http=True, json_response=True)
     register_tools(mcp)
@@ -335,7 +344,7 @@ def test_mcp_boundary_normalizes_nonfinite_error_details(monkeypatch) -> None:
     async def failed_get(**kwargs):
         return expected
 
-    monkeypatch.setenv("WANDB_MCP_ENABLE_ARIA_TOOLS", "true")
+    _enable_aria(monkeypatch)
     monkeypatch.setattr(server, "get_aria_turn", failed_get)
     mcp = InstrumentedFastMCP("test", stateless_http=True, json_response=True)
     register_tools(mcp)

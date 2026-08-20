@@ -35,11 +35,12 @@ Version 0.4.0 makes W&B reads SDK-first, bounded, and workload-aware:
 - Dedicated and Self-Managed deployments can send W&B Models/API traffic over an
   internal Kubernetes service with `WANDB_INTERNAL_BASE_URL`, while public links
   continue to use `WANDB_BASE_URL`.
-- Raw GraphQL is disabled by default and remains query-only when explicitly
-  enabled. Mutations and subscriptions are rejected.
-- Three opt-in ARIA tools support bounded asynchronous submission and polling
-  when a deployment has an approved hosted W&B Agent path. Dedicated and
-  Self-Managed deployments keep this integration disabled by default.
+- Raw GraphQL is local compatibility only and remains query-only; managed
+  Shared and Dedicated profiles reject it. Mutations and subscriptions are
+  rejected.
+- Three local-only ARIA tools support bounded asynchronous submission and
+  polling when a deployment has an approved hosted W&B Agent path. Managed
+  Shared and Dedicated profiles reject the ARIA profile in v0.4.
 - Tool telemetry is bounded, excludes raw arguments and API keys, and correctly
   attributes supported clients such as Codex, Claude Code, and Cursor.
 
@@ -102,18 +103,19 @@ mutable image tags such as `latest` are not supported release channels.
 | **aria_get_turn** *(opt-in)* | Poll an ARIA turn for progress or its final result | *"Check whether that ARIA analysis finished"* |
 | **aria_get_turns** *(opt-in)* | Poll up to 20 ARIA turns concurrently | *"Check all of those ARIA analyses in one bounded wait"* |
 
-**Read-only deployment mode:** Set `WANDB_MCP_READ_ONLY=true` to omit the three write-capable tools,
-`create_wandb_report_tool`, `log_analysis_to_wandb`, and `aria_send_message`, while keeping every existing read tool.
+**Read-only deployment mode:** Set `WANDB_MCP_ACCESS_MODE=read-only` to omit every tool
+classified as a write, including `create_wandb_report_tool`,
+`log_analysis_to_wandb`, and (in the ARIA profile) `aria_send_message`.
 `query_wandb_tool` is read-only in every mode. It normally uses documented W&B
 APIs and may use fixed, application-owned query-only projections to avoid
 per-result fan-out; callers cannot supply GraphQL to this tool.
 
-**Advanced raw GraphQL:** Raw GraphQL is not registered by default. Set
-`WANDB_MCP_ENABLE_RAW_GRAPHQL=true` to add the query-only `query_wandb_graphql_tool`
-for schema introspection, unmodeled fields, cross-resource nesting, aliases, or exact
-response shapes that the typed tool cannot represent. It accepts exactly one bounded
-query operation; mutations and subscriptions are always rejected. This flag is
-independent of `WANDB_MCP_READ_ONLY`. See the
+**Advanced raw GraphQL:** Raw GraphQL is available only in the explicit local
+`models-weave-graphql-compat` profile. That profile adds the query-only
+`query_wandb_graphql_tool` for schema introspection, unmodeled fields,
+cross-resource nesting, aliases, or exact response shapes that the typed tool
+cannot represent. It accepts exactly one bounded query operation; mutations
+and subscriptions are always rejected. See the
 [query capability matrix](docs/query-capabilities.md).
 
 On the supported W&B service transport, raw and fixed GraphQL responses are
@@ -126,14 +128,15 @@ Recommended deployment presets:
 
 | Deployment | Settings |
 |---|---|
-| W&B-hosted | Weave Agent tools enabled; ARIA and caller-supplied raw GraphQL disabled by default. ARIA is available only through a separately validated W&B-managed profile. |
-| Strict customer read-only | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`, `WANDB_MCP_ENABLE_ARIA_TOOLS=false` |
-| Trusted read-only compatibility | `WANDB_MCP_READ_ONLY=true`, `WANDB_MCP_ENABLE_RAW_GRAPHQL=true`, `WANDB_MCP_ENABLE_ARIA_TOOLS=false`, `MCP_MAX_GQL_ITEMS=50`, `MCP_MAX_GQL_ITEMS_PER_PAGE=20` |
+| MT SaaS | `models-weave-agents`, `shared`, `read-write` (30 tools) |
+| Dedicated Models-only | `models-only`, `dedicated`, `read-write` (17 tools) |
+| Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (22 tools) |
+| Local GraphQL compatibility | `models-weave-graphql-compat`, `local`; choose either access mode |
 
 **Migration from v0.3.7:** `query_wandb_tool` now accepts structured SDK parameters
 (`entity_name`, `project_name`, `resource`, filters, ordering, and identifiers) instead
-of a GraphQL document. Existing raw-query callers must explicitly enable and call
-`query_wandb_graphql_tool`.
+of a GraphQL document. Existing raw-query callers must select the local
+`models-weave-graphql-compat` profile and call `query_wandb_graphql_tool`.
 
 **Run history semantics:** for explicit multi-key default-history sampled and
 ranged collection reads, `get_run_history_tool` outer-joins requested metric
@@ -157,11 +160,13 @@ source; those invalid JSON numeric values are omitted from returned rows, and
 their counts are exhaustive only when `key_counts_exact=true`.
 Exact `target_x` remains a point lookup rather than an outer-union read. This
 path uses a fixed application-owned query-only projection, accepts no
-caller-supplied GraphQL, and works with `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`.
+caller-supplied GraphQL, and is part of every supported managed tool profile.
 
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
 
-These tools are disabled by default. Enable them with `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=true`.
+These tools are present in the explicit `models-weave-agents` and
+`models-weave-agents-aria` profiles. MT SaaS uses the former; Dedicated v0.4
+rejects both profiles.
 
 | Tool | Description | Example Query |
 |------|-------------|---------------|
@@ -183,7 +188,11 @@ These tools are disabled by default. Enable them with `WANDB_MCP_ENABLE_WEAVE_AG
 
 **Docs search:** `search_wandb_docs_tool` proxies [docs.wandb.ai](https://docs.wandb.ai) so you get data tools + documentation search from a single MCP connection. Disable with `WANDB_MCP_PROXY_DOCS=false` if you connect the docs MCP separately.
 
-**ARIA tools are opt-in:** Set `WANDB_MCP_ENABLE_ARIA_TOOLS=true` only when the deployment has an approved HTTPS path to the hosted W&B Agent service. The default is `false`, including Dedicated/Self-Managed deployments, so customer credentials are never forwarded to the public ARIA service implicitly. `WANDB_MCP_READ_ONLY=true` additionally omits `aria_send_message` while retaining polling when the ARIA group is explicitly enabled.
+**ARIA tools are explicit and local-only in managed v0.4:** select
+`models-weave-agents-aria` and configure `WB_AGENT_BASE_URL` to an approved
+absolute HTTPS origin. Endpoint presence alone never enables the tools.
+`WANDB_MCP_ACCESS_MODE=read-only` omits `aria_send_message` while retaining the
+two polling tools. Shared and Dedicated managed profiles reject ARIA.
 
 **ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
 
@@ -645,55 +654,57 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_API_KEY` | Your W&B API key (alternative to `--wandb_api_key` flag) | Yes |
 | `WANDB_BASE_URL` | Public W&B instance URL used for credentials and user-facing links | No |
 | `WANDB_INTERNAL_BASE_URL` | Optional server-side W&B Models/API URL; Dedicated charts set this to the in-cluster API service. Weave trace routing remains controlled by `WF_TRACE_SERVER_URL`. | No |
-| `WB_AGENT_BASE_URL` | Hosted ARIA service URL (default: `https://wb-agent.wandb.ai`) | No |
+| `WB_AGENT_BASE_URL` | Explicit approved HTTPS origin required only by the ARIA tool profile | No |
 | `MCP_SERVER_LOG_LEVEL` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` | No |
 | `WANDB_SILENT` | Set to `"True"` to suppress W&B SDK output (default: `true`) | No |
 | `WEAVE_SILENT` | Set to `"True"` to suppress Weave SDK output (default: `true`) | No |
 | `WANDB_DEBUG` | Set to `"true"` to enable detailed W&B logging | No |
 | `MCP_AUTH_DISABLED` | Must be `true` to acknowledge unauthenticated loopback HTTP development | No |
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
-| `MCP_MAX_GQL_ITEMS` | Maximum items returned by the opt-in raw GraphQL tool (profile default) | No |
-| `MCP_MAX_GQL_ITEMS_PER_PAGE` | Maximum raw GraphQL connection page size (profile default) | No |
-| `MCP_HOSTED_MODE` | Marks an HTTP deployment as hosted; defaults the workload profile to `shared` | No |
-| `MCP_WORKLOAD_PROFILE` | Bounded defaults for `shared`, `dedicated`, or `local` workloads (default: `shared` when hosted, otherwise `local`) | No |
-| `MCP_ADMISSION_CONTROL_ENABLED` | Enable actor-aware weighted tool admission (default: enabled except for the `local` profile) | No |
-| `MCP_ADMISSION_ACTOR_CAPACITY` | Maximum concurrent cost units per API-key actor (profile default: shared `4`, dedicated `8`, local `16`) | No |
-| `MCP_ADMISSION_PROCESS_CAPACITY` | Maximum concurrent cost units per server process (default: `16`) | No |
-| `MCP_ADMISSION_WAIT_MS` | Maximum queue wait before returning retryable `server_busy` (default: `2000`) | No |
-| `MCP_TOOL_TIMEOUT_SECONDS` | Hosted public-tool response deadline (default: `30`); timed-out sync workers retain admission capacity until they finish | No |
-| `MCP_WANDB_REQUEST_TIMEOUT_SECONDS` | Timeout for server-side W&B SDK and fixed read requests (default: `20`) | No |
-| `MCP_SYNC_TOOL_WORKERS` | Bounded worker count for synchronous public tools (profile-derived default, capped at `16`) | No |
 | `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events | No |
 | `MCP_ANALYTICS_QUEUE_CAPACITY` | Maximum outstanding events per optional Segment or Datadog forwarder (default: `256`) | No |
 | `MCP_REQUEST_SUCCESS_SAMPLE_RATE` | Deterministic sample rate for successful HTTP request telemetry (default: `0.10`; failures and requests over two seconds are always retained). | No |
 | `MCP_LOG_PRIVACY_LEVEL` | Telemetry privacy level: `off`, `standard`, or `strict` (default: `off`) | No |
-| `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |
 
 <!-- BEGIN GENERATED: PUBLIC FEATURE PROFILES -->
 <!-- Generated by scripts/public_release.py docs. Do not edit this block. -->
 
-Release-controlled feature variables:
+Release-controlled orthogonal selectors:
 
 | Variable | Default | Effect |
 |---|---:|---|
-| `WANDB_MCP_ENABLE_WEAVE_TOOLS` | `true` | Registers the `weave` group (5 tools). |
-| `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS` | `false` | Registers the `agents` group (8 tools). |
-| `WANDB_MCP_ENABLE_ARIA_TOOLS` | `false` | Registers the `aria` group (3 tools). |
-| `WANDB_MCP_ENABLE_RAW_GRAPHQL` | `false` | Registers the `raw_graphql` group (1 tools). |
-| `WANDB_MCP_READ_ONLY` | `false` | Removes all tools classified as writes. |
+| `WANDB_MCP_TOOL_PROFILE` | `models-weave` | Selects one exact reviewed product-capability profile. |
+| `WANDB_MCP_ACCESS_MODE` | `read-write` | `read-only` subtracts every write tool. |
+| `MCP_WORKLOAD_PROFILE` | `local` | Selects query/history limits, admission mode and wait, deadlines, sessions, and HTTP rate policy. |
+| `MCP_CAPACITY_CLASS` | `small` | Selects bounded actor/process capacities and worker counts. |
 
-Named exact tool profiles:
+Exact tool profiles:
 
-| Profile | Weave | Agents | ARIA | Raw GraphQL | Read-only | Exact tools |
-|---|---:|---:|---:|---:|---:|---:|
-| `default` | `true` | `false` | `false` | `false` | `false` | 22 |
-| `models-only` | `false` | `false` | `false` | `false` | `false` | 17 |
-| `agents` | `true` | `true` | `false` | `false` | `false` | 30 |
-| `aria` | `true` | `false` | `true` | `false` | `false` | 25 |
-| `full` | `true` | `true` | `true` | `true` | `false` | 34 |
-| `strict-read-only` | `true` | `false` | `false` | `false` | `true` | 20 |
+| Tool profile | Groups | Managed workloads | Read-write | Read-only |
+|---|---|---|---:|---:|
+| `models-only` | models | shared, dedicated | 17 | 15 |
+| `models-weave` | models, weave | shared, dedicated | 22 | 20 |
+| `models-weave-agents` | models, weave, agents | shared | 30 | 28 |
+| `models-weave-agents-aria` | models, weave, agents, aria | local only | 33 | 30 |
+| `models-weave-graphql-compat` | models, weave, raw-graphql | local only | 23 | 21 |
 
-Use `python scripts/public_release.py profiles --all` for every exact feature/read-only combination and tool name.
+Exact workload defaults:
+
+| Workload | Collection rows | History samples | Metric keys | Range span | Full-detail rows | Admission / HTTP rate |
+|---|---:|---:|---:|---:|---:|---|
+| `shared` | 100 | 500 | 20 | 5,000 | 3 | application admission and HTTP rate limiting off |
+| `dedicated` | 250 | 1,500 | 50 | 20,000 | 10 | admission on; 60/key/minute, 1000/process/minute |
+| `local` | 1,000 | 5,000 | 100 | 100,000 | 25 | application admission and HTTP rate limiting off |
+
+Exact capacity classes:
+
+| Capacity class | Actor | Process | Sync workers | Count workers |
+|---|---:|---:|---:|---:|
+| `small` | 4 | 4 | 4 | 4 |
+| `medium` | 4 | 8 | 8 | 8 |
+| `large` | 8 | 16 | 16 | 8 |
+
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:f60ff283adf64c5b6644d29095d70ac50357accbaaed5f5215dc2a2eb9f0944b`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line
@@ -702,14 +713,14 @@ compatibility input, then the `.netrc` entry for `WANDB_BASE_URL`, then
 the environment and remove stale `.netrc` entries for the same host; never pass
 a key in release automation or a process argument.
 
-Workload profiles provide one deployment-level choice while preserving the
-individual `MCP_MAX_*` overrides for advanced operators:
-
-| Profile | Collection rows | History samples | Metric keys | Range step span | Full-detail rows | Eval detail rows | Schema sample rows | Actor/process cost |
-|---------|----------------:|----------------:|------------:|----------------:|-----------------:|-----------------:|-------------------:|-------------------:|
-| `shared` | 100 | 500 | 20 | 5,000 | 3 | 500 | 100 | 4 / 16 |
-| `dedicated` | 250 | 1,500 | 50 | 20,000 | 10 | 2,000 | 250 | 8 / 16 |
-| `local` | 1,000 | 5,000 | 100 | 100,000 | 25 | 5,000 | 500 | admission disabled |
+Workload profiles are authoritative in managed deployments. They select query
+and history limits, admission mode and wait, deadlines, session bounds, and
+HTTP request-rate policy. Low-level numeric overrides are rejected for
+`shared` and `dedicated`; only `local` accepts bounded advanced overrides.
+The generated tables above contain the exact workload and capacity defaults.
+`MCP_CAPACITY_CLASS` independently selects actor/process capacity and worker
+counts; it does not change product capabilities, query semantics, or caller
+authorization.
 
 #### Usage Examples
 

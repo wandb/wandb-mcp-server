@@ -428,7 +428,7 @@ class TestSchemaVersion:
             "MCP_TRANSPORT": "http",
             "MCP_DEPLOYMENT_TYPE": "hosted",
             "ENVIRONMENT": "production",
-            "MCP_HOSTED_MODE": "true",
+            "MCP_WORKLOAD_PROFILE": "shared",
             "WANDB_BASE_URL": "https://api.wandb.ai",
         },
         clear=False,

@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import importlib
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
+from zipfile import ZipFile
 
 import pytest
 from mcp.server.fastmcp import FastMCP
 
 from scripts import public_release
-from scripts.mcp_stdio_smoke import _server_environment
+from scripts.mcp_stdio_smoke import _server_environment, _wheel_runtime_contract_sha256
 from wandb_mcp_server.server import register_tools
 
 
@@ -33,63 +33,100 @@ def _contract() -> dict:
     return public_release.load_contract(CONTRACT_PATH)
 
 
-def test_contract_generates_every_exact_feature_and_read_only_profile():
+def test_contract_generates_every_exact_tool_profile_and_access_mode():
     contract = _contract()
     profiles = public_release.exhaustive_profiles(contract)
+    runtime_contract = public_release.load_runtime_contract(contract)
 
-    assert len(profiles) == 32
-    assert len({profile.name for profile in profiles}) == 32
+    assert len(profiles) == 10
+    assert len({profile.name for profile in profiles}) == 10
     assert all(profile.tools == tuple(sorted(set(profile.tools))) for profile in profiles)
-
-    by_shape = {(tuple(profile.features.values()), profile.read_only): profile for profile in profiles}
-    assert len(by_shape) == 32
+    assert {profile.tool_profile for profile in profiles} == set(runtime_contract["tool_profiles"])
+    assert {profile.access_mode for profile in profiles} == {"read-write", "read-only"}
     for profile in profiles:
-        write_tools = set(contract["write_tools"])
+        write_tools = {
+            tool["name"]
+            for group in runtime_contract["tool_groups"].values()
+            for tool in group["tools"]
+            if tool["access"] == "write"
+        }
         if profile.read_only:
             assert write_tools.isdisjoint(profile.tools)
         else:
-            expected_writes = write_tools.intersection(
-                set(contract["base_tools"])
-                | {
-                    tool
-                    for feature, enabled in profile.features.items()
-                    if enabled
-                    for tool in contract["feature_groups"][feature]["tools"]
-                }
-            )
-            assert expected_writes <= set(profile.tools)
+            assert profile.tools
+        assert profile.runtime_contract_sha256 == public_release.runtime_contract_sha256(contract)
+
+
+def test_public_release_contract_rejects_non_object_root(tmp_path):
+    malformed = tmp_path / "public-contract.json"
+    malformed.write_text("[]")
+    with pytest.raises(public_release.ReleaseError, match="root must be an object"):
+        public_release.load_contract(malformed)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("python_versions", [], "Python 3.11 and 3.12"),
+        ("python_versions", ["3.12"], "Python 3.11 and 3.12"),
+        ("mcp", None, "MCP compatibility versions"),
+        (
+            "mcp",
+            {"minimum": "1.29.0", "locked": "1.28.1", "maximum_exclusive": "2"},
+            "compatibility range",
+        ),
+    ],
+)
+def test_public_release_contract_rejects_missing_compatibility_gates(tmp_path, field, value, message):
+    contract = _contract()
+    contract[field] = value
+    malformed = tmp_path / "public-contract.json"
+    malformed.write_text(json.dumps(contract))
+    with pytest.raises(public_release.ReleaseError, match=message):
+        public_release.load_contract(malformed)
+
+
+def test_wheel_runtime_contract_is_present_once_and_matches_checkout(tmp_path):
+    contract = _contract()
+    runtime_contract_path = REPOSITORY_ROOT / contract["runtime_contract"]
+    wheel = tmp_path / "candidate.whl"
+    with ZipFile(wheel, "w") as archive:
+        archive.write(runtime_contract_path, "wandb_mcp_server/runtime-contract.json")
+
+    assert _wheel_runtime_contract_sha256(wheel) == public_release.runtime_contract_sha256(contract)
+
+    missing = tmp_path / "missing.whl"
+    with ZipFile(missing, "w") as archive:
+        archive.writestr("wandb_mcp_server/__init__.py", "")
+    with pytest.raises(ValueError, match="exactly one"):
+        _wheel_runtime_contract_sha256(missing)
 
 
 def test_contract_matches_runtime_for_every_profile(monkeypatch):
     contract = _contract()
-    import wandb_mcp_server.config as config
+    for profile in public_release.exhaustive_profiles(contract):
+        for name, value in profile.environment.items():
+            monkeypatch.setenv(name, value)
+        if "aria" in profile.tool_profile:
+            monkeypatch.setenv("WB_AGENT_BASE_URL", "https://wb-agent.wandb.ai")
+        server = FastMCP("release-contract-test")
+        register_tools(server)
+        import asyncio
 
-    try:
-        for profile in public_release.exhaustive_profiles(contract):
-            for name, value in profile.environment.items():
-                monkeypatch.setenv(name, value)
-            importlib.reload(config)
-            server = FastMCP("release-contract-test")
-            register_tools(server)
-            assert set(server._tool_manager._tools) == set(profile.tools), profile.name
-    finally:
-        for group in contract["feature_groups"].values():
-            monkeypatch.delenv(group["environment"], raising=False)
-        monkeypatch.delenv(contract["read_only_environment"], raising=False)
-        importlib.reload(config)
+        assert {tool.name for tool in asyncio.run(server.list_tools())} == set(profile.tools), profile.name
 
 
-def test_named_profiles_are_shortcuts_to_exact_contracts():
+def test_named_profiles_are_exact_contract_shortcuts():
     contract = _contract()
 
-    default = public_release.named_profile(contract, "default")
-    full = public_release.named_profile(contract, "full")
-    strict = public_release.named_profile(contract, "strict-read-only")
+    default = public_release.named_profile(contract, "models-weave")
+    full = public_release.named_profile(contract, "models-weave-agents-aria")
+    strict = public_release.named_profile(contract, "models-weave-agents-aria", "read-only")
 
-    assert default.features == {"weave": True, "agents": False, "aria": False, "raw_graphql": False}
-    assert full.features == {"weave": True, "agents": True, "aria": True, "raw_graphql": True}
+    assert len(default.tools) == 22
+    assert len(full.tools) == 33
     assert strict.read_only is True
-    assert set(contract["write_tools"]).isdisjoint(strict.tools)
+    assert len(strict.tools) == 30
 
 
 def test_release_version_validation_generalizes_to_future_versions(tmp_path):
@@ -221,12 +258,13 @@ def test_attestation_rejects_profile_evidence_from_another_source(monkeypatch, t
     evidence_paths = []
     for python_version in contract["python_versions"]:
         evidence = {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "passed",
             "version": version,
             "source_sha": "wrong-source",
             "wheel_sha256": public_release.sha256_file(wheel),
             "contract_sha256": public_release.sha256_file(CONTRACT_PATH),
+            "runtime_contract_sha256": public_release.runtime_contract_sha256(contract),
             "harness_sha256": public_release.sha256_file(REPOSITORY_ROOT / "scripts" / "mcp_stdio_smoke.py"),
             "python_version": python_version,
             "mcp_version": contract["mcp"]["locked"],
@@ -253,6 +291,30 @@ def test_attestation_rejects_profile_evidence_from_another_source(monkeypatch, t
         )
 
 
+def test_attestation_rejects_obsolete_profile_evidence_schema(monkeypatch, tmp_path):
+    contract = _contract()
+    profile_evidence = {
+        "schema_version": 1,
+        "status": "passed",
+        "profiles": [profile.as_dict() for profile in public_release.exhaustive_profiles(contract)],
+    }
+    evidence_path = tmp_path / "profiles.json"
+    evidence_path.write_bytes(public_release.canonical_json(profile_evidence))
+    monkeypatch.setattr(public_release, "verify_clean_tree", lambda _root: None)
+
+    with pytest.raises(public_release.ReleaseError, match="every exact public profile"):
+        public_release.create_attestation(
+            REPOSITORY_ROOT,
+            CONTRACT_PATH,
+            "0.4.0",
+            (evidence_path,),
+            (),
+            tmp_path / "build.json",
+            tmp_path / "SHA256SUMS",
+            tmp_path / "parent.json",
+        )
+
+
 def test_source_release_workflow_is_tag_only_pinned_and_draft():
     workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "release-source.yml").read_text()
 
@@ -267,7 +329,7 @@ def test_source_release_workflow_is_tag_only_pinned_and_draft():
     assert "candidate-pr-evidence.json" in workflow
     assert "only-fixed" not in workflow
     assert "--predicate-type https://spdx.dev/Document/v2.3" in workflow
-    assert "--predicate-type https://wandb.ai/attestations/mcp-public-release/v1" in workflow
+    assert "--predicate-type https://wandb.ai/attestations/mcp-public-release/v2" in workflow
     assert "uv export --frozen --no-dev --no-emit-project" in workflow
     assert 'uv pip install --python "$TEST_ENV/bin/python" --no-deps "$WHEEL"' in workflow
 
@@ -307,8 +369,15 @@ def test_generated_feature_documentation_is_current():
     assert result["changed"] is False
     readme = (REPOSITORY_ROOT / "README.md").read_text()
     assert "Generated by scripts/public_release.py docs" in readme
-    for name in _contract()["named_profiles"]:
+    runtime_contract = public_release.load_runtime_contract(_contract())
+    for name in runtime_contract["tool_profiles"]:
         assert f"| `{name}` |" in readme
+    version = public_release._read_version_facts(REPOSITORY_ROOT)["pyproject"]
+    release_notes = (REPOSITORY_ROOT / "docs" / "releases" / f"v{version}.md").read_text()
+    assert "BEGIN GENERATED: RELEASE RUNTIME CONTRACT" in release_notes
+    assert public_release.runtime_contract_sha256(_contract()) in release_notes
+    for name in runtime_contract["tool_profiles"]:
+        assert f"| `{name}` |" in release_notes
 
 
 def test_vulnerability_evidence_rejects_high_or_critical_findings(monkeypatch, tmp_path):

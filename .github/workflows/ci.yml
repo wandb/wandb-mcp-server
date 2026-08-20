@@ -80,9 +80,7 @@ jobs:
           "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py \
             --server-command "$SMOKE_ENV/bin/wandb_mcp_server" \
             --contract release/public-contract.json \
-            --profile default \
-            --profile full \
-            --profile strict-read-only
+            --all-profiles
           echo "artifact-dir=$ARTIFACT_DIR" >> "$GITHUB_OUTPUT"
         env:
           WANDB_SILENT: "True"

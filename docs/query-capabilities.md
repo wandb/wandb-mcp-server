@@ -1,9 +1,10 @@
 # W&B Query Capability Matrix
 
 W&B MCP v0.4 does not expose caller-supplied GraphQL by default. Start with the
-typed read tools below. An administrator can enable
-`WANDB_MCP_ENABLE_RAW_GRAPHQL=true` only for read shapes the typed tools cannot
-represent.
+typed read tools below. The compatibility tool is present only in the explicit
+local `models-weave-graphql-compat` profile and only for read shapes the typed
+tools cannot represent. Managed `shared` and `dedicated` workloads reject that
+profile.
 
 ## v0.3 GraphQL example migration
 
@@ -90,7 +91,7 @@ returned rows, and these counts describe the bounded source rather than the
 entire run unless `key_counts_exact=true`.
 The fixed projection is
 revalidated as query-only and accepts no caller-selected GraphQL, so this
-behavior is available with `WANDB_MCP_ENABLE_RAW_GRAPHQL=false`.
+behavior is available in every supported managed tool profile.
 
 The compatibility tool accepts exactly one query operation and rejects
 mutations, subscriptions, mixed/multiple operations, nested or multiple

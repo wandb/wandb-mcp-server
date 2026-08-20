@@ -12,7 +12,6 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
-import itertools
 import json
 from pathlib import Path
 import re
@@ -22,13 +21,26 @@ import time
 import tomllib
 from typing import Any, Iterable
 
-
+# The release controller must run in a fresh checkout before dependency
+# installation. Import the packaged, stdlib-only runtime contract module from
+# source so release validation and the installed server execute the same code.
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
+
+from wandb_mcp_server.runtime_contract import (  # noqa: E402 - source checkout import is required pre-install
+    canonical_json as canonical_runtime_json,
+    tools_for_profile,
+    validate_runtime_contract,
+)
+
+
 DEFAULT_CONTRACT = REPOSITORY_ROOT / "release" / "public-contract.json"
-ATTESTATION_TYPE = "https://wandb.ai/attestations/mcp-public-release/v1"
+ATTESTATION_TYPE = "https://wandb.ai/attestations/mcp-public-release/v2"
 _VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+(?:[a-zA-Z0-9.+-]*)?$")
 _GENERATED_FEATURES_START = "<!-- BEGIN GENERATED: PUBLIC FEATURE PROFILES -->"
 _GENERATED_FEATURES_END = "<!-- END GENERATED: PUBLIC FEATURE PROFILES -->"
+_GENERATED_RELEASE_RUNTIME_START = "<!-- BEGIN GENERATED: RELEASE RUNTIME CONTRACT -->"
+_GENERATED_RELEASE_RUNTIME_END = "<!-- END GENERATED: RELEASE RUNTIME CONTRACT -->"
 
 
 class ReleaseError(RuntimeError):
@@ -37,21 +49,27 @@ class ReleaseError(RuntimeError):
 
 @dataclass(frozen=True)
 class Profile:
-    """One exact feature/read-only registration contract."""
+    """One exact tool-profile/access-mode registration contract."""
 
     name: str
-    features: dict[str, bool]
-    read_only: bool
+    tool_profile: str
+    access_mode: str
     environment: dict[str, str]
     tools: tuple[str, ...]
+    runtime_contract_sha256: str
+
+    @property
+    def read_only(self) -> bool:
+        return self.access_mode == "read-only"
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "features": self.features,
-            "read_only": self.read_only,
+            "tool_profile": self.tool_profile,
+            "access_mode": self.access_mode,
             "environment": self.environment,
             "tools": list(self.tools),
+            "runtime_contract_sha256": self.runtime_contract_sha256,
         }
 
 
@@ -80,26 +98,88 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
     return contract
 
 
+def _runtime_contract_path(contract: dict[str, Any], root: Path = REPOSITORY_ROOT) -> Path:
+    relative = contract.get("runtime_contract")
+    if not isinstance(relative, str) or not relative:
+        raise ReleaseError("public release contract must reference runtime_contract")
+    path = (root / relative).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError as error:
+        raise ReleaseError("runtime_contract must stay within the repository") from error
+    if not path.is_file():
+        raise ReleaseError(f"missing packaged runtime contract: {relative}")
+    return path
+
+
+def load_runtime_contract(contract: dict[str, Any], root: Path = REPOSITORY_ROOT) -> dict[str, Any]:
+    path = _runtime_contract_path(contract, root)
+    try:
+        runtime_contract = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ReleaseError(f"cannot read runtime contract {path}: {error}") from error
+    try:
+        validate_runtime_contract(runtime_contract)
+    except ValueError as error:
+        raise ReleaseError(f"invalid runtime contract: {error}") from error
+    return runtime_contract
+
+
+def runtime_contract_sha256(contract: dict[str, Any], root: Path = REPOSITORY_ROOT) -> str:
+    runtime_contract = load_runtime_contract(contract, root)
+    return runtime_contract_payload_sha256(runtime_contract)
+
+
+def runtime_contract_payload_sha256(runtime_contract: Any) -> str:
+    """Validate and identify one parsed packaged runtime-contract payload."""
+    try:
+        validate_runtime_contract(runtime_contract)
+    except ValueError as error:
+        raise ReleaseError(f"invalid runtime contract: {error}") from error
+    return f"sha256:{hashlib.sha256(canonical_runtime_json(runtime_contract)).hexdigest()}"
+
+
 def validate_contract(contract: dict[str, Any]) -> None:
-    if contract.get("schema_version") != 1:
-        raise ReleaseError("public release contract schema_version must be 1")
+    if not isinstance(contract, dict):
+        raise ReleaseError("public release contract root must be an object")
+    if contract.get("schema_version") != 2:
+        raise ReleaseError("public release contract schema_version must be 2")
     if contract.get("package") != "wandb_mcp_server":
         raise ReleaseError("public release contract package must be wandb_mcp_server")
     if not isinstance(contract.get("build_requirements"), str) or not contract["build_requirements"]:
         raise ReleaseError("public release contract must define build_requirements")
+    python_versions = contract.get("python_versions")
+    if python_versions != ["3.11", "3.12"]:
+        raise ReleaseError("public release contract must require Python 3.11 and 3.12")
+    mcp_versions = contract.get("mcp")
+    if (
+        not isinstance(mcp_versions, dict)
+        or set(mcp_versions) != {"minimum", "locked", "maximum_exclusive"}
+        or not all(isinstance(value, str) and value for value in mcp_versions.values())
+    ):
+        raise ReleaseError("public release contract must define MCP compatibility versions")
+    parsed_mcp_versions: dict[str, tuple[int, int, int]] = {}
+    for name, value in mcp_versions.items():
+        if re.fullmatch(r"\d+(?:\.\d+){0,2}", value) is None:
+            raise ReleaseError(f"public release contract MCP {name} version is invalid")
+        parts = tuple(int(part) for part in value.split("."))
+        parsed_mcp_versions[name] = (parts + (0, 0))[:3]
+    if not (parsed_mcp_versions["minimum"] <= parsed_mcp_versions["locked"] < parsed_mcp_versions["maximum_exclusive"]):
+        raise ReleaseError("public release contract MCP compatibility range is invalid")
     qualification_tests = contract.get("qualification_tests")
     if (
         not isinstance(qualification_tests, list)
         or not qualification_tests
         or not all(isinstance(path, str) and path for path in qualification_tests)
+        or len(qualification_tests) != len(set(qualification_tests))
     ):
         raise ReleaseError("public release contract must define qualification_tests")
     required_pr_checks = contract.get("required_pr_checks")
     if (
         not isinstance(required_pr_checks, list)
         or not required_pr_checks
-        or len(required_pr_checks) != len(set(required_pr_checks))
         or not all(isinstance(name, str) and name for name in required_pr_checks)
+        or len(required_pr_checks) != len(set(required_pr_checks))
     ):
         raise ReleaseError("public release contract must define unique required_pr_checks")
     locked_runtime = contract.get("locked_runtime")
@@ -110,101 +190,45 @@ def validate_contract(contract: dict[str, Any]) -> None:
     ):
         raise ReleaseError("public release contract must define locked_runtime versions")
 
-    groups = contract.get("feature_groups")
-    if not isinstance(groups, dict) or not groups:
-        raise ReleaseError("public release contract must define feature_groups")
-
-    seen_tools: set[str] = set()
-    seen_environments: set[str] = set()
-    for group_name, group in groups.items():
-        if not isinstance(group_name, str) or not isinstance(group, dict):
-            raise ReleaseError("feature group names and definitions must be mappings")
-        environment = group.get("environment")
-        if not isinstance(environment, str) or not environment:
-            raise ReleaseError(f"feature group {group_name} has no environment variable")
-        if environment in seen_environments:
-            raise ReleaseError(f"duplicate feature environment variable: {environment}")
-        seen_environments.add(environment)
-        if not isinstance(group.get("default"), bool):
-            raise ReleaseError(f"feature group {group_name} default must be boolean")
-        tools = group.get("tools")
-        if not isinstance(tools, list) or not tools or not all(isinstance(tool, str) and tool for tool in tools):
-            raise ReleaseError(f"feature group {group_name} must define tool names")
-        duplicates = seen_tools.intersection(tools)
-        if duplicates:
-            raise ReleaseError(f"tools occur in more than one group: {sorted(duplicates)}")
-        seen_tools.update(tools)
-
-    base_tools = contract.get("base_tools")
-    if not isinstance(base_tools, list) or not base_tools:
-        raise ReleaseError("public release contract must define base_tools")
-    duplicates = seen_tools.intersection(base_tools)
-    if duplicates or len(base_tools) != len(set(base_tools)):
-        raise ReleaseError(f"duplicate public tools: {sorted(duplicates)}")
-    seen_tools.update(base_tools)
-
-    write_tools = contract.get("write_tools")
-    if not isinstance(write_tools, list) or not set(write_tools) <= seen_tools:
-        raise ReleaseError("write_tools must be a subset of public tools")
-    if not isinstance(contract.get("read_only_environment"), str):
-        raise ReleaseError("read_only_environment must be defined")
-
-    named_profiles = contract.get("named_profiles")
-    if not isinstance(named_profiles, dict) or not named_profiles:
-        raise ReleaseError("named_profiles must be defined")
-    allowed_profile_keys = set(groups) | {"read_only"}
-    for name, overrides in named_profiles.items():
-        if not isinstance(name, str) or not isinstance(overrides, dict):
-            raise ReleaseError("named profile names and overrides must be mappings")
-        unknown = set(overrides) - allowed_profile_keys
-        if unknown:
-            raise ReleaseError(f"named profile {name} has unknown keys: {sorted(unknown)}")
-        if not all(isinstance(value, bool) for value in overrides.values()):
-            raise ReleaseError(f"named profile {name} values must be boolean")
+    load_runtime_contract(contract)
 
 
-def _profile(contract: dict[str, Any], name: str, features: dict[str, bool], read_only: bool) -> Profile:
-    tools = set(contract["base_tools"])
-    environment: dict[str, str] = {}
-    for group_name, group in contract["feature_groups"].items():
-        enabled = features[group_name]
-        environment[group["environment"]] = str(enabled).lower()
-        if enabled:
-            tools.update(group["tools"])
-    environment[contract["read_only_environment"]] = str(read_only).lower()
-    if read_only:
-        tools.difference_update(contract["write_tools"])
+def _profile(contract: dict[str, Any], tool_profile: str, access_mode: str) -> Profile:
+    runtime_contract = load_runtime_contract(contract)
+    tools = tools_for_profile(runtime_contract, tool_profile, access_mode)
+    selector = runtime_contract["selectors"]
+    environment = {
+        selector["tool_profile"]["environment"]: tool_profile,
+        selector["access_mode"]["environment"]: access_mode,
+        selector["workload_profile"]["environment"]: "local",
+        selector["capacity_class"]["environment"]: "small",
+    }
     return Profile(
-        name=name,
-        features=dict(features),
-        read_only=read_only,
+        name=f"{tool_profile}-{access_mode}",
+        tool_profile=tool_profile,
+        access_mode=access_mode,
         environment=environment,
         tools=tuple(sorted(tools)),
+        runtime_contract_sha256=runtime_contract_sha256(contract),
     )
 
 
-def named_profile(contract: dict[str, Any], name: str) -> Profile:
-    try:
-        overrides = contract["named_profiles"][name]
-    except KeyError as error:
-        raise ReleaseError(f"unknown named profile: {name}") from error
-    features = {
-        group_name: overrides.get(group_name, group["default"])
-        for group_name, group in contract["feature_groups"].items()
-    }
-    return _profile(contract, name, features, overrides.get("read_only", False))
+def named_profile(contract: dict[str, Any], name: str, access_mode: str = "read-write") -> Profile:
+    runtime_contract = load_runtime_contract(contract)
+    if name not in runtime_contract["tool_profiles"]:
+        raise ReleaseError(f"unknown named profile: {name}")
+    if access_mode not in runtime_contract["selectors"]["access_mode"]["values"]:
+        raise ReleaseError(f"unknown access mode: {access_mode}")
+    return _profile(contract, name, access_mode)
 
 
 def exhaustive_profiles(contract: dict[str, Any]) -> tuple[Profile, ...]:
-    group_names = tuple(contract["feature_groups"])
-    profiles: list[Profile] = []
-    for values in itertools.product((False, True), repeat=len(group_names) + 1):
-        feature_values = dict(zip(group_names, values[:-1], strict=True))
-        read_only = values[-1]
-        feature_slug = "-".join(f"{name}={int(feature_values[name])}" for name in group_names)
-        name = f"{feature_slug}-read_only={int(read_only)}"
-        profiles.append(_profile(contract, name, feature_values, read_only))
-    return tuple(profiles)
+    runtime_contract = load_runtime_contract(contract)
+    return tuple(
+        _profile(contract, name, access_mode)
+        for name in runtime_contract["tool_profiles"]
+        for access_mode in runtime_contract["selectors"]["access_mode"]["values"]
+    )
 
 
 def _read_version_facts(root: Path) -> dict[str, str]:
@@ -263,6 +287,10 @@ def policy_identity(root: Path, contract_path: Path, contract: dict[str, Any]) -
         test_digests[relative_path] = sha256_file(path)
     return {
         "contract_sha256": sha256_file(contract_path),
+        "runtime_contract": {
+            "path": contract["runtime_contract"],
+            "sha256": runtime_contract_sha256(contract, root),
+        },
         "build_requirements": {
             "path": contract["build_requirements"],
             "sha256": sha256_file(build_requirements),
@@ -714,10 +742,16 @@ def create_attestation(
             evidence = json.loads(profile_evidence_path.read_text())
         except (OSError, json.JSONDecodeError) as error:
             raise ReleaseError(f"invalid profile evidence {profile_evidence_path}: {error}") from error
-        if evidence.get("status") != "passed" or evidence.get("profiles") != expected_profiles:
+        if (
+            evidence.get("schema_version") != 2
+            or evidence.get("status") != "passed"
+            or evidence.get("profiles") != expected_profiles
+        ):
             raise ReleaseError("profile evidence does not prove every exact public profile")
         if evidence.get("contract_sha256") != sha256_file(contract_path):
             raise ReleaseError("profile evidence was produced from a different release contract")
+        if evidence.get("runtime_contract_sha256") != runtime_contract_sha256(contract, root):
+            raise ReleaseError("profile evidence was produced from a different runtime contract")
         harness = root / "scripts" / "mcp_stdio_smoke.py"
         if evidence.get("harness_sha256") != sha256_file(harness):
             raise ReleaseError("profile evidence was produced by a different installed-wheel harness")
@@ -768,7 +802,7 @@ def create_attestation(
     build_manifest = _read_json_object(build_manifest_path, "build manifest")
     return {
         "_type": ATTESTATION_TYPE,
-        "schema_version": 1,
+        "schema_version": 2,
         "release": {"version": version, "source_sha": identity["sha"], "source_tree": identity["tree"]},
         "policy": policy_identity(root, contract_path, contract),
         "parent_evidence": {
@@ -808,82 +842,201 @@ def _write_json(value: Any, output: Path | None) -> None:
 
 def _profiles_payload(contract_path: Path, *, all_profiles: bool, names: list[str]) -> dict[str, Any]:
     contract = load_contract(contract_path)
+    runtime_contract = load_runtime_contract(contract)
     if all_profiles:
         profiles = exhaustive_profiles(contract)
     elif names:
         profiles = tuple(named_profile(contract, name) for name in names)
     else:
-        profiles = tuple(named_profile(contract, name) for name in contract["named_profiles"])
+        profiles = tuple(named_profile(contract, name) for name in runtime_contract["tool_profiles"])
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "contract_sha256": sha256_file(contract_path),
+        "runtime_contract_sha256": runtime_contract_sha256(contract),
         "profiles": [profile.as_dict() for profile in profiles],
     }
 
 
+def _runtime_profile_rows(runtime_contract: dict[str, Any]) -> list[str]:
+    rows = [
+        "| Tool profile | Groups | Managed workloads | Read-write | Read-only |",
+        "|---|---|---|---:|---:|",
+    ]
+    for name, definition in runtime_contract["tool_profiles"].items():
+        managed = ", ".join(definition["managed_workloads"]) or "local only"
+        rows.append(
+            f"| `{name}` | {', '.join(definition['groups'])} | {managed} | "
+            f"{definition['expected_tools']['read-write']} | {definition['expected_tools']['read-only']} |"
+        )
+    return rows
+
+
+def _runtime_workload_rows(runtime_contract: dict[str, Any]) -> list[str]:
+    rows = [
+        "| Workload | Collection rows | History samples | Metric keys | Range span | Full-detail rows | Admission / HTTP rate |",
+        "|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for name, definition in runtime_contract["workload_profiles"].items():
+        limits = definition["limits"]
+        rate = definition["http_rate_policy"]
+        if rate["enabled"]:
+            policy = (
+                f"admission on; {rate['per_key_per_minute']}/key/minute, {rate['global_per_minute']}/process/minute"
+            )
+        else:
+            policy = "application admission and HTTP rate limiting off"
+        rows.append(
+            f"| `{name}` | {limits['MCP_MAX_QUERY_LIMIT']:,} | {limits['MCP_MAX_HISTORY_SAMPLES']:,} | "
+            f"{limits['MCP_MAX_HISTORY_KEYS']:,} | {limits['MCP_MAX_HISTORY_RANGE_STEPS']:,} | "
+            f"{limits['MCP_MAX_FULL_DETAIL_ITEMS']:,} | {policy} |"
+        )
+    return rows
+
+
+def _runtime_capacity_rows(runtime_contract: dict[str, Any]) -> list[str]:
+    rows = [
+        "| Capacity class | Actor | Process | Sync workers | Count workers |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for name, definition in runtime_contract["capacity_classes"].items():
+        rows.append(
+            f"| `{name}` | {definition['actor_capacity']} | {definition['process_capacity']} | "
+            f"{definition['sync_workers']} | {definition['count_workers']} |"
+        )
+    return rows
+
+
 def _generated_feature_docs(contract: dict[str, Any]) -> str:
+    runtime_contract = load_runtime_contract(contract)
+    selectors = runtime_contract["selectors"]
     environment_rows = [
         "| Variable | Default | Effect |",
         "|---|---:|---|",
+        f"| `{selectors['tool_profile']['environment']}` | `{selectors['tool_profile']['default']}` | "
+        "Selects one exact reviewed product-capability profile. |",
+        f"| `{selectors['access_mode']['environment']}` | `{selectors['access_mode']['default']}` | "
+        "`read-only` subtracts every write tool. |",
+        f"| `{selectors['workload_profile']['environment']}` | `{selectors['workload_profile']['default']}` | "
+        "Selects query/history limits, admission mode and wait, deadlines, sessions, and HTTP rate policy. |",
+        f"| `{selectors['capacity_class']['environment']}` | `{selectors['capacity_class']['default']}` | "
+        "Selects bounded actor/process capacities and worker counts. |",
     ]
-    for group_name, group in contract["feature_groups"].items():
-        environment_rows.append(
-            f"| `{group['environment']}` | `{str(group['default']).lower()}` | "
-            f"Registers the `{group_name}` group ({len(group['tools'])} tools). |"
-        )
-    environment_rows.append(
-        f"| `{contract['read_only_environment']}` | `false` | Removes all tools classified as writes. |"
-    )
-
-    profile_rows = [
-        "| Profile | Weave | Agents | ARIA | Raw GraphQL | Read-only | Exact tools |",
-        "|---|---:|---:|---:|---:|---:|---:|",
-    ]
-    for name in contract["named_profiles"]:
-        profile = named_profile(contract, name)
-        values = [str(profile.features[key]).lower() for key in ("weave", "agents", "aria", "raw_graphql")]
-        profile_rows.append(
-            f"| `{name}` | "
-            + " | ".join(f"`{value}`" for value in values)
-            + f" | `{str(profile.read_only).lower()}` | {len(profile.tools)} |"
-        )
+    profile_rows = _runtime_profile_rows(runtime_contract)
+    workload_rows = _runtime_workload_rows(runtime_contract)
+    capacity_rows = _runtime_capacity_rows(runtime_contract)
     body = "\n".join(
         [
             _GENERATED_FEATURES_START,
             "<!-- Generated by scripts/public_release.py docs. Do not edit this block. -->",
             "",
-            "Release-controlled feature variables:",
+            "Release-controlled orthogonal selectors:",
             "",
             *environment_rows,
             "",
-            "Named exact tool profiles:",
+            "Exact tool profiles:",
             "",
             *profile_rows,
             "",
-            "Use `python scripts/public_release.py profiles --all` for every exact feature/read-only combination and tool name.",
+            "Exact workload defaults:",
+            "",
+            *workload_rows,
+            "",
+            "Exact capacity classes:",
+            "",
+            *capacity_rows,
+            "",
+            "Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. "
+            f"Runtime contract: `{runtime_contract_sha256(contract)}`.",
             _GENERATED_FEATURES_END,
         ]
     )
     return body
 
 
-def update_generated_docs(contract_path: Path, readme: Path, *, check: bool) -> dict[str, Any]:
+def _generated_release_runtime_docs(contract: dict[str, Any]) -> str:
+    runtime_contract = load_runtime_contract(contract)
+    selectors = runtime_contract["selectors"]
+    profile_rows = _runtime_profile_rows(runtime_contract)
+    workload_rows = _runtime_workload_rows(runtime_contract)
+    capacity_rows = _runtime_capacity_rows(runtime_contract)
+
+    return "\n".join(
+        [
+            _GENERATED_RELEASE_RUNTIME_START,
+            "<!-- Generated by scripts/public_release.py docs. Do not edit this block. -->",
+            "",
+            "This release replaces arbitrary per-feature booleans with one packaged runtime contract and four orthogonal selectors:",
+            "",
+            f"- `{selectors['tool_profile']['environment']}` selects the exact product-capability profile.",
+            f"- `{selectors['access_mode']['environment']}` selects `read-write` or `read-only`.",
+            f"- `{selectors['workload_profile']['environment']}` selects query/history limits, admission mode and wait, deadlines, sessions, and HTTP rate policy.",
+            f"- `{selectors['capacity_class']['environment']}` selects bounded actor/process capacities and worker counts.",
+            "",
+            *profile_rows,
+            "",
+            *workload_rows,
+            "",
+            *capacity_rows,
+            "",
+            f"Runtime contract: `{runtime_contract_sha256(contract)}`.",
+            _GENERATED_RELEASE_RUNTIME_END,
+        ]
+    )
+
+
+def _render_generated_block(current: str, start: str, end: str, body: str, label: str) -> str:
+    if current.count(start) != 1 or current.count(end) != 1:
+        raise ReleaseError(f"{label} must contain exactly one generated runtime-contract block")
+    before, remainder = current.split(start, 1)
+    _, after = remainder.split(end, 1)
+    return before + body + after
+
+
+def update_generated_docs(
+    contract_path: Path,
+    readme: Path,
+    *,
+    check: bool,
+    release_notes: Path | None = None,
+) -> dict[str, Any]:
     contract = load_contract(contract_path)
+    if release_notes is None:
+        root = contract_path.resolve().parents[1]
+        version = _read_version_facts(root)["pyproject"]
+        release_notes = root / "docs" / "releases" / f"v{version}.md"
     try:
-        current = readme.read_text()
+        current_readme = readme.read_text()
+        current_release_notes = release_notes.read_text()
     except OSError as error:
         raise ReleaseError(f"cannot read documentation target {readme}: {error}") from error
-    if current.count(_GENERATED_FEATURES_START) != 1 or current.count(_GENERATED_FEATURES_END) != 1:
-        raise ReleaseError("README must contain exactly one generated public-feature block")
-    before, remainder = current.split(_GENERATED_FEATURES_START, 1)
-    _, after = remainder.split(_GENERATED_FEATURES_END, 1)
-    rendered = before + _generated_feature_docs(contract) + after
-    changed = rendered != current
+    rendered_readme = _render_generated_block(
+        current_readme,
+        _GENERATED_FEATURES_START,
+        _GENERATED_FEATURES_END,
+        _generated_feature_docs(contract),
+        "README",
+    )
+    rendered_release_notes = _render_generated_block(
+        current_release_notes,
+        _GENERATED_RELEASE_RUNTIME_START,
+        _GENERATED_RELEASE_RUNTIME_END,
+        _generated_release_runtime_docs(contract),
+        "release notes",
+    )
+    changed = rendered_readme != current_readme or rendered_release_notes != current_release_notes
     if check and changed:
-        raise ReleaseError("generated README feature profiles are stale; run public_release.py docs --write")
-    if not check and changed:
-        readme.write_text(rendered)
-    return {"schema_version": 1, "target": str(readme), "changed": changed, "status": "passed"}
+        raise ReleaseError("generated runtime documentation is stale; run public_release.py docs --write")
+    if not check:
+        if rendered_readme != current_readme:
+            readme.write_text(rendered_readme)
+        if rendered_release_notes != current_release_notes:
+            release_notes.write_text(rendered_release_notes)
+    return {
+        "schema_version": 2,
+        "targets": [str(readme), str(release_notes)],
+        "changed": changed,
+        "status": "passed",
+    }
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -923,6 +1076,11 @@ def _parser() -> argparse.ArgumentParser:
 
     docs = subparsers.add_parser("docs", help="Generate or verify public feature documentation")
     docs.add_argument("--readme", type=Path, default=REPOSITORY_ROOT / "README.md")
+    docs.add_argument(
+        "--release-notes",
+        type=Path,
+        default=None,
+    )
     mode = docs.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--write", action="store_true")
@@ -967,7 +1125,15 @@ def main() -> None:
             )
             _write_json(attestation, args.output)
         elif args.command == "docs":
-            _write_json(update_generated_docs(args.contract, args.readme, check=args.check), None)
+            _write_json(
+                update_generated_docs(
+                    args.contract,
+                    args.readme,
+                    check=args.check,
+                    release_notes=args.release_notes,
+                ),
+                None,
+            )
         else:  # pragma: no cover - argparse enforces the command set.
             parser.error("unknown command")
     except ReleaseError as error:

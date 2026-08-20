@@ -21,11 +21,9 @@ import json
 import logging
 import os
 import sys
-from pathlib import Path
-from typing import Any, Callable, Collection, Dict, List, Literal, Optional, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
 import wandb
-from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import PositiveInt
@@ -34,7 +32,6 @@ from wandb_mcp_server.config import (
     MCP_COUNT_TOOL_WORKERS,
     MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
     WANDB_API_BASE_URL,
-    _env_bool,
     resolve_aria_base_url,
 )
 from wandb_mcp_server.error_sanitizer import MAX_EXTERNAL_ERROR_CHARS, sanitize_sensitive_text, sanitize_sensitive_value
@@ -42,6 +39,7 @@ from wandb_mcp_server.instrumented_server import (
     InstrumentedFastMCP,
     register_current_sync_future,
 )
+from wandb_mcp_server.runtime_contract import RuntimeSelection, load_runtime_contract, resolve_runtime_selection
 
 # Import Weave for tracing MCP tool calls
 try:
@@ -158,8 +156,7 @@ class _AgentTool:
     description: str
 
 
-# Single source of truth for the agent tools: the names feed the optional tool
-# group registry below and the registration loop in register_tools().
+# Implementations for the agent tools selected by the packaged runtime contract.
 _AGENT_TOOLS = (
     _AgentTool("list_weave_agents_tool", list_agents, LIST_AGENTS_TOOL_DESCRIPTION),
     _AgentTool("list_weave_agent_versions_tool", list_agent_versions, LIST_AGENT_VERSIONS_TOOL_DESCRIPTION),
@@ -175,54 +172,43 @@ _AGENT_TOOLS = (
     _AgentTool("get_weave_agent_conversation_tool", get_agent_conversation, GET_AGENT_CONVERSATION_TOOL_DESCRIPTION),
 )
 
-_AGENT_TOOL_NAMES = frozenset(tool.name for tool in _AGENT_TOOLS)
 
-_WEAVE_TOOL_NAMES = frozenset(
-    {
-        "query_weave_traces_tool",
-        "count_weave_traces_tool",
-        "resolve_trace_roots_tool",
-        "infer_trace_schema_tool",
-        "summarize_evaluation_tool",
-    }
-)
+def _selected_tool_registrar(
+    mcp_instance: FastMCP,
+    selection: RuntimeSelection,
+) -> tuple[Callable[..., Callable[[Callable[..., Any]], Callable[..., Any]]], set[str]]:
+    """Create a decorator that registers only contract-selected public tools.
 
+    The selection happens before registration.  We never add a tool and then
+    mutate FastMCP's private registry to remove it.
+    """
+    contract = load_runtime_contract()
+    known_tools = {tool["name"] for group in contract["tool_groups"].values() for tool in group["tools"]}
+    registered: set[str] = set()
 
-@dataclass(frozen=True, slots=True)
-class _OptionalToolGroup:
-    """A group of tools controlled by one environment-backed feature flag."""
+    def selected_tool(
+        *,
+        name: str | None = None,
+        **tool_options: Any,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        def decorate(function: Callable[..., Any]) -> Callable[..., Any]:
+            tool_name = name or function.__name__
+            if tool_name not in known_tools:
+                raise RuntimeError(f"MCP tool is absent from the runtime contract: {tool_name}")
+            if tool_name not in selection.tools:
+                return function
+            if tool_name in registered:
+                raise RuntimeError(f"MCP tool registered more than once: {tool_name}")
+            options = dict(tool_options)
+            if name is not None:
+                options["name"] = name
+            result = mcp_instance.tool(**options)(function)
+            registered.add(tool_name)
+            return result
 
-    key: str
-    env_var: str
-    default_enabled: bool
-    tool_names: frozenset[str]
+        return decorate
 
-
-_OPTIONAL_TOOL_GROUPS = (
-    _OptionalToolGroup(
-        key="weave",
-        env_var="WANDB_MCP_ENABLE_WEAVE_TOOLS",
-        default_enabled=True,
-        tool_names=_WEAVE_TOOL_NAMES,
-    ),
-    _OptionalToolGroup(
-        key="weave_agents",
-        env_var="WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
-        default_enabled=False,
-        tool_names=_AGENT_TOOL_NAMES,
-    ),
-)
-
-
-def _remove_registered_tools(mcp_instance: FastMCP, tool_names: Collection[str]) -> None:
-    """Remove tools from FastMCP's registry after decorator registration."""
-    tool_manager = getattr(mcp_instance, "_tool_manager", None)
-    tools = getattr(tool_manager, "_tools", None)
-    if not isinstance(tools, dict):
-        logger.warning("Could not remove disabled MCP tools; FastMCP internals changed")
-        return
-    for tool_name in tool_names:
-        tools.pop(tool_name, None)
+    return selected_tool, registered
 
 
 def _aria_result_or_tool_error(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -538,7 +524,7 @@ def initialize_weave_tracing() -> bool:
 # ===============================================================================
 
 
-def register_tools(mcp_instance: FastMCP) -> None:
+def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = None) -> None:
     """
     Register all W&B MCP tools on the given FastMCP instance.
 
@@ -585,13 +571,15 @@ def register_tools(mcp_instance: FastMCP) -> None:
     Args:
         mcp_instance: The FastMCP instance to register tools on
     """
-    # The CLI intentionally loads .env after this module is imported. Resolve
-    # registration gates here so late-loaded deployment configuration cannot
-    # leave write tools enabled or raw GraphQL disabled unexpectedly.
-    read_only = _env_bool("WANDB_MCP_READ_ONLY", False)
-    raw_graphql_enabled = _env_bool("WANDB_MCP_ENABLE_RAW_GRAPHQL", False)
+    # The console bootstrap loads .env before importing this module. Resolve
+    # the complete deployment envelope here, before the first decorator can
+    # mutate the public MCP surface.
+    selection = selection or resolve_runtime_selection()
+    register_tool, registered_tools = _selected_tool_registrar(mcp_instance, selection)
+    read_only = selection.read_only
+    raw_graphql_enabled = "raw-graphql" in selection.groups
 
-    @mcp_instance.tool(description=QUERY_WEAVE_TRACES_TOOL_DESCRIPTION)
+    @register_tool(description=QUERY_WEAVE_TRACES_TOOL_DESCRIPTION)
     async def query_weave_traces_tool(
         entity_name: str,
         project_name: str,
@@ -621,36 +609,39 @@ def register_tools(mcp_instance: FastMCP) -> None:
             return_full_data = True
 
         from wandb_mcp_server.config import (
-            MCP_HOSTED_MODE,
             MCP_MAX_FULL_TRACE_LIMIT,
             MCP_MAX_QUERY_LIMIT,
+            MCP_WORKLOAD_PROFILE,
             COST_SORT_FIELDS,
             structured_error,
         )
         from wandb_mcp_server.api_client import WandBApiManager
 
-        hosted_limit = MCP_MAX_FULL_TRACE_LIMIT if return_full_data else MCP_MAX_QUERY_LIMIT
-        effective_limit = hosted_limit if MCP_HOSTED_MODE and limit is None else (1000 if limit is None else limit)
-        if MCP_HOSTED_MODE and effective_limit > hosted_limit:
+        managed_workload = MCP_WORKLOAD_PROFILE != "local"
+        profile_limit = MCP_MAX_FULL_TRACE_LIMIT if return_full_data else MCP_MAX_QUERY_LIMIT
+        effective_limit = profile_limit if managed_workload and limit is None else (1000 if limit is None else limit)
+        if managed_workload and effective_limit > profile_limit:
             return json.dumps(
                 structured_error(
                     "quota_exceeded",
-                    f"Hosted MCP trace queries are limited to {hosted_limit} traces for detail_level='{detail_level}'.",
+                    f"The {MCP_WORKLOAD_PROFILE} workload profile limits trace queries to "
+                    f"{profile_limit} traces for detail_level='{detail_level}'.",
                     limit=effective_limit,
-                    max_limit=hosted_limit,
+                    max_limit=profile_limit,
                     suggestions=[
                         "Use detail_level='schema' for broad discovery.",
-                        f"Set limit={hosted_limit} or lower.",
+                        f"Set limit={profile_limit} or lower.",
                         "Use count_weave_traces_tool for aggregate counts without trace payloads.",
                         "Add filters to narrow the result set.",
                     ],
                 )
             )
-        if MCP_HOSTED_MODE and sort_by in COST_SORT_FIELDS:
+        if managed_workload and sort_by in COST_SORT_FIELDS:
             return json.dumps(
                 structured_error(
                     "quota_exceeded",
-                    f"Hosted MCP does not support sort_by='{sort_by}' because it requires a large first-pass scan.",
+                    f"The {MCP_WORKLOAD_PROFILE} workload profile does not support sort_by='{sort_by}' "
+                    "because it requires a large first-pass scan.",
                     sort_by=sort_by,
                     suggestions=[
                         "Add time_range or op_name_contains filters.",
@@ -805,7 +796,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 }
             )
 
-    @mcp_instance.tool(description=COUNT_WEAVE_TRACES_TOOL_DESCRIPTION)
+    @register_tool(description=COUNT_WEAVE_TRACES_TOOL_DESCRIPTION)
     async def count_weave_traces_tool(
         entity_name: str, project_name: str, filters: Optional[Dict[str, Any]] = None
     ) -> str:
@@ -848,7 +839,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             return json.dumps(
                 structured_error(
                     "timeout",
-                    f"Counting traces exceeded the {MCP_TOOL_TIMEOUT_SECONDS}s hosted timeout.",
+                    f"Counting traces exceeded the {MCP_TOOL_TIMEOUT_SECONDS}s tool deadline.",
                     timeout_seconds=MCP_TOOL_TIMEOUT_SECONDS,
                 )
             )
@@ -869,7 +860,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         resolve_trace_roots,
     )
 
-    @mcp_instance.tool(description=RESOLVE_TRACE_ROOTS_TOOL_DESCRIPTION)
+    @register_tool(description=RESOLVE_TRACE_ROOTS_TOOL_DESCRIPTION)
     def resolve_trace_roots_tool(
         entity_name: str,
         project_name: str,
@@ -882,7 +873,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             trace_ids=trace_ids,
         )
 
-    @mcp_instance.tool(description=QUERY_WANDB_TOOL_DESCRIPTION)
+    @register_tool(description=QUERY_WANDB_TOOL_DESCRIPTION)
     def query_wandb_tool(
         entity_name: str,
         project_name: str,
@@ -922,7 +913,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             query_paginated_wandb_gql,
         )
 
-        @mcp_instance.tool(description=QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION)
+        @register_tool(description=QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION)
         def query_wandb_graphql_tool(
             query: str,
             variables: Optional[Dict[str, Any]] = None,
@@ -933,7 +924,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
 
     if not read_only:
 
-        @mcp_instance.tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
+        @register_tool(description=CREATE_WANDB_REPORT_TOOL_DESCRIPTION)
         def create_wandb_report_tool(
             entity_name: str,
             project_name: str,
@@ -963,7 +954,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             log_analysis,
         )
 
-        @mcp_instance.tool(description=LOG_ANALYSIS_TOOL_DESCRIPTION)
+        @register_tool(description=LOG_ANALYSIS_TOOL_DESCRIPTION)
         def log_analysis_to_wandb(
             entity_name: str,
             project_name: str,
@@ -997,12 +988,12 @@ def register_tools(mcp_instance: FastMCP) -> None:
                     }
                 )
 
-    @mcp_instance.tool(description=LIST_ENTITIES_TOOL_DESCRIPTION)
+    @register_tool(description=LIST_ENTITIES_TOOL_DESCRIPTION)
     def list_entities_tool() -> str:
         """List W&B entities (user + teams) accessible with the current API key."""
         return list_entities()
 
-    @mcp_instance.tool(description=LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION)
+    @register_tool(description=LIST_ENTITY_PROJECTS_TOOL_DESCRIPTION)
     def query_wandb_entity_projects(
         entity: Optional[str] = None,
         max_projects: int = 50,
@@ -1010,7 +1001,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         """List projects for a W&B entity."""
         return list_entity_projects(entity=entity, max_projects=max_projects)
 
-    @mcp_instance.tool(description=LIST_AUTOMATIONS_TOOL_DESCRIPTION)
+    @register_tool(description=LIST_AUTOMATIONS_TOOL_DESCRIPTION)
     def list_wandb_automations_tool(
         entity: Optional[str] = None,
         name: Optional[str] = None,
@@ -1019,7 +1010,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         """List W&B Automations accessible with the current API key."""
         return list_automations(entity=entity, name=name, max_items=max_items)
 
-    @mcp_instance.tool(description=LIST_INTEGRATIONS_TOOL_DESCRIPTION)
+    @register_tool(description=LIST_INTEGRATIONS_TOOL_DESCRIPTION)
     def list_wandb_integrations_tool(
         entity: str | None = None,
         kind: str | None = None,
@@ -1033,7 +1024,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         infer_trace_schema,
     )
 
-    @mcp_instance.tool(description=INFER_TRACE_SCHEMA_TOOL_DESCRIPTION)
+    @register_tool(description=INFER_TRACE_SCHEMA_TOOL_DESCRIPTION)
     def infer_trace_schema_tool(
         entity_name: str,
         project_name: str,
@@ -1054,19 +1045,24 @@ def register_tools(mcp_instance: FastMCP) -> None:
         search_wandb_docs,
     )
 
-    if is_docs_proxy_enabled():
-
-        @mcp_instance.tool(description=SEARCH_WANDB_DOCS_TOOL_DESCRIPTION)
-        async def search_wandb_docs_tool(query: str) -> str:
-            """Search the official W&B documentation."""
-            return await search_wandb_docs(query)
+    @register_tool(description=SEARCH_WANDB_DOCS_TOOL_DESCRIPTION)
+    async def search_wandb_docs_tool(query: str) -> str:
+        """Search the official W&B documentation."""
+        if not is_docs_proxy_enabled():
+            return json.dumps(
+                {
+                    "error": "docs_proxy_disabled",
+                    "message": "The W&B documentation proxy is disabled for this deployment.",
+                }
+            )
+        return await search_wandb_docs(query)
 
     from wandb_mcp_server.mcp_tools.run_history import (
         GET_RUN_HISTORY_TOOL_DESCRIPTION,
         get_run_history,
     )
 
-    @mcp_instance.tool(description=GET_RUN_HISTORY_TOOL_DESCRIPTION)
+    @register_tool(description=GET_RUN_HISTORY_TOOL_DESCRIPTION)
     def get_run_history_tool(
         entity_name: str,
         project_name: str,
@@ -1109,7 +1105,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
 
     # --- Registry & Artifact tools ---
 
-    @mcp_instance.tool(description=LIST_REGISTRIES_TOOL_DESCRIPTION)
+    @register_tool(description=LIST_REGISTRIES_TOOL_DESCRIPTION)
     def list_registries_tool(
         organization: Optional[str] = None,
         filter: Optional[Dict[str, Any]] = None,
@@ -1122,7 +1118,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             max_items=max_items,
         )
 
-    @mcp_instance.tool(description=LIST_REGISTRY_COLLECTIONS_TOOL_DESCRIPTION)
+    @register_tool(description=LIST_REGISTRY_COLLECTIONS_TOOL_DESCRIPTION)
     def list_registry_collections_tool(
         registry_name: str,
         organization: Optional[str] = None,
@@ -1137,7 +1133,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             max_items=max_items,
         )
 
-    @mcp_instance.tool(description=LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION)
+    @register_tool(description=LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION)
     def list_artifact_versions_tool(
         collection_name: str,
         entity_name: Optional[str] = None,
@@ -1168,7 +1164,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             created_before=created_before,
         )
 
-    @mcp_instance.tool(description=GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION)
+    @register_tool(description=GET_ARTIFACT_DETAILS_TOOL_DESCRIPTION)
     def get_artifact_details_tool(
         artifact_name: str,
         type_name: Optional[str] = None,
@@ -1183,7 +1179,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
             max_files=max_files,
         )
 
-    @mcp_instance.tool(description=COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION)
+    @register_tool(description=COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION)
     def compare_artifact_versions_tool(
         artifact_name_a: str,
         artifact_name_b: str,
@@ -1207,7 +1203,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         compare_runs,
     )
 
-    @mcp_instance.tool(description=COMPARE_RUNS_TOOL_DESCRIPTION)
+    @register_tool(description=COMPARE_RUNS_TOOL_DESCRIPTION)
     def compare_runs_tool(
         entity_name: str,
         project_name: str,
@@ -1239,7 +1235,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         summarize_evaluation,
     )
 
-    @mcp_instance.tool(description=SUMMARIZE_EVALUATION_TOOL_DESCRIPTION)
+    @register_tool(description=SUMMARIZE_EVALUATION_TOOL_DESCRIPTION)
     def summarize_evaluation_tool(
         entity_name: str,
         project_name: str,
@@ -1261,7 +1257,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         diagnose_run,
     )
 
-    @mcp_instance.tool(description=DIAGNOSE_RUN_TOOL_DESCRIPTION)
+    @register_tool(description=DIAGNOSE_RUN_TOOL_DESCRIPTION)
     def diagnose_run_tool(
         entity_name: str,
         project_name: str,
@@ -1291,7 +1287,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         probe_project,
     )
 
-    @mcp_instance.tool(description=PROBE_PROJECT_TOOL_DESCRIPTION)
+    @register_tool(description=PROBE_PROJECT_TOOL_DESCRIPTION)
     def probe_project_tool(
         entity_name: str,
         project_name: str,
@@ -1314,12 +1310,12 @@ def register_tools(mcp_instance: FastMCP) -> None:
     # Each implementation is a complete tool; its parameter schema is derived
     # from the function signature.
     for tool in _AGENT_TOOLS:
-        mcp_instance.tool(name=tool.name, description=tool.description)(tool.impl)
+        register_tool(name=tool.name, description=tool.description)(tool.impl)
 
     # ARIA forwards the caller's credential to a distinct hosted service and
     # includes a write operation. Register it only after explicit opt-in;
     # never rely on removing it through private FastMCP internals.
-    aria_enabled = _env_bool("WANDB_MCP_ENABLE_ARIA_TOOLS", False)
+    aria_enabled = "aria" in selection.groups
     if aria_enabled:
         # The CLI loads .env after module imports. Resolve and validate again
         # here so a late configuration can never silently fall back to a
@@ -1327,7 +1323,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
         resolve_aria_base_url()
         if not read_only:
 
-            @mcp_instance.tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
+            @register_tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
             async def aria_send_message(
                 message: str,
                 entity: Optional[str] = None,
@@ -1347,7 +1343,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
                     )
                 )
 
-        @mcp_instance.tool(description=ARIA_GET_TURN_TOOL_DESCRIPTION)
+        @register_tool(description=ARIA_GET_TURN_TOOL_DESCRIPTION)
         async def aria_get_turn(
             turn_id: str,
             wait_seconds: int = 0,
@@ -1361,7 +1357,7 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 )
             )
 
-        @mcp_instance.tool(description=ARIA_GET_TURNS_TOOL_DESCRIPTION)
+        @register_tool(description=ARIA_GET_TURNS_TOOL_DESCRIPTION)
         async def aria_get_turns(
             turn_ids: List[str],
             wait_seconds: int = 0,
@@ -1375,17 +1371,12 @@ def register_tools(mcp_instance: FastMCP) -> None:
                 )
             )
 
-    # Optional groups are registered first and removed last so each feature
-    # gate controls the complete public surface without bypassing the shared
-    # InstrumentedFastMCP dispatch boundary.
-    for group in _OPTIONAL_TOOL_GROUPS:
-        if not _env_bool(group.env_var, group.default_enabled):
-            logger.info(
-                "Optional MCP tool group '%s' disabled via %s",
-                group.key,
-                group.env_var,
-            )
-            _remove_registered_tools(mcp_instance, group.tool_names)
+    missing = selection.tools - registered_tools
+    unexpected = registered_tools - selection.tools
+    if missing or unexpected:
+        raise RuntimeError(
+            f"MCP runtime contract registration mismatch (missing={sorted(missing)}, unexpected={sorted(unexpected)})"
+        )
 
 
 # ===============================================================================
@@ -1453,6 +1444,9 @@ def create_mcp_server(transport: str, host: str = "localhost", port: Optional[in
           server. Set MCP_AUTH_DISABLED=true to acknowledge this explicitly.
           Production HTTP uses the hosted wrapper or Helm deployment.
     """
+    # Resolve the complete configuration after CLI dotenv loading and before
+    # constructing FastMCP so invalid policy can never create a partial server.
+    runtime_selection = resolve_runtime_selection()
     host = _validate_standalone_transport(transport, host)
 
     from wandb_mcp_server.analytics import configure_analytics_runtime
@@ -1471,7 +1465,7 @@ def create_mcp_server(transport: str, host: str = "localhost", port: Optional[in
         logger.info("STDIO transport uses environment variable authentication")
 
     # Register all tools
-    register_tools(mcp)
+    register_tools(mcp, runtime_selection)
 
     return mcp
 
@@ -1501,12 +1495,9 @@ def cli():
         WEAVE_SILENT                Set to "False" to enable Weave output (default: True)
         WANDB_DEBUG                 Set to "true" to enable W&B debug logging
         MCP_AUTH_DISABLED           Must be "true" for loopback HTTP development
-        WB_AGENT_BASE_URL           ARIA service URL (default: https://wb-agent.wandb.ai)
+        WB_AGENT_BASE_URL           Explicit approved HTTPS origin required by the ARIA profile
     """
     print("Starting W&B MCP Server...", file=sys.stderr)
-
-    # Load .env only when running as CLI, not on import
-    load_dotenv(dotenv_path=Path(__file__).parent.parent.parent / ".env")
 
     # Normalize process-wide logging BEFORE any logger.info call fires. When
     # MCP_LOG_FORMAT=json this installs our JSON handler on root + uvicorn.* + mcp,

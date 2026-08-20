@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "package": "wandb_mcp_server",
+  "selectors": {
+    "tool_profile": {
+      "environment": "WANDB_MCP_TOOL_PROFILE",
+      "default": "models-weave"
+    },
+    "access_mode": {
+      "environment": "WANDB_MCP_ACCESS_MODE",
+      "default": "read-write",
+      "values": [
+        "read-write",
+        "read-only"
+      ]
+    },
+    "workload_profile": {
+      "environment": "MCP_WORKLOAD_PROFILE",
+      "default": "local",
+      "values": [
+        "shared",
+        "dedicated",
+        "local"
+      ]
+    },
+    "capacity_class": {
+      "environment": "MCP_CAPACITY_CLASS",
+      "default": "small",
+      "values": [
+        "small",
+        "medium",
+        "large"
+      ]
+    }
+  },
+  "legacy_tool_environment_variables": [
+    "WANDB_MCP_ENABLE_WEAVE_TOOLS",
+    "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
+    "WANDB_MCP_ENABLE_ARIA_TOOLS",
+    "WANDB_MCP_ENABLE_RAW_GRAPHQL",
+    "WANDB_MCP_READ_ONLY"
+  ],
+  "tool_groups": {
+    "models": {
+      "tools": [
+        {"name": "compare_artifact_versions_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "compare_runs_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "create_wandb_report_tool", "access": "write", "risk": "write", "prerequisite": "wandb"},
+        {"name": "diagnose_run_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "get_artifact_details_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "get_run_history_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "list_artifact_versions_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "list_entities_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "list_registries_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "list_registry_collections_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "list_wandb_automations_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "list_wandb_integrations_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "log_analysis_to_wandb", "access": "write", "risk": "write", "prerequisite": "wandb"},
+        {"name": "probe_project_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "query_wandb_entity_projects", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "query_wandb_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "search_wandb_docs_tool", "access": "read", "risk": "read", "prerequisite": "none"}
+      ]
+    },
+    "weave": {
+      "tools": [
+        {"name": "count_weave_traces_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
+        {"name": "infer_trace_schema_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
+        {"name": "query_weave_traces_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
+        {"name": "resolve_trace_roots_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
+        {"name": "summarize_evaluation_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"}
+      ]
+    },
+    "agents": {
+      "tools": [
+        {"name": "get_weave_agent_conversation_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
+        {"name": "get_weave_agent_span_stats_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
+        {"name": "get_weave_agent_trace_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
+        {"name": "list_weave_agent_custom_attributes_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
+        {"name": "list_weave_agent_versions_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
+        {"name": "list_weave_agents_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
+        {"name": "query_weave_agent_spans_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
+        {"name": "search_weave_agents_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"}
+      ]
+    },
+    "aria": {
+      "tools": [
+        {"name": "aria_get_turn", "access": "read", "risk": "credential-forwarding", "prerequisite": "aria-https-origin"},
+        {"name": "aria_get_turns", "access": "read", "risk": "credential-forwarding", "prerequisite": "aria-https-origin"},
+        {"name": "aria_send_message", "access": "write", "risk": "non-idempotent-credential-forwarding", "prerequisite": "aria-https-origin"}
+      ]
+    },
+    "raw-graphql": {
+      "tools": [
+        {"name": "query_wandb_graphql_tool", "access": "read", "risk": "compatibility", "prerequisite": "wandb"}
+      ]
+    }
+  },
+  "tool_profiles": {
+    "models-only": {
+      "groups": ["models"],
+      "managed_workloads": ["shared", "dedicated"],
+      "expected_tools": {"read-write": 17, "read-only": 15}
+    },
+    "models-weave": {
+      "groups": ["models", "weave"],
+      "managed_workloads": ["shared", "dedicated"],
+      "expected_tools": {"read-write": 22, "read-only": 20}
+    },
+    "models-weave-agents": {
+      "groups": ["models", "weave", "agents"],
+      "managed_workloads": ["shared"],
+      "expected_tools": {"read-write": 30, "read-only": 28}
+    },
+    "models-weave-agents-aria": {
+      "groups": ["models", "weave", "agents", "aria"],
+      "managed_workloads": [],
+      "expected_tools": {"read-write": 33, "read-only": 30}
+    },
+    "models-weave-graphql-compat": {
+      "groups": ["models", "weave", "raw-graphql"],
+      "managed_workloads": [],
+      "expected_tools": {"read-write": 23, "read-only": 21}
+    }
+  },
+  "workload_profiles": {
+    "shared": {
+      "managed": true,
+      "limits": {
+        "MAX_RESPONSE_TOKENS": 30000,
+        "MAX_ACCUMULATED_BYTES": 1073741824,
+        "MCP_TOOL_TIMEOUT_SECONDS": 30,
+        "MCP_WANDB_REQUEST_TIMEOUT_SECONDS": 20,
+        "MCP_ADMISSION_CONTROL_ENABLED": false,
+        "MCP_ADMISSION_WAIT_MS": 0,
+        "MCP_MAX_QUERY_LIMIT": 100,
+        "MCP_MAX_FULL_TRACE_LIMIT": 25,
+        "MCP_MAX_HISTORY_SAMPLES": 500,
+        "MCP_MAX_HISTORY_KEYS": 20,
+        "MCP_MAX_HISTORY_RANGE_STEPS": 5000,
+        "MCP_MAX_WANDB_QUERY_ITEMS": 100,
+        "MCP_MAX_FULL_DETAIL_ITEMS": 3,
+        "MCP_MAX_PROJECT_FIELDS": 500,
+        "MCP_MAX_PROBE_RUNS": 6,
+        "MCP_MAX_EVALUATION_ROWS": 500,
+        "MCP_MAX_SCHEMA_SAMPLE_ROWS": 100,
+        "MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE": 50,
+        "MCP_MAX_GQL_ITEMS": 100,
+        "MCP_MAX_GQL_ITEMS_PER_PAGE": 50,
+        "SESSION_TTL_SECONDS": 3600,
+        "MAX_SESSIONS_PER_KEY": 10
+      },
+      "http_rate_policy": {"enabled": false, "per_key_per_minute": 0, "global_per_minute": 0}
+    },
+    "dedicated": {
+      "managed": true,
+      "limits": {
+        "MAX_RESPONSE_TOKENS": 30000,
+        "MAX_ACCUMULATED_BYTES": 1073741824,
+        "MCP_TOOL_TIMEOUT_SECONDS": 30,
+        "MCP_WANDB_REQUEST_TIMEOUT_SECONDS": 20,
+        "MCP_ADMISSION_CONTROL_ENABLED": true,
+        "MCP_ADMISSION_WAIT_MS": 2000,
+        "MCP_MAX_QUERY_LIMIT": 250,
+        "MCP_MAX_FULL_TRACE_LIMIT": 250,
+        "MCP_MAX_HISTORY_SAMPLES": 1500,
+        "MCP_MAX_HISTORY_KEYS": 50,
+        "MCP_MAX_HISTORY_RANGE_STEPS": 20000,
+        "MCP_MAX_WANDB_QUERY_ITEMS": 250,
+        "MCP_MAX_FULL_DETAIL_ITEMS": 10,
+        "MCP_MAX_PROJECT_FIELDS": 2000,
+        "MCP_MAX_PROBE_RUNS": 12,
+        "MCP_MAX_EVALUATION_ROWS": 2000,
+        "MCP_MAX_SCHEMA_SAMPLE_ROWS": 250,
+        "MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE": 200,
+        "MCP_MAX_GQL_ITEMS": 250,
+        "MCP_MAX_GQL_ITEMS_PER_PAGE": 200,
+        "SESSION_TTL_SECONDS": 3600,
+        "MAX_SESSIONS_PER_KEY": 10
+      },
+      "http_rate_policy": {"enabled": true, "per_key_per_minute": 60, "global_per_minute": 1000}
+    },
+    "local": {
+      "managed": false,
+      "limits": {
+        "MAX_RESPONSE_TOKENS": 30000,
+        "MAX_ACCUMULATED_BYTES": 1073741824,
+        "MCP_TOOL_TIMEOUT_SECONDS": 30,
+        "MCP_WANDB_REQUEST_TIMEOUT_SECONDS": 20,
+        "MCP_ADMISSION_CONTROL_ENABLED": false,
+        "MCP_ADMISSION_WAIT_MS": 2000,
+        "MCP_MAX_QUERY_LIMIT": 1000,
+        "MCP_MAX_FULL_TRACE_LIMIT": 1000,
+        "MCP_MAX_HISTORY_SAMPLES": 5000,
+        "MCP_MAX_HISTORY_KEYS": 100,
+        "MCP_MAX_HISTORY_RANGE_STEPS": 100000,
+        "MCP_MAX_WANDB_QUERY_ITEMS": 1000,
+        "MCP_MAX_FULL_DETAIL_ITEMS": 25,
+        "MCP_MAX_PROJECT_FIELDS": 5000,
+        "MCP_MAX_PROBE_RUNS": 24,
+        "MCP_MAX_EVALUATION_ROWS": 5000,
+        "MCP_MAX_SCHEMA_SAMPLE_ROWS": 500,
+        "MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE": 200,
+        "MCP_MAX_GQL_ITEMS": 1000,
+        "MCP_MAX_GQL_ITEMS_PER_PAGE": 200,
+        "SESSION_TTL_SECONDS": 3600,
+        "MAX_SESSIONS_PER_KEY": 10
+      },
+      "http_rate_policy": {"enabled": false, "per_key_per_minute": 0, "global_per_minute": 0}
+    }
+  },
+  "capacity_classes": {
+    "small": {"actor_capacity": 4, "process_capacity": 4, "sync_workers": 4, "count_workers": 4},
+    "medium": {"actor_capacity": 4, "process_capacity": 8, "sync_workers": 8, "count_workers": 8},
+    "large": {"actor_capacity": 8, "process_capacity": 16, "sync_workers": 16, "count_workers": 8}
+  }
+}
