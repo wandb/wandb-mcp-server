@@ -66,30 +66,30 @@ class TraceService:
     LATENCY_FIELD_MAPPING = {"latency_ms": "summary.weave.latency_ms"}
 
     @staticmethod
-    def _hosted_trace_limit(return_full_data: bool) -> int | None:
-        """Return the hosted trace cap, or None when hosted mode is disabled."""
+    def _managed_trace_limit(return_full_data: bool) -> int | None:
+        """Return the selected managed-workload cap, or None for local mode."""
         from wandb_mcp_server.config import (
-            MCP_HOSTED_MODE,
             MCP_MAX_FULL_TRACE_LIMIT,
             MCP_MAX_QUERY_LIMIT,
+            MCP_WORKLOAD_PROFILE,
         )
 
-        if not MCP_HOSTED_MODE:
+        if MCP_WORKLOAD_PROFILE == "local":
             return None
         return MCP_MAX_FULL_TRACE_LIMIT if return_full_data else MCP_MAX_QUERY_LIMIT
 
     @staticmethod
-    def _enforce_hosted_trace_limit(limit: Optional[int], cap: int | None, *, detail: str) -> int | None:
-        """Apply hosted trace limits before any upstream Weave query is issued."""
+    def _enforce_managed_trace_limit(limit: Optional[int], cap: int | None, *, detail: str) -> int | None:
+        """Apply managed-workload limits before any upstream Weave query."""
         if cap is None:
             return limit
         if limit is None:
             return cap
         if limit > cap:
-            from wandb_mcp_server.config import HostedLimitExceeded
+            from wandb_mcp_server.config import HostedLimitExceeded, MCP_WORKLOAD_PROFILE
 
             raise HostedLimitExceeded(
-                f"Hosted MCP trace queries are limited to {cap} traces for {detail}.",
+                f"The {MCP_WORKLOAD_PROFILE} workload profile limits trace queries to {cap} traces for {detail}.",
                 limit=limit,
                 max_limit=cap,
                 detail=detail,
@@ -384,13 +384,14 @@ class TraceService:
 
         # Special handling for cost-based sorting
         client_side_cost_sort = sort_by in self.COST_FIELDS
-        hosted_cap = self._hosted_trace_limit(return_full_data)
-        limit = self._enforce_hosted_trace_limit(limit, hosted_cap, detail="trace query")
-        if client_side_cost_sort and hosted_cap is not None:
-            from wandb_mcp_server.config import HostedLimitExceeded
+        managed_cap = self._managed_trace_limit(return_full_data)
+        limit = self._enforce_managed_trace_limit(limit, managed_cap, detail="trace query")
+        if client_side_cost_sort and managed_cap is not None:
+            from wandb_mcp_server.config import HostedLimitExceeded, MCP_WORKLOAD_PROFILE
 
             raise HostedLimitExceeded(
-                f"Hosted MCP does not support sort_by='{sort_by}' because it requires a large first-pass scan.",
+                f"The {MCP_WORKLOAD_PROFILE} workload profile does not support sort_by='{sort_by}' "
+                "because it requires a large first-pass scan.",
                 sort_by=sort_by,
                 max_scan=self.COST_SORT_MAX_FIRST_PASS,
             )
@@ -598,19 +599,20 @@ class TraceService:
 
         # Special handling for cost-based sorting
         client_side_cost_sort = sort_by in self.COST_FIELDS
-        hosted_cap = self._hosted_trace_limit(return_full_data)
-        target_limit = self._enforce_hosted_trace_limit(
+        managed_cap = self._managed_trace_limit(return_full_data)
+        target_limit = self._enforce_managed_trace_limit(
             target_limit,
-            hosted_cap,
+            managed_cap,
             detail="paginated trace query",
         )
-        if chunk_size and hosted_cap is not None:
-            chunk_size = min(chunk_size, hosted_cap)
-        if client_side_cost_sort and hosted_cap is not None:
-            from wandb_mcp_server.config import HostedLimitExceeded
+        if chunk_size and managed_cap is not None:
+            chunk_size = min(chunk_size, managed_cap)
+        if client_side_cost_sort and managed_cap is not None:
+            from wandb_mcp_server.config import HostedLimitExceeded, MCP_WORKLOAD_PROFILE
 
             raise HostedLimitExceeded(
-                f"Hosted MCP does not support sort_by='{sort_by}' because it requires a large first-pass scan.",
+                f"The {MCP_WORKLOAD_PROFILE} workload profile does not support sort_by='{sort_by}' "
+                "because it requires a large first-pass scan.",
                 sort_by=sort_by,
                 max_scan=self.COST_SORT_MAX_FIRST_PASS,
             )
@@ -760,13 +762,14 @@ class TraceService:
         Returns:
             List of trace dictionaries sorted by the specified cost field.
         """
-        from wandb_mcp_server.config import MCP_HOSTED_MODE
+        from wandb_mcp_server.config import MCP_WORKLOAD_PROFILE
 
-        if MCP_HOSTED_MODE:
+        if MCP_WORKLOAD_PROFILE != "local":
             from wandb_mcp_server.config import HostedLimitExceeded
 
             raise HostedLimitExceeded(
-                f"Hosted MCP does not support sort_by='{sort_by}' because it requires a large first-pass scan.",
+                f"The {MCP_WORKLOAD_PROFILE} workload profile does not support sort_by='{sort_by}' "
+                "because it requires a large first-pass scan.",
                 sort_by=sort_by,
                 max_scan=self.COST_SORT_MAX_FIRST_PASS,
             )

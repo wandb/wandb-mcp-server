@@ -34,7 +34,6 @@ from wandb_mcp_server.config import (
     MCP_ADMISSION_CONTROL_ENABLED,
     MCP_ADMISSION_PROCESS_CAPACITY,
     MCP_ADMISSION_WAIT_MS,
-    MCP_HOSTED_MODE,
     MCP_SYNC_TOOL_WORKERS,
     MCP_TOOL_TIMEOUT_SECONDS,
 )
@@ -332,7 +331,6 @@ class InstrumentedFastMCP(FastMCP):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._bounded_dispatch_enabled = MCP_HOSTED_MODE or MCP_ADMISSION_CONTROL_ENABLED
         self._sync_executor = ThreadPoolExecutor(
             max_workers=MCP_SYNC_TOOL_WORKERS,
             thread_name_prefix="mcp-tool",
@@ -356,8 +354,6 @@ class InstrumentedFastMCP(FastMCP):
             @functools.wraps(fn)
             async def _threaded_tool(*fn_args: Any, **fn_kwargs: Any) -> Any:
                 call = functools.partial(fn, *fn_args, **fn_kwargs)
-                if not self._bounded_dispatch_enabled:
-                    return await anyio.to_thread.run_sync(call, abandon_on_cancel=False)
                 context = copy_context()
                 future = asyncio.get_running_loop().run_in_executor(
                     self._sync_executor,
@@ -393,9 +389,7 @@ class InstrumentedFastMCP(FastMCP):
         harness_token = current_harness_context.set(self._tool_harness_context())
         sync_state = _SyncCallState()
         sync_state_token = _current_sync_call_state.set(sync_state)
-        sync_executor_token = _current_sync_executor.set(
-            self._sync_executor if self._bounded_dispatch_enabled else None
-        )
+        sync_executor_token = _current_sync_executor.set(self._sync_executor)
         started = time.monotonic()
         success = True
         error: str | None = None
@@ -436,14 +430,9 @@ class InstrumentedFastMCP(FastMCP):
                 queue_ms = lease.queue_ms
                 admission_outcome = "admitted"
 
-            enforce_deadline = MCP_HOSTED_MODE or self._admission_controller is not None
-            if enforce_deadline:
-                deadline_token = current_tool_deadline.set(time.monotonic() + MCP_TOOL_TIMEOUT_SECONDS)
+            deadline_token = current_tool_deadline.set(time.monotonic() + MCP_TOOL_TIMEOUT_SECONDS)
             try:
-                if enforce_deadline:
-                    async with asyncio.timeout(MCP_TOOL_TIMEOUT_SECONDS):
-                        result = await super().call_tool(name, arguments)
-                else:
+                async with asyncio.timeout(MCP_TOOL_TIMEOUT_SECONDS):
                     result = await super().call_tool(name, arguments)
             except TimeoutError as exc:
                 success = False

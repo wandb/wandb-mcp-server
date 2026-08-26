@@ -511,7 +511,9 @@ def test_count_mode_uses_public_sdk_without_iterating(fake_api):
 @pytest.mark.asyncio
 async def test_public_query_tools_run_sync_sdk_work_off_event_loop(fake_api, monkeypatch):
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
-    monkeypatch.setenv("WANDB_MCP_ENABLE_RAW_GRAPHQL", "true")
+    monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-weave-graphql-compat")
+    monkeypatch.setenv("WANDB_MCP_ACCESS_MODE", "read-write")
+    monkeypatch.setenv("MCP_WORKLOAD_PROFILE", "local")
     server = create_mcp_server("stdio")
 
     for name in ("query_wandb_tool", "query_wandb_graphql_tool"):
@@ -524,7 +526,8 @@ async def test_public_query_tools_run_sync_sdk_work_off_event_loop(fake_api, mon
 async def test_public_mcp_dispatch_enforces_hosted_summary_limit(monkeypatch):
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
     monkeypatch.setenv("MCP_AUTH_DISABLED", "true")
-    monkeypatch.setattr(sdk_query, "MCP_HOSTED_MODE", True)
+    monkeypatch.setattr(sdk_query, "MCP_WORKLOAD_PROFILE", "shared")
+    monkeypatch.setattr(sdk_query, "MCP_MAX_FULL_DETAIL_ITEMS", 3)
     monkeypatch.setattr(
         sdk_query.WandBApiManager,
         "get_api",
@@ -548,7 +551,8 @@ async def test_public_mcp_dispatch_enforces_hosted_summary_limit(monkeypatch):
 
 
 def test_hosted_full_collection_summary_is_rejected_before_api(monkeypatch):
-    monkeypatch.setattr(sdk_query, "MCP_HOSTED_MODE", True)
+    monkeypatch.setattr(sdk_query, "MCP_WORKLOAD_PROFILE", "dedicated")
+    monkeypatch.setattr(sdk_query, "MCP_MAX_FULL_DETAIL_ITEMS", 10)
     monkeypatch.setattr(
         sdk_query.WandBApiManager,
         "get_api",
@@ -564,7 +568,7 @@ def test_hosted_full_collection_summary_is_rejected_before_api(monkeypatch):
     )
 
     assert result["error"] == "invalid_request"
-    assert "limit<=3" in result["message"]
+    assert "limit<=10" in result["message"]
 
 
 def test_collection_limit_is_clamped_to_deployment_ceiling(fake_api, monkeypatch):

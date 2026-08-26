@@ -22,7 +22,7 @@ requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-wandb_mcp_server = "wandb_mcp_server.server:cli"
+wandb_mcp_server = "wandb_mcp_server.entrypoint:cli"
 add_to_client = "wandb_mcp_server.add_to_client:add_to_client_cli"
 
 [project.optional-dependencies]

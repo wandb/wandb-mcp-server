@@ -10,6 +10,9 @@ import sys
 import pytest
 
 _LOAD_CONFIG = "import runpy; runpy.run_path('src/wandb_mcp_server/config.py')"
+_RESOLVE_RUNTIME = (
+    "from wandb_mcp_server.runtime_contract import resolve_runtime_selection; resolve_runtime_selection()"
+)
 
 
 @pytest.mark.parametrize(
@@ -121,11 +124,6 @@ def test_worker_pool_cannot_exceed_process_admission_capacity(worker_variable: s
     [
         "MCP_HOSTED_MODE",
         "MCP_ADMISSION_CONTROL_ENABLED",
-        "WANDB_MCP_ENABLE_WEAVE_TOOLS",
-        "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
-        "WANDB_MCP_ENABLE_ARIA_TOOLS",
-        "WANDB_MCP_READ_ONLY",
-        "WANDB_MCP_ENABLE_RAW_GRAPHQL",
         "MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS",
     ],
 )
@@ -163,10 +161,11 @@ def test_runtime_booleans_reject_typos(variable: str) -> None:
 )
 def test_enabled_aria_rejects_unsafe_base_urls(value: str) -> None:
     environment = os.environ.copy()
-    environment["WANDB_MCP_ENABLE_ARIA_TOOLS"] = "true"
+    environment["WANDB_MCP_TOOL_PROFILE"] = "models-weave-agents-aria"
+    environment["MCP_WORKLOAD_PROFILE"] = "local"
     environment["WB_AGENT_BASE_URL"] = value
     result = subprocess.run(
-        [sys.executable, "-c", _LOAD_CONFIG],
+        [sys.executable, "-c", _RESOLVE_RUNTIME],
         cwd=Path(__file__).parents[1],
         env=environment,
         capture_output=True,
@@ -180,10 +179,11 @@ def test_enabled_aria_rejects_unsafe_base_urls(value: str) -> None:
 
 def test_disabled_aria_does_not_require_network_endpoint_configuration() -> None:
     environment = os.environ.copy()
-    environment["WANDB_MCP_ENABLE_ARIA_TOOLS"] = "false"
+    environment["WANDB_MCP_TOOL_PROFILE"] = "models-weave"
+    environment["MCP_WORKLOAD_PROFILE"] = "local"
     environment["WB_AGENT_BASE_URL"] = "http://legacy.invalid"
     result = subprocess.run(
-        [sys.executable, "-c", _LOAD_CONFIG],
+        [sys.executable, "-c", _RESOLVE_RUNTIME],
         cwd=Path(__file__).parents[1],
         env=environment,
         capture_output=True,
@@ -196,10 +196,12 @@ def test_disabled_aria_does_not_require_network_endpoint_configuration() -> None
 
 def test_enabled_aria_requires_response_budget_large_enough_for_safe_error() -> None:
     environment = os.environ.copy()
-    environment["WANDB_MCP_ENABLE_ARIA_TOOLS"] = "true"
+    environment["WANDB_MCP_TOOL_PROFILE"] = "models-weave-agents-aria"
+    environment["MCP_WORKLOAD_PROFILE"] = "local"
+    environment["WB_AGENT_BASE_URL"] = "https://wb-agent.wandb.ai"
     environment["MAX_RESPONSE_TOKENS"] = "63"
     result = subprocess.run(
-        [sys.executable, "-c", _LOAD_CONFIG],
+        [sys.executable, "-c", _RESOLVE_RUNTIME],
         cwd=Path(__file__).parents[1],
         env=environment,
         capture_output=True,

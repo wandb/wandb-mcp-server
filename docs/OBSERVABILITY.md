@@ -32,9 +32,10 @@ Configure through the
 
 ```yaml
 mcp-server:
-  datadog:
-    enabled: true
-    # Agent mode uses structured container logs and no workload DD_API_KEY.
+  observability:
+    provider: datadog-agent
+    privacy: standard
+# Agent mode uses structured container logs and no workload DD_API_KEY.
 ```
 
 ### Forwarder mode (serverless only)
@@ -162,8 +163,8 @@ runs at every level.
 |---|---|---|
 | Local dev | `off` (unset) | env-var default |
 | Managed serverless | Deployment-selected | Set explicitly in the managed deployment configuration |
-| Customer K8s via helm chart | `standard` | chart injects from `mcp-server.privacy.logLevel` (default `standard`) |
-| Regulated / privacy-sensitive K8s | `strict` | override chart value to `strict` |
+| Customer K8s via helm chart | `standard` | chart injects from `mcp-server.observability.privacy` (default `standard`) |
+| Regulated / privacy-sensitive K8s | `strict` | set `mcp-server.observability.privacy: strict` |
 
 ### Why the split
 

@@ -24,7 +24,6 @@ from wandb_mcp_server.api_client import (
 )
 from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
 from wandb_mcp_server.config import (
-    MCP_HOSTED_MODE,
     MCP_MAX_HISTORY_KEYS,
     MCP_MAX_HISTORY_RANGE_STEPS,
     MCP_MAX_HISTORY_SAMPLES,
@@ -375,17 +374,20 @@ def get_run_history(
         input_bytes += _history_text_bytes(f"keys[{index}]", key)
     if input_bytes > _MAX_HISTORY_INPUT_BYTES:
         raise ValueError(f"history identifiers exceed the {_MAX_HISTORY_INPUT_BYTES}-byte total limit")
-    if (MCP_WORKLOAD_PROFILE == "shared" or MCP_HOSTED_MODE) and not keys:
+    if MCP_WORKLOAD_PROFILE != "local" and not keys:
         raise ValueError(
-            f"The shared workload profile requires explicit history keys (1-{MCP_MAX_HISTORY_KEYS} metrics)."
+            f"The managed {MCP_WORKLOAD_PROFILE} workload profile requires explicit history keys "
+            f"(1-{MCP_MAX_HISTORY_KEYS} metrics)."
         )
     if min_step is not None and max_step is not None:
         if max_step < min_step:
             raise ValueError("max_step must be greater than or equal to min_step")
         if max_step - min_step + 1 > MCP_MAX_HISTORY_RANGE_STEPS:
             raise ValueError(f"history step range cannot exceed {MCP_MAX_HISTORY_RANGE_STEPS} steps")
-    elif (MCP_WORKLOAD_PROFILE == "shared" or MCP_HOSTED_MODE) and (min_step is not None or max_step is not None):
-        raise ValueError("The shared workload profile requires both min_step and max_step for range scans")
+    elif MCP_WORKLOAD_PROFILE != "local" and (min_step is not None or max_step is not None):
+        raise ValueError(
+            f"The managed {MCP_WORKLOAD_PROFILE} workload profile requires both min_step and max_step for range scans"
+        )
 
     requested_keys = list(dict.fromkeys(keys or []))
 
@@ -633,7 +635,9 @@ def get_run_history(
                 f"The {MCP_WORKLOAD_PROFILE} workload profile limits history responses to "
                 f"{MCP_MAX_HISTORY_SAMPLES} rows."
             )
-            if MCP_HOSTED_MODE:
+            if MCP_WORKLOAD_PROFILE != "local":
+                result_dict["managed_limit_note"] = result_dict["profile_limit_note"]
+            if MCP_WORKLOAD_PROFILE == "shared":
                 result_dict["hosted_limit_note"] = result_dict["profile_limit_note"]
         if fetched.compatibility_caveat:
             result_dict["compatibility_caveat"] = fetched.compatibility_caveat

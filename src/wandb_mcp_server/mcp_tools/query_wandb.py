@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Literal, Optional
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.config import (
     MAX_RESPONSE_TOKENS,
-    MCP_HOSTED_MODE,
     MCP_MAX_FULL_DETAIL_ITEMS,
     MCP_MAX_HISTORY_KEYS,
     MCP_MAX_WANDB_QUERY_ITEMS,
@@ -120,8 +119,8 @@ dict
     project_exhaustive. Single-resource results use item.
 
 For schema introspection, unmodeled fields, aliases, cross-resource nesting, or an
-exact GraphQL response shape, an administrator may explicitly enable the separate
-query_wandb_graphql_tool with WANDB_MCP_ENABLE_RAW_GRAPHQL=true.
+exact GraphQL response shape, a local operator may select the explicit
+models-weave-graphql-compat profile and call query_wandb_graphql_tool.
 """
 
 _INCLUDE_FIELDS = {
@@ -759,7 +758,7 @@ def _validate_request(
     if unsupported:
         allowed = sorted(_INCLUDE_FIELDS[resource])
         raise WandBQueryValidationError(f"unsupported include value for this resource; allowed values: {allowed}")
-    full_detail_limit = 3 if MCP_HOSTED_MODE and MCP_WORKLOAD_PROFILE == "local" else MCP_MAX_FULL_DETAIL_ITEMS
+    full_detail_limit = MCP_MAX_FULL_DETAIL_ITEMS
     if resource in {"runs", "sweeps", "reports"} and limit > full_detail_limit:
         untargeted_summary = "summary" in requested and summary_keys is None
         untargeted_config = "config" in requested and config_keys is None

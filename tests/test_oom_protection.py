@@ -100,14 +100,18 @@ class TestErrorPayloads:
 
 
 class TestHostedLimitConfig:
-    """Test hosted-mode limit configuration."""
+    """Test authoritative workload-profile configuration."""
 
-    def test_hosted_mode_uses_stricter_defaults(self):
+    def test_shared_profile_uses_stricter_defaults(self):
         import importlib
         import os
         import wandb_mcp_server.config as cfg
 
-        with patch.dict(os.environ, {"MCP_HOSTED_MODE": "true"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"MCP_WORKLOAD_PROFILE": "shared", "MCP_CAPACITY_CLASS": "large"},
+            clear=False,
+        ):
             importlib.reload(cfg)
             assert cfg.MCP_HOSTED_MODE is True
             assert cfg.MCP_MAX_QUERY_LIMIT == 100
@@ -116,14 +120,18 @@ class TestHostedLimitConfig:
             assert cfg.MCP_MAX_SCHEMA_SAMPLE_ROWS == 100
         importlib.reload(cfg)
 
-    def test_hosted_limits_are_configurable(self):
+    def test_managed_limits_reject_numeric_overrides(self):
         import importlib
         import os
         import wandb_mcp_server.config as cfg
 
-        with patch.dict(os.environ, {"MCP_HOSTED_MODE": "true", "MCP_MAX_QUERY_LIMIT": "42"}, clear=False):
-            importlib.reload(cfg)
-            assert cfg.MCP_MAX_QUERY_LIMIT == 42
+        with patch.dict(
+            os.environ,
+            {"MCP_WORKLOAD_PROFILE": "shared", "MCP_MAX_QUERY_LIMIT": "42"},
+            clear=False,
+        ):
+            with pytest.raises(ValueError, match="cannot override managed"):
+                importlib.reload(cfg)
         importlib.reload(cfg)
 
     def test_dedicated_profile_uses_larger_bounded_defaults(self):
@@ -133,7 +141,7 @@ class TestHostedLimitConfig:
 
         with patch.dict(
             os.environ,
-            {"MCP_HOSTED_MODE": "true", "MCP_WORKLOAD_PROFILE": "dedicated"},
+            {"MCP_WORKLOAD_PROFILE": "dedicated", "MCP_CAPACITY_CLASS": "small"},
             clear=False,
         ):
             importlib.reload(cfg)
@@ -142,8 +150,8 @@ class TestHostedLimitConfig:
             assert cfg.MCP_MAX_HISTORY_SAMPLES == 1_500
             assert cfg.MCP_MAX_HISTORY_KEYS == 50
             assert cfg.MCP_MAX_SCHEMA_SAMPLE_ROWS == 250
-            assert cfg.MCP_ADMISSION_ACTOR_CAPACITY == 8
-            assert cfg.MCP_ADMISSION_PROCESS_CAPACITY == 16
+            assert cfg.MCP_ADMISSION_ACTOR_CAPACITY == 4
+            assert cfg.MCP_ADMISSION_PROCESS_CAPACITY == 4
         importlib.reload(cfg)
 
     def test_local_profile_disables_admission_by_default(self):
@@ -154,8 +162,8 @@ class TestHostedLimitConfig:
         with patch.dict(
             os.environ,
             {
-                "MCP_HOSTED_MODE": "false",
                 "MCP_WORKLOAD_PROFILE": "local",
+                "MCP_CAPACITY_CLASS": "small",
                 "MCP_ADMISSION_CONTROL_ENABLED": "",
             },
             clear=False,
