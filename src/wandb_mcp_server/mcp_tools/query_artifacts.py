@@ -11,6 +11,11 @@ from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.registry_support import (
+    registry_error_result,
+    require_registry,
+    resolve_registry_organization,
+)
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -63,7 +68,7 @@ project_name : str, optional
 registry_name : str, optional
     Registry name. Required when source="registry".
 organization : str, optional
-    W&B organization name. Only used when source="registry".
+    W&B organization or entity name. Only used when source="registry".
 type_name : str, optional
     Artifact type (e.g., "model", "dataset"). Required for project source.
 source : str, optional
@@ -119,14 +124,17 @@ def list_artifact_versions(
                             "message": "registry_name is required when source='registry'",
                         }
                     )
-                reg_kwargs: Dict[str, Any] = {}
-                if organization is not None:
-                    reg_kwargs["organization"] = organization
-                registry = api.registry(registry_name, **reg_kwargs)
-                versions_iter = registry.collections(
+                resolved_organization = resolve_registry_organization(api, organization)
+                registry_search = api.registries(
+                    organization=resolved_organization,
+                    filter={"name": registry_name},
+                    per_page=1,
+                )
+                require_registry(registry_search)
+                versions_iter = registry_search.collections(
                     filter={"name": collection_name},
                     per_page=min(max_items, 100),
-                ).versions()
+                ).versions(per_page=min(max_items, 100))
             else:
                 if not type_name:
                     return json.dumps(
@@ -138,6 +146,16 @@ def list_artifact_versions(
                 qualified_name = collection_name
                 if "/" not in collection_name and entity_name and project_name:
                     qualified_name = f"{entity_name}/{project_name}/{collection_name}"
+                if not _is_qualified_collection_name(qualified_name):
+                    return json.dumps(
+                        {
+                            "error": "invalid_input",
+                            "message": (
+                                "Project artifact collections require collection_name='entity/project/name' "
+                                "or both entity_name and project_name."
+                            ),
+                        }
+                    )
                 versions_iter = api.artifacts(
                     type_name=type_name,
                     name=qualified_name,
@@ -164,8 +182,10 @@ def list_artifact_versions(
 
         except Exception as e:
             logger.error(f"Error in list_artifact_versions: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            ctx.mark_error(type(e).__name__)
+            if source == "registry":
+                return json.dumps(registry_error_result(e))
+            return json.dumps(_artifact_error_result(e, operation="list"))
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +219,8 @@ artifact_name : str
     Fully qualified artifact name with version or alias
     (e.g., "my-team/my-project/my-model:v3").
 type_name : str, optional
-    Artifact type hint for disambiguation.
+    Artifact type hint. If it is wrong, the artifact is still returned and the
+    response notes that the hint was ignored.
 include_files : bool, optional
     Whether to include the file manifest. Default: False.
 max_files : int, optional
@@ -233,7 +254,7 @@ def get_artifact_details(
         },
     ) as ctx:
         try:
-            artifact = api.artifact(artifact_name, type=type_name)
+            artifact, type_hint_ignored = _get_artifact(api, artifact_name, type_name)
 
             result: Dict[str, Any] = {
                 "artifact": {
@@ -257,13 +278,18 @@ def get_artifact_details(
 
             if include_files:
                 result["files"] = _list_files(artifact, max_files)
+            if type_hint_ignored:
+                result["warning"] = (
+                    "The supplied type_name did not match the artifact type and was ignored. "
+                    f"The artifact type is {getattr(artifact, 'type', None)!r}."
+                )
 
             return json.dumps(result)
 
         except Exception as e:
             logger.error(f"Error in get_artifact_details: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(_artifact_error_result(e, operation="get"))
 
 
 # ---------------------------------------------------------------------------
@@ -337,8 +363,8 @@ def compare_artifact_versions(
         },
     ) as ctx:
         try:
-            art_a = api.artifact(artifact_name_a, type=type_name)
-            art_b = api.artifact(artifact_name_b, type=type_name)
+            art_a, type_hint_ignored_a = _get_artifact(api, artifact_name_a, type_name)
+            art_b, type_hint_ignored_b = _get_artifact(api, artifact_name_b, type_name)
 
             meta_a = getattr(art_a, "metadata", {}) or {}
             meta_b = getattr(art_b, "metadata", {}) or {}
@@ -393,18 +419,64 @@ def compare_artifact_versions(
 
             if include_file_diff:
                 result["file_diff"] = _compute_file_diff(art_a, art_b, max_file_diff_entries)
+            if type_hint_ignored_a or type_hint_ignored_b:
+                result["warning"] = "The supplied type_name did not match at least one artifact and was ignored."
 
             return json.dumps(result)
 
         except Exception as e:
             logger.error(f"Error in compare_artifact_versions: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(_artifact_error_result(e, operation="compare"))
 
 
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_qualified_collection_name(name: str) -> bool:
+    parts = name.split("/")
+    return len(parts) == 3 and all(part.strip() for part in parts)
+
+
+def _get_artifact(api: Any, artifact_name: str, type_name: Optional[str]) -> tuple[Any, bool]:
+    """Fetch an artifact, treating type_name as a non-fatal validation hint."""
+    try:
+        return api.artifact(artifact_name, type=type_name), False
+    except ValueError as exc:
+        if type_name and "specified but this artifact is of type" in str(exc):
+            return api.artifact(artifact_name), True
+        raise
+
+
+def _artifact_error_result(exc: Exception, *, operation: str) -> Dict[str, Any]:
+    """Return stable, actionable artifact errors instead of SDK parser details."""
+    message = str(exc)
+    lowered = message.lower()
+    if "authentication" in lowered or "api key" in lowered or "unauth" in lowered:
+        return {"error": "authentication_failed", "message": "W&B authentication failed."}
+    if "unable to parse 'artifacts' response data" in lowered:
+        return {
+            "error": "resource_not_found",
+            "message": (
+                "No artifact collection matched that entity/project/name and type_name. "
+                "Verify the fully qualified collection path and its actual artifact type."
+            ),
+        }
+    if "artifact membership" in lowered and "not found" in lowered:
+        return {
+            "error": "resource_not_found",
+            "message": (
+                "The artifact version was not found. Use a fully qualified "
+                "'entity/project/collection:alias' name (for example ':latest' or ':v3'), "
+                "not an artifact membership display name."
+            ),
+        }
+    if "not found" in lowered or "could not find" in lowered:
+        noun = "artifact version" if operation != "list" else "artifact collection"
+        return {"error": "resource_not_found", "message": f"The requested W&B {noun} was not found."}
+    return {"error": "api_error", "message": message[:500]}
 
 
 def _serialize_artifact_summary(artifact: Any) -> Dict[str, Any]:

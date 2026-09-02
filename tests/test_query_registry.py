@@ -43,6 +43,7 @@ class TestListRegistries:
     def test_basic(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
+        mock_api.settings = {"organization": "my-org"}
         mock_api.registries.return_value = iter(
             [
                 _make_registry("models"),
@@ -62,6 +63,7 @@ class TestListRegistries:
     def test_filter_passed_through(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
+        mock_api.settings = {"organization": "my-org"}
         mock_api.registries.return_value = iter([_make_registry("models")])
         mock_api_mgr.get_api.return_value = mock_api
 
@@ -75,6 +77,7 @@ class TestListRegistries:
     def test_max_items_ceiling(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
+        mock_api.settings = {"organization": "my-org"}
         regs = [_make_registry(f"reg-{i}") for i in range(250)]
         mock_api.registries.return_value = iter(regs)
         mock_api_mgr.get_api.return_value = mock_api
@@ -88,6 +91,7 @@ class TestListRegistries:
     def test_api_error_returns_json(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
+        mock_api.settings = {"organization": "my-org"}
         mock_api.registries.side_effect = Exception("Connection refused")
         mock_api_mgr.get_api.return_value = mock_api
 
@@ -100,6 +104,7 @@ class TestListRegistries:
     def test_empty_result(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
+        mock_api.settings = {"organization": "my-org"}
         mock_api.registries.return_value = iter([])
         mock_api_mgr.get_api.return_value = mock_api
 
@@ -115,14 +120,16 @@ class TestListRegistryCollections:
     def test_basic(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
-        mock_registry = MagicMock()
-        mock_registry.collections.return_value = iter(
+        mock_api.settings = {"organization": "my-org"}
+        mock_registry_search = MagicMock()
+        mock_registry_search.__iter__.return_value = iter([_make_registry()])
+        mock_registry_search.collections.return_value = iter(
             [
                 _make_collection("model-a"),
                 _make_collection("model-b"),
             ]
         )
-        mock_api.registry.return_value = mock_registry
+        mock_api.registries.return_value = mock_registry_search
         mock_api_mgr.get_api.return_value = mock_api
 
         result = json.loads(list_registry_collections("my-registry"))
@@ -136,9 +143,11 @@ class TestListRegistryCollections:
     def test_empty(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
-        mock_registry = MagicMock()
-        mock_registry.collections.return_value = iter([])
-        mock_api.registry.return_value = mock_registry
+        mock_api.settings = {"organization": "my-org"}
+        mock_registry_search = MagicMock()
+        mock_registry_search.__iter__.return_value = iter([_make_registry()])
+        mock_registry_search.collections.return_value = iter([])
+        mock_api.registries.return_value = mock_registry_search
         mock_api_mgr.get_api.return_value = mock_api
 
         result = json.loads(list_registry_collections("my-registry"))
@@ -150,10 +159,12 @@ class TestListRegistryCollections:
     def test_collection_properties(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
-        mock_registry = MagicMock()
+        mock_api.settings = {"organization": "my-org"}
+        mock_registry_search = MagicMock()
+        mock_registry_search.__iter__.return_value = iter([_make_registry()])
         coll = _make_collection("prod-model", tags=["production", "v2"], is_sequence=True)
-        mock_registry.collections.return_value = iter([coll])
-        mock_api.registry.return_value = mock_registry
+        mock_registry_search.collections.return_value = iter([coll])
+        mock_api.registries.return_value = mock_registry_search
         mock_api_mgr.get_api.return_value = mock_api
 
         result = json.loads(list_registry_collections("my-registry"))
@@ -167,13 +178,13 @@ class TestListRegistryCollections:
     def test_api_error_returns_json(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
-        mock_api.registry.side_effect = Exception("Registry not found")
+        mock_api.settings = {"organization": "my-org"}
+        mock_api.registries.side_effect = Exception("Registry not found")
         mock_api_mgr.get_api.return_value = mock_api
 
         result = json.loads(list_registry_collections("nonexistent"))
 
-        assert "error" in result
-        assert "Registry not found" in result["message"]
+        assert result["error"] == "resource_not_found"
 
 
 class TestToolDescriptions:
