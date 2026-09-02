@@ -88,6 +88,7 @@ class TestListArtifactVersions:
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
         mock_registry = MagicMock()
+        mock_registry.__iter__.return_value = iter([MagicMock()])
         mock_collections = MagicMock()
         mock_collections.versions.return_value = iter(
             [
@@ -95,7 +96,8 @@ class TestListArtifactVersions:
             ]
         )
         mock_registry.collections.return_value = mock_collections
-        mock_api.registry.return_value = mock_registry
+        mock_api.settings = {"organization": "my-org"}
+        mock_api.registries.return_value = mock_registry
         mock_api_mgr.get_api.return_value = mock_api
 
         result = json.loads(list_artifact_versions("my-model", registry_name="model-registry", source="registry"))
@@ -124,6 +126,32 @@ class TestListArtifactVersions:
 
         assert result["error"] == "invalid_input"
         assert "registry_name" in result["message"]
+
+    @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
+    def test_project_source_requires_qualified_collection(self, mock_api_mgr):
+        mock_api = MagicMock()
+        mock_api.viewer = MagicMock()
+        mock_api_mgr.get_api.return_value = mock_api
+
+        result = json.loads(list_artifact_versions("my-model", type_name="model"))
+
+        assert result["error"] == "invalid_input"
+        assert "entity/project/name" in result["message"]
+        mock_api.artifacts.assert_not_called()
+
+    @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
+    def test_sdk_parse_error_becomes_resource_not_found(self, mock_api_mgr):
+        mock_api = MagicMock()
+        mock_api.viewer = MagicMock()
+        broken_versions = MagicMock()
+        broken_versions.__iter__.side_effect = ValueError("Unable to parse 'Artifacts' response data")
+        mock_api.artifacts.return_value = broken_versions
+        mock_api_mgr.get_api.return_value = mock_api
+
+        result = json.loads(list_artifact_versions("team/project/missing", type_name="model"))
+
+        assert result["error"] == "resource_not_found"
+        assert "fully qualified collection path" in result["message"]
 
 
 class TestGetArtifactDetails:
@@ -184,8 +212,37 @@ class TestGetArtifactDetails:
 
         result = json.loads(get_artifact_details("team/proj/model:v99"))
 
-        assert "error" in result
-        assert "Artifact not found" in result["message"]
+        assert result["error"] == "resource_not_found"
+        assert "artifact version" in result["message"]
+
+    @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
+    def test_wrong_type_hint_is_retried_without_hint(self, mock_api_mgr):
+        mock_api = MagicMock()
+        mock_api.viewer = MagicMock()
+        artifact = _make_artifact(type="checkpoint")
+        mock_api.artifact.side_effect = [
+            ValueError("type model specified but this artifact is of type checkpoint"),
+            artifact,
+        ]
+        mock_api_mgr.get_api.return_value = mock_api
+
+        result = json.loads(get_artifact_details("team/proj/model:v1", type_name="model"))
+
+        assert result["artifact"]["type"] == "checkpoint"
+        assert "ignored" in result["warning"]
+        assert mock_api.artifact.call_args_list[1].kwargs == {}
+
+    @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
+    def test_membership_not_found_has_collection_alias_guidance(self, mock_api_mgr):
+        mock_api = MagicMock()
+        mock_api.viewer = MagicMock()
+        mock_api.artifact.side_effect = Exception("artifact membership 'model-v2' not found")
+        mock_api_mgr.get_api.return_value = mock_api
+
+        result = json.loads(get_artifact_details("team/proj/model-v2"))
+
+        assert result["error"] == "resource_not_found"
+        assert "collection:alias" in result["message"]
 
 
 class TestCompareArtifactVersions:

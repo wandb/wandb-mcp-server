@@ -8,6 +8,43 @@ from graphql import parse
 from graphql.language import ast as gql_ast
 
 
+REGISTRY_ORGANIZATION_QUERY = """
+query MCPRegistryOrganization($name: String!, $hasName: Boolean!) {
+  organization(name: $name) @include(if: $hasName) {
+    name
+    orgEntity {
+      name
+    }
+  }
+  entity(name: $name) @include(if: $hasName) {
+    organization {
+      name
+      orgEntity {
+        name
+      }
+    }
+    user {
+      organizations {
+        name
+        orgEntity {
+          name
+        }
+      }
+    }
+  }
+  viewer @skip(if: $hasName) {
+    entity
+    organizations {
+      name
+      orgEntity {
+        name
+      }
+    }
+  }
+}
+"""
+
+
 class GraphQLReadOnlyViolation(ValueError):
     """Raised when a GraphQL document contains a non-query operation."""
 
@@ -49,3 +86,12 @@ def execute_graphql(
             "W&B SDK compatibility error: query_wandb_tool requires wandb>=0.28.0 with ServiceApi.execute_graphql."
         )
     return execute(query, variables=variables_dict)
+
+
+def fetch_registry_organization_info(api: Any, name: str | None) -> dict[str, Any]:
+    """Fetch organization and entity candidates on the request-scoped transport."""
+    return execute_graphql(
+        api,
+        REGISTRY_ORGANIZATION_QUERY,
+        {"name": name or "", "hasName": name is not None},
+    )

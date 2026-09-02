@@ -11,6 +11,11 @@ from typing import Any, Dict, List, Optional
 
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.registry_support import (
+    registry_error_result,
+    require_registry,
+    resolve_registry_organization,
+)
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -40,9 +45,10 @@ Typical workflow:
 </when_to_use>
 
 <critical_info>
-Requires the user's API key to have access to the organization. If no
-organization is specified, uses the default organization for the
-authenticated user.
+The organization parameter accepts either a W&B organization name or an
+entity name. Team and personal entities that map to one organization are
+resolved automatically. If no organization is specified and more than one is
+available, the response lists candidates and asks the caller to choose.
 Supports MongoDB-style filters on name, description, etc.
 (e.g., {"name": {"$regex": "model.*"}}).
 </critical_info>
@@ -50,7 +56,7 @@ Supports MongoDB-style filters on name, description, etc.
 Parameters
 ----------
 organization : str, optional
-    W&B organization name. Omit to use the authenticated user's default org.
+    W&B organization or entity name. Omit to resolve from the authenticated user.
 filter : dict, optional
     MongoDB-style filter dict (e.g., {"name": {"$regex": "model.*"}}).
 max_items : int, optional
@@ -81,9 +87,11 @@ def list_registries(
         max_items = min(max_items, MAX_ITEMS_CEILING)
 
         try:
-            kwargs: Dict[str, Any] = {"per_page": min(max_items, 100)}
-            if organization is not None:
-                kwargs["organization"] = organization
+            resolved_organization = resolve_registry_organization(api, organization)
+            kwargs: Dict[str, Any] = {
+                "organization": resolved_organization,
+                "per_page": min(max_items, 100),
+            }
             if filter is not None:
                 kwargs["filter"] = filter
 
@@ -110,9 +118,9 @@ def list_registries(
             return json.dumps({"registries": registries, "count": len(registries), "truncated": truncated})
 
         except Exception as e:
-            logger.error(f"Error in list_registries: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            logger.error("Error in list_registries (%s)", type(e).__name__, exc_info=True)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(registry_error_result(e))
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +140,8 @@ list_artifact_versions_tool or get_artifact_details_tool.
 <critical_info>
 The registry_name is the short name (e.g., "model"), NOT the full name with
 the "wandb-registry-" prefix.
+The organization parameter also accepts an entity name and resolves it to the
+corresponding organization when the mapping is unambiguous.
 Supports MongoDB-style filters on name, description, tags, etc.
 </critical_info>
 
@@ -140,7 +150,7 @@ Parameters
 registry_name : str
     The registry short name (e.g., "model", "dataset", "my-registry").
 organization : str, optional
-    W&B organization name. Omit to use default.
+    W&B organization or entity name. Omit to resolve from the authenticated user.
 filter : dict, optional
     MongoDB-style filter (e.g., {"tag": "production"}).
 max_items : int, optional
@@ -178,10 +188,13 @@ def list_registry_collections(
         max_items = min(max_items, MAX_ITEMS_CEILING)
 
         try:
-            reg_kwargs: Dict[str, Any] = {}
-            if organization is not None:
-                reg_kwargs["organization"] = organization
-            registry = api.registry(registry_name, **reg_kwargs)
+            resolved_organization = resolve_registry_organization(api, organization)
+            registry_search = api.registries(
+                organization=resolved_organization,
+                filter={"name": registry_name},
+                per_page=1,
+            )
+            require_registry(registry_search)
 
             coll_kwargs: Dict[str, Any] = {"per_page": min(max_items, 100)}
             if filter is not None:
@@ -189,7 +202,7 @@ def list_registry_collections(
 
             collections: List[Dict[str, Any]] = []
             truncated = False
-            for coll in registry.collections(**coll_kwargs):
+            for coll in registry_search.collections(**coll_kwargs):
                 if len(collections) >= max_items:
                     truncated = True
                     break
@@ -216,6 +229,6 @@ def list_registry_collections(
             )
 
         except Exception as e:
-            logger.error(f"Error in list_registry_collections: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            logger.error("Error in list_registry_collections (%s)", type(e).__name__, exc_info=True)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(registry_error_result(e))
