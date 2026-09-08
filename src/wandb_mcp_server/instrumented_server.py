@@ -395,10 +395,11 @@ class InstrumentedFastMCP(FastMCP):
         error: str | None = None
         lease = None
         deadline_token = None
-        cost_class, weight = _dispatch_tool_cost(name, arguments)
+        cost_class, weight = "heavy", 4
         admission_outcome = "disabled"
         queue_ms = 0.0
         try:
+            cost_class, weight = _dispatch_tool_cost(name, arguments)
             if self._admission_controller is not None:
                 admission_started = time.monotonic()
                 try:
@@ -550,6 +551,11 @@ class InstrumentedFastMCP(FastMCP):
                 success = False
                 error = _telemetry_error(_structured_result_error_category(result) or "tool_error")
             return result
+        except BaseException as exc:
+            success = False
+            if error is None:
+                error = _telemetry_error(type(exc).__name__)
+            raise
         finally:
             if deadline_token is not None:
                 current_tool_deadline.reset(deadline_token)
@@ -581,7 +587,7 @@ class InstrumentedFastMCP(FastMCP):
                     session_id=current_session_id.get(),
                     viewer_info=None,
                     params={
-                        **arguments,
+                        **(arguments if isinstance(arguments, dict) else {}),
                         "cost_class": cost_class,
                         "admission_outcome": admission_outcome,
                         "queue_ms": queue_ms,

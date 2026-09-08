@@ -571,6 +571,11 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     Args:
         mcp_instance: The FastMCP instance to register tools on
     """
+    from wandb_mcp_server.privacy import resolve_privacy_level
+    from wandb_mcp_server.tokenizer import load_tokenizer
+
+    resolve_privacy_level()
+    load_tokenizer()
     # The console bootstrap loads .env before importing this module. Resolve
     # the complete deployment envelope here, before the first decorator can
     # mutate the public MCP surface.

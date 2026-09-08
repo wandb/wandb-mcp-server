@@ -164,11 +164,20 @@ HEAVY_TOOLS = frozenset(
 
 def tool_cost(name: str, arguments: Mapping[str, Any] | None = None) -> tuple[str, int]:
     """Return the request-aware telemetry cost class and admission weight."""
-    arguments = arguments or {}
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, Mapping):
+        return "heavy", 4
     if name == "query_wandb_tool":
+        resource = arguments.get("resource")
+        if resource is not None and not isinstance(resource, str):
+            return "heavy", 4
+        for field in ("include", "summary_keys", "config_keys"):
+            value = arguments.get(field)
+            if value is not None and (not isinstance(value, list) or any(not isinstance(item, str) for item in value)):
+                return "heavy", 4
         if arguments.get("response_mode") == "count":
             return "light", 1
-        resource = arguments.get("resource")
         include = set(arguments.get("include") or [])
         full_summary = "summary" in include and not arguments.get("summary_keys")
         full_config = "config" in include and not arguments.get("config_keys")
@@ -179,6 +188,8 @@ def tool_cost(name: str, arguments: Mapping[str, Any] | None = None) -> tuple[st
         return "expensive", 2
     if name == "get_run_history_tool":
         keys = arguments.get("keys")
+        if keys is not None and (not isinstance(keys, list) or any(not isinstance(key, str) for key in keys)):
+            return "heavy", 4
         if (
             arguments.get("target_x") is not None
             or arguments.get("min_step") is not None

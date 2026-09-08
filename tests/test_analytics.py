@@ -829,14 +829,15 @@ class TestPrivacyLevel:
 
         assert _resolve_privacy_level() == "standard"
 
-    def test_unknown_falls_back_to_off(self, monkeypatch):
+    def test_unknown_privacy_level_fails_closed(self, monkeypatch):
         monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "paranoid")
         from wandb_mcp_server.analytics import _resolve_privacy_level
 
-        assert _resolve_privacy_level() == "off"
+        with pytest.raises(ValueError, match="MCP_LOG_PRIVACY_LEVEL"):
+            _resolve_privacy_level()
 
-    def test_invalid_level_warns_once(self, monkeypatch):
-        """Typos must surface as a WARNING, not silently downgrade to off.
+    def test_invalid_level_never_logs_value(self, monkeypatch):
+        """Invalid configuration fails without disclosing its supplied value.
 
         Attaches a dedicated handler to the analytics logger because that logger
         has propagate=False (BigQuery contract), so pytest's root-attached caplog
@@ -845,7 +846,6 @@ class TestPrivacyLevel:
         import wandb_mcp_server.analytics as a
 
         monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "stict")
-        a._warned_invalid_privacy_level = False  # reset the latch
 
         captured: list[logging.LogRecord] = []
 
@@ -856,15 +856,13 @@ class TestPrivacyLevel:
         handler = _Capture(level=logging.WARNING)
         a.logger.addHandler(handler)
         try:
-            assert a._resolve_privacy_level() == "off"
-            # Second call must not double-log (latch active)
-            assert a._resolve_privacy_level() == "off"
+            for _ in range(2):
+                with pytest.raises(ValueError, match="MCP_LOG_PRIVACY_LEVEL"):
+                    a._resolve_privacy_level()
         finally:
             a.logger.removeHandler(handler)
 
-        warnings = [r for r in captured if r.levelname == "WARNING" and "MCP_LOG_PRIVACY_LEVEL" in r.getMessage()]
-        assert len(warnings) == 1, f"expected exactly one warning for invalid level, got {len(warnings)}"
-        assert "stict" in warnings[0].getMessage()
+        assert not captured
 
     def test_organization_hashed_at_strict(self):
         """organization is a customer identifier (query_registry tool param); hash at strict."""

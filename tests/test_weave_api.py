@@ -69,9 +69,9 @@ class TestTraceProcessor(unittest.TestCase):
         assert result > 0
 
     def test_count_tokens_fallback(self):
-        with patch("tiktoken.get_encoding", side_effect=Exception("Tiktoken error")):
-            result = TraceProcessor.count_tokens("This is a test of the token counter.")
-            assert result == 8  # word count fallback
+        with patch("wandb_mcp_server.trace_utils._get_tiktoken_encoding", side_effect=Exception("Tiktoken error")):
+            text = "This is a test of the token counter."
+            assert TraceProcessor.count_tokens(text) == len(text.encode("utf-8"))
 
     def test_process_traces(self):
         now = datetime.now()

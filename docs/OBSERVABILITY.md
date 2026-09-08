@@ -147,6 +147,10 @@ identity compatibility fields. Product telemetry never contains raw tool
 arguments at any level. Public tool events contain only allowlisted
 `usage_dimensions` such as booleans, stable enums, counts, and numeric buckets.
 
+An unset privacy level defaults to `off`. Explicitly empty or invalid values
+fail startup without logging the supplied value. Valid levels are case-insensitive
+and ignore surrounding whitespace.
+
 | Level | Product tool telemetry | Identity compatibility fields | Verbose request-body logs |
 |---|---|---|---|
 | `off` (default) | compact `usage_dimensions` only | pass-through | INFO |

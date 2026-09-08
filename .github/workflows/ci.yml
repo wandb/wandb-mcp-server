@@ -66,6 +66,7 @@ jobs:
           uv pip install --python "$SMOKE_ENV/bin/python" --no-deps "$WHEEL"
           uv pip check --python "$SMOKE_ENV/bin/python"
           "$SMOKE_ENV/bin/python" -c "import wandb_mcp_server; print('ok')"
+          "$SMOKE_ENV/bin/python" scripts/offline_tokenizer_smoke.py
           "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; from packaging.version import Version; resolved = Version(version('mcp')); assert Version('1.28.1') <= resolved < Version('2'); print('fresh-wheel mcp', resolved)"
           "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py \
             --server-command "$SMOKE_ENV/bin/wandb_mcp_server" \

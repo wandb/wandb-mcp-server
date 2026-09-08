@@ -1,20 +1,12 @@
 """Utility functions for processing Weave traces."""
 
-import functools
 import json
 import re
 from datetime import datetime
 from typing import Any, Dict, List
 
-import tiktoken
-
+from wandb_mcp_server.tokenizer import load_tokenizer as _get_tiktoken_encoding
 from wandb_mcp_server.utils import get_rich_logger
-
-
-@functools.lru_cache(maxsize=1)
-def _get_tiktoken_encoding():
-    """Cached tiktoken encoding to avoid per-call overhead."""
-    return tiktoken.get_encoding("cl100k_base")
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -85,16 +77,14 @@ def truncate_value(value: Any, max_length: int = 200) -> Any:
 
 def count_tokens(text: str) -> int:
     """Count tokens in a string using tiktoken."""
-    try:
-        return len(_get_tiktoken_encoding().encode(text))
-    except Exception:
-        return len(text.split())
+    return count_tokens_conservative(text)
 
 
 def count_tokens_conservative(text: str) -> int:
     """Count tokens exactly, with a conservative no-tokenizer fallback."""
     try:
-        return len(_get_tiktoken_encoding().encode(text))
+        # Reserved-token spellings in user data are ordinary text, not control tokens.
+        return len(_get_tiktoken_encoding().encode(text, disallowed_special=()))
     except Exception:
         # A UTF-8 byte upper bound is intentionally conservative for BPE-style
         # tokenizers and cannot undercount dense CJK or unusual scalar data.

@@ -10,7 +10,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-import tiktoken
+from wandb_mcp_server.trace_utils import count_tokens_conservative
 
 from wandb_mcp_server.weave_api.models import TraceMetadata, QueryResult
 from wandb_mcp_server.utils import get_rich_logger
@@ -106,13 +106,7 @@ class TraceProcessor:
         Returns:
             Number of tokens.
         """
-        try:
-            encoding = tiktoken.get_encoding("cl100k_base")  # Using OpenAI's encoding
-            return len(encoding.encode(text))
-        except Exception as e:
-            logger.warning("Token counting failed (%s); using the bounded approximation", type(e).__name__)
-            # Fallback to approximate token count if tiktoken fails
-            return len(text.split())
+        return count_tokens_conservative(text)
 
     @classmethod
     def calculate_token_counts(cls, traces: List[Dict]) -> Dict[str, int]:
