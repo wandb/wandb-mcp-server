@@ -6,6 +6,7 @@ AnalyticsTracker._emit() automatically feeds the SegmentForwarder.
 """
 
 import time
+import threading
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
@@ -40,7 +41,7 @@ class TestMapToSegmentTrack:
 
     def _make_event(self, event_type: str, **overrides) -> Dict[str, Any]:
         base = {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "event_type": event_type,
             "timestamp": "2026-02-27T18:30:00+00:00",
             "user_id": "alice",
@@ -59,7 +60,7 @@ class TestMapToSegmentTrack:
             deployment_type="hosted",
             environment="production",
             hosted_mode=True,
-            params={"entity": "team"},
+            usage_dimensions={"max_items_bucket": "26-50"},
             success=True,
         )
         result = map_to_segment_track(event)
@@ -74,7 +75,7 @@ class TestMapToSegmentTrack:
         assert result["properties"]["environment"] == "production"
         assert result["properties"]["hosted_mode"] is True
         assert result["properties"]["source"] == "wandb-mcp-server"
-        assert result["properties"]["schema_version"] == "1.0"
+        assert result["properties"]["schema_version"] == "1.1"
 
     def test_harness_fields_are_base_properties(self):
         event = self._make_event(
@@ -86,6 +87,9 @@ class TestMapToSegmentTrack:
             mcp_client_source="user_agent",
             mcp_protocol_version="2025-06-18",
             mcp_jsonrpc_method="tools.list",
+            agent_harness="cursor",
+            client_vendor="cursor",
+            call_type="tools/list",
             mcp_client_name="cursor-internal-debug",
         )
         result = map_to_segment_track(event)
@@ -96,6 +100,9 @@ class TestMapToSegmentTrack:
         assert properties["mcp_client_source"] == "user_agent"
         assert properties["mcp_protocol_version"] == "2025-06-18"
         assert properties["mcp_jsonrpc_method"] == "tools.list"
+        assert properties["agent_harness"] == "cursor"
+        assert properties["client_vendor"] == "cursor"
+        assert properties["call_type"] == "tools/list"
         assert "mcp_client_name" not in properties
 
     def test_tool_call_preserves_timestamp(self):
@@ -108,15 +115,15 @@ class TestMapToSegmentTrack:
         event = self._make_event(
             "user_session",
             session_id="sess",
-            email_domain="wandb.com",
-            api_key_hash="abcd1234",
+            actor_id="wandb_key:abcd1234",
             runtime_surface="local_stdio",
             transport="stdio",
             deployment_type="local",
         )
         result = map_to_segment_track(event)
         assert result["event"] == f"{SEGMENT_EVENT_PREFIX}.session_start"
-        assert result["properties"]["email_domain"] == "wandb.com"
+        assert result["userId"] == "wandb_key:abcd1234"
+        assert "email_domain" not in result["properties"]
         assert result["properties"]["runtime_surface"] == "local_stdio"
         assert result["properties"]["transport"] == "stdio"
         assert result["properties"]["deployment_type"] == "local"
@@ -142,7 +149,7 @@ class TestMapToSegmentTrack:
         assert result["userId"] == "anonymous"
 
     def test_anonymous_when_user_id_missing(self):
-        event = {"event_type": "tool_call", "timestamp": "t", "schema_version": "1.0"}
+        event = {"event_type": "tool_call", "timestamp": "t", "schema_version": "1.1"}
         result = map_to_segment_track(event)
         assert result is not None
         assert result["userId"] == "anonymous"
@@ -278,6 +285,56 @@ class TestSegmentForwarder:
         f.clear_forwarded_payloads()
         assert len(f.get_forwarded_payloads()) == 0
 
+    @patch.dict("os.environ", {"MCP_SEGMENT_FORWARD": "true"})
+    def test_live_queue_is_non_blocking_and_bounded(self, monkeypatch):
+        monkeypatch.setattr(
+            "wandb_mcp_server.analytics_segment.MCP_ANALYTICS_QUEUE_CAPACITY",
+            2,
+        )
+        f = SegmentForwarder(base_url="https://api.wandb.test")
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_post(_payload):
+            started.set()
+            release.wait(timeout=2)
+
+        monkeypatch.setattr(f, "_post", blocked_post)
+        event = {
+            "event_type": "tool_call",
+            "user_id": "actor",
+            "tool_name": "query_wandb_tool",
+        }
+        f.forward(event)
+        assert started.wait(timeout=1)
+        f.forward(event)
+        before = time.monotonic()
+        f.forward(event)
+
+        assert time.monotonic() - before < 0.1
+        assert f._executor.outstanding_count <= 2
+        assert f.dropped_count == 1
+        release.set()
+        f._executor.shutdown(wait=True)
+
+    @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
+    def test_test_payload_history_is_bounded(self, monkeypatch):
+        monkeypatch.setattr(
+            "wandb_mcp_server.analytics_segment.MCP_ANALYTICS_TEST_BUFFER_CAPACITY",
+            2,
+        )
+        f = SegmentForwarder()
+        for index in range(3):
+            f.forward(
+                {
+                    "event_type": "tool_call",
+                    "user_id": "actor",
+                    "tool_name": f"tool-{index}",
+                }
+            )
+
+        assert len(f.get_forwarded_payloads()) == 2
+
 
 # ---------------------------------------------------------------------------
 # Singleton lifecycle
@@ -292,6 +349,32 @@ class TestSingleton:
         f1 = get_segment_forwarder()
         reset_segment_forwarder()
         assert get_segment_forwarder() is not f1
+
+    def test_concurrent_initialization_returns_one_instance(self):
+        barrier = threading.Barrier(8)
+        results = []
+
+        def resolve() -> None:
+            barrier.wait()
+            results.append(get_segment_forwarder())
+
+        threads = [threading.Thread(target=resolve) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1)
+
+        assert len(results) == 8
+        assert len({id(result) for result in results}) == 1
+
+
+def test_segment_session_does_not_retry_wandb_overload() -> None:
+    session = __import__(
+        "wandb_mcp_server.analytics_segment",
+        fromlist=["_build_retry_session"],
+    )._build_retry_session()
+
+    assert session.get_adapter("https://").max_retries.total == 0
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +423,7 @@ class TestEndToEndIntegration:
 
         payloads = forwarder.get_forwarded_payloads()
         assert len(payloads) == 1
-        assert payloads[0]["userId"] == "bob"
+        assert payloads[0]["userId"] == f"wandb_key:{'a' * 24}"
         assert payloads[0]["event"] == f"{SEGMENT_EVENT_PREFIX}.session_start"
 
     @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
@@ -393,8 +476,8 @@ class TestEndToEndIntegration:
         assert payloads[0]["userId"] == "anonymous"
 
     @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
-    def test_sanitised_params_in_forwarded_payload(self):
-        """Params should be sanitised by the tracker before reaching Segment."""
+    def test_compact_usage_dimensions_in_forwarded_payload(self):
+        """Only allowlisted dimensions should reach Segment."""
         reset_segment_forwarder()
         forwarder = get_segment_forwarder()
 
@@ -403,11 +486,20 @@ class TestEndToEndIntegration:
             tool_name="gql",
             session_id="s",
             viewer_info="alice",
-            params={"api_key": "super_secret", "entity": "my-team"},
+            params={
+                "api_key": "super_secret",
+                "entity": "my-team",
+                "max_items": 50,
+                "include_files": True,
+            },
         )
 
         payloads = forwarder.get_forwarded_payloads()
         assert len(payloads) == 1
-        seg_params = payloads[0]["properties"]["params"]
-        assert seg_params["api_key"] == "<redacted>"
-        assert seg_params["entity"] == "my-team"
+        properties = payloads[0]["properties"]
+        assert "params" not in properties
+        assert properties["usage_dimensions"] == {
+            "include_files": True,
+            "max_items_bucket": "26-50",
+        }
+        assert "super_secret" not in str(properties)

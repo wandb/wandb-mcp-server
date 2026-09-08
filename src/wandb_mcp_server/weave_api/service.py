@@ -66,30 +66,30 @@ class TraceService:
     LATENCY_FIELD_MAPPING = {"latency_ms": "summary.weave.latency_ms"}
 
     @staticmethod
-    def _hosted_trace_limit(return_full_data: bool) -> int | None:
-        """Return the hosted trace cap, or None when hosted mode is disabled."""
+    def _managed_trace_limit(return_full_data: bool) -> int | None:
+        """Return the selected managed-workload cap, or None for local mode."""
         from wandb_mcp_server.config import (
-            MCP_HOSTED_MODE,
             MCP_MAX_FULL_TRACE_LIMIT,
             MCP_MAX_QUERY_LIMIT,
+            MCP_WORKLOAD_PROFILE,
         )
 
-        if not MCP_HOSTED_MODE:
+        if MCP_WORKLOAD_PROFILE == "local":
             return None
         return MCP_MAX_FULL_TRACE_LIMIT if return_full_data else MCP_MAX_QUERY_LIMIT
 
     @staticmethod
-    def _enforce_hosted_trace_limit(limit: Optional[int], cap: int | None, *, detail: str) -> int | None:
-        """Apply hosted trace limits before any upstream Weave query is issued."""
+    def _enforce_managed_trace_limit(limit: Optional[int], cap: int | None, *, detail: str) -> int | None:
+        """Apply managed-workload limits before any upstream Weave query."""
         if cap is None:
             return limit
         if limit is None:
             return cap
         if limit > cap:
-            from wandb_mcp_server.config import HostedLimitExceeded
+            from wandb_mcp_server.config import HostedLimitExceeded, MCP_WORKLOAD_PROFILE
 
             raise HostedLimitExceeded(
-                f"Hosted MCP trace queries are limited to {cap} traces for {detail}.",
+                f"The {MCP_WORKLOAD_PROFILE} workload profile limits trace queries to {cap} traces for {detail}.",
                 limit=limit,
                 max_limit=cap,
                 detail=detail,
@@ -100,7 +100,7 @@ class TraceService:
         self,
         api_key: Optional[str] = None,
         server_url: Optional[str] = None,
-        retries: int = 3,
+        retries: int = 0,
         timeout: int = 10,
     ):
         """Initialize the TraceService.
@@ -108,7 +108,8 @@ class TraceService:
         Args:
             api_key: W&B API key. If not provided, uses WANDB_API_KEY env var.
             server_url: Weave API server URL. Defaults to env-driven config.
-            retries: Number of retries for failed requests.
+            retries: Retained for compatibility. Functional trace requests are
+                not retried automatically.
             timeout: Request timeout in seconds.
         """
         # If no API key provided, try to get from context only (no fallbacks!)
@@ -217,15 +218,13 @@ class TraceService:
                     # Valid nested field (e.g., "summary.weave.latency_ms", "attributes.foo")
                     if col_name not in filtered_columns_for_api:
                         filtered_columns_for_api.append(col_name)
-                    logger.info(f"Nested column field '{col_name}' requested, added to API columns.")
+                    logger.info("A validated nested column was added to the API projection")
                 else:
-                    logger.warning(
-                        f"Invalid base field '{base_field}' in nested column '{col_name}'. It will be ignored."
-                    )
+                    logger.warning("An invalid nested column was ignored")
                     invalid_columns_reported.add(col_name)
             else:
                 # Neither a direct valid column, nor a recognized synthetic, nor a valid-looking nested path
-                logger.warning(f"Invalid column '{col_name}' requested. It will be ignored.")
+                logger.warning("An invalid column was ignored")
                 invalid_columns_reported.add(col_name)
 
         # Ensure filtered_columns_for_api does not have duplicates and maintains order as much as possible
@@ -304,7 +303,7 @@ class TraceService:
                     logger.debug(f"Adding synthetic 'costs' column with {len(costs_data)} providers")
                     updated_trace["costs"] = costs_data
                 else:
-                    logger.warning(f"No costs data found in trace {trace.get('id')}")
+                    logger.warning("No costs data found in a returned trace")
                     updated_trace["costs"] = {}
 
             # Add status from summary if requested
@@ -314,10 +313,10 @@ class TraceService:
                     # Extract from summary.weave.status
                     status = trace.get("summary", {}).get("weave", {}).get("status")
                     if status:
-                        logger.debug(f"Adding synthetic 'status' from summary: {status}")
+                        logger.debug("Adding synthetic status from summary")
                         updated_trace["status"] = status
                     else:
-                        logger.warning(f"No status data found in trace {trace.get('id')}")
+                        logger.warning("No status data found in a returned trace")
                         updated_trace["status"] = None
 
             # Add latency_ms from summary if requested
@@ -327,10 +326,10 @@ class TraceService:
                     # Extract from summary.weave.latency_ms
                     latency = trace.get("summary", {}).get("weave", {}).get("latency_ms")
                     if latency is not None:
-                        logger.debug(f"Adding synthetic 'latency_ms' from summary: {latency}")
+                        logger.debug("Adding synthetic latency from summary")
                         updated_trace["latency_ms"] = latency
                     else:
-                        logger.warning(f"No latency_ms data found in trace {trace.get('id')}")
+                        logger.warning("No latency data found in a returned trace")
                         updated_trace["latency_ms"] = None
 
             # Add warnings for invalid columns
@@ -385,20 +384,21 @@ class TraceService:
 
         # Special handling for cost-based sorting
         client_side_cost_sort = sort_by in self.COST_FIELDS
-        hosted_cap = self._hosted_trace_limit(return_full_data)
-        limit = self._enforce_hosted_trace_limit(limit, hosted_cap, detail="trace query")
-        if client_side_cost_sort and hosted_cap is not None:
-            from wandb_mcp_server.config import HostedLimitExceeded
+        managed_cap = self._managed_trace_limit(return_full_data)
+        limit = self._enforce_managed_trace_limit(limit, managed_cap, detail="trace query")
+        if client_side_cost_sort and managed_cap is not None:
+            from wandb_mcp_server.config import HostedLimitExceeded, MCP_WORKLOAD_PROFILE
 
             raise HostedLimitExceeded(
-                f"Hosted MCP does not support sort_by='{sort_by}' because it requires a large first-pass scan.",
+                f"The {MCP_WORKLOAD_PROFILE} workload profile does not support sort_by='{sort_by}' "
+                "because it requires a large first-pass scan.",
                 sort_by=sort_by,
                 max_scan=self.COST_SORT_MAX_FIRST_PASS,
             )
 
         # Handle latency field mapping
         if sort_by in self.LATENCY_FIELD_MAPPING:
-            logger.info(f"Mapping sort field '{sort_by}' to '{self.LATENCY_FIELD_MAPPING[sort_by]}'")
+            logger.info("Mapping a supported synthetic sort field to its server field")
             server_sort_by = self.LATENCY_FIELD_MAPPING[sort_by]
             server_sort_direction = sort_direction
         elif client_side_cost_sort:
@@ -406,25 +406,21 @@ class TraceService:
             server_sort_by = "started_at"
             server_sort_direction = sort_direction
         elif sort_by == "latency_ms":  # Added specific handling for latency_ms sort
-            logger.info(
-                f"Sort by 'latency_ms' requested. Will sort by server field '{self.LATENCY_FIELD_MAPPING['latency_ms']}'."
-            )
+            logger.info("Mapping the latency sort field to its server field")
             server_sort_by = self.LATENCY_FIELD_MAPPING["latency_ms"]
             server_sort_direction = sort_direction
         elif "." in sort_by:  # Handles general dot-separated paths
             base_field = sort_by.split(".")[0]
             if base_field in VALID_COLUMNS:
-                logger.info(f"Using nested sort field for server: {sort_by}")
+                logger.info("Using a validated nested server sort field")
                 server_sort_by = sort_by
                 server_sort_direction = sort_direction
             else:
-                logger.warning(
-                    f"Invalid base field '{base_field}' in sort_by '{sort_by}', falling back to 'started_at'."
-                )
+                logger.warning("Invalid nested sort field; using the default sort")
                 server_sort_by = "started_at"
                 server_sort_direction = sort_direction
         elif sort_by not in VALID_COLUMNS:
-            logger.warning(f"Invalid sort field '{sort_by}', falling back to 'started_at'.")
+            logger.warning("Invalid sort field; using the default sort")
             server_sort_by = "started_at"
             server_sort_direction = sort_direction
         else:  # sort_by is in VALID_COLUMNS and not a special case
@@ -495,7 +491,7 @@ class TraceService:
 
         # Client-side cost-based sorting if needed
         if client_side_cost_sort and all_traces:
-            logger.info(f"Performing client-side sorting by {sort_by}")
+            logger.info("Performing a bounded client-side cost sort")
             # Sort traces by cost
             all_traces.sort(
                 key=lambda t: TraceProcessor.get_cost(t, sort_by),
@@ -507,7 +503,7 @@ class TraceService:
 
         # If we need to synthesize fields, do it
         if synthetic_fields:
-            logger.info(f"Synthesizing fields: {synthetic_fields}")
+            logger.info("Synthesizing %d requested fields", len(synthetic_fields))
             all_traces = [TraceProcessor.synthesize_fields(trace, synthetic_fields) for trace in all_traces]
 
         # Process traces
@@ -603,19 +599,20 @@ class TraceService:
 
         # Special handling for cost-based sorting
         client_side_cost_sort = sort_by in self.COST_FIELDS
-        hosted_cap = self._hosted_trace_limit(return_full_data)
-        target_limit = self._enforce_hosted_trace_limit(
+        managed_cap = self._managed_trace_limit(return_full_data)
+        target_limit = self._enforce_managed_trace_limit(
             target_limit,
-            hosted_cap,
+            managed_cap,
             detail="paginated trace query",
         )
-        if chunk_size and hosted_cap is not None:
-            chunk_size = min(chunk_size, hosted_cap)
-        if client_side_cost_sort and hosted_cap is not None:
-            from wandb_mcp_server.config import HostedLimitExceeded
+        if chunk_size and managed_cap is not None:
+            chunk_size = min(chunk_size, managed_cap)
+        if client_side_cost_sort and managed_cap is not None:
+            from wandb_mcp_server.config import HostedLimitExceeded, MCP_WORKLOAD_PROFILE
 
             raise HostedLimitExceeded(
-                f"Hosted MCP does not support sort_by='{sort_by}' because it requires a large first-pass scan.",
+                f"The {MCP_WORKLOAD_PROFILE} workload profile does not support sort_by='{sort_by}' "
+                "because it requires a large first-pass scan.",
                 sort_by=sort_by,
                 max_scan=self.COST_SORT_MAX_FIRST_PASS,
             )
@@ -624,20 +621,20 @@ class TraceService:
         effective_sort_by = "started_at"  # Default
         if sort_by == "latency_ms":
             effective_sort_by = self.LATENCY_FIELD_MAPPING["latency_ms"]
-            logger.info(f"Paginated sort by 'latency_ms', server will use '{effective_sort_by}'.")
+            logger.info("Mapping the paginated latency sort field to its server field")
         elif "." in sort_by:
             base_field = sort_by.split(".")[0]
             if base_field in VALID_COLUMNS:
                 effective_sort_by = sort_by
-                logger.info(f"Paginated sort by nested field '{sort_by}', server will use it directly.")
+                logger.info("Using a validated nested sort field for pagination")
             else:
-                logger.warning(f"Paginated sort by invalid nested field '{sort_by}', defaulting to 'started_at'.")
+                logger.warning("Invalid nested pagination sort field; using the default sort")
         elif (
             sort_by in VALID_COLUMNS and sort_by not in self.COST_FIELDS
         ):  # Exclude COST_FIELDS as they are client-sorted
             effective_sort_by = sort_by
         elif sort_by not in self.COST_FIELDS:  # If not valid and not cost, warn and default
-            logger.warning(f"Paginated sort by invalid field '{sort_by}', defaulting to 'started_at'.")
+            logger.warning("Invalid pagination sort field; using the default sort")
 
         # Validate and filter columns using CallSchema
         # Pass the original 'columns'
@@ -654,7 +651,7 @@ class TraceService:
         # filtered_api_columns = self._ensure_required_columns_for_synthetic(filtered_api_columns, rs_columns)
 
         if client_side_cost_sort:
-            logger.info(f"Cost-based sorting detected: {sort_by}")
+            logger.info("Cost-based pagination sort selected")
             all_traces = self._query_for_cost_sorting(
                 entity_name=entity_name,
                 project_name=project_name,
@@ -765,13 +762,14 @@ class TraceService:
         Returns:
             List of trace dictionaries sorted by the specified cost field.
         """
-        from wandb_mcp_server.config import MCP_HOSTED_MODE
+        from wandb_mcp_server.config import MCP_WORKLOAD_PROFILE
 
-        if MCP_HOSTED_MODE:
+        if MCP_WORKLOAD_PROFILE != "local":
             from wandb_mcp_server.config import HostedLimitExceeded
 
             raise HostedLimitExceeded(
-                f"Hosted MCP does not support sort_by='{sort_by}' because it requires a large first-pass scan.",
+                f"The {MCP_WORKLOAD_PROFILE} workload profile does not support sort_by='{sort_by}' "
+                "because it requires a large first-pass scan.",
                 sort_by=sort_by,
                 max_scan=self.COST_SORT_MAX_FIRST_PASS,
             )
@@ -817,7 +815,7 @@ class TraceService:
             else [t["id"] for t in filtered_results if "id" in t]
         )
 
-        logger.info(f"After sorting by {sort_by}, selected {len(top_ids)} trace IDs")
+        logger.info("Selected %d traces after bounded cost sorting", len(top_ids))
 
         if not top_ids:
             return []

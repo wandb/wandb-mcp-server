@@ -66,7 +66,7 @@ class QueryBuilder:
             return int(calendar.timegm(dt.utctimetuple()))
         except ValueError:
             # If parsing fails, return 0 (beginning of epoch)
-            logger.warning(f"Failed to parse datetime string: {dt_str}")
+            logger.warning("Failed to parse a datetime filter value")
             return 0
 
     @classmethod
@@ -95,7 +95,7 @@ class QueryBuilder:
 
             literal_op = LiteralOperation(**{"$literal": value})
         except Exception as e:
-            logger.warning(f"Invalid value for {field_name} comparison {operator}: {value}. Error: {e}")
+            logger.warning("Invalid comparison filter value (%s)", type(e).__name__)
             return None
 
         if operator == FilterOperator.GREATER_THAN:
@@ -111,7 +111,7 @@ class QueryBuilder:
             gt_op = GtOperation(**{"$gt": (field_op, literal_op)})
             return NotOperation(**{"$not": [gt_op]})
         else:
-            logger.warning(f"Unsupported comparison operator '{operator}' for {field_name}")
+            logger.warning("Unsupported comparison operator")
             return None
 
     @classmethod
@@ -218,7 +218,7 @@ class QueryBuilder:
                 if comp_op:
                     operations.append(comp_op)
             else:
-                logger.warning(f"Invalid status filter value: {target_status}. Expected a string.")
+                logger.warning("Invalid status filter value type")
 
         # Handle time range filter (convert ISO datetime strings to Unix seconds)
         if "time_range" in filters:
@@ -264,9 +264,9 @@ class QueryBuilder:
                 if isinstance(pattern, str):
                     operations.append(cls.create_contains_operation("wb_run_id", pattern))
                 else:
-                    logger.warning(f"Invalid $contains value for wb_run_id: {pattern}. Expected string.")
+                    logger.warning("Invalid run-ID contains-filter value type")
             else:
-                logger.warning(f"Invalid wb_run_id filter value: {run_id}. Expected a string or dict with $contains.")
+                logger.warning("Invalid run-ID filter value type")
 
         # Handle latency filter based on summary.weave.latency_ms
         if "latency" in filters:
@@ -280,11 +280,9 @@ class QueryBuilder:
                     if comp_op:
                         operations.append(comp_op)
                 except (ValueError, KeyError):
-                    logger.warning(f"Invalid operator for latency filter: {op_key}")
+                    logger.warning("Invalid latency filter operator")
             else:
-                logger.warning(
-                    f"Invalid format for latency filter: {latency_filter}. Expected a dict with one operator key."
-                )
+                logger.warning("Invalid latency filter shape")
 
         # Handle attributes filter using dot notation AND supporting comparison operators
         if "attributes" in filters:
@@ -307,7 +305,7 @@ class QueryBuilder:
                             if comp_op:
                                 operations.append(comp_op)
                         except (ValueError, KeyError):
-                            logger.warning(f"Invalid operator for attribute filter: {op_key}")
+                            logger.warning("Invalid attribute filter operator")
                     elif isinstance(attr_value_or_op, dict) and "$contains" in attr_value_or_op:
                         # It's a contains operation
                         if isinstance(attr_value_or_op["$contains"], str):
@@ -315,9 +313,7 @@ class QueryBuilder:
                                 cls.create_contains_operation(full_attr_path, attr_value_or_op["$contains"])
                             )
                         else:
-                            logger.warning(
-                                f"Invalid value for $contains on {full_attr_path}: {attr_value_or_op['$contains']}. Expected string."
-                            )
+                            logger.warning("Invalid attribute contains-filter value type")
                     else:
                         # Assume literal equality
                         comp_op = cls.create_comparison_operation(
@@ -326,7 +322,7 @@ class QueryBuilder:
                         if comp_op:
                             operations.append(comp_op)
             else:
-                logger.warning(f"Invalid format for 'attributes' filter: {attributes_filters}. Expected a dictionary.")
+                logger.warning("Invalid attributes filter shape")
 
         # Handle inputs filter (substring search on trace inputs via $contains)
         if "inputs" in filters:
@@ -338,7 +334,7 @@ class QueryBuilder:
                         if isinstance(input_condition["$contains"], str):
                             operations.append(cls.create_contains_operation(full_path, input_condition["$contains"]))
                         else:
-                            logger.warning(f"Invalid $contains value for {full_path}: expected string.")
+                            logger.warning("Invalid input contains-filter value type")
                     elif isinstance(input_condition, dict):
                         for op_key, value in input_condition.items():
                             try:
@@ -347,7 +343,7 @@ class QueryBuilder:
                                 if comp_op:
                                     operations.append(comp_op)
                             except (ValueError, KeyError):
-                                logger.warning(f"Invalid operator for inputs filter: {op_key}")
+                                logger.warning("Invalid input filter operator")
                     else:
                         comp_op = cls.create_comparison_operation(full_path, FilterOperator.EQUALS, input_condition)
                         if comp_op:
@@ -368,7 +364,7 @@ class QueryBuilder:
                         if isinstance(output_condition["$contains"], str):
                             operations.append(cls.create_contains_operation(full_path, output_condition["$contains"]))
                         else:
-                            logger.warning(f"Invalid $contains value for {full_path}: expected string.")
+                            logger.warning("Invalid output contains-filter value type")
                     elif isinstance(output_condition, dict):
                         for op_key, value in output_condition.items():
                             try:
@@ -377,7 +373,7 @@ class QueryBuilder:
                                 if comp_op:
                                     operations.append(comp_op)
                             except (ValueError, KeyError):
-                                logger.warning(f"Invalid operator for output filter: {op_key}")
+                                logger.warning("Invalid output filter operator")
                     else:
                         comp_op = cls.create_comparison_operation(full_path, FilterOperator.EQUALS, output_condition)
                         if comp_op:

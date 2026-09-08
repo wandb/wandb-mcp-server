@@ -28,10 +28,11 @@ from wandb_mcp_server.mcp_tools.agents import (
 
 
 class _FakeResponse:
-    def __init__(self, json_data, status_code=200, text=""):
+    def __init__(self, json_data, status_code=200, text="", headers=None):
         self._json = json_data
         self.status_code = status_code
         self.text = text
+        self.headers = headers or {}
 
     def json(self):
         if self._json is None:
@@ -52,13 +53,20 @@ class _FakeSession:
 
 
 @contextmanager
-def _patched(json_data, status_code=200, text=""):
+def _patched(json_data, status_code=200, text="", headers=None):
     """Patch auth + the agents HTTP session; yield the fake session for asserts."""
-    session = _FakeSession(_FakeResponse(json_data, status_code=status_code, text=text))
+    session = _FakeSession(
+        _FakeResponse(
+            json_data,
+            status_code=status_code,
+            text=text,
+            headers=headers,
+        )
+    )
     with (
         patch.object(WandBApiManager, "get_api_key", return_value="test-key"),
         patch.object(WandBApiManager, "get_api", return_value=MagicMock(viewer=MagicMock())),
-        patch("wandb_mcp_server.mcp_tools.agents.get_retry_session", return_value=session),
+        patch("wandb_mcp_server.mcp_tools.agents.get_no_retry_session", return_value=session),
     ):
         yield session
 
@@ -216,10 +224,61 @@ class TestErrorHandling:
         data = json.loads(out)
         assert data["error"] == "agents_api_unavailable"
         assert data["status_code"] == 404
+        assert "http://" not in data["message"]
+        assert "https://" not in data["message"]
 
     def test_500_maps_to_query_failed(self):
-        with _patched(None, status_code=500, text="boom"):
+        with _patched(None, status_code=500, text="upstream-response-canary"):
             out = list_agents("e", "p")
+        data = json.loads(out)
+        assert data["error"] == "agents_query_failed"
+        assert data["status_code"] == 500
+        assert "upstream-response-canary" not in out
+
+    def test_transport_exception_does_not_expose_customer_content(self, caplog):
+        session = _FakeSession(_FakeResponse(None))
+        session.post = MagicMock(side_effect=RuntimeError("customer-secret-canary"))
+        with (
+            patch.object(WandBApiManager, "get_api_key", return_value="test-key"),
+            patch("wandb_mcp_server.mcp_tools.agents.get_no_retry_session", return_value=session),
+            caplog.at_level("DEBUG"),
+        ):
+            out = list_agents("customer-entity", "customer-project")
+
+        assert json.loads(out)["error"] == "agents_query_failed"
+        assert "customer-secret-canary" not in out
+        assert "customer-secret-canary" not in caplog.text
+        assert "customer-entity" not in caplog.text
+        assert "customer-project" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("status_code", "body"),
+        [
+            (429, "rate limited"),
+            (503, "service overloaded"),
+        ],
+    )
+    def test_overload_is_single_attempt_and_preserves_retry_after(self, status_code, body):
+        from wandb_mcp_server.api_client import WandBServerBusy
+
+        with _patched(
+            None,
+            status_code=status_code,
+            text=body,
+            headers={"Retry-After": "7"},
+        ) as session:
+            with pytest.raises(WandBServerBusy) as caught:
+                list_agents("e", "p")
+
+        assert len(session.calls) == 1
+        assert caught.value.status_code == status_code
+        assert caught.value.retry_after_ms == 7000
+
+    def test_non_overload_503_is_structured_and_not_retried(self):
+        with _patched(None, status_code=503, text="maintenance") as session:
+            out = list_agents("e", "p")
+
+        assert len(session.calls) == 1
         assert json.loads(out)["error"] == "agents_query_failed"
 
 

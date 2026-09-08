@@ -1,0 +1,34 @@
+{
+  "schema_version": 2,
+  "package": "wandb_mcp_server",
+  "python_versions": [
+    "3.11",
+    "3.12"
+  ],
+  "mcp": {
+    "minimum": "1.28.1",
+    "locked": "1.29.0",
+    "maximum_exclusive": "2"
+  },
+  "locked_runtime": {
+    "wandb": "0.28.0",
+    "wandb-workspaces": "0.4.4",
+    "weave": "0.52.35"
+  },
+  "build_requirements": "release/build-requirements.lock",
+  "runtime_contract": "src/wandb_mcp_server/runtime-contract.json",
+  "qualification_tests": [
+    "scripts/mcp_stdio_smoke.py",
+    "tests/test_public_release.py",
+    "tests/test_runtime_contract.py"
+  ],
+  "required_pr_checks": [
+    "Dependency vulnerabilities",
+    "Python source security",
+    "Socket Security: Project Report",
+    "Socket Security: Pull Request Alerts",
+    "test (3.11)",
+    "test (3.12)",
+    "wandb-latest-compatibility"
+  ]
+}

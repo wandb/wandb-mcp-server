@@ -5,6 +5,8 @@ Tests the mapper (severity, attributes, PII exclusion), the gated forwarder
 where AnalyticsTracker._emit() feeds the DatadogForwarder.
 """
 
+import threading
+import time
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
@@ -30,7 +32,7 @@ def _reset():
 
 def _make_event(event_type: str, **overrides) -> Dict[str, Any]:
     base: Dict[str, Any] = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "event_type": event_type,
         "timestamp": "2026-04-13T12:00:00+00:00",
         "user_id": "alice",
@@ -169,7 +171,7 @@ class TestDatadogAttributes:
         assert "runtime_surface:cloud_run" in entry["ddtags"]
         assert "transport:http" in entry["ddtags"]
         assert "deployment_type:hosted" in entry["ddtags"]
-        assert "mcp_tool_name:count_weave_traces_tool" in entry["ddtags"]
+        assert "mcp_tool_name:count_weave_traces_tool" not in entry["ddtags"]
 
     def test_mcp_harness_tags_and_attributes(self):
         event = _make_event(
@@ -183,19 +185,26 @@ class TestDatadogAttributes:
             mcp_protocol_version="2025-06-18",
             mcp_jsonrpc_method="tools.call",
             mcp_client_name="claude-code",
+            agent_harness="claude_code",
+            client_vendor="anthropic",
+            call_type="tools/call",
         )
         entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
 
-        assert "mcp_client_family:claude" in entry["ddtags"]
-        assert "mcp_client_app:claude_code" in entry["ddtags"]
-        assert "mcp_client_source:session_metadata" in entry["ddtags"]
+        assert "agent_harness:claude_code" in entry["ddtags"]
+        assert "client_vendor:anthropic" not in entry["ddtags"]
+        assert "call_type:tools/call" in entry["ddtags"]
+        assert "mcp_client_family:claude" not in entry["ddtags"]
         assert "claude-code" not in entry["ddtags"]
         assert entry["attributes"]["mcp"]["client"] == {
+            "agent_harness": "claude_code",
+            "vendor": "anthropic",
             "family": "claude",
             "app": "claude_code",
             "source": "session_metadata",
         }
         assert entry["attributes"]["mcp"]["protocol"] == {
+            "call_type": "tools/call",
             "version": "2025-06-18",
             "jsonrpc_method": "tools.call",
         }
@@ -213,12 +222,7 @@ class TestDatadogAttributes:
             duration_ms=546.08,
             release_version="0.3.5",
             timestamp="2026-05-27T17:58:00+00:00",
-            params={
-                "entity_name": "wandb-applied-ai-team",
-                "project_name": "mcp-tests",
-                "run_id": "h0fm5qp5",
-                "samples": 20,
-            },
+            usage_dimensions={"samples_bucket": "11-25"},
             runtime_surface="cloud_run",
             transport="http",
             deployment_type="hosted",
@@ -226,16 +230,14 @@ class TestDatadogAttributes:
         entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
         attrs = entry["attributes"]
 
-        assert attrs["schema_version"] == "1.0"
+        assert attrs["schema_version"] == "1.1"
         assert attrs["release_version"] == "0.3.5"
         assert attrs["timestamp"] == "2026-05-27T17:58:00+00:00"
         assert attrs["tool_name"] == "get_run_history"
         assert attrs["success"] is True
         assert attrs["duration_ms"] == 546.08
-        assert attrs["params"]["entity_name"] == "wandb-applied-ai-team"
-        assert attrs["params"]["project_name"] == "mcp-tests"
-        assert attrs["params"]["run_id"] == "h0fm5qp5"
-        assert attrs["params"]["samples"] == 20
+        assert attrs["usage_dimensions"] == {"samples_bucket": "11-25"}
+        assert "params" not in attrs
         assert attrs["labels"]["tool_name"] == "get_run_history"
         assert attrs["labels"]["event_type"] == "tool_call"
 
@@ -248,7 +250,7 @@ class TestDatadogAttributes:
 class TestPIIExclusion:
     """Datadog must NOT receive params, api_key_hash, metadata, or email_domain."""
 
-    def test_params_are_sanitized_not_raw(self):
+    def test_raw_params_are_excluded(self):
         event = _make_event(
             "tool_call",
             tool_name="query_traces",
@@ -256,9 +258,10 @@ class TestPIIExclusion:
             params={"query": "query { viewer { username } }"},
         )
         entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
-        assert entry["attributes"]["params"]["query"] == "<redacted: text len=29>"
+        assert "params" not in entry["attributes"]
+        assert "viewer" not in str(entry)
 
-    def test_params_redact_secrets(self):
+    def test_params_with_secrets_are_excluded(self):
         event = _make_event(
             "tool_call",
             tool_name="query_traces",
@@ -266,34 +269,27 @@ class TestPIIExclusion:
             params={"api_key": "secret", "Authorization": "Bearer token", "token": "x"},
         )
         entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
-        assert entry["attributes"]["params"]["api_key"] == "<redacted>"
-        assert entry["attributes"]["params"]["Authorization"] == "<redacted>"
-        assert entry["attributes"]["params"]["token"] == "<redacted>"
+        assert "params" not in entry["attributes"]
+        assert "secret" not in str(entry)
+        assert "Bearer token" not in str(entry)
 
-    def test_params_preserve_safe_dimensions(self):
+    def test_usage_dimensions_are_preserved(self):
         event = _make_event(
             "tool_call",
             tool_name="get_run_history",
             success=True,
-            params={
-                "entity_name": "team",
-                "project_name": "project",
-                "run_id": "abc123",
-                "samples": 20,
-                "max_items": 100,
+            usage_dimensions={
+                "samples_bucket": "11-25",
+                "max_items_bucket": "51-100",
             },
         )
         entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
-        assert entry["attributes"]["params"] == {
-            "entity_name": "team",
-            "project_name": "project",
-            "run_id": "abc123",
-            "samples": 20,
-            "max_items": 100,
+        assert entry["attributes"]["usage_dimensions"] == {
+            "samples_bucket": "11-25",
+            "max_items_bucket": "51-100",
         }
 
-    @patch.dict("os.environ", {"MCP_DATADOG_PARAM_PRIVACY_LEVEL": "strict"})
-    def test_params_can_hash_identifiers_at_strict(self):
+    def test_usage_dimensions_do_not_accept_raw_params(self):
         event = _make_event(
             "tool_call",
             tool_name="get_run_history",
@@ -301,10 +297,7 @@ class TestPIIExclusion:
             params={"entity_name": "team", "project_name": "project", "run_id": "abc123"},
         )
         entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
-        params = entry["attributes"]["params"]
-        assert params["entity_name"].startswith("<h:")
-        assert params["project_name"].startswith("<h:")
-        assert params["run_id"].startswith("<h:")
+        assert "params" not in entry["attributes"]
 
     def test_params_do_not_become_tags(self):
         event = _make_event(
@@ -343,13 +336,14 @@ class TestPIIExclusion:
 class TestTagsAndTopLevel:
     """Verify ddtags, ddsource, hostname, service, message."""
 
-    def test_tags_contain_env_service_version(self):
+    def test_tags_contain_only_low_cardinality_operational_dimensions(self):
         event = _make_event("tool_call", tool_name="count_traces", success=True)
         entry = map_to_datadog_log(event, dd_env="staging", dd_version="0.3.0", dd_service="wandb-mcp-server")
         tags = entry["ddtags"]
         assert "env:staging" in tags
         assert "service:wandb-mcp-server" in tags
-        assert "version:0.3.0" in tags
+        assert "version:0.3.0" not in tags
+        assert entry["attributes"]["service_version"] == "0.3.0"
         assert "event_type:tool_call" in tags
         assert "tool_name:count_traces" in tags
         assert "success:true" in tags
@@ -458,7 +452,7 @@ class TestDatadogForwarder:
     )
     def test_forward_builds_entry_and_records(self):
         reset_datadog_forwarder()
-        fwd = DatadogForwarder()
+        fwd = DatadogForwarder(capture_payloads=True)
         with patch.object(fwd, "_post"):
             event = _make_event("tool_call", tool_name="query_traces", success=True, duration_ms=100)
             entry = fwd.forward(event)
@@ -466,6 +460,20 @@ class TestDatadogForwarder:
             assert entry["status"] == "info"
             assert entry["service"] == "test-mcp"
             assert len(fwd.get_forwarded_payloads()) == 1
+
+    @patch.dict(
+        "os.environ",
+        {
+            "MCP_DATADOG_FORWARD": "true",
+            "DD_API_KEY": "testkey",
+        },
+        clear=False,
+    )
+    def test_production_forwarder_does_not_retain_payload_history(self):
+        fwd = DatadogForwarder()
+        with patch.object(fwd, "_post"):
+            assert fwd.forward(_make_event("tool_call", tool_name="x", success=True))
+            assert fwd.get_forwarded_payloads() == []
 
     @patch.dict(
         "os.environ",
@@ -489,12 +497,49 @@ class TestDatadogForwarder:
     )
     def test_clear_forwarded_payloads(self):
         reset_datadog_forwarder()
-        fwd = DatadogForwarder()
+        fwd = DatadogForwarder(capture_payloads=True)
         with patch.object(fwd, "_post"):
             fwd.forward(_make_event("tool_call", tool_name="x", success=True))
             assert len(fwd.get_forwarded_payloads()) == 1
             fwd.clear_forwarded_payloads()
             assert fwd.get_forwarded_payloads() == []
+
+    @patch.dict(
+        "os.environ",
+        {"MCP_DATADOG_FORWARD": "true", "DD_API_KEY": "testkey"},
+        clear=False,
+    )
+    def test_live_queue_is_non_blocking_and_memory_bounded(self, monkeypatch):
+        monkeypatch.setattr(
+            "wandb_mcp_server.analytics_datadog.MCP_ANALYTICS_QUEUE_CAPACITY",
+            2,
+        )
+        monkeypatch.setattr(
+            "wandb_mcp_server.analytics_datadog.MCP_ANALYTICS_TEST_BUFFER_CAPACITY",
+            2,
+        )
+        fwd = DatadogForwarder(capture_payloads=True)
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_post(_entry):
+            started.set()
+            release.wait(timeout=2)
+
+        monkeypatch.setattr(fwd, "_post", blocked_post)
+        event = _make_event("tool_call", tool_name="query_wandb_tool", success=True)
+        fwd.forward(event)
+        assert started.wait(timeout=1)
+        fwd.forward(event)
+        before = time.monotonic()
+        fwd.forward(event)
+
+        assert time.monotonic() - before < 0.1
+        assert fwd._executor.outstanding_count <= 2
+        assert fwd.dropped_count == 1
+        assert len(fwd.get_forwarded_payloads()) == 2
+        release.set()
+        fwd._executor.shutdown(wait=True)
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +643,25 @@ class TestSingleton:
         b = get_datadog_forwarder()
         assert a is not b
 
+    @patch.dict("os.environ", {"MCP_DATADOG_FORWARD": "false"}, clear=False)
+    def test_concurrent_initialization_returns_one_instance(self):
+        reset_datadog_forwarder()
+        barrier = threading.Barrier(8)
+        results = []
+
+        def resolve() -> None:
+            barrier.wait()
+            results.append(get_datadog_forwarder())
+
+        threads = [threading.Thread(target=resolve) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1)
+
+        assert len(results) == 8
+        assert len({id(result) for result in results}) == 1
+
 
 # ---------------------------------------------------------------------------
 # E2E: AnalyticsTracker -> DatadogForwarder
@@ -622,14 +686,14 @@ class TestE2ETrackerToDatadog:
     def test_tool_call_reaches_datadog(self):
         reset_datadog_forwarder()
         reset_analytics_tracker()
-        fwd = get_datadog_forwarder()
+        fwd = get_datadog_forwarder(capture_payloads=True)
         with patch.object(fwd, "_post"):
             tracker = AnalyticsTracker(enabled=True)
             tracker.track_tool_call(
                 tool_name="query_traces",
                 session_id="sess_1",
                 viewer_info="alice",
-                params={"entity": "team"},
+                params={"entity": "team", "max_items": 50},
                 success=True,
                 duration_ms=150.5,
             )
@@ -639,7 +703,7 @@ class TestE2ETrackerToDatadog:
             assert entry["status"] == "info"
             assert entry["attributes"]["tool"]["name"] == "query_traces"
             assert entry["attributes"]["duration"] == 150_500_000
-            assert entry["attributes"]["params"]["entity"] == "team"
+            assert entry["attributes"]["usage_dimensions"] == {"max_items_bucket": "26-50"}
 
     @patch.dict(
         "os.environ",
@@ -653,7 +717,7 @@ class TestE2ETrackerToDatadog:
     def test_failed_tool_call_reaches_datadog_as_error(self):
         reset_datadog_forwarder()
         reset_analytics_tracker()
-        fwd = get_datadog_forwarder()
+        fwd = get_datadog_forwarder(capture_payloads=True)
         with patch.object(fwd, "_post"):
             tracker = AnalyticsTracker(enabled=True)
             tracker.track_tool_call(
@@ -683,7 +747,7 @@ class TestE2ETrackerToDatadog:
     def test_request_500_reaches_datadog_as_error(self):
         reset_datadog_forwarder()
         reset_analytics_tracker()
-        fwd = get_datadog_forwarder()
+        fwd = get_datadog_forwarder(capture_payloads=True)
         with patch.object(fwd, "_post"):
             tracker = AnalyticsTracker(enabled=True)
             tracker.track_request(

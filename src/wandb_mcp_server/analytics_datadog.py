@@ -19,19 +19,23 @@ PII leakage into ops logs.
 
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from wandb_mcp_server.bounded_worker import BoundedWorkerQueue
+from wandb_mcp_server.config import (
+    MCP_ANALYTICS_QUEUE_CAPACITY,
+    MCP_ANALYTICS_TEST_BUFFER_CAPACITY,
+)
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
 
 _DATADOG_EVENT_PREFIX = "mcp"
-_DATADOG_PARAM_PRIVACY_LEVEL_DEFAULT = "standard"
 
 
 def _build_retry_session() -> requests.Session:
@@ -48,39 +52,18 @@ def _build_retry_session() -> requests.Session:
     return session
 
 
-def _datadog_safe_params(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Return Datadog-safe analytics params.
-
-    Cloud Run keeps MCP_LOG_PRIVACY_LEVEL=off for product analytics, but Datadog
-    is an operational sink. Use standard redaction by default so free text is
-    summarized, secrets are redacted, and structured dimensions remain useful.
-    """
-    params = event.get("params")
-    if not params:
-        return {}
-
-    from wandb_mcp_server.analytics import AnalyticsTracker
-
-    privacy_level = os.environ.get(
-        "MCP_DATADOG_PARAM_PRIVACY_LEVEL",
-        _DATADOG_PARAM_PRIVACY_LEVEL_DEFAULT,
-    )
-    return AnalyticsTracker._sanitise_params(params, level=privacy_level)
-
-
 def _datadog_safe_labels(event: Dict[str, Any]) -> Dict[str, str]:
     """Return low-cardinality labels safe for Datadog attributes."""
     labels: Dict[str, str] = {"event_type": str(event.get("event_type", "unknown"))}
     for key in (
         "tool_name",
-        "mcp_tool_name",
         "success",
         "runtime_surface",
         "transport",
         "deployment_type",
-        "mcp_client_family",
-        "mcp_client_app",
-        "mcp_client_source",
+        "agent_harness",
+        "client_vendor",
+        "call_type",
     ):
         value = event.get(key)
         if value is not None:
@@ -108,7 +91,7 @@ def map_to_datadog_log(
     Args:
         event: Internal analytics event dict (as emitted by AnalyticsTracker).
         dd_env: Datadog environment tag (e.g. "staging", "production").
-        dd_version: Service version tag (e.g. "0.3.0").
+        dd_version: Service version attribute (e.g. "0.3.0").
         dd_service: Service name tag.
 
     Returns:
@@ -121,14 +104,13 @@ def map_to_datadog_log(
     tags = [
         f"env:{dd_env}",
         f"service:{dd_service}",
-        f"version:{dd_version}",
         f"event_type:{event_type}",
     ]
     for key in ("runtime_surface", "transport", "deployment_type", "environment"):
         value = event.get(key)
         if value is not None:
             tags.append(f"{key}:{value}")
-    for key in ("mcp_client_family", "mcp_client_app", "mcp_client_source"):
+    for key in ("agent_harness", "call_type"):
         value = event.get(key)
         if value is not None:
             tags.append(f"{key}:{value}")
@@ -136,15 +118,20 @@ def map_to_datadog_log(
     if tool_name:
         tags.append(f"tool_name:{tool_name}")
     mcp_tool_name = event.get("mcp_tool_name")
-    if mcp_tool_name:
-        tags.append(f"mcp_tool_name:{mcp_tool_name}")
     success = event.get("success")
     if success is not None:
         tags.append(f"success:{str(success).lower()}")
+    error_str = event.get("error")
+    error_kind = None
+    if error_str:
+        parts = str(error_str).split(": ", 1)
+        error_kind = parts[0] if len(parts) > 1 else "Error"
+        tags.append(f"error_kind:{error_kind}")
 
     attributes: Dict[str, Any] = {
         "event_type": event_type,
-        "schema_version": event.get("schema_version", "1.0"),
+        "schema_version": event.get("schema_version", "1.1"),
+        "service_version": dd_version,
     }
     if success is not None:
         attributes["success"] = success
@@ -183,6 +170,8 @@ def map_to_datadog_log(
 
     mcp_client_attrs: Dict[str, Any] = {}
     for event_key, attr_key in (
+        ("agent_harness", "agent_harness"),
+        ("client_vendor", "vendor"),
         ("mcp_client_family", "family"),
         ("mcp_client_app", "app"),
         ("mcp_client_source", "source"),
@@ -192,6 +181,7 @@ def map_to_datadog_log(
             mcp_client_attrs[attr_key] = value
     mcp_protocol_attrs: Dict[str, Any] = {}
     for event_key, attr_key in (
+        ("call_type", "call_type"),
         ("mcp_protocol_version", "version"),
         ("mcp_jsonrpc_method", "jsonrpc_method"),
     ):
@@ -206,22 +196,23 @@ def map_to_datadog_log(
             mcp_attrs["protocol"] = mcp_protocol_attrs
         attributes["mcp"] = mcp_attrs
 
-    error_str = event.get("error")
     if error_str:
-        parts = str(error_str).split(": ", 1)
         attributes["error"] = {
-            "kind": parts[0] if len(parts) > 1 else "Error",
-            "message": parts[-1][:1000],
+            "kind": error_kind,
+            "message": str(error_str).split(": ", 1)[-1][:1000],
         }
 
-    user_id = event.get("user_id")
+    actor_id = event.get("actor_id")
+    user_id = event.get("user_id") or actor_id
     if user_id:
         attributes["user_id"] = user_id
         attributes["usr"] = {"id": user_id}
+    if actor_id:
+        attributes["actor_id"] = actor_id
 
-    safe_params = _datadog_safe_params(event)
-    if safe_params:
-        attributes["params"] = safe_params
+    usage_dimensions = event.get("usage_dimensions")
+    if usage_dimensions:
+        attributes["usage_dimensions"] = usage_dimensions
 
     labels = _datadog_safe_labels(event)
     if labels:
@@ -322,7 +313,7 @@ def _resolve_dd_api_key() -> str:
             if key_bytes:
                 return key_bytes.decode("utf-8").strip()
     except Exception as exc:
-        logger.debug(f"SecretsResolver failed for {_DD_SECRET_NAME}: {exc}")
+        logger.debug("Datadog credential resolution failed (%s)", type(exc).__name__)
     return ""
 
 
@@ -336,13 +327,13 @@ class DatadogForwarder:
       (same pattern as the HMAC session key).
     - ``DD_SITE``: Datadog site (default ``datadoghq.com``).
     - ``DD_ENV``: environment tag (default ``production``).
-    - ``DD_VERSION``: version tag (default ``0.0.0``).
+    - ``DD_VERSION``: version attribute (default ``0.0.0``).
     - ``DD_SERVICE``: service name tag (default ``wandb-mcp-server``).
 
     Live POSTs run in a daemon thread so they never block the MCP request path.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, capture_payloads: bool = False) -> None:
         self.live = os.environ.get("MCP_DATADOG_FORWARD", "false").lower() == "true"
         self._api_key = _resolve_dd_api_key() if self.live else ""
         self._site = os.environ.get("DD_SITE", "datadoghq.com")
@@ -350,8 +341,11 @@ class DatadogForwarder:
         self._version = os.environ.get("DD_VERSION", "0.0.0")
         self._service = os.environ.get("DD_SERVICE", "wandb-mcp-server")
         self._intake_url = f"https://http-intake.logs.{self._site}/api/v2/logs"
-        self._forwarded_payloads: List[Dict[str, Any]] = []
-        self._executor: Optional[ThreadPoolExecutor] = None
+        self._forwarded_payloads: Deque[Dict[str, Any]] | None = (
+            deque(maxlen=MCP_ANALYTICS_TEST_BUFFER_CAPACITY) if capture_payloads else None
+        )
+        self._executor: Optional[BoundedWorkerQueue[Dict[str, Any]]] = None
+        self._executor_lock = threading.Lock()
         self._thread_local = threading.local()
 
         if self.live and not self._api_key:
@@ -391,10 +385,9 @@ class DatadogForwarder:
             dd_service=self._service,
         )
 
-        if self._executor is None:
-            self._executor = ThreadPoolExecutor(max_workers=2)
-        self._executor.submit(self._post, entry)
-        self._forwarded_payloads.append(entry)
+        self._get_executor().submit(entry)
+        if self._forwarded_payloads is not None:
+            self._forwarded_payloads.append(entry)
         return entry
 
     def _post(self, entry: Dict[str, Any]) -> None:
@@ -415,31 +408,60 @@ class DatadogForwarder:
                 },
             )
             if resp.status_code not in (200, 202):
-                logger.warning(f"Datadog forward failed: {resp.status_code} {resp.text[:200]}")
+                logger.warning("Datadog forwarding returned HTTP %s", resp.status_code)
         except Exception as exc:
-            logger.warning(f"Datadog forward error (non-fatal): {exc}")
+            logger.warning("Datadog forwarding failed (non-fatal; %s)", type(exc).__name__)
 
     def get_forwarded_payloads(self) -> List[Dict[str, Any]]:
         """Return all payloads that were forwarded (for testing/inspection)."""
-        return list(self._forwarded_payloads)
+        return list(self._forwarded_payloads or ())
 
     def clear_forwarded_payloads(self) -> None:
         """Clear the forwarded payloads buffer."""
-        self._forwarded_payloads.clear()
+        if self._forwarded_payloads is not None:
+            self._forwarded_payloads.clear()
+
+    @property
+    def dropped_count(self) -> int:
+        """Number of forwarding events dropped because the queue was full."""
+        return self._executor.dropped_count if self._executor is not None else 0
+
+    def _get_executor(self) -> BoundedWorkerQueue[Dict[str, Any]]:
+        if self._executor is None:
+            with self._executor_lock:
+                if self._executor is None:
+                    self._executor = BoundedWorkerQueue(
+                        self._post,
+                        capacity=MCP_ANALYTICS_QUEUE_CAPACITY,
+                        worker_count=2,
+                        on_drop=lambda count: logger.warning(
+                            "Datadog forwarding queue full; dropped_count=%s",
+                            count,
+                        ),
+                        thread_name_prefix="mcp-datadog",
+                    )
+        return self._executor
 
 
 _datadog_forwarder: Optional[DatadogForwarder] = None
+_datadog_forwarder_lock = threading.Lock()
 
 
-def get_datadog_forwarder() -> DatadogForwarder:
+def get_datadog_forwarder(*, capture_payloads: bool = False) -> DatadogForwarder:
     """Get or create the global DatadogForwarder singleton."""
     global _datadog_forwarder
     if _datadog_forwarder is None:
-        _datadog_forwarder = DatadogForwarder()
+        with _datadog_forwarder_lock:
+            if _datadog_forwarder is None:
+                _datadog_forwarder = DatadogForwarder(capture_payloads=capture_payloads)
     return _datadog_forwarder
 
 
 def reset_datadog_forwarder() -> None:
     """Reset the global DatadogForwarder (for testing)."""
     global _datadog_forwarder
-    _datadog_forwarder = None
+    with _datadog_forwarder_lock:
+        previous = _datadog_forwarder
+        _datadog_forwarder = None
+    if previous is not None and previous._executor is not None:
+        previous._executor.shutdown(wait=False, cancel_futures=True)

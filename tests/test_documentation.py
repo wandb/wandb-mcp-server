@@ -1,0 +1,248 @@
+"""Regression checks for durable repository documentation."""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import json
+import re
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+from mcp.server.fastmcp import FastMCP
+
+import wandb_mcp_server.config as config
+from wandb_mcp_server.server import register_tools
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+README = REPOSITORY_ROOT / "README.md"
+QUERY_CAPABILITIES = REPOSITORY_ROOT / "docs" / "query-capabilities.md"
+RELEASE_NOTES = REPOSITORY_ROOT / "docs" / "releases" / "v0.4.0.md"
+RELEASE_INDEX = REPOSITORY_ROOT / "docs" / "releases" / "README.md"
+RELEASE_TEMPLATE = REPOSITORY_ROOT / "docs" / "releases" / "TEMPLATE.md"
+PUBLIC_RELEASE_CONTRACT = REPOSITORY_ROOT / "release" / "public-contract.json"
+RUNTIME_CONTRACT = REPOSITORY_ROOT / "src" / "wandb_mcp_server" / "runtime-contract.json"
+ENV_EXAMPLE = REPOSITORY_ROOT / "env.example"
+REPO_SKILLS = REPOSITORY_ROOT / ".agents" / "skills"
+FEATURE_FLAGS = (
+    "WANDB_MCP_ENABLE_RAW_GRAPHQL",
+    "WANDB_MCP_ENABLE_ARIA_TOOLS",
+    "WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS",
+    "WANDB_MCP_ENABLE_WEAVE_TOOLS",
+    "WANDB_MCP_READ_ONLY",
+)
+MARKDOWN_LINK = re.compile(r"!?\[[^\]]*]\(([^)]+)\)")
+JSON_FENCE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
+
+
+def _durable_markdown_files() -> list[Path]:
+    return [
+        *sorted(REPOSITORY_ROOT.glob("*.md")),
+        *sorted((REPOSITORY_ROOT / "docs").rglob("*.md")),
+    ]
+
+
+def _repo_skill_files() -> list[Path]:
+    return [
+        path for path in sorted(REPO_SKILLS.rglob("*")) if path.is_file() and path.suffix in {".md", ".yaml", ".yml"}
+    ]
+
+
+def test_readme_documents_every_default_tool(monkeypatch):
+    for feature_flag in FEATURE_FLAGS:
+        monkeypatch.delenv(feature_flag, raising=False)
+    importlib.reload(config)
+
+    server = FastMCP("documentation-test")
+    register_tools(server)
+    tool_names = {tool.name for tool in asyncio.run(server.list_tools())}
+    readme = README.read_text()
+
+    missing = sorted(name for name in tool_names if f"**{name}**" not in readme)
+    assert not missing, f"README is missing default tools: {missing}"
+
+
+def test_documentation_json_examples_are_valid():
+    errors: list[str] = []
+    for path in _durable_markdown_files():
+        for index, example in enumerate(JSON_FENCE.findall(path.read_text()), start=1):
+            try:
+                json.loads(example)
+            except json.JSONDecodeError as error:
+                errors.append(f"{path.relative_to(REPOSITORY_ROOT)} block {index}: {error}")
+
+    assert not errors, "Invalid JSON documentation examples:\n" + "\n".join(errors)
+
+
+def test_relative_documentation_links_resolve():
+    broken: list[str] = []
+    for path in (*_durable_markdown_files(), *_repo_skill_files()):
+        for raw_target in MARKDOWN_LINK.findall(path.read_text()):
+            target = raw_target.strip().strip("<>")
+            parsed = urlsplit(target)
+            if parsed.scheme or parsed.netloc or target.startswith(("#", "mailto:")):
+                continue
+
+            relative_path = unquote(parsed.path)
+            if not relative_path:
+                continue
+            resolved = (path.parent / relative_path).resolve()
+            if not resolved.exists():
+                broken.append(f"{path.relative_to(REPOSITORY_ROOT)} -> {target}")
+
+    assert not broken, "Broken relative documentation links:\n" + "\n".join(broken)
+
+
+def test_every_versioned_release_note_is_indexed():
+    index = RELEASE_INDEX.read_text()
+    notes = sorted(
+        path for path in (REPOSITORY_ROOT / "docs" / "releases").glob("v*.md") if path.name != RELEASE_TEMPLATE.name
+    )
+
+    assert notes
+    for note in notes:
+        assert f"({note.name})" in index
+    assert "Public source" in RELEASE_TEMPLATE.read_text()
+    assert "Dedicated/Self-Managed" in RELEASE_TEMPLATE.read_text()
+
+
+def test_readme_uses_immutable_source_install_examples():
+    readme = README.read_text()
+    moving_source = "git+https://github.com/wandb/wandb-mcp-server"
+
+    assert moving_source in readme
+    assert not re.search(rf"{re.escape(moving_source)}(?=[\s\"'])", readme)
+    assert "@vX.Y.Z" in readme
+    assert "docs/releases/README.md" in readme
+
+
+def test_feature_environments_are_documented_and_contract_driven():
+    public_contract = json.loads(PUBLIC_RELEASE_CONTRACT.read_text())
+    contract = json.loads(RUNTIME_CONTRACT.read_text())
+    readme = README.read_text()
+
+    assert public_contract["runtime_contract"] == str(RUNTIME_CONTRACT.relative_to(REPOSITORY_ROOT))
+    environments = {selector["environment"] for selector in contract["selectors"].values()}
+    for environment in environments:
+        assert f"`{environment}`" in readme
+
+
+def test_every_former_named_graphql_example_has_a_typed_v040_route():
+    text = QUERY_CAPABILITIES.read_text()
+    route_rows = dict(
+        re.findall(
+            r"^\| `([^`]+)` \| `([^`]+)` \|",
+            text,
+            flags=re.MULTILINE,
+        )
+    )
+
+    assert route_rows == {
+        "MinimalRunIdVsDisplayName": "query_wandb_tool",
+        "GetProjectInfo": "query_wandb_tool",
+        "GetSortedRuns": "query_wandb_tool",
+        "GetFilteredRuns": "query_wandb_tool",
+        "GetRunByDisplayName": "query_wandb_tool",
+    }
+
+
+def test_query_capability_matrix_routes_typed_specialized_and_raw_reads():
+    text = QUERY_CAPABILITIES.read_text()
+
+    for typed_route in (
+        'query_wandb_tool(resource="project")',
+        'query_wandb_tool(resource="run", run_id=...)',
+        'query_wandb_tool(resource="runs", filters=..., order=...)',
+        'query_wandb_tool(resource="sweep"|"sweeps")',
+        'query_wandb_tool(resource="reports", report_name=...)',
+    ):
+        assert f"`{typed_route}`" in text
+
+    for specialized_tool in (
+        "get_run_history_tool",
+        "list_artifact_versions_tool",
+        "get_artifact_details_tool",
+        "list_registries_tool",
+        "list_registry_collections_tool",
+        "list_wandb_automations_tool",
+        "list_wandb_integrations_tool",
+    ):
+        assert f"`{specialized_tool}`" in text
+
+    raw_rows = [line for line in text.splitlines() if line.startswith("|") and "query_wandb_graphql_tool" in line]
+    assert len(raw_rows) == 4
+    assert all(line.rstrip().endswith("| Yes |") for line in raw_rows)
+
+
+def test_history_safety_metadata_is_documented_truthfully():
+    for path in (README, QUERY_CAPABILITIES, RELEASE_NOTES):
+        text = path.read_text()
+        assert "non_finite_counts" in text
+        assert "key_counts_exact" in text
+
+    capability_text = QUERY_CAPABILITIES.read_text()
+    assert "source_truncated" in capability_text
+    assert "step-window" in capability_text
+    assert "post-protobuf" in capability_text
+
+
+def test_removed_wandbot_is_not_documented_or_shipped():
+    assert not (REPOSITORY_ROOT / "src" / "wandb_mcp_server" / "mcp_tools" / "query_wandbot.py").exists()
+    for path in (*_durable_markdown_files(), REPOSITORY_ROOT / "env.example"):
+        text = path.read_text().lower()
+        assert "wandbot" not in text
+        assert "supportbot" not in text
+
+
+def test_public_docs_do_not_embed_restricted_release_details():
+    public_text = "\n".join(
+        [
+            *(path.read_text() for path in _durable_markdown_files()),
+            *(path.read_text() for path in _repo_skill_files()),
+            ENV_EXAMPLE.read_text(),
+        ]
+    ).lower()
+
+    for forbidden in (
+        "wandb-mcp-server-test",
+        "wandbagentfactory",
+        ".svc.cluster.local",
+        "http://<release>-api",
+        "http://<release>-app",
+        "http://wandb-api",
+    ):
+        assert forbidden not in public_text
+
+
+def test_repo_local_maintainer_skills_are_complete():
+    expected_skills = {
+        "develop-wandb-mcp-tools",
+        "release-wandb-mcp-server",
+    }
+
+    discovered_skills = {path.name for path in REPO_SKILLS.iterdir() if path.is_dir()}
+    assert expected_skills <= discovered_skills
+    for name in expected_skills:
+        skill_text = (REPO_SKILLS / name / "SKILL.md").read_text()
+        agent_text = (REPO_SKILLS / name / "agents" / "openai.yaml").read_text()
+        assert skill_text.startswith(f"---\nname: {name}\n")
+        assert "[TODO" not in skill_text
+        assert f"${name}" in agent_text
+
+
+def test_obsolete_live_validation_helpers_are_removed():
+    assert not (REPOSITORY_ROOT / "scripts" / "test_local_changes.sh").exists()
+    assert not (REPOSITORY_ROOT / "scripts" / "validate_tools_live.py").exists()
+
+
+def test_live_harnesses_do_not_discover_or_parse_env_files():
+    script = (REPOSITORY_ROOT / "scripts" / "report_layout_live_harness.py").read_text()
+    assert "load_dotenv" not in script
+    assert "--env-file" not in script
+    assert "WandBAgentFactory" not in script
+    assert "wandb-mcp-server-test" not in script
+
+    conftest = (REPOSITORY_ROOT / "tests" / "conftest.py").read_text()
+    assert "load_dotenv" not in conftest
+    assert not (REPOSITORY_ROOT / "scripts" / "report_agent_harness.py").exists()

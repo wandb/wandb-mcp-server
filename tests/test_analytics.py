@@ -13,12 +13,15 @@ from unittest.mock import patch
 
 import pytest
 
+import wandb_mcp_server.analytics as analytics_module
 from wandb_mcp_server.analytics import (
     SCHEMA_VERSION,
     AnalyticsTracker,
+    _prepare_event,
     analytics_logger,
     configure_analytics_logging,
     configure_analytics_logging_for_transport,
+    configure_analytics_runtime,
     get_analytics_tracker,
     reset_analytics_tracker,
 )
@@ -26,7 +29,9 @@ from wandb_mcp_server.harness import HarnessContext, current_harness_context
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch):
+    monkeypatch.setattr(analytics_module, "MCP_REQUEST_SUCCESS_SAMPLE_RATE", 1.0)
+    monkeypatch.setattr(analytics_module, "_analytics_startup_logged", False)
     reset_analytics_tracker()
     configure_analytics_logging("stdout")
     yield
@@ -153,22 +158,51 @@ class TestAnalyticsLogStream:
         assert "ANALYTICS_EVENT" in stdout.getvalue()
         assert stderr.getvalue() == ""
 
-    def test_explicit_stream_env_overrides_transport(self, monkeypatch):
+    def test_stdio_ignores_unsafe_stdout_override(self, monkeypatch):
         stdout = io.StringIO()
         stderr = io.StringIO()
         monkeypatch.setattr("sys.stdout", stdout)
         monkeypatch.setattr("sys.stderr", stderr)
         monkeypatch.setenv("MCP_ANALYTICS_LOG_STREAM", "stdout")
 
-        assert configure_analytics_logging_for_transport("stdio") == "stdout"
+        assert configure_analytics_logging_for_transport("stdio") == "stderr"
         AnalyticsTracker(enabled=True).track_tool_call(
             tool_name="query_wandb_tool",
             session_id="s",
             viewer_info="viewer",
         )
 
-        assert "ANALYTICS_EVENT" in stdout.getvalue()
-        assert stderr.getvalue() == ""
+        assert stdout.getvalue() == ""
+        assert "ANALYTICS_EVENT" in stderr.getvalue()
+
+    def test_http_honors_explicit_stderr_override(self, monkeypatch):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        monkeypatch.setattr("sys.stdout", stdout)
+        monkeypatch.setattr("sys.stderr", stderr)
+        monkeypatch.setenv("MCP_ANALYTICS_LOG_STREAM", "stderr")
+
+        assert configure_analytics_logging_for_transport("http") == "stderr"
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_tool",
+            session_id="s",
+            viewer_info="viewer",
+        )
+
+        assert stdout.getvalue() == ""
+        assert "ANALYTICS_EVENT" in stderr.getvalue()
+
+    def test_runtime_selects_stream_before_startup_log_and_logs_once(self, monkeypatch):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        monkeypatch.setattr("sys.stdout", stdout)
+        monkeypatch.setattr("sys.stderr", stderr)
+
+        configure_analytics_runtime("stdio")
+        configure_analytics_runtime("stdio")
+
+        assert stdout.getvalue() == ""
+        assert stderr.getvalue().count("Analytics ready") == 1
 
     def test_reconfiguration_replaces_handler_instead_of_duplicating(self, monkeypatch):
         stdout = io.StringIO()
@@ -310,7 +344,11 @@ class TestSanitiseParams:
     def test_deeply_nested_stops_at_depth_limit(self):
         deep = {"l1": {"l2": {"l3": {"l4": {"api_key": "leak"}}}}}
         result = AnalyticsTracker._sanitise_params(deep)
-        assert result["l1"]["l2"]["l3"]["l4"] == {"api_key": "leak"}
+        assert result["l1"]["l2"]["l3"]["l4"] == {
+            "_truncated": "max_depth",
+            "_item_count": 1,
+        }
+        assert "leak" not in json.dumps(result)
 
     def test_integer_values_pass_through(self):
         assert AnalyticsTracker._sanitise_params({"count": 42})["count"] == 42
@@ -335,7 +373,18 @@ class TestSanitiseParams:
     def test_deeply_nested_list_stops_at_depth_limit(self):
         deep = {"l1": [{"l2": [{"l3": [{"api_key": "leak"}]}]}]}
         result = AnalyticsTracker._sanitise_params(deep)
-        assert result["l1"][0]["l2"][0]["l3"] == [{"api_key": "leak"}]
+        assert "leak" not in json.dumps(result)
+        assert "max_depth" in json.dumps(result)
+
+    def test_mapping_and_list_sizes_are_bounded(self):
+        result = AnalyticsTracker._sanitise_params(
+            {
+                "mapping": {str(i): i for i in range(30)},
+                "items": list(range(30)),
+            }
+        )
+        assert result["mapping"]["_truncated_keys"] == 10
+        assert result["items"][-1] == "<truncated:10 items>"
 
 
 # -- Schema version & base fields -------------------------------------------
@@ -343,7 +392,7 @@ class TestSanitiseParams:
 
 class TestSchemaVersion:
     def test_schema_version_constant(self):
-        assert SCHEMA_VERSION == "1.0"
+        assert SCHEMA_VERSION == "1.1"
 
     def test_user_session_has_schema_version(self, capture):
         AnalyticsTracker(enabled=True).track_user_session(session_id="s", viewer_info="u@t.com")
@@ -379,7 +428,7 @@ class TestSchemaVersion:
             "MCP_TRANSPORT": "http",
             "MCP_DEPLOYMENT_TYPE": "hosted",
             "ENVIRONMENT": "production",
-            "MCP_HOSTED_MODE": "true",
+            "MCP_WORKLOAD_PROFILE": "shared",
             "WANDB_BASE_URL": "https://api.wandb.ai",
         },
         clear=False,
@@ -446,7 +495,8 @@ class TestTrackUserSession:
     def test_none_api_key_hash(self, capture):
         AnalyticsTracker(enabled=True).track_user_session(session_id="s", viewer_info="v", api_key_hash=None)
         assert capture.event is not None
-        assert capture.event["api_key_hash"] is None
+        assert "api_key_hash" not in capture.event
+        assert "actor_id" not in capture.event
 
     def test_event_fields_complete(self, capture):
         AnalyticsTracker(enabled=True).track_user_session(
@@ -478,15 +528,16 @@ class TestTrackToolCall:
     def test_skipped_disabled(self):
         AnalyticsTracker(enabled=False).track_tool_call(tool_name="t", session_id="s", viewer_info="v")
 
-    def test_sanitises_api_key(self, capture):
+    def test_raw_params_are_not_emitted(self, capture):
         AnalyticsTracker(enabled=True).track_tool_call(
             tool_name="t",
             session_id="s",
             viewer_info="v",
             params={"api_key": "super_secret", "project": "ok"},
         )
-        assert capture.event["params"]["api_key"] == "<redacted>"
-        assert capture.event["params"]["project"] == "ok"
+        assert "params" not in capture.event
+        assert "super_secret" not in json.dumps(capture.event)
+        assert "project" not in json.dumps(capture.event.get("usage_dimensions", {}))
 
     def test_error_field_recorded(self, capture):
         AnalyticsTracker(enabled=True).track_tool_call(
@@ -508,6 +559,18 @@ class TestTrackToolCall:
         )
         assert capture.event["duration_ms"] == 123.4
 
+    def test_cancelled_admission_outcome_survives_event_emission(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="t",
+            session_id="s",
+            viewer_info=None,
+            success=False,
+            error="cancelled: tool admission wait was cancelled",
+            params={"admission_outcome": "cancelled"},
+        )
+
+        assert capture.event["usage_dimensions"]["admission_outcome"] == "cancelled"
+
     def test_mcp_tool_name_recorded_when_available(self, capture):
         AnalyticsTracker(enabled=True).track_tool_call(
             tool_name="query_paginated_wandb_gql",
@@ -516,9 +579,9 @@ class TestTrackToolCall:
             viewer_info="v",
         )
 
-        assert capture.event["tool_name"] == "query_paginated_wandb_gql"
+        assert capture.event["tool_name"] == "query_wandb_tool"
         assert capture.event["mcp_tool_name"] == "query_wandb_tool"
-        assert capture.labels["mcp_tool_name"] == "query_wandb_tool"
+        assert capture.labels["tool_name"] == "query_wandb_tool"
 
     def test_labels_include_tool_name(self, capture):
         AnalyticsTracker(enabled=True).track_tool_call(
@@ -527,6 +590,72 @@ class TestTrackToolCall:
             viewer_info="v",
         )
         assert capture.labels["tool_name"] == "query_gql"
+
+    def test_optional_empty_fields_are_omitted(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_gql",
+            session_id=None,
+            viewer_info=None,
+            params=None,
+        )
+        assert "session_id" not in capture.event
+        assert "user_id" not in capture.event
+        assert "email_domain" not in capture.event
+        assert "usage_dimensions" not in capture.event
+        assert "error" not in capture.event
+        assert "duration_ms" not in capture.event
+
+    def test_usage_dimensions_are_bounded_and_low_cardinality(self, capture):
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_gql",
+            session_id="s",
+            viewer_info=None,
+            params={
+                "entity_name": "private-team",
+                "query": "private query",
+                "filters": {str(i): i for i in range(50)},
+                "limit": 100,
+                "include_files": True,
+                "resource": "runs",
+                **{f"flag_{i}": True for i in range(20)},
+            },
+        )
+        dimensions = capture.event["usage_dimensions"]
+        assert len(dimensions) <= 12
+        assert dimensions["has_filters"] is True
+        assert dimensions["filter_key_count"] == 20
+        assert "entity_name" not in dimensions
+        assert "query" not in dimensions
+        assert "private-team" not in json.dumps(capture.event)
+
+    @pytest.mark.parametrize("level", ["off", "standard", "strict"])
+    def test_usage_dimensions_reject_client_defined_field_names(self, capture, monkeypatch, level):
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", level)
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_tool",
+            session_id="s",
+            viewer_info=None,
+            params={
+                "private-boolean-canary": True,
+                "private-list-canary": [],
+                "private-map-canary": {},
+                "include_files": True,
+                "columns": ["private-column-canary"],
+                "filters": {"private-filter-canary": 1},
+                "limit": 100,
+                "resource": "runs",
+            },
+        )
+
+        assert capture.event["usage_dimensions"] == {
+            "columns_count": 1,
+            "has_filters": True,
+            "filter_key_count": 1,
+            "include_files": True,
+            "limit_bucket": "51-100",
+            "resource": "runs",
+        }
+        assert "canary" not in json.dumps(capture.event)
 
 
 # -- track_request -------------------------------------------------------------
@@ -597,6 +726,9 @@ class TestTrackRequest:
         assert e["mcp_client_source"] == "initialize_client_info"
         assert e["mcp_protocol_version"] == "2025-06-18"
         assert e["mcp_jsonrpc_method"] == "tools.call"
+        assert e["agent_harness"] == "claude_code"
+        assert e["client_vendor"] == "anthropic"
+        assert e["call_type"] == "tools/call"
         assert "mcp_client_name" not in e
 
     @patch.dict("os.environ", {"MCP_HARNESS_DEBUG_FIELDS": "true"})
@@ -625,6 +757,51 @@ class TestTrackRequest:
         e = capture.event
         assert e["mcp_client_name"] == "claude-code"
         assert e["mcp_client_version"] == "2.1.89"
+
+    def test_success_sampling_can_drop_request(self, capture, monkeypatch):
+        monkeypatch.setattr(analytics_module, "MCP_REQUEST_SUCCESS_SAMPLE_RATE", 0.0)
+        AnalyticsTracker(enabled=True).track_request(
+            request_id="drop-me",
+            session_id="s",
+            method="POST",
+            path="/mcp",
+            status_code=200,
+            duration_ms=10,
+        )
+        assert capture.event is None
+
+    def test_errors_and_slow_requests_bypass_sampling(self, capture, monkeypatch):
+        monkeypatch.setattr(analytics_module, "MCP_REQUEST_SUCCESS_SAMPLE_RATE", 0.0)
+        tracker = AnalyticsTracker(enabled=True)
+        tracker.track_request("error", "s", "POST", "/mcp", 500, duration_ms=10)
+        assert capture.event["status_code"] == 500
+        tracker.track_request("slow", "s", "POST", "/mcp", 200, duration_ms=2000)
+        assert capture.event["request_id"] == "slow"
+
+    def test_health_requests_are_never_product_events(self, capture):
+        AnalyticsTracker(enabled=True).track_request(
+            request_id="health",
+            session_id=None,
+            method="GET",
+            path="/mcp/health",
+            status_code=500,
+        )
+        assert capture.event is None
+
+
+def test_event_size_is_hard_bounded() -> None:
+    event = _prepare_event(
+        {
+            "schema_version": "1.1",
+            "event_type": "tool_call",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "session_id": "s" * 20_000,
+            "error": "e" * 20_000,
+            "metadata": {str(i): "x" * 1000 for i in range(20)},
+        }
+    )
+    assert len(json.dumps(event, separators=(",", ":")).encode()) <= 4096
+    assert event["event_truncated"] is True
 
 
 # -- Global tracker singleton --------------------------------------------------
@@ -681,14 +858,15 @@ class TestPrivacyLevel:
 
         assert _resolve_privacy_level() == "standard"
 
-    def test_unknown_falls_back_to_off(self, monkeypatch):
+    def test_unknown_privacy_level_fails_closed(self, monkeypatch):
         monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "paranoid")
         from wandb_mcp_server.analytics import _resolve_privacy_level
 
-        assert _resolve_privacy_level() == "off"
+        with pytest.raises(ValueError, match="MCP_LOG_PRIVACY_LEVEL"):
+            _resolve_privacy_level()
 
-    def test_invalid_level_warns_once(self, monkeypatch):
-        """Typos must surface as a WARNING, not silently downgrade to off.
+    def test_invalid_level_never_logs_value(self, monkeypatch):
+        """Invalid configuration fails without disclosing its supplied value.
 
         Attaches a dedicated handler to the analytics logger because that logger
         has propagate=False (BigQuery contract), so pytest's root-attached caplog
@@ -697,7 +875,6 @@ class TestPrivacyLevel:
         import wandb_mcp_server.analytics as a
 
         monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "stict")
-        a._warned_invalid_privacy_level = False  # reset the latch
 
         captured: list[logging.LogRecord] = []
 
@@ -708,15 +885,13 @@ class TestPrivacyLevel:
         handler = _Capture(level=logging.WARNING)
         a.logger.addHandler(handler)
         try:
-            assert a._resolve_privacy_level() == "off"
-            # Second call must not double-log (latch active)
-            assert a._resolve_privacy_level() == "off"
+            for _ in range(2):
+                with pytest.raises(ValueError, match="MCP_LOG_PRIVACY_LEVEL"):
+                    a._resolve_privacy_level()
         finally:
             a.logger.removeHandler(handler)
 
-        warnings = [r for r in captured if r.levelname == "WARNING" and "MCP_LOG_PRIVACY_LEVEL" in r.getMessage()]
-        assert len(warnings) == 1, f"expected exactly one warning for invalid level, got {len(warnings)}"
-        assert "stict" in warnings[0].getMessage()
+        assert not captured
 
     def test_organization_hashed_at_strict(self):
         """organization is a customer identifier (query_registry tool param); hash at strict."""
@@ -820,7 +995,7 @@ class TestPrivacyLevel:
 
     # ---- Integration through track_tool_call ------------------------------
 
-    def test_track_tool_call_redacts_at_standard(self, capture, monkeypatch):
+    def test_track_tool_call_uses_compact_dimensions_at_standard(self, capture, monkeypatch):
         monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "standard")
         AnalyticsTracker(enabled=True).track_tool_call(
             tool_name="query_wandb_gql",
@@ -828,11 +1003,11 @@ class TestPrivacyLevel:
             viewer_info="alice",
             params={"query": "{ viewer { id } }", "entity_name": "acme"},
         )
-        assert capture.event["params"]["query"].startswith("<redacted: text len=")
-        # entity_name is an identifier, not free-text -> plaintext at standard
-        assert capture.event["params"]["entity_name"] == "acme"
+        assert "params" not in capture.event
+        assert "query" not in capture.event.get("usage_dimensions", {})
+        assert "entity_name" not in capture.event.get("usage_dimensions", {})
 
-    def test_track_tool_call_hashes_identifiers_at_strict(self, capture, monkeypatch):
+    def test_track_tool_call_excludes_identifiers_at_strict(self, capture, monkeypatch):
         monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "strict")
         AnalyticsTracker(enabled=True).track_tool_call(
             tool_name="count_traces",
@@ -840,8 +1015,9 @@ class TestPrivacyLevel:
             viewer_info=SimpleNamespace(username="alice", email="a@co.com"),
             params={"entity_name": "acme", "project_name": "eval"},
         )
-        assert capture.event["params"]["entity_name"].startswith("<h:")
-        assert capture.event["params"]["project_name"].startswith("<h:")
+        assert "params" not in capture.event
+        assert "entity_name" not in capture.event.get("usage_dimensions", {})
+        assert "project_name" not in capture.event.get("usage_dimensions", {})
         # Strict also hashes user_id and email_domain
         assert capture.event["user_id"].startswith("<h:")
         assert capture.event["email_domain"].startswith("<h:")
@@ -857,7 +1033,7 @@ class TestPrivacyLevel:
         )
         assert capture.event["user_id"] == "alice"
         assert capture.event["email_domain"] == "co.com"
-        assert capture.event["params"]["entity_name"] == "acme"
+        assert "params" not in capture.event
 
     # ---- is_verbose_log_site_gated ----------------------------------------
 

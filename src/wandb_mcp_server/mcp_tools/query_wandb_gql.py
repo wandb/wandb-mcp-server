@@ -1,463 +1,124 @@
-"""Module for querying the W&B GraphQL API."""
+"""Bounded, opt-in, query-only access to the W&B GraphQL API."""
+
+from __future__ import annotations
 
 import copy
-import logging
-import re
-import traceback
-from typing import Any, Dict, List, Optional
+import json
+import math
+from dataclasses import dataclass
+from typing import Any, Dict, List, Mapping, Optional
 
-from graphql import parse
 from graphql.language import ast as gql_ast
 from graphql.language import printer as gql_printer
-from graphql.language import visitor as gql_visitor
+
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_graphql import (
     GraphQLReadOnlyViolation,
+    GraphQLResponseTooLarge,
     execute_graphql,
     validate_read_only_graphql,
 )
 
 logger = get_rich_logger(__name__)
 
+MAX_GRAPHQL_DOCUMENT_BYTES = 64 * 1024
+MAX_GRAPHQL_DEPTH = 12
+MAX_GRAPHQL_FIELDS = 200
+MAX_GRAPHQL_FRAGMENTS = 32
+MAX_GRAPHQL_VARIABLE_DEPTH = 12
+MAX_GRAPHQL_VARIABLE_NODES = 5_000
+MAX_GRAPHQL_EXPANDED_SELECTIONS = MAX_GRAPHQL_FIELDS * 4
 
-QUERY_WANDB_GQL_TOOL_DESCRIPTION = """Execute a read-only GraphQL query against the W&B Models API.
+QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION = """Execute a bounded, query-only GraphQL document against W&B Models.
 
-Use for read-only W&B Models queries that need GraphQL-specific filtering, sorting,
-nested selections, custom fields, sweeps, reports, or schema introspection.
-For LLM traces or Weave evaluations, use query_weave_traces_tool instead.
-
-Prefer the existing SDK-backed tools when they provide the requested operation:
-- entity/project discovery: list_entities_tool and query_wandb_entity_projects
-- sampled or scanned run history: get_run_history_tool
-- artifact reads: list_artifact_versions_tool and get_artifact_details_tool
-- registry reads: list_registries_tool and list_registry_collections_tool
-- automations and integrations: list_wandb_automations_tool and list_wandb_integrations_tool
-
-Keep this raw GraphQL tool for general run filtering/sorting, custom project fields,
-sweeps, reports, introspection, and arbitrary nested selections where the exact
-response shape is not available from an existing tool. Do not translate arbitrary
-GraphQL into SDK calls: aliases, field selection, and nesting are part of its contract.
+This opt-in compatibility escape hatch is only for reads without public W&B API
+parity: schema introspection, unmodeled/custom fields, aliases, an exact GraphQL response shape,
+cross-resource nesting, sweep agents, report run sets, Launch resources, compound
+reads, and backward-pagination shapes.
 
 <when_to_use>
-Call when a read requires GraphQL-only filtering, sorting, nesting, custom fields,
-sweeps, reports, introspection, or an exact response shape not covered by an existing tool.
+Use only when the requested read cannot be represented by a typed MCP tool and
+the deployment administrator deliberately enabled raw GraphQL.
 </when_to_use>
 
-<query_analysis_step>
-**STEP 1: ANALYZE THE USER QUERY FIRST!**
-Before constructing the GraphQL query, determine how the user is referring to W&B entities, especially runs:
-  - Is the user providing a short, 8-character **Run ID** (e.g., `gtng2y4l`, `h0fm5qp5`)?
-  - Or are they providing a longer, human-readable **Display Name** (e.g., `transformer_train_run_123`, `eval_on_benchmark_v2`)?
-Your choice of query structure depends heavily on this analysis (see Key Concepts and Examples below).
-</query_analysis_step>
+Do not use this tool for projects, run lookup/filtering/sorting, sweeps, reports,
+artifacts, registries, automations, integrations, or run history. Those reads
+have bounded typed MCP tools.
 
-<key_concepts>
-**KEY CONCEPTS - READ CAREFULLY:**
-
-*   **Run ID vs. Display Name:**
-    *   To fetch a **single, specific run** using its unique 8-character ID (e.g., `gtng2y4l`), \
-use the `run(name: $runId)` field. The variable `$runId` MUST be the ID, not the display name.
-    *   To **find runs based on their human-readable `displayName`** (e.g., `my-cool-experiment-1`), \
-use the `runs` collection field with a `filters` argument like: `runs(filters: "{\\"displayName\\":\
-{\\"$eq\\":\\"my-cool-experiment-1\\"}}")`. This might return multiple runs if display names are not unique.
-*   **Filters require JSON Strings:** When using the `filters` argument (e.g., for `runs`, `artifacts`), \
-the value provided in the `variables` dictionary MUST be a JSON formatted *string*. Use `json.dumps()` in Python to create it.
-*   **Collections Require Pagination Structure:** Queries fetching lists/collections (like `project.runs`, \
-`artifact.files`) MUST include the `edges { node { ... } } pageInfo { endCursor hasNextPage }` pattern.
-*   **Summary Metrics:** Use the `summaryMetrics` field (returns a JSON string) to access a run's summary \
-dictionary, not the deprecated `summary` field.
-</key_concepts>
-
-This function allows interaction with W&B data (Projects, Runs, Artifacts, Sweeps, Reports, etc.)
-using the GraphQL query language.
-
-Parameters
-----------
-query : str
-    The GraphQL query string. Only query operations are accepted; mutations and
-    subscriptions are rejected before any request is sent to W&B.
-variables : dict[str, Any] | None, optional
-    A dictionary of variables to pass to the query.
-                                            Keys should match variable names defined in the query
-                                            (e.g., $entity, $project). Values should match the
-                                            expected types (String, Int, Float, Boolean, ID, JSONString).
-                                            **Crucially, complex arguments like `filters` MUST be provided
-                                            as a JSON formatted *string*. Use `json.dumps()` in Python
-                                            to create this string.**
-max_items : int, optional
-    Maximum number of items to fetch across all pages. Default is 100.
-items_per_page : int, optional
-    Number of items to request per page. Default is 50.
-
-Returns
--------
-Dict[str, Any]
-    The aggregated GraphQL response dictionary.
-
-<critical_warning>
-**⚠️ CRITICAL WARNING: Run ID vs. Display Name ⚠️**
-If the user query mentions a run using its **long, human-readable name** (Display Name), you **MUST** use the `runs(filters: ...)` approach shown in the examples.
-**DO NOT** use `run(name: ...)` with a Display Name; it will fail because `name` expects the short Run ID. Use `run(name: ...)` **ONLY** when the user provides the 8-character Run ID.
-Review the "Minimal Example: Run ID vs Display Name" and "Get Run by Display Name" examples carefully.
-</critical_warning>
-
-<required_pagination_structure>
-**⚠️ REQUIRED PAGINATION STRUCTURE ⚠️**
-
-All collection queries MUST include the complete W&B connection pattern with these elements:
-1. `edges` array containing nodes
-2. `node` objects inside edges containing your data fields
-3. `pageInfo` object with:
-    - `endCursor` field (to enable pagination)
-    - `hasNextPage` field (to determine if more data exists)
-
-This is a strict requirement enforced by the pagination system. Queries without this
-structure will fail with the error "Query doesn't follow the W&B connection pattern."
-
-Example of required pagination structure for any collection:
-```graphql
-query PaginatedRuns($entity: String!, $project: String!) {
-  project(name: $project, entityName: $entity) {
-  runs(first: 10) {  # or artifacts, files, etc.
-    edges {
-    node {
-        id
-        name
-        # ... other fields you need
-    }
-    # cursor # Optional: include cursor if needed for specific pagination logic
-    }
-    pageInfo {
-    endCursor
-    hasNextPage
-    }
-  }
-  }
-}
-```
-</required_pagination_structure>
-
-<llm_context_window_management>
-**LLM CONTEXT WINDOW MANAGEMENT**
-
-The results of this tool are returned to a LLM. Be mindful of the context window of the LLM!
-
-<warning_about_open_ended_queries>
-**WARNING: AVOID OPEN-ENDED QUERIES!**
-
-Open-ended queries should be strictly avoided when:
-- There are a lot of runs in the project (e.g., hundreds or thousands)
-- There are runs with large amounts of data (e.g., many metrics, large configs, etc.)
-
-Examples of problematic open-ended queries:
-- Requesting all runs in a project without limits
-- Requesting complete run histories without filtering specific metrics
-- Requesting all files from artifacts without specifying names/types
-
-Instead, always:
-- Use the `first` parameter to limit the number of items returned (start small, e.g., 5-10)
-- Apply specific filters to narrow down results (e.g., state, creation time, metrics)
-- Request only the specific fields needed, avoid selecting everything
-- Consider paginating results if necessary (don't request everything at once)
-
-Bad:
-```graphql
-query AllRuns($entity: String!, $project: String!) {
-    project(name: $project, entityName: $entity) {
-    # Potentially huge response: requests all fields for all runs
-    runs {
-        edges {
-        node {
-            id
-            name
-            state
-            history
-            summaryMetrics
-            config
-            files { edges { node { name size } } }
-        }
-        }
-    }
-    }
-}
-```
-
-Good:
-```graphql
-query LimitedRuns($entity: String!, $project: String!) {
-    project(name: $project, entityName: $entity) {
-    # Limits runs, specifies filters, and selects only necessary fields
-    runs(first: 5, filters: "{\\"state\\":\\"finished\\"}") {
-        edges {
-        node {
-            id
-            name
-            createdAt
-            summaryMetrics # Get summary JSON, parse later if needed
-        }
-        }
-        pageInfo { endCursor hasNextPage } # Always include pageInfo for collections
-    }
-    }
-}
-```
-</warning_about_open_ended_queries>
-
-Some tactics to consider to avoid exceeding the context window of the LLM when using this tool:
-    - First return just metadata about the wandb project or run you will be returning.
-    - Select only a subset of the data such as just particular columns or rows.
-    - If you need to return a large amount of data consider using the `query_wandb_tool` in a loop
-    - Break up the query into smaller chunks.
-
-If you are returning just a sample subset of the data warn the user that this is a sample and that they should
-use the tool again with additional filters or pagination to get a more complete view.
-</llm_context_window_management>
-
-**Constructing GraphQL Queries:**
-
-1.  **Operation Type:** Start with `query`. This tool is read-only and rejects `mutation` and `subscription` operations.
-2.  **Operation Name:** (Optional but recommended) A descriptive name (e.g., `ProjectInfo`).
-3.  **Variables Definition:** Define variables used in the query with their types (e.g., `($entity: String!, $project: String!)`). `!` means required.
-4.  **Selection Set:** Specify the fields you want to retrieve, nesting as needed based on the W&B schema.
-
-**W&B Schema Overview:**
-
-*   **Core Types:** `Entity`, `Project`, `Run`, `Artifact`, `Sweep`, `Report`, `User`, `Team`.
-*   **Relationships:** Entities contain Projects. Projects contain Runs, Sweeps, Artifacts. Runs use/are used by Artifacts. Sweeps contain Runs.
-*   **Common Fields:** `id`, `name`, `description`, `createdAt`, `config` (JSONString), `summaryMetrics` (JSONString - **Note:** use this field,
-        not `summary`, to access the run's summary dictionary as a JSON string), `historyKeys` (List of String), etc.
-*   **Connections (Lists):** Many lists (like `project.runs`, `artifact.files`) use a connection pattern:
-    ```graphql
-    query PaginatedRuns($entity: String!, $project: String!, $first: Int, $after: String, $filters: JSONString, $order: String) {
-      project(name: $project, entityName: $entity) {
-      runs(first: $first, after: $after, filters: $filters, order: $order) {
-        edges { node { id name } cursor }
-        pageInfo { hasNextPage endCursor }
-      }
-      }
-    }
-    ```
-    Use `first` for limit, `after` with `pageInfo.endCursor` for pagination, `filters` (as a JSON string) for complex filtering, and `order` for sorting.
-*   **Field Type Handling:**
-    - Some fields require subfield selection (e.g., `tags { name }`) while others are scalar (e.g., `historyKeys`).
-    - Check the schema if you get errors like "must have a selection of subfields" or "must not have a selection".
-
-**Query Examples:**
-
-<!-- WANDB_GQL_EXAMPLE_START name=MinimalRunIdVsDisplayName -->
-*   **Minimal Example: Run ID vs Display Name:**
-    *   **A) User provides Run ID (e.g., "get info for run h0fm5qp5"):**
-        ```graphql
-        query GetRunById($entity: String!, $project: String!, $runId: String!) {
-          project(name: $project, entityName: $entity) {
-            # Use run(name: ...) with the Run ID
-            run(name: $runId) {
-              id
-              name # This will be the Run ID
-              displayName # This is the human-readable name
-            }
-          }
-        }
-        ```
-        ```python
-        variables = {"entity": "...", "project": "...", "runId": "h0fm5qp5"}
-        ```
-    *   **B) User provides Display Name (e.g., "get info for run transformer_train_123"):**
-        ```graphql
-        # Note: Querying *runs* collection and filtering
-        query GetRunByDisplayNameMinimal($project: String!, $entity: String!, $displayNameFilter: JSONString) {
-          project(name: $project, entityName: $entity) {
-            # Use runs(filters: ...) with the Display Name
-            runs(first: 1, filters: $displayNameFilter) {
-              edges {
-                node {
-                  id
-                  name # Run ID
-                  displayName # Display Name provided by user
-                }
-              }
-              pageInfo { endCursor hasNextPage } # Required for collections
-            }
-          }
-        }
-        ```
-        ```python
-        import json
-        variables = {
-            "entity": "...",
-            "project": "...",
-            "displayNameFilter": json.dumps({"displayName": {"$eq": "transformer_train_123"}})
-        }
-        ```
-<!-- WANDB_GQL_EXAMPLE_END name=MinimalRunIdVsDisplayName -->
-
-<!-- WANDB_GQL_EXAMPLE_START name=GetProjectInfo -->
-*   **Get Project Info:** (Doesn't retrieve a collection, no pagination needed)
-    ```graphql
-    query ProjectInfo($entity: String!, $project: String!) {
-        project(name: $project, entityName: $entity) {
-        id
-        name
-        entityName
-        description
-        runCount
-        }
-    }
-    ```
-    ```python
-    variables = {"entity": "my-entity", "project": "my-project"}
-    ```
-<!-- WANDB_GQL_EXAMPLE_END name=GetProjectInfo -->
-
-<!-- WANDB_GQL_EXAMPLE_START name=GetSortedRuns -->
-*   **Get Sorted Runs:** (Retrieves a collection, requires pagination structure)
-    ```graphql
-    query SortedRuns($project: String!, $entity: String!, $limit: Int, $order: String) {
-        project(name: $project, entityName: $entity) {
-        runs(first: $limit, order: $order) {
-            edges {
-            node { id name displayName state createdAt summaryMetrics }
-            cursor # Optional cursor
-            }
-            pageInfo { # Required for collections
-            hasNextPage
-            endCursor
-            }
-        }
-        }
-    }
-    ```
-    ```python
-    variables = {
-        "entity": "my-entity",
-        "project": "my-project",
-        "limit": 10,
-        "order": "+summary_metrics.accuracy"  # Ascending order by accuracy
-        # Use "-createdAt" for newest first (default if order omitted)
-        # Use "+createdAt" for oldest first
-    }
-    ```
-<!-- WANDB_GQL_EXAMPLE_END name=GetSortedRuns -->
-
-<!-- WANDB_GQL_EXAMPLE_START name=GetFilteredRuns -->
-*   **Get Runs with Pagination and Filtering:** (Requires pagination structure)
-    ```graphql
-    query FilteredRuns($project: String!, $entity: String!, $limit: Int, $cursor: String, $filters: JSONString, $order: String) {
-        project(name: $project, entityName: $entity) {
-        runs(first: $limit, after: $cursor, filters: $filters, order: $order) {
-            edges {
-            node { id name state createdAt summaryMetrics }
-            cursor # Optional cursor
-            }
-            pageInfo { endCursor hasNextPage } # Required
-        }
-        }
-    }
-    ```
-    ```python
-    # Corrected: Show filters as the required escaped JSON string
-    variables = {
-        "entity": "my-entity",
-        "project": "my-project",
-        "limit": 10,
-        "order": "-summary_metrics.accuracy",  # Optional: sort
-        "filters": "{\"state\": \"finished\", \"summary_metrics.accuracy\": {\"$gt\": 0.9}}", # Escaped JSON string
-        # "cursor": previous_pageInfo_endCursor # Optional for next page
-    }
-    # Note: The *content* of the `filters` JSON string must adhere to the specific
-    # filtering syntax supported by the W&B API (e.g., using operators like `$gt`, `$eq`, `$in`).
-    # Refer to W&B documentation for the full filter specification.
-    ```
-<!-- WANDB_GQL_EXAMPLE_END name=GetFilteredRuns -->
-
-<!-- WANDB_GQL_EXAMPLE_START name=GetRunByDisplayName -->
-*   **Get Run by Display Name:** (Requires filtering and pagination structure)
-    ```graphql
-    # Note: Querying *runs* collection and filtering, not the singular run(name:...) field
-    query GetRunByDisplayName($project: String!, $entity: String!, $displayNameFilter: JSONString) {
-        project(name: $project, entityName: $entity) {
-        # Filter the runs collection by displayName
-        runs(first: 1, filters: $displayNameFilter) {
-            edges {
-            # Select desired fields from the node (the run)
-            node { id name displayName state createdAt summaryMetrics }
-            }
-            # Required pageInfo for collections
-            pageInfo { endCursor hasNextPage }
-        }
-        }
-    }
-    ```
-    ```python
-    # Use json.dumps for the filters argument
-    import json
-    target_display_name = "my-experiment-run-123"
-    variables = {
-        "entity": "my-entity",
-        "project": "my-project",
-        # Filter for the specific display name
-        "displayNameFilter": json.dumps({"displayName": {"$eq": target_display_name}})
-        # W&B filter syntax might vary slightly, check docs if needed. Common is {"field": "value"} or {"field": {"$operator": "value"}}
-    }
-    # Note: This finds runs where displayName *exactly* matches.
-    # It might return multiple runs if display names are not unique.
-    # The `name` field (often the run ID like 'gtng2y4l') is guaranteed unique per project.
-    # Use `run(name: $runId)` if you know the unique run ID ('name').
-    ```
-<!-- WANDB_GQL_EXAMPLE_END name=GetRunByDisplayName -->
-
-**Troubleshooting Common Errors:**
-
-*   `"Cannot query field 'summary' on type 'Run'"`: Use the `summaryMetrics` field instead of `summary`. It returns a JSON string containing the summary dictionary.
-*   `"Argument 'filters' has invalid value ... Expected type 'JSONString'"`: Ensure the `filters` argument in your `variables` is a JSON formatted *string*, likely created using `json.dumps()`. Also check the *content* of the filter string for valid W&B filter syntax.
-*   `"400 Client Error: Bad Request"` (especially when using filters): Double-check the *syntax* inside your `filters` JSON string. Ensure operators (`$eq`, `$gt`, etc.) and structure are valid for the W&B API. Invalid field names or operators within the filter string can cause this.
-*   `"Unknown argument 'direction' on field 'runs'"`: Control sort direction using `+` (ascending) or `-` (descending) prefixes in the `order` argument string (e.g., `order: "-createdAt"`), not with a separate `direction` argument.
-*   For run history keys or time-series values, use `get_run_history_tool`; it provides sampled or scanned history through the supported SDK path.
-*   `"Query doesn't follow the W&B connection pattern"`: Ensure any field returning a list/collection (like `runs`, `files`, `artifacts`, etc.) includes the full `edges { node { ... } } pageInfo { endCursor hasNextPage }` structure. This is mandatory for pagination.
-*   `"Field must not have a selection"` / `"Field must have a selection"`: Check if the field you are querying is a scalar type (like `String`, `Int`, `JSONString`, `[String!]`) which cannot have sub-fields selected, or an object type which requires you to select sub-fields.
-*   `"Cannot query field 'step' on type 'Run'"`: The `Run` type does not have a direct `step` field. To find the maximum step count or total steps logged, query the `summaryMetrics` field (look for a key like `_step` or similar in the returned JSON string) or use the `historyLineCount` field which indicates the total number of history rows logged (often corresponding to steps).
-
-**Notes:**
-*   Refer to the official W&B GraphQL schema (via introspection or documentation) for the most up-to-date field names, types, and available filters/arguments.
-*   Structure your query to request only the necessary data fields to minimize response size and improve performance.
-*   **Sorting:** Use the `order` parameter string. Prefix with `+` for ascending, `-` for descending (default).
-        Common sortable fields: `createdAt`, `updatedAt`, `heartbeatAt`, `config.*`, `summary_metrics.*`.
-*   Handle potential errors in the returned dictionary (e.g., check for an 'errors' key in the response).
+The document must contain exactly one query operation. Mutations, subscriptions,
+mixed documents, multiple operations, nested/multiple paginated connections, and
+unbounded connections are rejected before any W&B request. Pagination and MCP
+output are bounded. On the supported ServiceApi path, response text is checked
+before MCP JSON decoding and decoded structure is checked again; these checks
+occur after the SDK receives the protobuf envelope and are not a wire-size or
+backend-work limit.
 """
 
 
+class GraphQLQueryValidationError(ValueError):
+    """Raised before API construction when an opt-in raw query is unsafe."""
+
+    def __init__(self, message: str, *, error: str = "invalid_request") -> None:
+        self.error = error
+        super().__init__(message)
+
+
+@dataclass
+class _ConnectionPlan:
+    path: list[str]
+    field: gql_ast.FieldNode
+    first_variable: str | None
+    after_variable: str | None
+    initial_after: str | None
+    initial_before: str | None
+    edges_key: str | None
+    page_info_key: str | None
+    edge_cursor_key: str | None
+    has_next_page_key: str | None
+    end_cursor_key: str | None
+    has_previous_page_key: str | None
+    start_cursor_key: str | None
+    backward: bool = False
+
+
+@dataclass
+class _SelectionExpansionBudget:
+    visited: int = 0
+
+    def consume(self) -> None:
+        self.visited += 1
+        if self.visited > MAX_GRAPHQL_EXPANDED_SELECTIONS:
+            raise GraphQLQueryValidationError(
+                f"GraphQL expanded selections are limited to {MAX_GRAPHQL_EXPANDED_SELECTIONS}",
+                error="query_too_complex",
+            )
+
+
 def find_paginated_collections(obj: Dict, current_path: Optional[List[str]] = None) -> List[List[str]]:
-    """Find collections in a response that follow the W&B connection pattern. Returns List[List[str]]."""
-    # Ensure this implementation correctly builds and returns List[List[str]]
-    if current_path is None:
-        current_path = []
-    collections = []
+    """Find W&B-style connection objects in a response."""
+    path = [] if current_path is None else current_path
+    collections: list[list[str]] = []
     if isinstance(obj, dict):
         if (
-            "edges" in obj
-            and "pageInfo" in obj
-            and isinstance(obj.get("edges"), list)
+            isinstance(obj.get("edges"), list)
             and isinstance(obj.get("pageInfo"), dict)
-            and "hasNextPage" in obj.get("pageInfo", {})
-            and "endCursor" in obj.get("pageInfo", {})
+            and "hasNextPage" in obj["pageInfo"]
+            and "endCursor" in obj["pageInfo"]
         ):
-            collections.append(list(current_path))  # Correct: append list path
-        # Recurse correctly
+            collections.append(list(path))
         for key, value in obj.items():
-            current_path.append(key)
-            collections.extend(find_paginated_collections(value, current_path))
-            current_path.pop()
+            path.append(key)
+            collections.extend(find_paginated_collections(value, path))
+            path.pop()
     elif isinstance(obj, list):
         for item in obj:
-            collections.extend(find_paginated_collections(item, current_path))
+            collections.extend(find_paginated_collections(item, path))
     return collections
 
 
 def get_nested_value(obj: Dict, path: list[str]) -> Optional[Any]:
-    """Get a value from a nested dictionary using a list of keys (path)."""
-    current = obj
-    # Iterate directly over the list path
+    current: Any = obj
     for key in path:
         if not isinstance(current, dict) or key not in current:
             return None
@@ -465,530 +126,955 @@ def get_nested_value(obj: Dict, path: list[str]) -> Optional[Any]:
     return current
 
 
-_HOSTED_LIMIT_VARIABLE_RE = re.compile(r"^(first|limit|count|max_?items|page_?size|items_per_page)$", re.I)
-
-
 def _field_name(node: gql_ast.FieldNode) -> str:
-    """Return the response field name for a GraphQL field."""
     return node.alias.value if node.alias else node.name.value
 
 
-def _is_connection_field(node: gql_ast.FieldNode) -> bool:
-    """Return True if a field selection looks like a W&B connection."""
-    if not node.selection_set:
-        return False
-    child_names = {
-        selection.name.value for selection in node.selection_set.selections if isinstance(selection, gql_ast.FieldNode)
-    }
-    return {"edges", "pageInfo"}.issubset(child_names)
-
-
-class HostedGraphQLPreflightVisitor(gql_visitor.Visitor):
-    """Clamp hosted GraphQL page sizes and reject unsafe fanout shapes."""
-
-    def __init__(self, max_first: int) -> None:
-        super().__init__()
-        self.max_first = max_first
-        self.path: list[str] = []
-        self.connection_depth = 0
-        self.connection_paths: list[tuple[str, ...]] = []
-        self.rewrites: list[str] = []
-        self.rejections: list[str] = []
-
-    def enter_variable_definition(self, node, key, parent, path, ancestors):
-        if not isinstance(node, gql_ast.VariableDefinitionNode):
-            return
-        if not _HOSTED_LIMIT_VARIABLE_RE.match(node.variable.name.value):
-            return
-        if not isinstance(node.default_value, gql_ast.IntValueNode):
-            return
-
-        requested = int(node.default_value.value)
-        if requested <= self.max_first:
-            return
-
-        node.default_value = gql_ast.IntValueNode(value=str(self.max_first))
-        self.rewrites.append(f"Clamped ${node.variable.name.value} default from {requested} to {self.max_first}")
-
-    def enter_field(self, node, key, parent, path, ancestors):
-        if not isinstance(node, gql_ast.FieldNode):
-            return
-
-        self.path.append(_field_name(node))
-        if not _is_connection_field(node):
-            return
-
-        current_path = tuple(self.path)
-        self.connection_paths.append(current_path)
-        if self.connection_depth > 0:
-            self.rejections.append(
-                f"Nested paginated collection is not allowed in hosted mode: {'/'.join(current_path)}"
-            )
-        if len(self.connection_paths) > 1:
-            self.rejections.append(
-                f"Hosted GraphQL queries may include only one paginated collection; found {len(self.connection_paths)}."
-            )
-
-        existing_args = list(node.arguments or [])
-        has_first = False
-        for idx, arg in enumerate(existing_args):
-            arg_name = arg.name.value
-            if arg_name == "last":
-                self.rejections.append(
-                    f"Hosted GraphQL does not support reverse pagination with last: {'/'.join(current_path)}"
+def _selection_field_names(
+    selection_set: gql_ast.SelectionSetNode | None,
+    fragments: Mapping[str, gql_ast.FragmentDefinitionNode],
+    stack: tuple[str, ...] = (),
+    budget: _SelectionExpansionBudget | None = None,
+) -> set[str]:
+    names: set[str] = set()
+    if selection_set is None:
+        return names
+    budget = budget or _SelectionExpansionBudget()
+    for selection in selection_set.selections:
+        budget.consume()
+        if isinstance(selection, gql_ast.FieldNode):
+            names.add(selection.name.value)
+        elif isinstance(selection, gql_ast.InlineFragmentNode):
+            names.update(_selection_field_names(selection.selection_set, fragments, stack, budget))
+        elif isinstance(selection, gql_ast.FragmentSpreadNode):
+            fragment_name = selection.name.value
+            if fragment_name in stack:
+                raise GraphQLQueryValidationError("GraphQL fragment cycles are not allowed")
+            fragment = fragments.get(fragment_name)
+            if fragment is None:
+                raise GraphQLQueryValidationError(f"Unknown GraphQL fragment: {fragment_name}")
+            names.update(
+                _selection_field_names(
+                    fragment.selection_set,
+                    fragments,
+                    (*stack, fragment_name),
+                    budget,
                 )
-            if arg_name != "first":
-                continue
-            has_first = True
-            if isinstance(arg.value, gql_ast.IntValueNode):
-                requested = int(arg.value.value)
-                if requested > self.max_first:
-                    existing_args[idx] = gql_ast.ArgumentNode(
-                        name=arg.name,
-                        value=gql_ast.IntValueNode(value=str(self.max_first)),
-                    )
-                    self.rewrites.append(f"Clamped {'/'.join(current_path)} first from {requested} to {self.max_first}")
-
-        if not has_first:
-            self.rejections.append(
-                "Hosted GraphQL paginated collections must include a first argument so the initial request "
-                f"can be bounded: {'/'.join(current_path)}"
             )
-
-        node.arguments = tuple(existing_args)
-        self.connection_depth += 1
-
-    def leave_field(self, node, key, parent, path, ancestors):
-        if isinstance(node, gql_ast.FieldNode) and _is_connection_field(node):
-            self.connection_depth = max(0, self.connection_depth - 1)
-        if self.path:
-            self.path.pop()
+    return names
 
 
-def _hosted_preprocess_graphql_query(query: str, max_first: int) -> tuple[str, list[str], list[str]]:
-    """Rewrite hosted GraphQL pagination limits before the first execution."""
-    document = parse(query.strip())
-    visitor = HostedGraphQLPreflightVisitor(max_first=max_first)
-    rewritten = gql_visitor.visit(document, visitor)
-    return gql_printer.print_ast(rewritten), visitor.rewrites, visitor.rejections
+def _selection_fields(
+    selection_set: gql_ast.SelectionSetNode | None,
+    fragments: Mapping[str, gql_ast.FragmentDefinitionNode],
+    stack: tuple[str, ...] = (),
+    budget: _SelectionExpansionBudget | None = None,
+) -> list[gql_ast.FieldNode]:
+    """Expand one selection level, retaining response aliases."""
+    fields: list[gql_ast.FieldNode] = []
+    if selection_set is None:
+        return fields
+    budget = budget or _SelectionExpansionBudget()
+    for selection in selection_set.selections:
+        budget.consume()
+        if isinstance(selection, gql_ast.FieldNode):
+            fields.append(selection)
+        elif isinstance(selection, gql_ast.InlineFragmentNode):
+            fields.extend(_selection_fields(selection.selection_set, fragments, stack, budget))
+        elif isinstance(selection, gql_ast.FragmentSpreadNode):
+            fragment_name = selection.name.value
+            if fragment_name in stack:
+                raise GraphQLQueryValidationError("GraphQL fragment cycles are not allowed")
+            fragment = fragments.get(fragment_name)
+            if fragment is None:
+                raise GraphQLQueryValidationError(f"Unknown GraphQL fragment: {fragment_name}")
+            fields.extend(
+                _selection_fields(
+                    fragment.selection_set,
+                    fragments,
+                    (*stack, fragment_name),
+                    budget,
+                )
+            )
+    return fields
 
 
-def _hosted_clamp_variables(variables: Dict[str, Any], max_first: int) -> Dict[str, Any]:
-    """Clamp common page-size variable names before the initial GraphQL execute."""
-    clamped = dict(variables)
-    for key, value in list(clamped.items()):
-        if not _HOSTED_LIMIT_VARIABLE_RE.match(key):
+def _response_key(
+    selection_set: gql_ast.SelectionSetNode | None,
+    field_name: str,
+    fragments: Mapping[str, gql_ast.FragmentDefinitionNode],
+    budget: _SelectionExpansionBudget,
+) -> str | None:
+    """Return the unique response key selected for a schema field."""
+    keys = {
+        _field_name(field)
+        for field in _selection_fields(selection_set, fragments, budget=budget)
+        if field.name.value == field_name
+    }
+    if len(keys) > 1:
+        raise GraphQLQueryValidationError(
+            f"Paginated connection selects {field_name!r} through multiple aliases",
+            error="query_too_complex",
+        )
+    return next(iter(keys), None)
+
+
+def _nested_response_key(
+    selection_set: gql_ast.SelectionSetNode | None,
+    parent_field_name: str,
+    child_field_name: str,
+    fragments: Mapping[str, gql_ast.FragmentDefinitionNode],
+    budget: _SelectionExpansionBudget,
+) -> str | None:
+    """Return a unique response key selected below a connection metadata field."""
+    keys: set[str] = set()
+    for field in _selection_fields(selection_set, fragments, budget=budget):
+        if field.name.value != parent_field_name:
             continue
-        if isinstance(value, int) and value > max_first:
-            clamped[key] = max_first
-    return clamped
+        key = _response_key(field.selection_set, child_field_name, fragments, budget)
+        if key is not None:
+            keys.add(key)
+    if len(keys) > 1:
+        raise GraphQLQueryValidationError(
+            (f"Paginated connection selects {parent_field_name}.{child_field_name} through multiple aliases"),
+            error="query_too_complex",
+        )
+    return next(iter(keys), None)
+
+
+def _is_connection_field(
+    node: gql_ast.FieldNode,
+    fragments: Mapping[str, gql_ast.FragmentDefinitionNode],
+    budget: _SelectionExpansionBudget,
+) -> bool:
+    argument_names = {argument.name.value for argument in node.arguments or ()}
+    if argument_names & {"first", "last"}:
+        return True
+    return {"edges", "pageInfo"}.issubset(_selection_field_names(node.selection_set, fragments, budget=budget))
+
+
+def _int_variable_defaults(operation: gql_ast.OperationDefinitionNode) -> dict[str, int]:
+    defaults: dict[str, int] = {}
+    for definition in operation.variable_definitions or ():
+        if isinstance(definition.default_value, gql_ast.IntValueNode):
+            defaults[definition.variable.name.value] = int(definition.default_value.value)
+    return defaults
+
+
+def _string_variable_defaults(operation: gql_ast.OperationDefinitionNode) -> dict[str, str]:
+    defaults: dict[str, str] = {}
+    for definition in operation.variable_definitions or ():
+        if isinstance(definition.default_value, gql_ast.StringValueNode):
+            defaults[definition.variable.name.value] = definition.default_value.value
+    return defaults
+
+
+def _validate_variable_shape(value: Any) -> None:
+    """Reject deeply nested or pathologically broad JSON variables."""
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    visited = 0
+    while stack:
+        current, depth = stack.pop()
+        visited += 1
+        if visited > MAX_GRAPHQL_VARIABLE_NODES:
+            raise GraphQLQueryValidationError(
+                f"GraphQL variables may contain at most {MAX_GRAPHQL_VARIABLE_NODES} JSON values",
+                error="query_too_complex",
+            )
+        if depth > MAX_GRAPHQL_VARIABLE_DEPTH:
+            raise GraphQLQueryValidationError(
+                f"GraphQL variables are limited to depth {MAX_GRAPHQL_VARIABLE_DEPTH}",
+                error="query_too_complex",
+            )
+        if isinstance(current, Mapping):
+            stack.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current)
+
+
+def _replace_argument(
+    field: gql_ast.FieldNode,
+    name: str,
+    value: gql_ast.ValueNode,
+) -> None:
+    arguments = list(field.arguments or ())
+    for index, argument in enumerate(arguments):
+        if argument.name.value == name:
+            arguments[index] = gql_ast.ArgumentNode(name=argument.name, value=value)
+            field.arguments = tuple(arguments)
+            return
+    arguments.append(gql_ast.ArgumentNode(name=gql_ast.NameNode(value=name), value=value))
+    field.arguments = tuple(arguments)
+
+
+def _ensure_variable_definition(
+    operation: gql_ast.OperationDefinitionNode,
+    variable_name: str,
+    type_name: str,
+) -> None:
+    definitions = list(operation.variable_definitions or ())
+    if any(definition.variable.name.value == variable_name for definition in definitions):
+        return
+    definitions.append(
+        gql_ast.VariableDefinitionNode(
+            variable=gql_ast.VariableNode(name=gql_ast.NameNode(value=variable_name)),
+            type=gql_ast.NamedTypeNode(name=gql_ast.NameNode(value=type_name)),
+        )
+    )
+    operation.variable_definitions = tuple(definitions)
+
+
+def _analyze_and_bound_document(
+    query: str,
+    variables: Optional[Mapping[str, Any]],
+    page_size: int,
+) -> tuple[str, dict[str, Any], _ConnectionPlan | None]:
+    if not isinstance(query, str) or not query.strip():
+        raise GraphQLQueryValidationError("query must be a non-empty string")
+    if len(query.encode("utf-8")) > MAX_GRAPHQL_DOCUMENT_BYTES:
+        raise GraphQLQueryValidationError("GraphQL document exceeds the 64 KiB limit", error="query_too_complex")
+    if variables is not None and not isinstance(variables, Mapping):
+        raise GraphQLQueryValidationError("variables must be a mapping")
+    try:
+        serialized_variables = json.dumps(
+            dict(variables or {}),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+    except (RecursionError, TypeError, ValueError):
+        raise GraphQLQueryValidationError("variables must be finite JSON-compatible values") from None
+    variables_bytes = len(serialized_variables.encode("utf-8"))
+    if variables_bytes > MAX_GRAPHQL_DOCUMENT_BYTES:
+        raise GraphQLQueryValidationError(
+            "GraphQL variables exceed the 64 KiB limit",
+            error="query_too_complex",
+        )
+    try:
+        bounded_variables = json.loads(serialized_variables)
+    except (RecursionError, TypeError, ValueError, json.JSONDecodeError):
+        raise GraphQLQueryValidationError("variables must be finite JSON-compatible values") from None
+    _validate_variable_shape(bounded_variables)
+
+    document = validate_read_only_graphql(query)
+    operations = [
+        definition for definition in document.definitions if isinstance(definition, gql_ast.OperationDefinitionNode)
+    ]
+    if len(operations) != 1:
+        raise GraphQLQueryValidationError(
+            "GraphQL documents must contain exactly one query operation",
+            error="query_too_complex",
+        )
+    operation = operations[0]
+    fragments = {
+        definition.name.value: definition
+        for definition in document.definitions
+        if isinstance(definition, gql_ast.FragmentDefinitionNode)
+    }
+    if len(fragments) > MAX_GRAPHQL_FRAGMENTS:
+        raise GraphQLQueryValidationError(
+            f"GraphQL documents may contain at most {MAX_GRAPHQL_FRAGMENTS} fragments",
+            error="query_too_complex",
+        )
+
+    connections: list[tuple[list[str], gql_ast.FieldNode]] = []
+    field_count = 0
+    max_depth = 0
+    expansion_budget = _SelectionExpansionBudget()
+
+    def walk(
+        selection_set: gql_ast.SelectionSetNode | None,
+        path: list[str],
+        depth: int,
+        connection_ancestor: bool,
+        fragment_stack: tuple[str, ...] = (),
+    ) -> None:
+        nonlocal field_count, max_depth
+        if selection_set is None:
+            return
+        for selection in selection_set.selections:
+            expansion_budget.consume()
+            if isinstance(selection, gql_ast.FieldNode):
+                field_count += 1
+                max_depth = max(max_depth, depth)
+                if field_count > MAX_GRAPHQL_FIELDS or max_depth > MAX_GRAPHQL_DEPTH:
+                    raise GraphQLQueryValidationError(
+                        (
+                            f"GraphQL documents are limited to {MAX_GRAPHQL_FIELDS} selected fields "
+                            f"and depth {MAX_GRAPHQL_DEPTH}"
+                        ),
+                        error="query_too_complex",
+                    )
+                field_path = [*path, _field_name(selection)]
+                is_connection = _is_connection_field(selection, fragments, expansion_budget)
+                if is_connection:
+                    if connection_ancestor:
+                        raise GraphQLQueryValidationError(
+                            f"Nested paginated connection is not allowed: {'/'.join(field_path)}",
+                            error="query_too_complex",
+                        )
+                    connections.append((field_path, selection))
+                    if len(connections) > 1:
+                        raise GraphQLQueryValidationError(
+                            "GraphQL documents may contain only one paginated connection",
+                            error="query_too_complex",
+                        )
+                walk(
+                    selection.selection_set,
+                    field_path,
+                    depth + 1,
+                    connection_ancestor or is_connection,
+                    fragment_stack,
+                )
+            elif isinstance(selection, gql_ast.InlineFragmentNode):
+                walk(selection.selection_set, path, depth, connection_ancestor, fragment_stack)
+            elif isinstance(selection, gql_ast.FragmentSpreadNode):
+                fragment_name = selection.name.value
+                if fragment_name in fragment_stack:
+                    raise GraphQLQueryValidationError("GraphQL fragment cycles are not allowed")
+                fragment = fragments.get(fragment_name)
+                if fragment is None:
+                    raise GraphQLQueryValidationError(f"Unknown GraphQL fragment: {fragment_name}")
+                walk(
+                    fragment.selection_set,
+                    path,
+                    depth,
+                    connection_ancestor,
+                    (*fragment_stack, fragment_name),
+                )
+
+    walk(operation.selection_set, [], 1, False)
+    if not connections:
+        return gql_printer.print_ast(document), bounded_variables, None
+
+    connection_path, connection_field = connections[0]
+    arguments = {argument.name.value: argument for argument in connection_field.arguments or ()}
+    first = arguments.get("first")
+    last = arguments.get("last")
+    if first is not None and last is not None:
+        raise GraphQLQueryValidationError("A paginated connection cannot use both first and last")
+    if first is None and last is None:
+        raise GraphQLQueryValidationError(
+            f"Paginated connection must include first or last: {'/'.join(connection_path)}",
+            error="query_too_complex",
+        )
+
+    first_variable: str | None = None
+    pagination_argument = first or last
+    assert pagination_argument is not None
+    argument_name = "first" if first is not None else "last"
+    if isinstance(pagination_argument.value, gql_ast.IntValueNode):
+        requested_first = int(pagination_argument.value.value)
+        if requested_first < 1:
+            raise GraphQLQueryValidationError(f"GraphQL {argument_name} must be a positive integer")
+        _replace_argument(
+            connection_field,
+            argument_name,
+            gql_ast.IntValueNode(value=str(min(requested_first, page_size))),
+        )
+    elif isinstance(pagination_argument.value, gql_ast.VariableNode):
+        first_variable = pagination_argument.value.name.value
+        defaults = _int_variable_defaults(operation)
+        requested_first = bounded_variables.get(first_variable, defaults.get(first_variable, page_size))
+        if isinstance(requested_first, bool) or not isinstance(requested_first, int) or requested_first < 1:
+            raise GraphQLQueryValidationError(
+                f"GraphQL variable ${first_variable}, bound to {argument_name}, must be a positive integer"
+            )
+        bounded_variables[first_variable] = min(requested_first, page_size)
+    else:
+        raise GraphQLQueryValidationError(f"GraphQL {argument_name} must be an integer literal or variable")
+
+    edges_key = _response_key(connection_field.selection_set, "edges", fragments, expansion_budget)
+    page_info_key = _response_key(connection_field.selection_set, "pageInfo", fragments, expansion_budget)
+    edge_cursor_key = _nested_response_key(
+        connection_field.selection_set,
+        "edges",
+        "cursor",
+        fragments,
+        expansion_budget,
+    )
+    has_next_page_key = _nested_response_key(
+        connection_field.selection_set,
+        "pageInfo",
+        "hasNextPage",
+        fragments,
+        expansion_budget,
+    )
+    end_cursor_key = _nested_response_key(
+        connection_field.selection_set,
+        "pageInfo",
+        "endCursor",
+        fragments,
+        expansion_budget,
+    )
+    has_previous_page_key = _nested_response_key(
+        connection_field.selection_set,
+        "pageInfo",
+        "hasPreviousPage",
+        fragments,
+        expansion_budget,
+    )
+    start_cursor_key = _nested_response_key(
+        connection_field.selection_set,
+        "pageInfo",
+        "startCursor",
+        fragments,
+        expansion_budget,
+    )
+
+    if last is not None:
+        before = arguments.get("before")
+        initial_before: str | None = None
+        if before is not None and isinstance(before.value, gql_ast.VariableNode):
+            before_variable = before.value.name.value
+            initial_before = bounded_variables.get(
+                before_variable,
+                _string_variable_defaults(operation).get(before_variable),
+            )
+            if initial_before is not None and not isinstance(initial_before, str):
+                raise GraphQLQueryValidationError(f"GraphQL variable ${before_variable} must be a string or null")
+        elif before is not None and isinstance(before.value, gql_ast.StringValueNode):
+            initial_before = before.value.value
+        elif before is not None and not isinstance(before.value, gql_ast.NullValueNode):
+            raise GraphQLQueryValidationError("GraphQL before must be a string literal, variable, or null")
+        return (
+            gql_printer.print_ast(document),
+            bounded_variables,
+            _ConnectionPlan(
+                path=connection_path,
+                field=connection_field,
+                first_variable=first_variable,
+                after_variable=None,
+                initial_after=None,
+                initial_before=initial_before,
+                edges_key=edges_key,
+                page_info_key=page_info_key,
+                edge_cursor_key=edge_cursor_key,
+                has_next_page_key=has_next_page_key,
+                end_cursor_key=end_cursor_key,
+                has_previous_page_key=has_previous_page_key,
+                start_cursor_key=start_cursor_key,
+                backward=True,
+            ),
+        )
+
+    after = arguments.get("after")
+    after_variable = "__mcp_after"
+    initial_after: str | None = None
+    if after is not None and isinstance(after.value, gql_ast.VariableNode):
+        after_variable = after.value.name.value
+        supplied_after = bounded_variables.get(
+            after_variable,
+            _string_variable_defaults(operation).get(after_variable),
+        )
+        if supplied_after is not None and not isinstance(supplied_after, str):
+            raise GraphQLQueryValidationError(f"GraphQL variable ${after_variable} must be a string or null")
+        initial_after = supplied_after
+    else:
+        if after is not None:
+            if isinstance(after.value, gql_ast.StringValueNode):
+                initial_after = after.value.value
+            elif not isinstance(after.value, gql_ast.NullValueNode):
+                raise GraphQLQueryValidationError("GraphQL after must be a string literal, variable, or null")
+        _ensure_variable_definition(operation, after_variable, "String")
+        _replace_argument(
+            connection_field,
+            "after",
+            gql_ast.VariableNode(name=gql_ast.NameNode(value=after_variable)),
+        )
+        bounded_variables[after_variable] = initial_after
+
+    return (
+        gql_printer.print_ast(document),
+        bounded_variables,
+        _ConnectionPlan(
+            path=connection_path,
+            field=connection_field,
+            first_variable=first_variable,
+            after_variable=after_variable,
+            initial_after=initial_after,
+            initial_before=None,
+            edges_key=edges_key,
+            page_info_key=page_info_key,
+            edge_cursor_key=edge_cursor_key,
+            has_next_page_key=has_next_page_key,
+            end_cursor_key=end_cursor_key,
+            has_previous_page_key=has_previous_page_key,
+            start_cursor_key=start_cursor_key,
+        ),
+    )
+
+
+def _estimate_tokens(payload: Mapping[str, Any]) -> int:
+    from wandb_mcp_server.trace_utils import count_tokens_conservative
+
+    serialized = json.dumps(payload, default=str, ensure_ascii=False, allow_nan=False)
+    return count_tokens_conservative(serialized)
+
+
+def _set_pagination_extension(
+    result: dict[str, Any],
+    *,
+    returned_count: int,
+    has_more: bool,
+    next_cursor: str | None,
+    truncated_by_budget: bool = False,
+) -> None:
+    extensions = result.setdefault("extensions", {})
+    if not isinstance(extensions, dict):
+        extensions = {}
+        result["extensions"] = extensions
+    extensions["wandb_mcp"] = {
+        "returned_count": returned_count,
+        "has_more": has_more,
+        "next_cursor": next_cursor if has_more else None,
+        "truncated_by_response_budget": truncated_by_budget,
+    }
+
+
+def _response_too_large(message: str) -> dict[str, Any]:
+    return {
+        "errors": [
+            {
+                "error": "response_too_large",
+                "message": message,
+            }
+        ]
+    }
+
+
+def _edge_cursor(edge: Any, plan: _ConnectionPlan) -> str | None:
+    if not isinstance(edge, Mapping) or plan.edge_cursor_key is None:
+        return None
+    value = edge.get(plan.edge_cursor_key)
+    return value if isinstance(value, str) and value else None
+
+
+def _pagination_error(error: str, message: str) -> dict[str, Any]:
+    return {"errors": [{"error": error, "message": message}]}
+
+
+def _is_non_advancing_cursor(cursor: str, plan: _ConnectionPlan) -> bool:
+    initial_cursor = plan.initial_before if plan.backward else plan.initial_after
+    return initial_cursor is not None and cursor == initial_cursor
+
+
+def _bound_unpageable_connection(
+    result: dict[str, Any],
+    connection: dict[str, Any],
+    edges: list[Any],
+    plan: _ConnectionPlan,
+    max_items: int,
+) -> dict[str, Any]:
+    """Enforce the local item cap when response pagination metadata is unusable."""
+    if len(edges) <= max_items:
+        return _fit_response_budget(result, plan)
+
+    retained = edges[-max_items:] if plan.backward else edges[:max_items]
+    boundary = retained[0] if plan.backward else retained[-1]
+    resume_cursor = _edge_cursor(boundary, plan)
+    if resume_cursor is None:
+        return _pagination_error(
+            "pagination_cursor_unavailable",
+            ("The bounded GraphQL page exceeded the item limit but no selected edge cursor permits safe continuation"),
+        )
+    if _is_non_advancing_cursor(resume_cursor, plan):
+        return _pagination_error(
+            "pagination_cursor_non_advancing",
+            "The GraphQL connection returned a repeated or non-advancing continuation cursor",
+        )
+
+    connection[plan.edges_key] = retained
+    if plan.page_info_key is not None:
+        selected_page_info = connection.get(plan.page_info_key)
+        if isinstance(selected_page_info, Mapping):
+            page_info = dict(selected_page_info)
+            if plan.backward:
+                if plan.has_previous_page_key is not None:
+                    page_info[plan.has_previous_page_key] = True
+                if plan.start_cursor_key is not None:
+                    page_info[plan.start_cursor_key] = resume_cursor
+            else:
+                if plan.has_next_page_key is not None:
+                    page_info[plan.has_next_page_key] = True
+                if plan.end_cursor_key is not None:
+                    page_info[plan.end_cursor_key] = resume_cursor
+            connection[plan.page_info_key] = page_info
+    _set_pagination_extension(
+        result,
+        returned_count=len(retained),
+        has_more=True,
+        next_cursor=resume_cursor,
+    )
+    result["extensions"]["wandb_mcp"]["limit_applied"] = max_items
+    return _fit_response_budget(result, plan)
+
+
+def _fit_response_budget(
+    result: dict[str, Any],
+    plan: _ConnectionPlan | None,
+) -> dict[str, Any]:
+    from wandb_mcp_server.config import MAX_RESPONSE_TOKENS
+
+    try:
+        if _estimate_tokens(result) <= MAX_RESPONSE_TOKENS:
+            return result
+    except (TypeError, ValueError):
+        return _response_too_large("GraphQL response could not be serialized safely")
+    if plan is None or plan.edges_key is None:
+        return _response_too_large("GraphQL response exceeded the configured response budget")
+    connection = get_nested_value(result, plan.path)
+    if not isinstance(connection, dict):
+        return _response_too_large("GraphQL response exceeded the configured response budget")
+    edges = connection.get(plan.edges_key)
+    if not isinstance(edges, list):
+        return _response_too_large("GraphQL response exceeded the configured response budget")
+
+    page_info: dict[str, Any] = {}
+    if plan.page_info_key is not None:
+        selected_page_info = connection.get(plan.page_info_key)
+        if isinstance(selected_page_info, Mapping):
+            page_info = dict(selected_page_info)
+
+    while edges:
+        if plan.backward:
+            edges.pop(0)
+        else:
+            edges.pop()
+        if not edges:
+            break
+        resume_cursor = _edge_cursor(edges[0] if plan.backward else edges[-1], plan)
+        if resume_cursor is None:
+            return _response_too_large(
+                "GraphQL response exceeded the budget and no selected edge cursor permits safe continuation"
+            )
+        if _is_non_advancing_cursor(resume_cursor, plan):
+            return _pagination_error(
+                "pagination_cursor_non_advancing",
+                "The GraphQL connection returned a repeated or non-advancing continuation cursor",
+            )
+        if plan.backward:
+            if plan.has_previous_page_key is not None:
+                page_info[plan.has_previous_page_key] = True
+            if plan.start_cursor_key is not None:
+                page_info[plan.start_cursor_key] = resume_cursor
+        else:
+            if plan.has_next_page_key is not None:
+                page_info[plan.has_next_page_key] = True
+            if plan.end_cursor_key is not None:
+                page_info[plan.end_cursor_key] = resume_cursor
+        if plan.page_info_key is not None:
+            connection[plan.page_info_key] = page_info
+        _set_pagination_extension(
+            result,
+            returned_count=len(edges),
+            has_more=True,
+            next_cursor=resume_cursor,
+            truncated_by_budget=True,
+        )
+        try:
+            if _estimate_tokens(result) <= MAX_RESPONSE_TOKENS:
+                return result
+        except (TypeError, ValueError):
+            break
+    return _response_too_large("GraphQL response exceeded the budget and could not retain one safely continuable edge")
+
+
+def _validation_error(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, GraphQLReadOnlyViolation):
+        return {
+            "errors": [
+                {
+                    "error": "read_only_violation",
+                    "message": str(exc),
+                    "operation_types": list(exc.operation_types),
+                }
+            ]
+        }
+    return {
+        "errors": [
+            {
+                "error": getattr(exc, "error", "invalid_request"),
+                "message": str(exc),
+            }
+        ]
+    }
 
 
 def query_paginated_wandb_gql(
     query: str,
     variables: Optional[Dict[str, Any]] = None,
     max_items: int = 100,
-    items_per_page: int = 50,
+    items_per_page: int = 20,
 ) -> Dict[str, Any]:
-    """
-    Execute a GraphQL query against the W&B API with pagination support using AST modification.
-    Handles a single paginated field detected via the connection pattern.
-    Modifies the result dictionary in-place.
+    """Execute one bounded read-only GraphQL operation."""
+    if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 1:
+        return _validation_error(GraphQLQueryValidationError("max_items must be a positive integer"))
+    if isinstance(items_per_page, bool) or not isinstance(items_per_page, int) or items_per_page < 1:
+        return _validation_error(GraphQLQueryValidationError("items_per_page must be a positive integer"))
 
-    Args:
-        query: The GraphQL query string. MUST include pageInfo{hasNextPage, endCursor} for paginated fields.
-        variables: Variables to pass to the GraphQL query.
-        max_items: Maximum number of items to fetch across all pages (default: 100).
-        items_per_page: Number of items to request per page (default: 20).
-        deduplicate: Whether to deduplicate nodes by ID across pages (default: True).
+    from wandb_mcp_server.config import MCP_MAX_GQL_ITEMS, MCP_MAX_GQL_ITEMS_PER_PAGE
 
-    Returns:
-        The aggregated GraphQL response dictionary.
-    """
+    applied_max_items = min(max_items, MCP_MAX_GQL_ITEMS)
+    applied_page_size = min(items_per_page, MCP_MAX_GQL_ITEMS_PER_PAGE, applied_max_items)
     try:
-        validate_read_only_graphql(query)
-    except GraphQLReadOnlyViolation as e:
-        return {
-            "errors": [
-                {
-                    "error": "read_only_violation",
-                    "message": str(e),
-                    "operation_types": list(e.operation_types),
-                }
-            ]
-        }
-    except Exception as e:
-        return {"errors": [{"message": f"Failed to validate initial query: {e}"}]}
+        bounded_query, bounded_variables, plan = _analyze_and_bound_document(
+            query,
+            variables,
+            applied_page_size,
+        )
+    except Exception as exc:
+        return _validation_error(exc)
 
     from wandb_mcp_server.api_client import get_wandb_api
 
-    api = get_wandb_api()
-    result_dict = {}
-    limit_key = None
     with track_tool_execution(
         "query_paginated_wandb_gql",
-        api.viewer,
+        None,
         {
-            "query": query,
-            "variables": variables,
-            "max_items": max_items,
-            "items_per_page": items_per_page,
+            "query_bytes": len(query.encode("utf-8")),
+            "has_variables": bool(variables),
+            "max_items": applied_max_items,
+            "items_per_page": applied_page_size,
         },
+        mcp_tool_name="query_wandb_graphql_tool",
     ) as ctx:
         try:
-            from wandb_mcp_server.config import (
-                MCP_HOSTED_MODE,
-                MCP_MAX_GQL_ITEMS,
-                MCP_MAX_GQL_ITEMS_PER_PAGE,
-            )
+            api = get_wandb_api()
+            initial = execute_graphql(api, bounded_query, bounded_variables)
+            if not isinstance(initial, Mapping):
+                raise TypeError("W&B returned a non-mapping GraphQL response")
+            result = copy.deepcopy(dict(initial))
+            if "errors" in result or plan is None:
+                return _fit_response_budget(result, None)
 
-            if MCP_HOSTED_MODE:
-                if max_items > MCP_MAX_GQL_ITEMS:
-                    logger.warning("Clamping hosted GraphQL max_items from %s to %s", max_items, MCP_MAX_GQL_ITEMS)
-                    max_items = MCP_MAX_GQL_ITEMS
-                if items_per_page > MCP_MAX_GQL_ITEMS_PER_PAGE:
-                    logger.warning(
-                        "Clamping hosted GraphQL items_per_page from %s to %s",
-                        items_per_page,
-                        MCP_MAX_GQL_ITEMS_PER_PAGE,
+            connection = get_nested_value(result, plan.path)
+            if not isinstance(connection, dict):
+                return _fit_response_budget(result, None)
+            if plan.edges_key is None:
+                return _fit_response_budget(result, plan)
+            initial_edges = connection.get(plan.edges_key)
+            if not isinstance(initial_edges, list):
+                return _fit_response_budget(result, plan)
+            page_info = connection.get(plan.page_info_key) if plan.page_info_key is not None else None
+            page_flag_key = plan.has_previous_page_key if plan.backward else plan.has_next_page_key
+            if (
+                plan.page_info_key is None
+                or not isinstance(page_info, dict)
+                or page_flag_key is None
+                or not isinstance(page_info.get(page_flag_key), bool)
+            ):
+                return _bound_unpageable_connection(
+                    result,
+                    connection,
+                    initial_edges,
+                    plan,
+                    applied_max_items,
+                )
+
+            if plan.backward:
+                cut_mid_page = len(initial_edges) > applied_max_items
+                connection[plan.edges_key] = initial_edges[-applied_max_items:]
+                has_more = (
+                    bool(plan.has_previous_page_key is not None and page_info.get(plan.has_previous_page_key))
+                    or cut_mid_page
+                )
+                next_cursor = page_info.get(plan.start_cursor_key) if plan.start_cursor_key is not None else None
+                if cut_mid_page and connection[plan.edges_key]:
+                    next_cursor = _edge_cursor(connection[plan.edges_key][0], plan)
+                    if next_cursor is None:
+                        return _pagination_error(
+                            "pagination_cursor_unavailable",
+                            (
+                                "The bounded backward GraphQL page stopped mid-page but no selected "
+                                "edge cursor permits safe continuation"
+                            ),
+                        )
+                if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor):
+                    next_cursor = None
+                if next_cursor is not None and _is_non_advancing_cursor(next_cursor, plan):
+                    return _pagination_error(
+                        "pagination_cursor_non_advancing",
+                        "The GraphQL connection returned a repeated or non-advancing continuation cursor",
                     )
-                    items_per_page = MCP_MAX_GQL_ITEMS_PER_PAGE
+                if has_more and next_cursor is None:
+                    return _pagination_error(
+                        "pagination_cursor_unavailable",
+                        "The backward GraphQL response indicates more data but exposes no continuation cursor",
+                    )
+                updated_page_info = dict(page_info)
+                if plan.has_previous_page_key is not None:
+                    updated_page_info[plan.has_previous_page_key] = has_more
+                if plan.start_cursor_key is not None:
+                    updated_page_info[plan.start_cursor_key] = next_cursor
+                connection[plan.page_info_key] = updated_page_info
+                _set_pagination_extension(
+                    result,
+                    returned_count=len(connection[plan.edges_key]),
+                    has_more=has_more,
+                    next_cursor=next_cursor,
+                )
+                return _fit_response_budget(result, plan)
 
-            logger.info("--- Inside query_paginated_wandb_gql: Step 0: Execute Initial Query ---")
+            aggregated: list[Any] = []
 
-            page1_vars_func = variables.copy() if variables is not None else {}
-            limit_key = None
-            for k in page1_vars_func:
-                if k.lower() in ["limit", "first", "count"]:
-                    limit_key = k
-                    break
-            if limit_key:
-                page1_vars_func[limit_key] = min(items_per_page, page1_vars_func.get(limit_key) or items_per_page)
-            else:
-                limit_key = "limit"
-                page1_vars_func[limit_key] = items_per_page
-                logger.debug(f"No limit variable found in input, adding '{limit_key}={items_per_page}'")
+            def append_edges(edges: list[Any]) -> bool:
+                cut_mid_page = False
+                for edge in edges:
+                    if len(aggregated) >= applied_max_items:
+                        cut_mid_page = True
+                        break
+                    aggregated.append(edge)
+                return cut_mid_page
 
-            if MCP_HOSTED_MODE:
+            cut_mid_page = append_edges(initial_edges)
+            current_page_info = dict(page_info)
+            has_next = bool(plan.has_next_page_key is not None and current_page_info.get(plan.has_next_page_key))
+            cursor = current_page_info.get(plan.end_cursor_key) if plan.end_cursor_key is not None else None
+            if cursor is not None and (not isinstance(cursor, str) or not cursor):
+                cursor = None
+            seen_page_cursors = {plan.initial_after} if plan.initial_after else set()
+            if has_next and cursor is not None:
+                if cursor in seen_page_cursors:
+                    return _pagination_error(
+                        "pagination_cursor_non_advancing",
+                        "The GraphQL connection returned a repeated or non-advancing continuation cursor",
+                    )
+                seen_page_cursors.add(cursor)
+            max_page_requests = max(1, math.ceil(applied_max_items / applied_page_size) + 2)
+            page_requests = 1
+            partial_error = False
+            last_page_had_edges = bool(initial_edges)
+
+            while has_next and cursor and len(aggregated) < applied_max_items and page_requests < max_page_requests:
+                request_cursor = cursor
+                page_variables = dict(bounded_variables)
+                assert plan.after_variable is not None
+                page_variables[plan.after_variable] = request_cursor
+                if plan.first_variable:
+                    page_variables[plan.first_variable] = min(
+                        applied_page_size,
+                        applied_max_items - len(aggregated),
+                    )
                 try:
-                    query, rewrites, rejections = _hosted_preprocess_graphql_query(
-                        query,
-                        MCP_MAX_GQL_ITEMS_PER_PAGE,
+                    page = execute_graphql(api, bounded_query, page_variables)
+                except GraphQLResponseTooLarge:
+                    return _response_too_large(
+                        "The W&B GraphQL response exceeded the safety limit; request fewer items or fields"
                     )
-                    page1_vars_func = _hosted_clamp_variables(
-                        page1_vars_func,
-                        MCP_MAX_GQL_ITEMS_PER_PAGE,
-                    )
-                    if rejections:
-                        ctx.mark_error(f"query_too_complex: {rejections[0]}")
-                        return {
-                            "errors": [
-                                {
-                                    "message": rejections[0],
-                                    "details": rejections,
-                                    "error": "query_too_complex",
-                                }
-                            ]
+                except Exception as exc:
+                    result.setdefault("errors", []).append(
+                        {
+                            "error": "upstream_error",
+                            "message": f"W&B GraphQL pagination failed ({type(exc).__name__})",
                         }
-                    if rewrites:
-                        logger.warning("Hosted GraphQL preflight rewrote query: %s", rewrites)
-                except Exception as e:
-                    logger.error("Hosted GraphQL preflight failed: %s", e, exc_info=True)
-                    ctx.mark_error(f"invalid_input: {e}")
-                    return {"errors": [{"message": f"Failed to validate initial query: {e}"}]}
-
-            try:
-                parse(query.strip())
-            except Exception as e:
-                logger.error(f"Failed to parse initial query with graphql-core: {e}")
-                ctx.mark_error(f"invalid_input: {e}")
-                return {"errors": [{"message": f"Failed to parse initial query: {e}"}]}
-
-            try:
-                result1 = execute_graphql(api, query.strip(), page1_vars_func)
-                result_dict = copy.deepcopy(result1)
-                if "errors" in result_dict:
-                    logger.error(f"GraphQL errors in initial response: {result_dict['errors']}")
-                    ctx.mark_error("upstream_error: GraphQL errors in initial response")
-                    return result_dict
-            except Exception as e:
-                logger.error(f"Failed to execute initial GraphQL query: {e}", exc_info=True)
-                ctx.mark_error(f"upstream_error: {e}")
-                return {"errors": [{"message": f"Failed to execute initial query: {e}"}]}
-
-            detected_paths = find_paginated_collections(result_dict)
-            if not detected_paths:
-                logger.info("No paginated paths detected. Returning initial result.")
-                return result_dict
-
-            path_to_paginate = detected_paths[0]
-            logger.info(f"Using path for pagination: {'/'.join(path_to_paginate)}")
-
-            runs_data1 = get_nested_value(result_dict, path_to_paginate)
-            if runs_data1 is None:
-                logger.warning(
-                    f"Could not extract data for pagination path {'/'.join(path_to_paginate)}. Returning initial result."
-                )
-                return result_dict
-            page_info1 = get_nested_value(runs_data1, ["pageInfo"])
-            if page_info1 is None:
-                logger.warning(
-                    f"Could not extract pageInfo for pagination path {'/'.join(path_to_paginate)}. Returning initial result."
-                )
-                return result_dict
-
-            cursor = page_info1.get("endCursor")
-            has_next = page_info1.get("hasNextPage")
-            initial_edges = runs_data1.get("edges", [])
-            logging.info(f"Page 1 Results: {len(initial_edges)} runs.")
-            logging.info(f"Page 1 PageInfo: {page_info1}")
-
-            seen_ids = set()
-            current_edge_count = 0
-            temp_initial_edges = []
-            if initial_edges:
-                for edge in initial_edges:
-                    try:
-                        if current_edge_count >= max_items:
-                            break
-                        node_id = edge["node"]["id"]
-                        if node_id not in seen_ids:
-                            seen_ids.add(node_id)
-                            temp_initial_edges.append(edge)
-                            current_edge_count += 1
-                    except (KeyError, TypeError):
-                        if current_edge_count < max_items:
-                            temp_initial_edges.append(edge)
-                            current_edge_count += 1
-                target_collection_dict = get_nested_value(result_dict, path_to_paginate)
-                if target_collection_dict:
-                    target_collection_dict["edges"] = temp_initial_edges[:max_items]
-                    current_edge_count = len(target_collection_dict["edges"])
-                logging.info(f"Stored {current_edge_count} unique edges after page 1 (max: {max_items}).")
-
-            if not has_next or not cursor or current_edge_count >= max_items:
-                logger.info("No further pages needed based on page 1 info or max_items reached.")
-                target_pi_dict = get_nested_value(result_dict, path_to_paginate + ["pageInfo"])
-                if target_pi_dict:
-                    target_pi_dict["hasNextPage"] = False
-                return result_dict
-
-            logging.info("\n--- Generating Paginated Query String --- ")
-            generated_paginated_query_string = None
-            after_variable_name = "after"
-            try:
-                initial_ast = parse(query.strip())
-                visitor = AddPaginationArgsVisitor(
-                    field_paths=detected_paths,
-                    first_variable_name=limit_key,
-                    after_variable_name=after_variable_name,
-                )
-                modified_ast = gql_visitor.visit(copy.deepcopy(initial_ast), visitor)
-                generated_paginated_query_string = gql_printer.print_ast(modified_ast)
-                logger.info("AST modification and printing successful.")
-            except Exception as e:
-                logger.error(f"Failed to generate query string via AST: {e}", exc_info=True)
-                return result_dict
-
-            if generated_paginated_query_string is None:
-                return result_dict
-
-            logging.info("\n--- Loop: Execute, Deduplicate, Aggregate In-Place, Check Limit ---")
-            page_num = 1
-            current_cursor = cursor
-            current_has_next = has_next
-            final_page_info = page_info1
-
-            while current_has_next:
-                if current_edge_count >= max_items:
-                    logging.info(f"Reached max_items ({max_items}). Stopping loop.")
-                    final_page_info = {**final_page_info, "hasNextPage": False}
+                    )
+                    partial_error = True
+                    break
+                page_requests += 1
+                if not isinstance(page, Mapping):
+                    partial_error = True
+                    break
+                if page.get("errors"):
+                    result.setdefault("errors", []).extend(copy.deepcopy(page["errors"]))
+                    partial_error = True
+                    break
+                page_connection = get_nested_value(dict(page), plan.path)
+                if not isinstance(page_connection, Mapping):
+                    partial_error = True
+                    break
+                page_edges = page_connection.get(plan.edges_key)
+                next_page_info = page_connection.get(plan.page_info_key)
+                if not isinstance(page_edges, list) or not isinstance(next_page_info, Mapping):
+                    partial_error = True
+                    break
+                cut_mid_page = append_edges(page_edges) or cut_mid_page
+                current_page_info = dict(next_page_info)
+                if plan.has_next_page_key is None or not isinstance(
+                    current_page_info.get(plan.has_next_page_key), bool
+                ):
+                    partial_error = True
+                    last_page_had_edges = bool(page_edges)
+                    break
+                has_next = bool(plan.has_next_page_key is not None and current_page_info.get(plan.has_next_page_key))
+                cursor = current_page_info.get(plan.end_cursor_key) if plan.end_cursor_key is not None else None
+                if cursor is not None and (not isinstance(cursor, str) or not cursor):
+                    cursor = None
+                if has_next and cursor is not None:
+                    if cursor == request_cursor or cursor in seen_page_cursors:
+                        return _pagination_error(
+                            "pagination_cursor_non_advancing",
+                            "The GraphQL connection returned a repeated or non-advancing continuation cursor",
+                        )
+                    seen_page_cursors.add(cursor)
+                last_page_had_edges = bool(page_edges)
+                if not page_edges and has_next and cursor is None:
+                    partial_error = True
                     break
 
-                page_num += 1
-                logging.info(f"\nFetching Page {page_num}...")
-                page_vars = variables.copy() if variables is not None else {}
-                page_vars[limit_key] = items_per_page
-                page_vars[after_variable_name] = current_cursor
-
-                try:
-                    logging.info(f"Executing generated query for page {page_num} with vars: {page_vars}")
-                    result_page = execute_graphql(api, generated_paginated_query_string, page_vars)
-
-                    if "errors" in result_page:
-                        logger.error(
-                            f"GraphQL errors on page {page_num}: {result_page['errors']}. Stopping pagination."
-                        )
-                        current_has_next = False
-                        final_page_info = {**final_page_info, "hasNextPage": False}
-                        continue
-
-                    runs_data = get_nested_value(result_page, path_to_paginate)
-                    if runs_data is None:
-                        logging.warning(
-                            f"Could not get data for path {'/'.join(path_to_paginate)} on page {page_num}. Stopping."
-                        )
-                        current_has_next = False
-                        continue
-                    else:
-                        edges_this_page = get_nested_value(runs_data, ["edges"]) or []
-                        page_info = get_nested_value(runs_data, ["pageInfo"]) or {}
-                        final_page_info = page_info
-
-                    logging.info(f"Result (Page {page_num}): {len(edges_this_page)} runs returned.")
-                    logging.info(f"Page Info (Page {page_num}): {page_info}")
-
-                    new_edges_for_aggregation = []
-                    duplicates_skipped = 0
-                    if edges_this_page:
-                        for edge in edges_this_page:
-                            if current_edge_count + len(new_edges_for_aggregation) >= max_items:
-                                logging.info(f"Max items ({max_items}) reached mid-page {page_num}.")
-                                final_page_info = {**final_page_info, "hasNextPage": False}
-                                current_has_next = False
-                                break
-
-                            try:
-                                node_id = edge["node"]["id"]
-                                if node_id not in seen_ids:
-                                    seen_ids.add(node_id)
-                                    new_edges_for_aggregation.append(edge)
-                                else:
-                                    duplicates_skipped += 1
-                            except (KeyError, TypeError):
-                                new_edges_for_aggregation.append(edge)
-
-                        if duplicates_skipped > 0:
-                            logging.info(f"Skipped {duplicates_skipped} duplicate edges on page {page_num}.")
-
-                        if new_edges_for_aggregation:
-                            target_collection_dict_inplace = get_nested_value(result_dict, path_to_paginate)
-                            if target_collection_dict_inplace and isinstance(
-                                target_collection_dict_inplace.get("edges"), list
-                            ):
-                                target_collection_dict_inplace["edges"].extend(new_edges_for_aggregation)
-                                current_edge_count = len(target_collection_dict_inplace["edges"])
-                                logging.info(
-                                    f"Appended {len(new_edges_for_aggregation)} new edges. Total unique edges: {current_edge_count}"
-                                )
-                            else:
-                                logging.error("Could not find target edges list in result_dict to append in-place.")
-                                current_has_next = False
-                        else:
-                            if len(edges_this_page) > 0:
-                                logging.info("No new unique edges found on page {page_num} after deduplication.")
-                            else:
-                                logging.info("No edges returned on page {page_num} to aggregate.")
-                    else:
-                        logging.info("No edges returned on page {page_num} to aggregate.")
-
-                    current_cursor = final_page_info.get("endCursor")
-                    if current_has_next:
-                        current_has_next = final_page_info.get("hasNextPage", False)
-
-                    if current_has_next and not current_cursor:
-                        logging.warning("hasNextPage is true but no endCursor received. Stopping loop.")
-                        current_has_next = False
-                    if not edges_this_page:
-                        logging.warning(f"No edges received for page {page_num}. Stopping loop.")
-                        current_has_next = False
-
-                except Exception as e:
-                    logging.error(f"Execution failed for page {page_num}: {e}", exc_info=True)
-                    current_has_next = False
-
-            logging.info(f"\n--- Pagination Loop Finished after page {page_num} ---")
-            logging.info(f"Final aggregated edge count: {current_edge_count}")
-
-            target_collection_dict_final = get_nested_value(result_dict, path_to_paginate)
-            if target_collection_dict_final:
-                target_collection_dict_final["pageInfo"] = final_page_info
-                logging.info(f"Updated final pageInfo: {final_page_info}")
-
-            return result_dict
-
-        except Exception as e:
-            error_message = f"Critical error in paginated GraphQL query function: {str(e)}\n{traceback.format_exc()}"
-            logger.error(error_message)
-            ctx.mark_error(f"query_failed: {e}")
-            if result_dict:
-                if "errors" not in result_dict:
-                    result_dict["errors"] = []
-                result_dict["errors"].append({"message": "Pagination failed", "details": str(e)})
-                return result_dict
-            else:
-                return {"errors": [{"message": "Pagination failed catastrophically", "details": str(e)}]}
-
-
-class AddPaginationArgsVisitor(gql_visitor.Visitor):
-    """Adds first/after args and variables"""
-
-    def __init__(self, field_paths, first_variable_name="limit", after_variable_name="after"):
-        super().__init__()
-        self.field_paths = set(tuple(p) for p in field_paths)
-        self.first_variable_name = first_variable_name
-        self.after_variable_name = after_variable_name
-        self.current_path = []
-        self.modified_operation = False
-
-    def enter_field(self, node, key, parent, path, ancestors):
-        field_name = node.alias.value if node.alias else node.name.value
-        self.current_path.append(field_name)
-        current_path_tuple = tuple(self.current_path)
-        if current_path_tuple in self.field_paths:
-            existing_args = list(node.arguments)
-            args_changed = False
-            has_first = any(arg.name.value == "first" for arg in existing_args)
-            if not has_first:
-                # Defaulting variable name to 'limit' if not found, might need refinement
-                limit_var_node = gql_ast.VariableNode(name=gql_ast.NameNode(value=self.first_variable_name))
-                existing_args.append(gql_ast.ArgumentNode(name=gql_ast.NameNode(value="first"), value=limit_var_node))
-                args_changed = True
-            has_after = any(arg.name.value == "after" for arg in existing_args)
-            if not has_after:
-                existing_args.append(
-                    gql_ast.ArgumentNode(
-                        name=gql_ast.NameNode(value="after"),
-                        value=gql_ast.VariableNode(name=gql_ast.NameNode(value=self.after_variable_name)),
-                    )
-                )
-                args_changed = True
-            if args_changed:
-                node.arguments = tuple(existing_args)
-
-    def leave_field(self, node, key, parent, path, ancestors):
-        if self.current_path:
-            self.current_path.pop()
-
-    def enter_operation_definition(self, node, key, parent, path, ancestors):
-        if self.modified_operation:
-            return
-        existing_vars = {var.variable.name.value for var in node.variable_definitions}
-        new_defs_list = list(node.variable_definitions)
-        defs_changed = False
-        # Determine limit variable name from existing vars if possible, else default
-        current_limit_var = self.first_variable_name  # Default
-        for var_name in existing_vars:
-            if var_name.lower() in ["limit", "first", "count"]:
-                current_limit_var = var_name
-                break
-
-        if current_limit_var not in existing_vars:
-            new_defs_list.append(
-                gql_ast.VariableDefinitionNode(
-                    variable=gql_ast.VariableNode(name=gql_ast.NameNode(value=current_limit_var)),
-                    type=gql_ast.NamedTypeNode(name=gql_ast.NameNode(value="Int")),
-                )
+            stopped_at_limit = len(aggregated) >= applied_max_items and (has_next or cut_mid_page)
+            stopped_at_request_bound = page_requests >= max_page_requests and has_next
+            has_more = bool(has_next or cut_mid_page or partial_error or stopped_at_request_bound)
+            connection[plan.edges_key] = aggregated
+            edge_cursor = _edge_cursor(aggregated[-1], plan) if aggregated else None
+            if cut_mid_page and edge_cursor is None:
+                return {
+                    "errors": [
+                        {
+                            "error": "pagination_cursor_unavailable",
+                            "message": (
+                                "The bounded GraphQL page stopped mid-page but no selected edge cursor "
+                                "permits safe continuation"
+                            ),
+                        }
+                    ]
+                }
+            page_end_cursor = current_page_info.get(plan.end_cursor_key) if plan.end_cursor_key is not None else None
+            last_cursor = (
+                edge_cursor
+                if cut_mid_page
+                else page_end_cursor
+                if not last_page_had_edges and isinstance(page_end_cursor, str) and page_end_cursor
+                else edge_cursor or page_end_cursor
             )
-            defs_changed = True
-        if self.after_variable_name not in existing_vars:
-            new_defs_list.append(
-                gql_ast.VariableDefinitionNode(
-                    variable=gql_ast.VariableNode(name=gql_ast.NameNode(value=self.after_variable_name)),
-                    type=gql_ast.NamedTypeNode(name=gql_ast.NameNode(value="String")),
+            if has_more and last_cursor is None:
+                return _pagination_error(
+                    "pagination_cursor_unavailable",
+                    "The GraphQL response indicates more data but exposes no continuation cursor",
                 )
+            if has_more and isinstance(last_cursor, str) and _is_non_advancing_cursor(last_cursor, plan):
+                return _pagination_error(
+                    "pagination_cursor_non_advancing",
+                    "The GraphQL connection returned a repeated or non-advancing continuation cursor",
+                )
+            updated_page_info = dict(current_page_info)
+            if plan.has_next_page_key is not None:
+                updated_page_info[plan.has_next_page_key] = has_more
+            if plan.end_cursor_key is not None:
+                updated_page_info[plan.end_cursor_key] = last_cursor
+            connection[plan.page_info_key] = updated_page_info
+            _set_pagination_extension(
+                result,
+                returned_count=len(aggregated),
+                has_more=has_more,
+                next_cursor=last_cursor,
             )
-            defs_changed = True
-        if defs_changed:
-            node.variable_definitions = tuple(new_defs_list)
-        self.modified_operation = True
+            if stopped_at_limit:
+                result["extensions"]["wandb_mcp"]["limit_applied"] = applied_max_items
+            return _fit_response_budget(result, plan)
+        except GraphQLResponseTooLarge:
+            ctx.mark_error("response_too_large")
+            return _response_too_large(
+                "The W&B GraphQL response exceeded the safety limit; request fewer items or fields"
+            )
+        except Exception as exc:
+            logger.error("Bounded GraphQL query failed (%s)", type(exc).__name__)
+            ctx.mark_error(f"query_failed: {type(exc).__name__}")
+            return {
+                "errors": [
+                    {
+                        "error": "upstream_error",
+                        "message": f"W&B GraphQL query failed ({type(exc).__name__})",
+                    }
+                ]
+            }

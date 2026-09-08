@@ -107,11 +107,9 @@ class TestAggregateEval:
 
 
 class TestSummarizeEvaluation:
-    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.count_traces", return_value=0)
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
-    def test_no_evals_found(self, mock_get_svc, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-
+    def test_no_evals_found(self, mock_get_svc, mock_count):
         mock_service = MagicMock()
         mock_get_svc.return_value = mock_service
 
@@ -122,13 +120,13 @@ class TestSummarizeEvaluation:
         result = json.loads(summarize_evaluation("ent", "proj"))
 
         assert result["evaluations"] == []
+        assert result["total_count"] == 0
         assert "No Evaluation.evaluate" in result["message"]
+        mock_count.assert_called_once()
 
-    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.count_traces", side_effect=[1, 2])
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
-    def test_with_eval_traces(self, mock_get_svc, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-
+    def test_with_eval_traces(self, mock_get_svc, mock_count):
         mock_service = MagicMock()
         mock_get_svc.return_value = mock_service
 
@@ -158,27 +156,119 @@ class TestSummarizeEvaluation:
         assert ev["total_predictions"] == 2
         assert ev["errors"] == 1
         assert ev["successes"] == 1
+        assert ev["details_exhaustive"] is True
+        assert ev["coverage"] == 1.0
         assert ev["scores"]["correctness"]["true_fraction"] == 0.9
+        assert mock_count.call_count == 2
+        child_count_kwargs = mock_count.call_args_list[1].kwargs
+        assert child_count_kwargs["filters"] == {
+            "parent_ids": ["eval-abc"],
+            "op_name_contains": "Evaluation.predict_and_score",
+        }
+        child_kwargs = mock_service.query_traces.call_args_list[1].kwargs
+        assert child_kwargs["filters"] == child_count_kwargs["filters"]
+        assert child_kwargs["columns"] == ["id", "exception", "summary"]
+        assert child_kwargs["limit"] == 2
+        assert child_kwargs["offset"] == 0
 
-    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.count_traces")
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
-    def test_query_failure_returns_error(self, mock_get_svc, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
+    def test_counts_only_direct_prediction_children(self, mock_get_svc, mock_count):
+        eval_trace = {
+            "id": "eval-abc",
+            "parent_id": None,
+            "op_name": "Evaluation.evaluate",
+            "started_at": "2026-01-01T00:00:00Z",
+            "summary": {},
+        }
+        traces = [
+            eval_trace,
+            {
+                "id": "prediction-1",
+                "parent_id": "eval-abc",
+                "op_name": "Evaluation.predict_and_score",
+                "summary": {"weave": {"status": "success"}},
+            },
+            {
+                "id": "prediction-2",
+                "parent_id": "eval-abc",
+                "op_name": "Evaluation.predict_and_score",
+                "summary": {"weave": {"status": "success"}},
+            },
+            {
+                "id": "summary-child",
+                "parent_id": "eval-abc",
+                "op_name": "Evaluation.summarize",
+                "summary": {"weave": {"status": "success"}},
+            },
+            {
+                "id": "nested-prediction",
+                "parent_id": "summary-child",
+                "op_name": "Evaluation.predict_and_score",
+                "summary": {"weave": {"status": "success"}},
+            },
+        ]
 
+        def matching(filters):
+            selected = traces
+            if filters.get("trace_roots_only"):
+                selected = [trace for trace in selected if trace.get("parent_id") is None]
+            if parent_ids := filters.get("parent_ids"):
+                selected = [trace for trace in selected if trace.get("parent_id") in parent_ids]
+            if op_name := filters.get("op_name_contains"):
+                selected = [trace for trace in selected if op_name in trace.get("op_name", "")]
+            return selected
+
+        def count_side_effect(entity_name, project_name, *, filters):
+            assert entity_name == "ent"
+            assert project_name == "proj"
+            return len(matching(filters))
+
+        def query_side_effect(**kwargs):
+            result = MagicMock()
+            selected = matching(kwargs["filters"])
+            offset = kwargs.get("offset", 0)
+            result.traces = selected[offset : offset + kwargs["limit"]]
+            return result
+
+        mock_count.side_effect = count_side_effect
+        mock_service = MagicMock()
+        mock_service.query_traces.side_effect = query_side_effect
+        mock_get_svc.return_value = mock_service
+
+        result = json.loads(
+            summarize_evaluation(
+                "ent",
+                "proj",
+                include_per_task=True,
+            )
+        )
+
+        summary = result["evaluations"][0]
+        assert summary["total_predictions"] == 2
+        assert summary["observed_predictions"] == 2
+        assert summary["details_exhaustive"] is True
+        assert [task["id"] for task in summary["per_task"]] == [
+            "prediction-1",
+            "prediction-2",
+        ]
+
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.count_traces", return_value=1)
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
+    def test_query_failure_returns_error(self, mock_get_svc, _mock_count):
         mock_service = MagicMock()
         mock_get_svc.return_value = mock_service
-        mock_service.query_traces.side_effect = Exception("Connection refused")
+        mock_service.query_traces.side_effect = Exception("customer-error-canary")
 
         result = json.loads(summarize_evaluation("ent", "proj"))
 
         assert result["error"] == "evaluation_query_failed"
-        assert "Connection refused" in result["message"]
+        assert result["message"] == "The evaluation trace query failed."
+        assert "customer-error-canary" not in json.dumps(result)
 
-    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.WandBApiManager")
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.count_traces", side_effect=[1, 0])
     @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
-    def test_project_path_in_response(self, mock_get_svc, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="user")
-
+    def test_project_path_in_response(self, mock_get_svc, _mock_count):
         mock_service = MagicMock()
         mock_get_svc.return_value = mock_service
 
@@ -191,10 +281,38 @@ class TestSummarizeEvaluation:
         }
         eval_result = MagicMock()
         eval_result.traces = [eval_trace]
-        child_result = MagicMock()
-        child_result.traces = []
-        mock_service.query_traces.side_effect = [eval_result, child_result]
+        mock_service.query_traces.return_value = eval_result
 
         result = json.loads(summarize_evaluation("my-team", "my-project"))
 
         assert result["project"] == "my-team/my-project"
+        assert mock_service.query_traces.call_count == 1
+
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.MCP_MAX_EVALUATION_ROWS", 500)
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.count_traces", side_effect=[1, 750])
+    @patch("wandb_mcp_server.mcp_tools.summarize_evaluation.get_trace_service")
+    def test_partial_child_aggregate_is_never_presented_as_exhaustive(
+        self,
+        mock_get_svc,
+        _mock_count,
+    ):
+        mock_service = MagicMock()
+        mock_get_svc.return_value = mock_service
+        eval_result = MagicMock()
+        eval_result.traces = [{"id": "eval-1", "op_name": "Evaluation.evaluate", "summary": {}}]
+        child_result = MagicMock()
+        child_result.traces = [{"summary": {"weave": {"status": "success"}}} for _ in range(100)]
+        mock_service.query_traces.side_effect = [eval_result, *([child_result] * 5)]
+
+        result = json.loads(summarize_evaluation("ent", "proj"))
+        summary = result["evaluations"][0]
+
+        assert summary["total_predictions"] == 750
+        assert summary["observed_predictions"] == 500
+        assert summary["details_exhaustive"] is False
+        assert summary["aggregate_scope"] == "sample"
+        assert summary["coverage"] == 0.6667
+        assert "successes" not in summary
+        assert "errors" not in summary
+        assert mock_service.query_traces.call_args_list[1].kwargs["limit"] == 100
+        assert mock_service.query_traces.call_args_list[-1].kwargs["offset"] == 400

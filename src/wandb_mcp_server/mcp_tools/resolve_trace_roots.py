@@ -3,7 +3,6 @@
 import json
 from typing import List
 
-from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.mcp_tools.query_weave import get_trace_service
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
@@ -61,10 +60,9 @@ def resolve_trace_roots(
     trace_ids: List[str],
 ) -> str:
     """Batch-resolve root spans for child trace_ids."""
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "resolve_trace_roots",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,
@@ -103,5 +101,13 @@ def resolve_trace_roots(
             )
 
         except Exception as e:
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "resolve_failed", "message": str(e)[:500]})
+            from wandb_mcp_server.api_client import raise_for_wandb_server_busy
+
+            raise_for_wandb_server_busy(e)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "resolve_failed",
+                    "message": "Trace-root resolution failed.",
+                }
+            )

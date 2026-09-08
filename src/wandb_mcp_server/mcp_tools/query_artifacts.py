@@ -7,17 +7,36 @@ comparison via the ``wandb.Api`` public interface.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
+from wandb_mcp_server.config import MCP_MAX_WANDB_QUERY_ITEMS, MCP_WORKLOAD_PROFILE
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.registry_support import (
+    bounded_sdk_page,
+    fit_registry_response,
+    nullable_string,
+    registry_error_result,
+    require_registry,
+    resolve_registry_organization,
+    validate_optional_identifier,
+)
 from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.wandb_selective_reads import (
+    SelectiveReadUnavailable,
+    fetch_registry_artifact_versions,
+)
 
 logger = get_rich_logger(__name__)
 
 DEFAULT_MAX_ITEMS = 50
-MAX_ITEMS_CEILING = 200
 MAX_USED_BY = 20
+_ORDER_FIELDS = {
+    "created_at": "createdAt",
+    "updated_at": "updatedAt",
+    "version": "versionIndex",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -26,7 +45,7 @@ MAX_USED_BY = 20
 
 LIST_ARTIFACT_VERSIONS_TOOL_DESCRIPTION = """List versions of an artifact collection from a project or registry.
 
-Returns version numbers, aliases, tags, sizes, and state for each version.
+Returns ordered, bounded version metadata with honest pagination and count scope.
 
 <when_to_use>
 Call this when the user wants to see available versions of a model, dataset, or
@@ -69,7 +88,16 @@ type_name : str, optional
 source : str, optional
     "project" (default) or "registry". Determines the API path.
 max_items : int, optional
-    Maximum versions to return. Default: 50, max: 200.
+    Maximum versions to return. Default: 50; workload-profile limits apply.
+order : str, optional
+    Sort by created_at, updated_at, or version. Prefix with "-" for descending
+    or "+" for ascending. Defaults to "-created_at".
+tags : list[str], optional
+    Require every listed artifact tag.
+created_after : str, optional
+    Include versions created at or after this ISO-8601 timestamp.
+created_before : str, optional
+    Include versions created at or before this ISO-8601 timestamp.
 
 Returns
 -------
@@ -77,8 +105,9 @@ JSON with:
   - collection: the queried collection name
   - source: "project" or "registry"
   - versions: list of version objects with version, aliases, tags, size, etc.
-  - count: number of versions returned
-  - truncated: whether more versions exist beyond max_items
+  - returned_count / total_count: returned and exact matching totals when known
+  - has_more / project_exhaustive: explicit pagination and scan scope
+  - compatibility_caveat: present only for a bounded older-backend fallback
 """
 
 
@@ -91,81 +120,179 @@ def list_artifact_versions(
     type_name: Optional[str] = None,
     source: str = "project",
     max_items: int = DEFAULT_MAX_ITEMS,
+    order: str = "-created_at",
+    tags: Optional[List[str]] = None,
+    created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
 ) -> str:
     """List versions of an artifact collection."""
-
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "list_artifact_versions",
-        api.viewer,
+        None,
         {
-            "collection_name": collection_name,
-            "entity_name": entity_name,
-            "project_name": project_name,
-            "registry_name": registry_name,
-            "type_name": type_name,
             "source": source,
             "max_items": max_items,
+            "order": order,
+            "tag_count": len(tags or []),
+            "has_entity": entity_name is not None,
+            "has_project": project_name is not None,
+            "has_registry": registry_name is not None,
+            "has_type": type_name is not None,
+            "has_organization": organization is not None,
+            "has_created_after": created_after is not None,
+            "has_created_before": created_before is not None,
         },
     ) as ctx:
-        max_items = min(max_items, MAX_ITEMS_CEILING)
-
         try:
+            validation_error = _validate_version_query(
+                collection_name=collection_name,
+                registry_name=registry_name,
+                type_name=type_name,
+                source=source,
+                max_items=max_items,
+                order=order,
+                tags=tags,
+                created_after=created_after,
+                created_before=created_before,
+            )
+            if validation_error:
+                return json.dumps({"error": "invalid_input", "message": validation_error})
             if source == "registry":
-                if not registry_name:
-                    return json.dumps(
-                        {
-                            "error": "invalid_input",
-                            "message": "registry_name is required when source='registry'",
-                        }
+                try:
+                    validate_optional_identifier("collection_name", collection_name)
+                    validate_optional_identifier("registry_name", registry_name)
+                    validate_optional_identifier("organization", organization)
+                except ValueError as exc:
+                    return json.dumps(registry_error_result(exc))
+
+            max_items = min(max_items, MCP_MAX_WANDB_QUERY_ITEMS)
+            order_value = _normalize_order(order)
+            after_dt = _parse_timestamp(created_after)
+            before_dt = _parse_timestamp(created_before)
+            needs_local_filter_scan = bool(created_after or created_before or tags)
+            scan_limit = MCP_MAX_WANDB_QUERY_ITEMS + 1 if needs_local_filter_scan else max_items + 1
+            api = WandBApiManager.get_api()
+            compatibility_caveat: str | None = None
+            exact_total: int | None = None
+
+            if source == "registry":
+                resolved_organization = resolve_registry_organization(api, organization)
+                registry_search = api.registries(
+                    organization=resolved_organization,
+                    filter={"name": registry_name},
+                    per_page=1,
+                )
+                require_registry(registry_search)
+                try:
+                    page = fetch_registry_artifact_versions(
+                        api,
+                        organization=resolved_organization,
+                        registry_name=registry_name or "",
+                        collection_name=collection_name,
+                        order=order_value,
+                        scan_limit=scan_limit,
                     )
-                reg_kwargs: Dict[str, Any] = {}
-                if organization is not None:
-                    reg_kwargs["organization"] = organization
-                registry = api.registry(registry_name, **reg_kwargs)
-                versions_iter = registry.collections(
-                    filter={"name": collection_name},
-                    per_page=min(max_items, 100),
-                ).versions()
+                    raw_versions: list[Any] = page.items
+                    upstream_has_more = page.has_more
+                except SelectiveReadUnavailable as exc:
+                    raise_for_wandb_server_busy(exc)
+                    versions_iter = registry_search.collections(
+                        filter={"name": collection_name},
+                        per_page=min(scan_limit, 100),
+                    ).versions(per_page=min(scan_limit, 100))
+                    raw_versions, upstream_has_more = bounded_sdk_page(versions_iter, scan_limit)
+                    compatibility_caveat = (
+                        "This Dedicated backend lacks ordered registry-version projection; "
+                        "a bounded SDK page was returned in backend order."
+                    )
             else:
-                if not type_name:
-                    return json.dumps(
-                        {
-                            "error": "invalid_input",
-                            "message": "type_name is required when source='project'",
-                        }
-                    )
                 qualified_name = collection_name
                 if "/" not in collection_name and entity_name and project_name:
                     qualified_name = f"{entity_name}/{project_name}/{collection_name}"
                 versions_iter = api.artifacts(
                     type_name=type_name,
                     name=qualified_name,
-                    per_page=min(max_items, 100),
+                    order=order_value,
+                    # W&B 0.28 applies ``tags`` while converting each SDK
+                    # page. A missing tag can therefore make every converted
+                    # page empty and cause the paginator to scan the entire
+                    # collection before MCP can enforce its row cap. Fetch a
+                    # bounded raw page and apply the identical all-tags
+                    # predicate below instead.
+                    tags=None,
+                    per_page=min(scan_limit, 100),
+                )
+                if not tags and created_after is None and created_before is None:
+                    try:
+                        exact_total = len(versions_iter)
+                    except (TypeError, NotImplementedError):
+                        exact_total = None
+                raw_versions, upstream_has_more = bounded_sdk_page(
+                    versions_iter,
+                    scan_limit,
+                    allow_partial_on_request_limit=True,
                 )
 
-            versions: List[Dict[str, Any]] = []
-            truncated = False
-            for art in versions_iter:
-                if len(versions) >= max_items:
-                    truncated = True
-                    break
-                versions.append(_serialize_artifact_summary(art))
+            matching = [
+                _serialize_artifact_summary(artifact)
+                for artifact in raw_versions
+                if _matches_artifact_filters(
+                    artifact,
+                    tags=tags or [],
+                    created_after=after_dt,
+                    created_before=before_dt,
+                )
+            ]
+            if exact_total is None and not upstream_has_more:
+                exact_total = len(matching)
+            has_more = len(matching) > max_items or upstream_has_more
+            versions = matching[:max_items]
 
-            return json.dumps(
-                {
-                    "collection": collection_name,
-                    "source": source,
-                    "versions": versions,
-                    "count": len(versions),
-                    "truncated": truncated,
-                }
-            )
+            result: dict[str, Any] = {
+                "collection": collection_name,
+                "source": source,
+                "items": versions,
+                "versions": versions,
+                "returned_count": len(versions),
+                "total_count": exact_total,
+                "has_more": has_more,
+                "limit": max_items,
+                "project_exhaustive": not has_more,
+                "scan": {
+                    "profile": MCP_WORKLOAD_PROFILE,
+                    "rows_examined": len(raw_versions),
+                    "row_cap": scan_limit,
+                    "filter_exhaustive": not upstream_has_more,
+                    "order": order,
+                },
+                # Compatibility aliases for the existing response contract.
+                "count": len(versions),
+                "truncated": has_more,
+            }
+            if compatibility_caveat:
+                result["compatibility_caveat"] = compatibility_caveat
+            if source == "registry":
+                result = fit_registry_response(
+                    result,
+                    aliases=("versions",),
+                    optional_fields=("description", "tags", "aliases", "digest"),
+                )
+            return json.dumps(result, allow_nan=False)
 
         except Exception as e:
-            logger.error(f"Error in list_artifact_versions: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            if source == "registry":
+                logger.error("Registry version listing failed (%s)", type(e).__name__)
+                ctx.mark_error(type(e).__name__)
+                return json.dumps(registry_error_result(e))
+            raise_for_wandb_server_busy(e)
+            logger.error("Artifact version listing failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "api_error",
+                    "message": "The W&B artifact version query failed.",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +352,7 @@ def get_artifact_details(
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "get_artifact_details",
-        api.viewer,
+        None,
         {
             "artifact_name": artifact_name,
             "type_name": type_name,
@@ -261,9 +388,15 @@ def get_artifact_details(
             return json.dumps(result)
 
         except Exception as e:
-            logger.error(f"Error in get_artifact_details: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            raise_for_wandb_server_busy(e)
+            logger.error("Artifact detail query failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "api_error",
+                    "message": "The W&B artifact detail query failed.",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +462,7 @@ def compare_artifact_versions(
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "compare_artifact_versions",
-        api.viewer,
+        None,
         {
             "artifact_name_a": artifact_name_a,
             "artifact_name_b": artifact_name_b,
@@ -397,9 +530,15 @@ def compare_artifact_versions(
             return json.dumps(result)
 
         except Exception as e:
-            logger.error(f"Error in compare_artifact_versions: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            raise_for_wandb_server_busy(e)
+            logger.error("Artifact comparison failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "api_error",
+                    "message": "The W&B artifact comparison failed.",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +548,8 @@ def compare_artifact_versions(
 
 def _serialize_artifact_summary(artifact: Any) -> Dict[str, Any]:
     """Extract core properties from an Artifact into a plain dict."""
+    if isinstance(artifact, dict):
+        return dict(artifact)
     return {
         "version": getattr(artifact, "version", None),
         "name": getattr(artifact, "name", None),
@@ -418,9 +559,109 @@ def _serialize_artifact_summary(artifact: Any) -> Dict[str, Any]:
         "size": getattr(artifact, "size", None),
         "file_count": getattr(artifact, "file_count", None),
         "description": getattr(artifact, "description", None),
-        "created_at": str(getattr(artifact, "created_at", "")),
+        "created_at": nullable_string(getattr(artifact, "created_at", None)),
         "digest": getattr(artifact, "digest", None),
     }
+
+
+def _validate_version_query(
+    *,
+    collection_name: str,
+    registry_name: str | None,
+    type_name: str | None,
+    source: str,
+    max_items: int,
+    order: str,
+    tags: list[str] | None,
+    created_after: str | None,
+    created_before: str | None,
+) -> str | None:
+    if not isinstance(collection_name, str) or not collection_name.strip():
+        return "collection_name must be a non-empty string"
+    if source not in {"project", "registry"}:
+        return "source must be 'project' or 'registry'"
+    if source == "registry" and not registry_name:
+        return "registry_name is required when source='registry'"
+    if source == "project" and not type_name:
+        return "type_name is required when source='project'"
+    if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 1:
+        return "max_items must be a positive integer"
+    try:
+        _normalize_order(order)
+        after_dt = _parse_timestamp(created_after)
+        before_dt = _parse_timestamp(created_before)
+    except ValueError as exc:
+        return str(exc)
+    if after_dt and before_dt and after_dt > before_dt:
+        return "created_after must not be later than created_before"
+    if tags is not None:
+        if not isinstance(tags, list) or any(not isinstance(tag, str) or not tag.strip() for tag in tags):
+            return "tags must be a list of non-empty strings"
+        if len(tags) > 100:
+            return "tags cannot contain more than 100 values"
+        if any(len(tag.encode("utf-8")) > 512 for tag in tags):
+            return "each tag must be at most 512 bytes"
+    return None
+
+
+def _normalize_order(order: str) -> str:
+    if not isinstance(order, str) or not order:
+        raise ValueError("order must be a non-empty string")
+    prefix = order[0] if order[0] in "+-" else "+"
+    field = order[1:] if order[0] in "+-" else order
+    if field not in _ORDER_FIELDS:
+        raise ValueError("order must use created_at, updated_at, or version")
+    return f"{prefix}{_ORDER_FIELDS[field]}"
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("date filters must be non-empty ISO-8601 strings")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"Invalid ISO-8601 timestamp: {value}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _artifact_created_at(artifact: Any) -> datetime | None:
+    raw = artifact.get("created_at") if isinstance(artifact, dict) else getattr(artifact, "created_at", None)
+    if isinstance(raw, datetime):
+        parsed = raw
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    if raw:
+        try:
+            return _parse_timestamp(str(raw))
+        except ValueError:
+            return None
+    return None
+
+
+def _matches_artifact_filters(
+    artifact: Any,
+    *,
+    tags: list[str],
+    created_after: datetime | None,
+    created_before: datetime | None,
+) -> bool:
+    artifact_tags = artifact.get("tags", []) if isinstance(artifact, dict) else getattr(artifact, "tags", [])
+    if not set(tags).issubset(set(artifact_tags or [])):
+        return False
+    if created_after is None and created_before is None:
+        return True
+    created_at = _artifact_created_at(artifact)
+    if created_at is None:
+        return False
+    return not (
+        (created_after is not None and created_at < created_after)
+        or (created_before is not None and created_at > created_before)
+    )
 
 
 def _serialize_run_info(run: Any) -> Optional[Dict[str, Any]]:
@@ -440,8 +681,9 @@ def _get_logged_by(artifact: Any) -> Optional[Dict[str, Any]]:
     try:
         run = artifact.logged_by()
         return _serialize_run_info(run)
-    except Exception:
-        logger.debug("logged_by() failed", exc_info=True)
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
+        logger.debug("Artifact logged-by lookup failed (%s)", type(exc).__name__)
         return None
 
 
@@ -460,16 +702,18 @@ def _build_lineage(artifact: Any) -> Dict[str, Any]:
                     used_by_truncated = True
                     break
                 used_by.append(_serialize_run_info(run))
-    except Exception:
-        logger.debug("used_by() failed", exc_info=True)
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
+        logger.debug("Artifact used-by lookup failed (%s)", type(exc).__name__)
 
     source_artifact = None
     try:
         src = artifact.source_artifact
         if src is not None and src is not artifact:
             source_artifact = getattr(src, "source_qualified_name", None) or getattr(src, "name", None)
-    except Exception:
-        logger.debug("source_artifact failed", exc_info=True)
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
+        logger.debug("Source-artifact lookup failed (%s)", type(exc).__name__)
 
     linked: Optional[List[str]] = None
     try:
@@ -480,8 +724,9 @@ def _build_lineage(artifact: Any) -> Dict[str, Any]:
                 name = getattr(la, "source_qualified_name", None) or getattr(la, "name", None)
                 if name:
                     linked.append(name)
-    except Exception:
-        logger.debug("linked_artifacts failed", exc_info=True)
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
+        logger.debug("Linked-artifact lookup failed (%s)", type(exc).__name__)
 
     lineage: Dict[str, Any] = {
         "logged_by": logged_by,
@@ -508,8 +753,9 @@ def _list_files(artifact: Any, max_files: int) -> List[Dict[str, Any]]:
                     "digest": getattr(f, "digest", None),
                 }
             )
-    except Exception:
-        logger.debug("files() failed", exc_info=True)
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
+        logger.debug("Artifact file listing failed (%s)", type(exc).__name__)
     return files
 
 
@@ -540,8 +786,9 @@ def _compute_file_diff(art_a: Any, art_b: Any, max_entries: int) -> Dict[str, An
                 scan_truncated = True
                 break
             files_a[getattr(f, "name", "")] = getattr(f, "digest", "")
-    except Exception:
-        logger.debug("files() failed for artifact_a", exc_info=True)
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
+        logger.debug("First artifact file listing failed (%s)", type(exc).__name__)
 
     try:
         for f in art_b.files():
@@ -549,8 +796,9 @@ def _compute_file_diff(art_a: Any, art_b: Any, max_entries: int) -> Dict[str, An
                 scan_truncated = True
                 break
             files_b[getattr(f, "name", "")] = getattr(f, "digest", "")
-    except Exception:
-        logger.debug("files() failed for artifact_b", exc_info=True)
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
+        logger.debug("Second artifact file listing failed (%s)", type(exc).__name__)
 
     names_a, names_b = set(files_a.keys()), set(files_b.keys())
     added = sorted(names_b - names_a)

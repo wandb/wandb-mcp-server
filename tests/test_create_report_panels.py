@@ -3,6 +3,7 @@
 import importlib
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 from wandb_mcp_server.mcp_tools.create_report import (
     CREATE_WANDB_REPORT_TOOL_DESCRIPTION,
@@ -411,6 +412,14 @@ class TestBuildPanelBlocks:
 
 
 class TestCreateReportWithPanels:
+    @pytest.fixture(autouse=True)
+    def _stub_bounded_report_save(self, monkeypatch):
+        monkeypatch.setattr(
+            create_report_module,
+            "save_report_bounded",
+            lambda report, api: report,
+        )
+
     @patch("wandb_mcp_server.mcp_tools.create_report.wr")
     @patch("wandb_mcp_server.api_client.WandBApiManager")
     def test_panels_none_backward_compat(self, mock_api_mgr, mock_wr):
@@ -562,7 +571,7 @@ class TestRealWorkspacesReportObjects:
             report.id = "report-id"
 
         with (
-            patch.object(create_report_module.wr.Report, "save", fake_save),
+            patch.object(create_report_module, "save_report_bounded", fake_save),
             patch("wandb_workspaces.reports.v2.interface._get_api", return_value=fake_api),
         ):
             result = create_report(

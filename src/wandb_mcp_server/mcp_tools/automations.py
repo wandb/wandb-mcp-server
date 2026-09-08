@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, get_args
 from pydantic import PositiveInt
 from wandb.automations import EventType, SlackIntegration, WebhookIntegration
 
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -108,11 +108,9 @@ def _clamp(value: int, floor: int, ceil: int, /) -> int:
 def _jsonify_scope(scope: ProjectScope | ArtifactCollectionScope) -> dict[str, Any]:
     """Flatten an AutomationScope to ``{type, id, name}``.
 
-    The wandb GraphQL fragments only carry ``id`` and ``name`` on scopes
-    (see ``wandb/automations/_generated/fragments.py``: ProjectScopeFields,
-    ArtifactSequenceScopeFields, ArtifactPortfolioScopeFields). The public
+    The W&B SDK payloads only carry ``id`` and ``name`` on scopes. The public
     ``scope_type`` enum (PROJECT | ARTIFACT_COLLECTION) lets agents branch
-    on it without parsing GraphQL typename strings.
+    on it without parsing backend type-name strings.
     """
     return {"type": scope.scope_type.value, "id": scope.id, "name": scope.name}
 
@@ -198,7 +196,7 @@ def list_automations(
     params = locals()  # Must be first so it only picks up the function args
 
     api = WandBApiManager.get_api()
-    with track_tool_execution("list_automations", api.viewer, params) as ctx:
+    with track_tool_execution("list_automations", None, params) as ctx:
         max_items = _clamp(max_items, 1, MAX_ITEMS_CEIL)
 
         try:
@@ -215,9 +213,15 @@ def list_automations(
             return json.dumps(result)
 
         except Exception as e:
-            logger.error(f"Error in list_automations: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            raise_for_wandb_server_busy(e)
+            logger.error("Automation listing failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "api_error",
+                    "message": "The W&B automation query failed.",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +305,7 @@ def list_integrations(
     params = locals()  # Must be first so it only picks up the function args
 
     api = WandBApiManager.get_api()
-    with track_tool_execution("list_integrations", api.viewer, params) as ctx:
+    with track_tool_execution("list_integrations", None, params) as ctx:
         max_items = _clamp(max_items, 1, MAX_ITEMS_CEIL)
 
         if kind is not None and kind not in _VALID_INTEGRATION_KINDS:
@@ -333,6 +337,12 @@ def list_integrations(
             return json.dumps(result)
 
         except Exception as e:
-            logger.error(f"Error in list_integrations: {e}", exc_info=True)
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "api_error", "message": str(e)[:500]})
+            raise_for_wandb_server_busy(e)
+            logger.error("Integration listing failed (%s)", type(e).__name__)
+            ctx.mark_error(type(e).__name__)
+            return json.dumps(
+                {
+                    "error": "api_error",
+                    "message": "The W&B integration query failed.",
+                }
+            )

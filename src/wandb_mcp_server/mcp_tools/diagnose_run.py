@@ -4,23 +4,34 @@ import json
 import math
 from typing import Any, Dict, List, Optional
 
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.admission import ToolDeadlineExceeded
+from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
+from wandb_mcp_server.config import MCP_MAX_HISTORY_KEYS, MCP_MAX_HISTORY_SAMPLES
+from wandb_mcp_server.mcp_tools.run_history import get_run_history
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.wandb_graphql import GraphQLResponseTooLarge
+from wandb_mcp_server.wandb_selective_reads import (
+    fetch_project_fields,
+    fetch_projected_run,
+)
 
 logger = get_rich_logger(__name__)
 
 DIAGNOSE_RUN_TOOL_DESCRIPTION = """Diagnose a W&B run's training health.
 
 Automatically detects convergence, overfitting, NaN values, and provides
-tail statistics. Returns actionable recommendations.
+tail statistics. Independent metric trends use bounded outer-union history;
+train/validation gap calculations use only points logged at the same axis
+value. Returns actionable recommendations.
 
 <when_to_use>
 Call when the user asks "is my run okay?", "has it converged?", "is it
 overfitting?", or wants a health check on a training run.
 
-This tool samples the run's history and applies standard ML diagnostic
-heuristics. Use get_run_history_tool for raw metric data instead.
+This tool selects a bounded metric set from the project field index, samples
+only those history keys, and discloses the selection and coverage behind every
+conclusion. Use get_run_history_tool for raw metric data instead.
 </when_to_use>
 
 Parameters
@@ -35,6 +46,14 @@ loss_key : str, optional
     Name of the loss metric. Auto-detected if not provided.
 val_loss_key : str, optional
     Name of the validation loss metric. Auto-detected if not provided.
+config_keys : list of str, optional
+    Projected config context to include. When omitted, a bounded indexed set is selected.
+summary_keys : list of str, optional
+    Summary/history metrics to analyze. When omitted, bounded numeric fields are selected.
+x_axis : str, optional
+    X-axis used for history sampling. Defaults to "_step".
+samples : int, optional
+    Number of sampled history rows, capped by the active workload profile.
 
 Returns
 -------
@@ -42,7 +61,8 @@ JSON with diagnosis (converged/diverging/plateaued/insufficient_data),
 overfit_signal, nan_warnings, tail_stats, and recommendations.
 """
 
-DIAGNOSIS_SAMPLES = 500
+DIAGNOSIS_SAMPLES = min(500, MCP_MAX_HISTORY_SAMPLES)
+_DIAGNOSIS_CONFIG_LIMIT = 10
 
 
 def _auto_detect_key(keys: List[str], patterns: List[str]) -> Optional[str]:
@@ -76,33 +96,95 @@ def _compute_trend(values: List[float]) -> str:
         return "plateaued"
 
 
-def _detect_overfit(train_vals: List[float], val_vals: List[float]) -> Dict[str, Any]:
+def _detect_overfit(
+    train_vals: List[float],
+    val_vals: List[float],
+    *,
+    aligned_pairs: List[tuple[float, float]] | None = None,
+) -> Dict[str, Any]:
     """Detect overfitting by comparing train and val loss trends."""
     if len(train_vals) < 10 or len(val_vals) < 10:
         return {"detected": False, "reason": "insufficient_data"}
 
-    min_len = min(len(train_vals), len(val_vals))
-    train_vals = train_vals[:min_len]
-    val_vals = val_vals[:min_len]
-
-    half = min_len // 2
-    train_gap_early = sum(abs(v - t) for t, v in zip(train_vals[:half], val_vals[:half])) / half
-    train_gap_late = sum(abs(v - t) for t, v in zip(train_vals[half:], val_vals[half:])) / (min_len - half)
-
     train_trend = _compute_trend(train_vals)
     val_trend = _compute_trend(val_vals)
-
     overfit = train_trend == "decreasing" and val_trend in ("increasing", "plateaued")
-    gap_growing = train_gap_late > train_gap_early * 1.3
+
+    if aligned_pairs is None:
+        aligned_pairs = list(zip(train_vals, val_vals))
+    gap_growing = False
+    train_gap_early: float | None = None
+    train_gap_late: float | None = None
+    gap_ratio: float | None = None
+    if len(aligned_pairs) >= 10:
+        half = len(aligned_pairs) // 2
+        early = aligned_pairs[:half]
+        late = aligned_pairs[half:]
+        train_gap_early = sum(abs(val - train) for train, val in early) / len(early)
+        train_gap_late = sum(abs(val - train) for train, val in late) / len(late)
+        gap_ratio = train_gap_late / max(train_gap_early, 1e-8)
+        gap_growing = train_gap_late > train_gap_early * 1.3
 
     return {
         "detected": overfit or gap_growing,
         "train_loss_trend": train_trend,
         "val_loss_trend": val_trend,
-        "gap_early": round(train_gap_early, 6),
-        "gap_late": round(train_gap_late, 6),
-        "gap_ratio": round(train_gap_late / max(train_gap_early, 1e-8), 3),
+        "aligned_points": len(aligned_pairs),
+        "gap_early": round(train_gap_early, 6) if train_gap_early is not None else None,
+        "gap_late": round(train_gap_late, 6) if train_gap_late is not None else None,
+        "gap_ratio": round(gap_ratio, 3) if gap_ratio is not None else None,
     }
+
+
+def _strip_field_prefix(path: str, prefixes: tuple[str, ...]) -> str | None:
+    for prefix in prefixes:
+        if path.startswith(prefix):
+            return path[len(prefix) :]
+    return None
+
+
+def _indexed_diagnosis_keys(api: Any, entity_name: str, project_name: str) -> tuple[list[str], list[str], bool]:
+    fields = fetch_project_fields(
+        api,
+        entity=entity_name,
+        project=project_name,
+        limit=max(200, MCP_MAX_HISTORY_KEYS * 20),
+    )
+    configs: list[str] = []
+    metrics: list[str] = []
+    numeric_types = {"number", "integer", "float", "int", "number[]"}
+    for field in fields.items:
+        path = field["path"]
+        config_key = _strip_field_prefix(path, ("config.", "config/"))
+        if config_key and not config_key.startswith(("_", "wandb")):
+            configs.append(config_key)
+            continue
+        summary_key = _strip_field_prefix(
+            path,
+            ("summary.", "summary/", "summary_metrics.", "summary_metrics/", "summaryMetrics."),
+        )
+        if (
+            summary_key
+            and not summary_key.startswith(("_", "wandb/"))
+            and field.get("type", "").lower() in numeric_types
+        ):
+            metrics.append(summary_key)
+    priority = ("loss", "accuracy", "score", "precision", "recall", "f1", "auc", "grad")
+    metrics.sort(key=lambda key: (not any(token in key.lower() for token in priority), key))
+    return (
+        list(dict.fromkeys(configs))[:_DIAGNOSIS_CONFIG_LIMIT],
+        list(dict.fromkeys(metrics))[:MCP_MAX_HISTORY_KEYS],
+        not fields.has_more,
+    )
+
+
+def _validate_optional_keys(name: str, value: Optional[List[str]]) -> None:
+    if value is not None and (
+        not isinstance(value, list)
+        or len(value) > MCP_MAX_HISTORY_KEYS
+        or not all(isinstance(key, str) and key.strip() for key in value)
+    ):
+        raise ValueError(f"{name} must contain at most {MCP_MAX_HISTORY_KEYS} non-empty strings")
 
 
 def diagnose_run(
@@ -111,25 +193,150 @@ def diagnose_run(
     run_id: str,
     loss_key: Optional[str] = None,
     val_loss_key: Optional[str] = None,
+    config_keys: Optional[List[str]] = None,
+    summary_keys: Optional[List[str]] = None,
+    x_axis: str = "_step",
+    samples: int = DIAGNOSIS_SAMPLES,
 ) -> str:
     """Diagnose a W&B run's training health."""
+    for name, value in (("config_keys", config_keys), ("summary_keys", summary_keys)):
+        _validate_optional_keys(name, value)
+    if not isinstance(x_axis, str) or not x_axis.strip():
+        raise ValueError("x_axis must be a non-empty string")
+    if isinstance(samples, bool) or not isinstance(samples, int) or samples < 1:
+        raise ValueError("samples must be a positive integer")
+    effective_samples = min(samples, MCP_MAX_HISTORY_SAMPLES)
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "diagnose_run",
-        api.viewer,
-        {"entity_name": entity_name, "project_name": project_name, "run_id": run_id},
+        None,
+        {
+            "entity_name": entity_name,
+            "project_name": project_name,
+            "run_id": run_id,
+            "config_key_count": len(config_keys or []),
+            "summary_key_count": len(summary_keys or []),
+            "x_axis_is_custom": x_axis != "_step",
+            "samples": effective_samples,
+        },
     ) as ctx:
+        selected_config = list(config_keys or [])
+        selected_summary = list(summary_keys or [])
+        selection_source = "explicit"
+        field_index_exhaustive: bool | None = None
         try:
-            run = api.run(f"{entity_name}/{project_name}/{run_id}")
+            if config_keys is None or summary_keys is None:
+                auto_config, auto_summary, field_index_exhaustive = _indexed_diagnosis_keys(
+                    api, entity_name, project_name
+                )
+                if config_keys is None:
+                    selected_config = auto_config
+                if summary_keys is None:
+                    selected_summary = auto_summary
+                selection_source = "project_field_index"
+            projected = fetch_projected_run(
+                api,
+                entity=entity_name,
+                project=project_name,
+                run_id=run_id,
+                config_keys=selected_config,
+                summary_keys=selected_summary,
+            )
+            if projected is None:
+                return json.dumps(
+                    {
+                        "error": "run_not_found",
+                        "message": "The requested run was not found or is not accessible.",
+                    }
+                )
         except Exception as e:
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "run_not_found", "message": str(e)[:500]})
+            if isinstance(e, ToolDeadlineExceeded):
+                raise
+            if isinstance(e, GraphQLResponseTooLarge):
+                ctx.mark_error("GraphQLResponseTooLarge: bounded selective read exceeded its safety limit")
+                return json.dumps(
+                    {
+                        "error": "response_too_large",
+                        "message": "The bounded W&B diagnosis response was too large; request fewer keys.",
+                        "retryable": False,
+                    }
+                )
+            raise_for_wandb_server_busy(e)
+            ctx.mark_error(f"{type(e).__name__}: selective diagnosis read unavailable")
+            return json.dumps(
+                {
+                    "error": "selective_read_unavailable",
+                    "message": "The W&B server could not provide the bounded fields required for this diagnosis.",
+                    "retryable": False,
+                }
+            )
+
+        run_name = projected.get("display_name") or run_id
+        run_state = projected.get("state") or "unknown"
+
+        if loss_key is None:
+            loss_key = _auto_detect_key(selected_summary, ["train_loss", "train/loss", "loss"])
+        if val_loss_key is None:
+            val_loss_key = _auto_detect_key(
+                selected_summary,
+                ["val_loss", "val/loss", "validation/loss", "eval_loss", "eval/loss", "validation_loss"],
+            )
+
+        requested_keys = list(dict.fromkeys([key for key in (loss_key, val_loss_key, *selected_summary) if key]))[
+            :MCP_MAX_HISTORY_KEYS
+        ]
+        if not requested_keys:
+            return json.dumps(
+                {
+                    "diagnosis": "no_loss_key",
+                    "message": "No bounded numeric metric set was available; provide loss_key and val_loss_key.",
+                    "run_id": run_id,
+                    "run_name": run_name,
+                    "selection": {
+                        "source": selection_source,
+                        "config_keys": selected_config,
+                        "summary_keys": selected_summary,
+                        "field_index_exhaustive": field_index_exhaustive,
+                    },
+                }
+            )
 
         try:
-            history_rows = list(run.scan_history(page_size=DIAGNOSIS_SAMPLES))[:DIAGNOSIS_SAMPLES]
+            history_result = json.loads(
+                get_run_history(
+                    entity_name,
+                    project_name,
+                    run_id,
+                    keys=requested_keys,
+                    samples=effective_samples,
+                    x_axis=x_axis,
+                )
+            )
+            if history_result.get("error"):
+                error = str(history_result.get("error"))
+                if error == "response_too_large":
+                    return json.dumps(history_result)
+                ctx.mark_error(f"history query returned {error}")
+                return json.dumps(
+                    {
+                        "error": "history_fetch_failed",
+                        "message": "The bounded W&B history required for this diagnosis was unavailable.",
+                        "retryable": False,
+                    }
+                )
+            history_rows = list(history_result.get("rows") or [])
         except Exception as e:
-            ctx.mark_error(f"{type(e).__name__}: {e}")
-            return json.dumps({"error": "history_fetch_failed", "message": str(e)[:500]})
+            if isinstance(e, ToolDeadlineExceeded):
+                raise
+            raise_for_wandb_server_busy(e)
+            ctx.mark_error(f"{type(e).__name__}: bounded history query failed")
+            return json.dumps(
+                {
+                    "error": "history_fetch_failed",
+                    "message": "The bounded W&B history required for this diagnosis was unavailable.",
+                    "retryable": False,
+                }
+            )
 
         if not history_rows:
             return json.dumps(
@@ -137,33 +344,48 @@ def diagnose_run(
                     "diagnosis": "no_history",
                     "message": "Run has no logged history steps.",
                     "run_id": run_id,
-                    "run_name": getattr(run, "name", run_id),
+                    "run_name": run_name,
+                    "selection": {
+                        "source": selection_source,
+                        "config_keys": selected_config,
+                        "summary_keys": selected_summary,
+                        "field_index_exhaustive": field_index_exhaustive,
+                    },
+                    "coverage": {
+                        "sampled": True,
+                        "requested_samples": samples,
+                        "effective_samples": effective_samples,
+                        "returned_rows": 0,
+                        "x_axis": x_axis,
+                    },
                 }
             )
 
-        all_keys = set()
-        for row in history_rows[:10]:
-            all_keys.update(k for k in row.keys() if not k.startswith("_"))
-        all_keys = sorted(all_keys)
-
-        if loss_key is None:
-            loss_key = _auto_detect_key(all_keys, ["train_loss", "train/loss", "loss"])
-        if val_loss_key is None:
-            val_loss_key = _auto_detect_key(
-                all_keys, ["val_loss", "val/loss", "eval_loss", "eval/loss", "validation_loss"]
-            )
+        all_keys = sorted(
+            {key for row in history_rows for key in row if not key.startswith("_") and key in requested_keys}
+        )
 
         # NaN detection
         nan_warnings = {}
+        non_finite_counts = history_result.get("non_finite_counts") or {}
         for key in all_keys:
             vals = [row.get(key) for row in history_rows if row.get(key) is not None]
-            nan_count = sum(1 for v in vals if isinstance(v, float) and (math.isnan(v) or math.isinf(v)))
+            nan_count = int(non_finite_counts.get(key, 0))
             if nan_count > 0:
                 nan_warnings[key] = {
                     "nan_count": nan_count,
-                    "total": len(vals),
-                    "fraction": round(nan_count / max(len(vals), 1), 4),
+                    "total": len(vals) + nan_count,
+                    "fraction": round(nan_count / max(len(vals) + nan_count, 1), 4),
                 }
+        for key, count in non_finite_counts.items():
+            if key in nan_warnings or not isinstance(count, int) or count <= 0:
+                continue
+            finite_count = sum(row.get(key) is not None for row in history_rows)
+            nan_warnings[key] = {
+                "nan_count": count,
+                "total": finite_count + count,
+                "fraction": round(count / max(finite_count + count, 1), 4),
+            }
 
         # Loss analysis
         diagnosis = "unknown"
@@ -213,7 +435,17 @@ def diagnose_run(
                 if isinstance(row.get(val_loss_key), (int, float))
                 and not math.isnan(row.get(val_loss_key, float("nan")))
             ]
-            overfit = _detect_overfit(train_vals, val_vals)
+            aligned_pairs = [
+                (float(row[loss_key]), float(row[val_loss_key]))
+                for row in history_rows
+                if isinstance(row.get(loss_key), (int, float))
+                and not isinstance(row.get(loss_key), bool)
+                and math.isfinite(float(row[loss_key]))
+                and isinstance(row.get(val_loss_key), (int, float))
+                and not isinstance(row.get(val_loss_key), bool)
+                and math.isfinite(float(row[val_loss_key]))
+            ]
+            overfit = _detect_overfit(train_vals, val_vals, aligned_pairs=aligned_pairs)
 
         # Recommendations
         recommendations = []
@@ -233,8 +465,8 @@ def diagnose_run(
         return json.dumps(
             {
                 "run_id": run_id,
-                "run_name": getattr(run, "name", run_id),
-                "run_state": getattr(run, "state", "unknown"),
+                "run_name": run_name,
+                "run_state": run_state,
                 "diagnosis": diagnosis,
                 "loss_stats": loss_stats,
                 "overfit_signal": overfit,
@@ -243,6 +475,25 @@ def diagnose_run(
                 "detected_keys": {"loss": loss_key, "val_loss": val_loss_key},
                 "total_history_rows": len(history_rows),
                 "recommendations": recommendations,
+                "projected_context": {
+                    "config": projected.get("config") or {},
+                    "summary": projected.get("summary") or {},
+                },
+                "selection": {
+                    "source": selection_source,
+                    "config_keys": selected_config,
+                    "summary_keys": selected_summary,
+                    "field_index_exhaustive": field_index_exhaustive,
+                },
+                "coverage": {
+                    "sampled": True,
+                    "requested_samples": samples,
+                    "effective_samples": effective_samples,
+                    "returned_rows": len(history_rows),
+                    "x_axis": x_axis,
+                    "project_exhaustive": False,
+                    "conclusions_apply_to_sample": True,
+                },
             },
             default=str,
         )

@@ -1,20 +1,31 @@
-"""E2E analytics tests: real tool calls -> Segment + Datadog payloads.
+"""End-to-end analytics tests at the public FastMCP tool boundary."""
 
-Exercises the full pipeline from track_tool_execution through _emit() to
-both SegmentForwarder (dry-run) and DatadogForwarder (dry-run), asserting
-that success/failure/duration propagate correctly to each sink.
+from __future__ import annotations
 
-Uses mocked WandBApiManager so no real API calls are made, but the analytics
-pipeline is exercised end-to-end through the real code paths.
-"""
-
-from unittest.mock import MagicMock, patch
+import asyncio
+import hashlib
+import json
+from unittest.mock import patch
 
 import pytest
+from mcp.types import TextContent
 
 from wandb_mcp_server.analytics import reset_analytics_tracker
-from wandb_mcp_server.analytics_datadog import get_datadog_forwarder, reset_datadog_forwarder
-from wandb_mcp_server.analytics_segment import get_segment_forwarder, reset_segment_forwarder
+from wandb_mcp_server.analytics_datadog import (
+    get_datadog_forwarder,
+    reset_datadog_forwarder,
+)
+from wandb_mcp_server.analytics_segment import (
+    get_segment_forwarder,
+    reset_segment_forwarder,
+)
+from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.instrumented_server import (
+    InstrumentedFastMCP,
+    _structured_result_error_category,
+    structured_result_error,
+)
+from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 
 
 @pytest.fixture(autouse=True)
@@ -30,263 +41,227 @@ def _reset_all():
 
 @pytest.fixture()
 def _enable_analytics(monkeypatch):
-    """Enable both forwarders in dry-run / capture mode."""
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "false")
     monkeypatch.setenv("MCP_SEGMENT_DRY_RUN", "true")
     monkeypatch.setenv("MCP_DATADOG_FORWARD", "true")
     monkeypatch.setenv("DD_API_KEY", "test-key-e2e")
     monkeypatch.setenv("DD_ENV", "test")
     monkeypatch.setenv("DD_SERVICE", "test-mcp")
-    monkeypatch.setenv("DD_VERSION", "0.3.1")
+    monkeypatch.setenv("DD_VERSION", "0.3.7")
+    api_key = "k" * 40
+    token = WandBApiManager.set_context_api_key(api_key)
     reset_analytics_tracker()
     reset_segment_forwarder()
     reset_datadog_forwarder()
+    get_datadog_forwarder(capture_payloads=True)
+    yield api_key
+    WandBApiManager.reset_context_api_key(token)
+
+
+def _server() -> InstrumentedFastMCP:
+    server = InstrumentedFastMCP("analytics-test")
+
+    @server.tool(name="query_public_tool")
+    async def query_public_tool(
+        entity_name: str,
+        query: str,
+        max_items: int = 50,
+        include_files: bool = False,
+    ) -> str:
+        with track_tool_execution(
+            "query_internal_helper",
+            None,
+            {"entity_name": entity_name, "query": query},
+        ):
+            return json.dumps({"ok": True, "max_items": max_items, "include_files": include_files})
+
+    @server.tool(name="nested_helper_tool")
+    async def nested_helper_tool() -> str:
+        with track_tool_execution("outer_helper", None, {}):
+            with track_tool_execution("inner_helper", None, {}):
+                return json.dumps({"ok": True})
+
+    @server.tool(name="structured_error_tool")
+    async def structured_error_tool() -> str:
+        return json.dumps(
+            {
+                "error": "permission_denied",
+                "message": "access denied for private-organization-canary",
+            }
+        )
+
+    @server.tool(name="untrusted_error_tool")
+    async def untrusted_error_tool() -> str:
+        return json.dumps({"error": "private-organization-canary"})
+
+    @server.tool(name="exception_tool")
+    async def exception_tool() -> str:
+        raise ValueError("bad query")
+
+    @server.tool(name="slow_tool")
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.05)
+        return "ok"
+
+    return server
+
+
+@pytest.mark.usefixtures("_enable_analytics")
+@pytest.mark.asyncio
+async def test_public_success_reaches_both_sinks_once() -> None:
+    server = _server()
+    dd_forwarder = get_datadog_forwarder()
+    with patch.object(dd_forwarder, "_post"):
+        await server.call_tool(
+            "query_public_tool",
+            {
+                "entity_name": "private-team",
+                "query": "private query text",
+                "max_items": 50,
+                "include_files": True,
+                "private-client-argument-canary": True,
+            },
+        )
+
+    segment = get_segment_forwarder().get_forwarded_payloads()
+    datadog = dd_forwarder.get_forwarded_payloads()
+    assert len(segment) == len(datadog) == 1
+    assert segment[0]["properties"]["tool_name"] == "query_public_tool"
+    assert segment[0]["properties"]["mcp_tool_name"] == "query_public_tool"
+    assert segment[0]["properties"]["call_type"] == "tools/call"
+    assert segment[0]["properties"]["success"] is True
+    assert "error" not in segment[0]["properties"]
+    assert segment[0]["properties"]["usage_dimensions"] == {
+        "admission_outcome": "disabled",
+        "cost_class": "heavy",
+        "include_files": True,
+        "max_items_bucket": "26-50",
+        "queue_ms_bucket": "0",
+    }
+    expected_actor = f"wandb_key:{hashlib.sha256(('k' * 40).encode()).hexdigest()[:24]}"
+    assert segment[0]["userId"] == expected_actor
+    assert "private-team" not in str(segment[0])
+    assert "private query text" not in str(segment[0])
+    assert "private-client-argument-canary" not in str(segment[0])
+    assert datadog[0]["attributes"]["tool"]["name"] == "query_public_tool"
+    assert datadog[0]["attributes"]["usage_dimensions"] == {
+        "admission_outcome": "disabled",
+        "cost_class": "heavy",
+        "include_files": True,
+        "max_items_bucket": "26-50",
+        "queue_ms_bucket": "0",
+    }
+    assert "params" not in datadog[0]["attributes"]
+    assert "private-client-argument-canary" not in str(datadog[0])
+
 
-
-def _mock_viewer():
-    v = MagicMock()
-    v.username = "testuser"
-    v.entity = "testorg"
-    v.email = "test@wandb.com"
-    return v
-
-
-# ---------------------------------------------------------------------------
-# Successful tool call -> both sinks
-# ---------------------------------------------------------------------------
-
-
-class TestSuccessfulToolCall:
-    """A tool call that completes successfully should record success, duration, and no error."""
-
-    @pytest.mark.usefixtures("_enable_analytics")
-    def test_success_reaches_segment(self):
-        from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
-
-        viewer = _mock_viewer()
-        dd_fwd = get_datadog_forwarder()
-
-        with patch.object(dd_fwd, "_post"):
-            with track_tool_execution("query_traces", viewer, {"entity": "org", "project": "proj"}):
-                pass  # tool "succeeds" instantly
-
-        seg_fwd = get_segment_forwarder()
-        seg_payloads = seg_fwd.get_forwarded_payloads()
-        assert len(seg_payloads) == 1
-        seg = seg_payloads[0]
-        assert seg["event"] == "mcp_server.tool_call"
-        assert seg["properties"]["release_version"] == "0.3.1"
-        assert seg["properties"]["tool_name"] == "query_traces"
-        assert seg["properties"]["success"] is True
-        assert seg["properties"]["error"] is None
-        assert seg["properties"]["duration_ms"] is not None
-        assert seg["properties"]["duration_ms"] >= 0
-        assert seg["userId"] == "testuser"
-
-    @pytest.mark.usefixtures("_enable_analytics")
-    def test_success_reaches_datadog(self):
-        from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
-
-        viewer = _mock_viewer()
-        dd_fwd = get_datadog_forwarder()
-
-        with patch.object(dd_fwd, "_post"):
-            with track_tool_execution("query_traces", viewer, {"entity": "org", "project": "proj"}):
-                pass
-
-        dd_payloads = dd_fwd.get_forwarded_payloads()
-        assert len(dd_payloads) == 1
-        dd = dd_payloads[0]
-        assert dd["status"] == "info"
-        assert dd["attributes"]["tool"]["name"] == "query_traces"
-        assert dd["attributes"]["tool"]["success"] is True
-        assert "error" not in dd["attributes"]
-        assert dd["attributes"]["duration"] >= 0
-        assert dd["attributes"]["usr"]["id"] == "testuser"
-        assert dd["attributes"]["params"] == {"entity": "org", "project": "proj"}
-
-    @pytest.mark.usefixtures("_enable_analytics")
-    def test_success_segment_excludes_email_domain(self):
-        from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
-
-        viewer = _mock_viewer()
-        dd_fwd = get_datadog_forwarder()
-
-        with patch.object(dd_fwd, "_post"):
-            with track_tool_execution("count_traces", viewer, {"entity": "org"}):
-                pass
-
-        seg = get_segment_forwarder().get_forwarded_payloads()[0]
-        assert "email_domain" not in seg["properties"]
-
-
-# ---------------------------------------------------------------------------
-# Failed tool call (exception) -> both sinks
-# ---------------------------------------------------------------------------
-
-
-class TestFailedToolCallException:
-    """A tool that raises should record success=False, the error string, and duration."""
-
-    @pytest.mark.usefixtures("_enable_analytics")
-    def test_exception_reaches_segment(self):
-        from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
-
-        viewer = _mock_viewer()
-        dd_fwd = get_datadog_forwarder()
-
-        with patch.object(dd_fwd, "_post"):
-            with pytest.raises(ValueError, match="bad query"):
-                with track_tool_execution("query_traces", viewer, {"entity": "org"}):
-                    raise ValueError("bad query")
-
-        seg = get_segment_forwarder().get_forwarded_payloads()[0]
-        assert seg["properties"]["success"] is False
-        assert "ValueError" in seg["properties"]["error"]
-        assert "bad query" in seg["properties"]["error"]
-        assert seg["properties"]["duration_ms"] is not None
-
-    @pytest.mark.usefixtures("_enable_analytics")
-    def test_exception_reaches_datadog_as_error(self):
-        from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
-
-        viewer = _mock_viewer()
-        dd_fwd = get_datadog_forwarder()
-
-        with patch.object(dd_fwd, "_post"):
-            with pytest.raises(RuntimeError):
-                with track_tool_execution("create_report", viewer, {"title": "test"}):
-                    raise RuntimeError("CommError: 404 Not Found")
-
-        dd = dd_fwd.get_forwarded_payloads()[0]
-        assert dd["status"] == "error"
-        assert dd["attributes"]["error"]["kind"] == "RuntimeError"
-        assert "CommError" in dd["attributes"]["error"]["message"]
-        assert dd["attributes"]["tool"]["success"] is False
-        assert dd["attributes"]["duration"] >= 0
-
-
-# ---------------------------------------------------------------------------
-# Failed tool call (mark_error, no raise) -> both sinks
-# ---------------------------------------------------------------------------
-
-
-class TestFailedToolCallMarkError:
-    """A tool that catches and returns an error dict should use ctx.mark_error()."""
-
-    @pytest.mark.usefixtures("_enable_analytics")
-    def test_mark_error_reaches_segment(self):
-        from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
-
-        viewer = _mock_viewer()
-        dd_fwd = get_datadog_forwarder()
-
-        with patch.object(dd_fwd, "_post"):
-            with track_tool_execution("list_registries", viewer, {"organization": "org"}) as ctx:
-                ctx.mark_error("PermissionError: access denied")
-
-        seg = get_segment_forwarder().get_forwarded_payloads()[0]
-        assert seg["properties"]["success"] is False
-        assert "PermissionError" in seg["properties"]["error"]
-        assert seg["properties"]["duration_ms"] is not None
-
-    @pytest.mark.usefixtures("_enable_analytics")
-    def test_mark_error_reaches_datadog(self):
-        from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
-
-        viewer = _mock_viewer()
-        dd_fwd = get_datadog_forwarder()
-
-        with patch.object(dd_fwd, "_post"):
-            with track_tool_execution("list_registries", viewer, {"organization": "org"}) as ctx:
-                ctx.mark_error("PermissionError: access denied")
-
-        dd = dd_fwd.get_forwarded_payloads()[0]
-        assert dd["status"] == "error"
-        assert dd["attributes"]["error"]["kind"] == "PermissionError"
-        assert dd["attributes"]["error"]["message"] == "access denied"
-        assert dd["attributes"]["tool"]["success"] is False
-
-
-# ---------------------------------------------------------------------------
-# Duration tracking
-# ---------------------------------------------------------------------------
-
-
-class TestDurationTracking:
-    """Duration should reflect actual execution time, not zero."""
-
-    @pytest.mark.usefixtures("_enable_analytics")
-    def test_duration_is_nonzero_for_slow_tool(self):
-        import time
-
-        from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
-
-        viewer = _mock_viewer()
-        dd_fwd = get_datadog_forwarder()
-
-        with patch.object(dd_fwd, "_post"):
-            with track_tool_execution("slow_tool", viewer, {}):
-                time.sleep(0.05)
-
-        seg = get_segment_forwarder().get_forwarded_payloads()[0]
-        assert seg["properties"]["duration_ms"] >= 40
-
-        dd = dd_fwd.get_forwarded_payloads()[0]
-        assert dd["attributes"]["duration"] >= 40_000_000  # 40ms in nanoseconds
-
-
-# ---------------------------------------------------------------------------
-# PII and data separation between sinks
-# ---------------------------------------------------------------------------
-
-
-class TestDataSeparation:
-    """Segment and Datadog receive differently sanitized analytics data."""
-
-    @pytest.mark.usefixtures("_enable_analytics")
-    def test_segment_gets_raw_params_datadog_gets_sanitized_params(self):
-        from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
-
-        viewer = _mock_viewer()
-        dd_fwd = get_datadog_forwarder()
-        params = {
-            "entity_name": "wandb-smle",
-            "project_name": "email-agent",
-            "limit": 10,
-            "query": "query { viewer { username } }",
-        }
-
-        with patch.object(dd_fwd, "_post"):
-            with track_tool_execution("query_traces", viewer, params):
-                pass
-
-        seg = get_segment_forwarder().get_forwarded_payloads()[0]
-        assert "params" in seg["properties"]
-        assert seg["properties"]["params"]["entity_name"] == "wandb-smle"
-        assert seg["properties"]["params"]["query"] == "query { viewer { username } }"
-
-        dd = dd_fwd.get_forwarded_payloads()[0]
-        assert dd["attributes"]["params"]["entity_name"] == "wandb-smle"
-        assert dd["attributes"]["params"]["project_name"] == "email-agent"
-        assert dd["attributes"]["params"]["limit"] == 10
-        assert dd["attributes"]["params"]["query"] == "<redacted: text len=29>"
-
-    @pytest.mark.usefixtures("_enable_analytics")
-    def test_datadog_has_structured_severity_segment_does_not(self):
-        from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
-
-        viewer = _mock_viewer()
-        dd_fwd = get_datadog_forwarder()
-
-        with patch.object(dd_fwd, "_post"):
-            with pytest.raises(Exception):
-                with track_tool_execution("create_report", viewer, {}):
-                    raise Exception("timeout")
-
-        dd = dd_fwd.get_forwarded_payloads()[0]
-        assert dd["status"] == "error"
-
-        seg = get_segment_forwarder().get_forwarded_payloads()[0]
-        assert "status" not in seg
-        assert seg["properties"]["success"] is False
+@pytest.mark.usefixtures("_enable_analytics")
+@pytest.mark.asyncio
+async def test_nested_implementation_helpers_do_not_double_count() -> None:
+    server = _server()
+    dd_forwarder = get_datadog_forwarder()
+    with patch.object(dd_forwarder, "_post"):
+        await server.call_tool("nested_helper_tool", {})
+
+    segment = get_segment_forwarder().get_forwarded_payloads()
+    assert len(segment) == 1
+    assert segment[0]["properties"]["tool_name"] == "nested_helper_tool"
+
+
+@pytest.mark.usefixtures("_enable_analytics")
+@pytest.mark.asyncio
+async def test_exception_is_emitted_as_one_failed_public_call() -> None:
+    server = _server()
+    dd_forwarder = get_datadog_forwarder()
+    with patch.object(dd_forwarder, "_post"):
+        with pytest.raises(Exception, match="bad query"):
+            await server.call_tool("exception_tool", {})
+
+    segment = get_segment_forwarder().get_forwarded_payloads()
+    datadog = dd_forwarder.get_forwarded_payloads()
+    assert len(segment) == len(datadog) == 1
+    assert segment[0]["properties"]["success"] is False
+    assert segment[0]["properties"]["error"] == "ToolError: tool failed"
+    assert "bad query" not in str(segment[0])
+    assert "bad query" not in str(datadog[0])
+    assert datadog[0]["attributes"]["error"]["kind"] == "ToolError"
+    assert datadog[0]["status"] == "error"
+
+
+@pytest.mark.usefixtures("_enable_analytics")
+@pytest.mark.asyncio
+async def test_structured_error_result_is_failed() -> None:
+    server = _server()
+    dd_forwarder = get_datadog_forwarder()
+    with patch.object(dd_forwarder, "_post"):
+        await server.call_tool("structured_error_tool", {})
+
+    segment = get_segment_forwarder().get_forwarded_payloads()[0]
+    datadog = dd_forwarder.get_forwarded_payloads()[0]
+    assert segment["properties"]["success"] is False
+    assert segment["properties"]["error"] == "permission_denied: tool failed"
+    assert "private-organization-canary" not in str(segment)
+    assert "private-organization-canary" not in str(datadog)
+    assert datadog["attributes"]["error"]["kind"] == "permission_denied"
+
+
+@pytest.mark.usefixtures("_enable_analytics")
+@pytest.mark.asyncio
+async def test_untrusted_error_value_is_not_used_as_telemetry_category() -> None:
+    server = _server()
+    dd_forwarder = get_datadog_forwarder()
+    with patch.object(dd_forwarder, "_post"):
+        await server.call_tool("untrusted_error_tool", {})
+
+    segment = get_segment_forwarder().get_forwarded_payloads()[0]
+    datadog = dd_forwarder.get_forwarded_payloads()[0]
+    assert segment["properties"]["error"] == "tool_error: tool failed"
+    assert datadog["attributes"]["error"]["kind"] == "tool_error"
+    assert "private-organization-canary" not in str(segment)
+    assert "private-organization-canary" not in str(datadog)
+    assert datadog["status"] == "error"
+
+
+def test_mcp_is_error_result_is_failed() -> None:
+    class ErrorResult:
+        isError = True
+
+    assert structured_result_error(ErrorResult()) == "ToolError: MCP result marked as an error"
+
+
+def test_text_content_error_retains_allowlisted_telemetry_category() -> None:
+    result = [
+        TextContent(
+            type="text",
+            text=json.dumps(
+                {
+                    "error": "permission_denied",
+                    "message": "private-organization-canary",
+                }
+            ),
+        )
+    ]
+
+    assert _structured_result_error_category(result) == "permission_denied"
+
+
+@pytest.mark.usefixtures("_enable_analytics")
+@pytest.mark.asyncio
+async def test_duration_is_measured_at_public_boundary() -> None:
+    server = _server()
+    dd_forwarder = get_datadog_forwarder()
+    with patch.object(dd_forwarder, "_post"):
+        await server.call_tool("slow_tool", {})
+
+    segment = get_segment_forwarder().get_forwarded_payloads()[0]
+    datadog = dd_forwarder.get_forwarded_payloads()[0]
+    assert segment["properties"]["duration_ms"] >= 40
+    assert datadog["attributes"]["duration"] >= 40_000_000
+
+
+@pytest.mark.usefixtures("_enable_analytics")
+def test_implementation_context_is_non_emitting() -> None:
+    with track_tool_execution("internal_helper", None, {"query": "secret"}):
+        pass
+    assert get_segment_forwarder().get_forwarded_payloads() == []
+    assert get_datadog_forwarder().get_forwarded_payloads() == []

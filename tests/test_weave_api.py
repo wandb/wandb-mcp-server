@@ -19,6 +19,7 @@ from wandb_mcp_server.weave_api.models import (
 )
 from wandb_mcp_server.weave_api.processors import TraceProcessor
 from wandb_mcp_server.weave_api.query_builder import QueryBuilder
+from wandb_mcp_server.weave_api.service import TraceService
 
 
 # ---------------------------------------------------------------------------
@@ -54,15 +55,23 @@ class TestTraceProcessor(unittest.TestCase):
         result = TraceProcessor.truncate_value(complex_object, max_length=50)
         assert result == {"type": "ComplexObject"}
 
+    def test_truncate_value_never_logs_customer_type(self):
+        canary = "customer-complex-type-canary"
+        with self.assertLogs("wandb_mcp_server.weave_api.processors", level="INFO") as captured:
+            result = TraceProcessor.truncate_value({"__type__": canary}, max_length=50)
+
+        assert result == {"type": canary}
+        assert canary not in "\n".join(captured.output)
+
     def test_count_tokens(self):
         text = "This is a test of the token counter."
         result = TraceProcessor.count_tokens(text)
         assert result > 0
 
     def test_count_tokens_fallback(self):
-        with patch("tiktoken.get_encoding", side_effect=Exception("Tiktoken error")):
-            result = TraceProcessor.count_tokens("This is a test of the token counter.")
-            assert result == 8  # word count fallback
+        with patch("wandb_mcp_server.trace_utils._get_tiktoken_encoding", side_effect=Exception("Tiktoken error")):
+            text = "This is a test of the token counter."
+            assert TraceProcessor.count_tokens(text) == len(text.encode("utf-8"))
 
     def test_process_traces(self):
         now = datetime.now()
@@ -165,6 +174,47 @@ class TestQueryBuilder(unittest.TestCase):
         assert QueryBuilder.datetime_to_timestamp("invalid_datetime") == 0
         assert QueryBuilder.datetime_to_timestamp("") == 0
 
+    def test_invalid_filters_never_log_customer_values_or_paths(self):
+        canaries = (
+            "customer-datetime-canary",
+            "customer-status-canary",
+            "customer-attribute-path-canary",
+            "customer-attribute-value-canary",
+        )
+        with self.assertLogs("wandb_mcp_server.weave_api.query_builder", level="WARNING") as captured:
+            assert QueryBuilder.datetime_to_timestamp(canaries[0]) == 0
+            QueryBuilder.build_query_expression(
+                {
+                    "status": {"value": canaries[1]},
+                    "attributes": {
+                        canaries[2]: {"$contains": {"value": canaries[3]}},
+                    },
+                }
+            )
+
+        logs = "\n".join(captured.output)
+        for canary in canaries:
+            assert canary not in logs
+
+    def test_trace_service_never_logs_columns_or_trace_ids(self):
+        column_canary = "attributes.customer-column-canary"
+        invalid_canary = "customer-invalid-column-canary"
+        trace_canary = "customer-trace-id-canary"
+        service = TraceService(api_key="test-key", server_url="https://trace.example")
+
+        with self.assertLogs("wandb_mcp_server.weave_api.service", level="INFO") as captured:
+            service._validate_and_filter_columns([column_canary, invalid_canary])
+            service._add_synthetic_columns(
+                [{"id": trace_canary}],
+                ["costs", "status", "latency_ms"],
+                set(),
+            )
+
+        logs = "\n".join(captured.output)
+        assert column_canary not in logs
+        assert invalid_canary not in logs
+        assert trace_canary not in logs
+
     def test_separate_filters(self):
         filters = {"trace_roots_only": True, "op_name": "test_op", "status": "success", "latency": {"$gt": 1000}}
         direct, complex_f = QueryBuilder.separate_filters(filters)
@@ -266,7 +316,7 @@ class TestWeaveApiClient(unittest.TestCase):
     def test_init_with_explicit_key(self):
         client = WeaveApiClient(api_key="test_key_12345")
         assert client.api_key == "test_key_12345"
-        assert client.retries == 3
+        assert client.retries == 0
         assert client.timeout == WeaveApiClient.DEFAULT_TIMEOUT
 
     def test_init_without_key_raises(self):
@@ -296,44 +346,85 @@ class TestWeaveApiClient(unittest.TestCase):
         assert results[0]["id"] == "1"
 
     @patch("requests.Session.post")
-    def test_query_traces_error_response(self, mock_post):
+    def test_query_traces_never_logs_customer_query(self, mock_post):
+        query_canary = "customer-query-canary"
         mock_response = Mock()
-        mock_response.status_code = 400
-        mock_response.text = "Bad request"
+        mock_response.status_code = 200
+        mock_response.iter_lines.return_value = []
         mock_post.return_value = mock_response
 
         client = WeaveApiClient(api_key="test_key")
-        with pytest.raises(Exception, match="Error 400"):
-            list(client.query_traces({"project_id": "entity/project"}))
+        with self.assertLogs("wandb_mcp_server.weave_api.client", level="DEBUG") as captured:
+            list(
+                client.query_traces(
+                    {
+                        "project_id": "customer-entity/customer-project",
+                        "filter": {"query": query_canary},
+                    }
+                )
+            )
+
+        logs = "\n".join(captured.output)
+        assert query_canary not in logs
+        assert "customer-entity" not in logs
+        assert "customer-project" not in logs
+
+    @patch("requests.Session.post")
+    def test_query_traces_error_response(self, mock_post):
+        mock_response = Mock()
+        mock_response.status_code = 400
+        mock_response.text = "upstream-customer-canary"
+        mock_post.return_value = mock_response
+
+        client = WeaveApiClient(api_key="test_key")
+        with self.assertLogs("wandb_mcp_server.weave_api.client", level="DEBUG") as captured:
+            with pytest.raises(Exception, match="network error") as caught:
+                list(client.query_traces({"project_id": "entity/project"}))
+        assert "upstream-customer-canary" not in "\n".join(captured.output)
+        assert "upstream-customer-canary" not in str(caught.value)
 
     @patch("requests.Session.post")
     def test_query_traces_network_error(self, mock_post):
+        query_canary = "network-query-canary"
         mock_post.side_effect = requests.RequestException("Network error")
         client = WeaveApiClient(api_key="test_key")
-        with pytest.raises(Exception, match="Failed to query Weave traces"):
-            list(client.query_traces({"project_id": "entity/project"}))
+        with self.assertLogs("wandb_mcp_server.weave_api.client", level="DEBUG") as captured:
+            with pytest.raises(Exception, match="Failed to query Weave traces"):
+                list(
+                    client.query_traces(
+                        {
+                            "project_id": "customer-entity/customer-project",
+                            "filter": {"query": query_canary},
+                        }
+                    )
+                )
+        logs = "\n".join(captured.output)
+        assert query_canary not in logs
+        assert "customer-entity" not in logs
+        assert "customer-project" not in logs
 
-    def test_retry_adapter_mounted(self):
-        """Verify retry adapter is mounted on the session for https and http."""
+    def test_functional_queries_never_mount_retry_adapter(self):
+        """Functional trace calls leave retry policy with the MCP caller."""
         client = WeaveApiClient(api_key="test_key")
         https_adapter = client.session.get_adapter("https://trace.wandb.ai")
         http_adapter = client.session.get_adapter("http://localhost:8080")
-        assert https_adapter.max_retries.total == 3
-        assert 429 in https_adapter.max_retries.status_forcelist
-        assert 503 in https_adapter.max_retries.status_forcelist
-        assert http_adapter.max_retries.total == 3
+        assert https_adapter.max_retries.total == 0
+        assert not https_adapter.max_retries.status_forcelist
+        assert http_adapter.max_retries.total == 0
 
     def test_custom_retries_and_timeout(self):
-        """Verify custom retries and timeout are applied."""
+        """Legacy retry input cannot re-enable amplification."""
         client = WeaveApiClient(api_key="test_key", retries=5, timeout=60)
         assert client.timeout == 60
+        assert client.retries == 0
         adapter = client.session.get_adapter("https://trace.wandb.ai")
-        assert adapter.max_retries.total == 5
+        assert adapter.max_retries.total == 0
 
-    def test_no_retry_on_client_error_status(self):
-        """Status codes like 400 should not be in the retry list."""
+    def test_no_status_code_is_retried(self):
         client = WeaveApiClient(api_key="test_key")
         adapter = client.session.get_adapter("https://trace.wandb.ai")
+        assert 429 not in adapter.max_retries.status_forcelist
+        assert 503 not in adapter.max_retries.status_forcelist
         assert 400 not in adapter.max_retries.status_forcelist
         assert 401 not in adapter.max_retries.status_forcelist
         assert 404 not in adapter.max_retries.status_forcelist

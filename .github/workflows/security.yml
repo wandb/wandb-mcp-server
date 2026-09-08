@@ -1,0 +1,67 @@
+name: Security
+
+on:
+  push:
+    branches: [main, "staging/**"]
+  pull_request:
+    branches: [main, "staging/**"]
+  schedule:
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-scan:
+    name: Dependency vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Scan locked dependencies with Grype
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          path: "."
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true
+          output-format: table
+          output-file: grype-report.txt
+          grype-version: "v0.112.0"
+
+      - name: Upload dependency scan report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: grype-dependency-report
+          path: grype-report.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  source-scan:
+    name: Python source security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          version: "0.11.27"
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra test --python 3.12
+
+      - name: Scan Python source with Bandit
+        run: uv run --no-sync bandit -q -r src -ll

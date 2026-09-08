@@ -3,7 +3,6 @@
 Query and analyze your Weights & Biases data using natural language through the Model Context Protocol.
 
 [![CI](https://github.com/wandb/wandb-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/wandb/wandb-mcp-server/actions/workflows/ci.yml)
-[![Eval](https://github.com/wandb/wandb-mcp-server/actions/workflows/eval.yml/badge.svg)](https://github.com/wandb/wandb-mcp-server/actions/workflows/eval.yml)
 <!-- BEGIN EVAL BADGES -->
 [![SDK](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wandb/wandb-mcp-server/main/.badges/sdk.json)](https://wandb.ai/wandb/mcp-server-ci/weave)
 [![MCP](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wandb/wandb-mcp-server/main/.badges/mcp.json)](https://wandb.ai/wandb/mcp-server-ci/weave)
@@ -12,13 +11,54 @@ Query and analyze your Weights & Biases data using natural language through the 
 <div align="center">
   <a href="https://cursor.com/en/install-mcp?name=wandb&config=eyJ0cmFuc3BvcnQiOiJodHRwIiwidXJsIjoiaHR0cHM6Ly9tY3Aud2l0aHdhbmRiLmNvbS9tY3AiLCJoZWFkZXJzIjp7IkF1dGhvcml6YXRpb24iOiJCZWFyZXIge3tXQU5EQl9BUElfS0VZfX0iLCJBY2NlcHQiOiJhcHBsaWNhdGlvbi9qc29uLCB0ZXh0L2V2ZW50LXN0cmVhbSJ9fQ%3D%3D"><img src="https://cursor.com/deeplink/mcp-install-dark.svg" alt="Cursor" height="28"/></a>
   <a href="#claude-desktop"><img src="https://img.shields.io/badge/Claude-6B5CE6?logo=anthropic&logoColor=white" alt="Claude" height="28"/></a>
-  <a href="#openai"><img src="https://img.shields.io/badge/OpenAI-412991?logo=openai&logoColor=white" alt="OpenAI" height="28"/></a>
+  <a href="#openai-response-api"><img src="https://img.shields.io/badge/OpenAI-412991?logo=openai&logoColor=white" alt="OpenAI" height="28"/></a>
   <a href="#gemini-cli"><img src="https://img.shields.io/badge/Gemini-4285F4?logo=google&logoColor=white" alt="Gemini" height="28"/></a>
-  <a href="#mistral-lechat"><img src="https://img.shields.io/badge/LeChat-FF6B6B?logo=mistralai&logoColor=white" alt="LeChat" height="28"/></a>
+  <a href="#mistral-chat"><img src="https://img.shields.io/badge/LeChat-FF6B6B?logo=mistralai&logoColor=white" alt="LeChat" height="28"/></a>
   <a href="#vscode"><img src="https://img.shields.io/badge/VSCode-007ACC?logo=visualstudiocode&logoColor=white" alt="VSCode" height="28"/></a>
 </div>
 
 ---
+
+## v0.4.0 Release Highlights
+
+Version 0.4.0 makes W&B reads SDK-first, bounded, and workload-aware:
+
+- Run collections return lightweight metadata by default and support targeted
+  `summary_keys` and `config_keys` instead of loading every metric.
+- Explicit multi-key default-history reads use bounded outer-union semantics,
+  so metrics logged at different cadences remain visible instead of requiring
+  every key on the same history row.
+- Shared and Dedicated workload profiles bound collection, history, evaluation,
+  and schema reads. When admission is enabled, weighted in-flight work cannot
+  exceed the configured per-actor and per-process cost capacities; overload
+  returns retryable `server_busy`. Local STDIO leaves admission off by default.
+- Dedicated and Self-Managed deployments can send W&B Models/API traffic over an
+  internal Kubernetes service with `WANDB_INTERNAL_BASE_URL`, while public links
+  continue to use `WANDB_BASE_URL`.
+- Raw GraphQL is local compatibility only and remains query-only; managed
+  Shared and Dedicated profiles reject it. Mutations and subscriptions are
+  rejected.
+- Three local-only ARIA tools support bounded asynchronous submission and
+  polling when a deployment has an approved hosted W&B Agent path. Managed
+  Shared and Dedicated profiles reject the ARIA profile in v0.4.
+- Tool telemetry is bounded, excludes raw arguments and API keys, and correctly
+  attributes supported clients such as Codex, Claude Code, and Cursor.
+
+See the [v0.4.0 release notes](docs/releases/v0.4.0.md) for migration guidance,
+deployment settings, and the complete customer-visible summary.
+
+### Release availability
+
+v0.4.0 is a release candidate until its signed source tag and each deployment
+artifact are independently verified. The
+[release index](docs/releases/README.md) is the source of truth for public
+source, W&B-hosted, Dedicated/Self-Managed, and customer-container availability.
+Do not infer availability from a branch, mutable tag, or version string in this
+README.
+
+The official artifacts are the verified signed source tag and GitHub Release,
+plus channel-specific immutable container digests recorded there. PyPI and
+mutable image tags such as `latest` are not supported release channels.
 
 ## What Can This Server Do?
 
@@ -27,7 +67,7 @@ Query and analyze your Weights & Biases data using natural language through the 
 
 | **Analyze Experiments** | **Debug Traces** | **Create Reports** | **Get Help** |
 |:---|:---|:---|:---|
-| Show me the top 5 runs by eval/accuracy in wandb-smle/hiring-agent-demo-public? | How did the latency of my hiring agent predict traces evolve over the last months? | Generate a wandb report comparing the decisions made by the hiring agent last month | How do I create a leaderboard in Weave - ask SupportBot? |
+| Show me the top 5 runs by eval/accuracy in wandb-smle/hiring-agent-demo-public? | How did the latency of my hiring agent predict traces evolve over the last months? | Generate a wandb report comparing the decisions made by the hiring agent last month | Search the official W&B docs for how to create a leaderboard in Weave. |
 
 *"Go through the last 100 traces of my last training run in grpo-cuda/axolotl-grpo and tell me why rollout traces of my RL experiment were bad sometimes?"*
 </details>
@@ -40,11 +80,17 @@ Query and analyze your Weights & Biases data using natural language through the 
 | **infer_trace_schema_tool** | Discover field names, types, and sample values | *"What fields are in my traces?"* |
 | **query_weave_traces_tool** | Analyze LLM traces with `detail_level` control | *"Show failed traces with full data"* |
 | **count_weave_traces_tool** | Count traces and get storage metrics | *"How many traces failed?"* |
-| **query_wandb_tool** | Query W&B runs, metrics, and experiments | *"Show me runs with loss < 0.1"* |
-| **get_run_history_tool** | Sampled time-series metric data | *"Show loss curve for run abc123"* |
+| **resolve_trace_roots_tool** | Resolve spans to their root traces | *"Find the root traces for these calls"* |
+| **query_wandb_tool** | Query projects, runs, sweeps, and reports through bounded W&B read APIs | *"Show me runs with loss < 0.1"* |
+| **probe_project_tool** | Discover useful project fields and bounded samples | *"What metrics and config fields are available?"* |
+| **get_run_history_tool** | Bounded time-series data with sparse, multi-key outer-union sampling | *"Show loss and validation-loss curves for run abc123"* |
+| **compare_runs_tool** | Compare selected metrics and configuration across runs | *"Compare these three training runs"* |
+| **diagnose_run_tool** | Diagnose a run using bounded metadata and history reads | *"Why did this run diverge?"* |
+| **summarize_evaluation_tool** | Summarize bounded evaluation results with coverage metadata | *"Summarize this evaluation"* |
 | **create_wandb_report_tool** | Create reports with markdown, charts, and panels | *"Create a report with loss plots"* |
 | **log_analysis_to_wandb** | Log analysis metrics to W&B as a run | *"Log these latency stats to W&B"* |
 | **search_wandb_docs_tool** | Search official W&B documentation | *"How do I create a Weave scorer?"* |
+| **list_entities_tool** | List entities accessible to the current API key | *"Which W&B teams can I access?"* |
 | **query_wandb_entity_projects** | List projects for an entity | *"What projects exist?"* |
 | **list_registries_tool** | List model registries in an organization | *"What registries are available?"* |
 | **list_registry_collections_tool** | List collections within a registry | *"What models are in the prod registry?"* |
@@ -53,14 +99,74 @@ Query and analyze your Weights & Biases data using natural language through the 
 | **compare_artifact_versions_tool** | Diff two artifact versions | *"Compare model v1 vs v2"* |
 | **list_wandb_automations_tool** | List W&B Automations | *"What automations alert on run metrics or status for my team's runs?"* |
 | **list_wandb_integrations_tool** | List registered integrations for W&B automations (e.g. Slack, webhook) | *"Which Slack channels can my automations target?"* |
+| **aria_send_message** *(opt-in)* | Start or continue async work with the hosted W&B agent | *"Ask ARIA to diagnose these failed evals"* |
+| **aria_get_turn** *(opt-in)* | Poll an ARIA turn for progress or its final result | *"Check whether that ARIA analysis finished"* |
+| **aria_get_turns** *(opt-in)* | Poll up to 20 ARIA turns concurrently | *"Check all of those ARIA analyses in one bounded wait"* |
 
-**Read-only deployment mode:** Set `WANDB_MCP_READ_ONLY=true` to omit the two write tools,
-`create_wandb_report_tool` and `log_analysis_to_wandb`, while keeping every existing read tool.
-`query_wandb_tool` is query-only in every mode, regardless of this setting.
+**Read-only deployment mode:** Set `WANDB_MCP_ACCESS_MODE=read-only` to omit every tool
+classified as a write, including `create_wandb_report_tool`,
+`log_analysis_to_wandb`, and (in the ARIA profile) `aria_send_message`.
+`query_wandb_tool` is read-only in every mode. It normally uses documented W&B
+APIs and may use fixed, application-owned query-only projections to avoid
+per-result fan-out; callers cannot supply GraphQL to this tool.
+
+**Advanced raw GraphQL:** Raw GraphQL is available only in the explicit local
+`models-weave-graphql-compat` profile. That profile adds the query-only
+`query_wandb_graphql_tool` for schema introspection, unmodeled fields,
+cross-resource nesting, aliases, or exact response shapes that the typed tool
+cannot represent. It accepts exactly one bounded query operation; mutations
+and subscriptions are always rejected. See the
+[query capability matrix](docs/query-capabilities.md).
+
+On the supported W&B service transport, raw and fixed GraphQL responses are
+checked at 16 MiB before MCP JSON decoding and again after decoding with a
+500,000-node structural ceiling. Oversized results return
+`response_too_large`. These are MCP processing safeguards after the SDK has
+received the protobuf envelope; they do not cap network bytes or backend work.
+
+Recommended deployment presets:
+
+| Deployment | Settings |
+|---|---|
+| MT SaaS | `models-weave-agents`, `shared`, `read-write` (30 tools) |
+| Dedicated Models-only | `models-only`, `dedicated`, `read-write` (17 tools) |
+| Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (22 tools) |
+| Local GraphQL compatibility | `models-weave-graphql-compat`, `local`; choose either access mode |
+
+**Migration from v0.3.7:** `query_wandb_tool` now accepts structured SDK parameters
+(`entity_name`, `project_name`, `resource`, filters, ordering, and identifiers) instead
+of a GraphQL document. Existing raw-query callers must select the local
+`models-weave-graphql-compat` profile and call `query_wandb_graphql_tool`.
+
+**Run history semantics:** for explicit multi-key default-history sampled and
+ranged collection reads, `get_run_history_tool` outer-joins requested metric
+series by `_step`, falling back to the selected x-axis when `_step` is absent,
+so keys logged in separate `wandb.log()` calls do not disappear. Multi-key
+ranges use one independent bounded series per metric, in requests of at most
+eight series. The independent-spec path is designed to cover active/newly
+synced as well as exported history. Multi-request reads use the same freshly
+observed upper-step boundary for every batch. A fixed snapshot query reads run
+identity plus one complete, resume-oriented `historyTail` row; it avoids loading
+the full config, summary, system metrics, or history-key index before the
+bounded history read. `samples` is the
+total final-row budget across all requested keys, not a per-key allowance. All
+observed sparse points in the bounded result are
+retained when the budget permits. Diagnostics report `unobserved_keys` when no
+usable finite/non-null value appears in a bounded/sample result; `missing_keys`
+is reported only when absence was checked exactly. A custom x-axis must occur
+on the same row as its metric because the server does not invent interpolation.
+`non_finite_counts` reports NaN or Infinity observations seen in the bounded
+source; those invalid JSON numeric values are omitted from returned rows, and
+their counts are exhaustive only when `key_counts_exact=true`.
+Exact `target_x` remains a point lookup rather than an outer-union read. This
+path uses a fixed application-owned query-only projection, accepts no
+caller-supplied GraphQL, and is part of every supported managed tool profile.
 
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
 
-These tools are disabled by default. Enable them with `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS=true`.
+These tools are present in the explicit `models-weave-agents` and
+`models-weave-agents-aria` profiles. MT SaaS uses the former; Dedicated v0.4
+rejects both profiles.
 
 | Tool | Description | Example Query |
 |------|-------------|---------------|
@@ -82,6 +188,30 @@ These tools are disabled by default. Enable them with `WANDB_MCP_ENABLE_WEAVE_AG
 
 **Docs search:** `search_wandb_docs_tool` proxies [docs.wandb.ai](https://docs.wandb.ai) so you get data tools + documentation search from a single MCP connection. Disable with `WANDB_MCP_PROXY_DOCS=false` if you connect the docs MCP separately.
 
+Docs queries accept up to 64 KiB of UTF-8 text. The proxy makes one request,
+downloads at most 4 MiB (or the lower configured accumulation limit), and fits
+returned snippets to the response token budget. Oversized snippets include a
+truncation notice; upstream errors never echo the query.
+
+The package includes its token-counting vocabulary, so response budgets work
+without outbound downloads or a writable tokenizer cache.
+
+**ARIA tools are explicit and local-only in managed v0.4:** select
+`models-weave-agents-aria` and configure `WB_AGENT_BASE_URL` to an approved
+absolute HTTPS origin. Endpoint presence alone never enables the tools.
+`WANDB_MCP_ACCESS_MODE=read-only` omits `aria_send_message` while retaining the
+two polling tools. Shared and Dedicated managed profiles reject ARIA.
+
+**ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
+
+**Registry organization resolution:** Registry tools use the authenticated
+request's W&B client when `organization` is omitted. A single accessible
+organization is selected automatically; callers with access to multiple
+organizations receive `organization_required` with a bounded candidate list.
+Collection listings intentionally return `aliases: null` and
+`aliases_loaded: false` instead of loading every collection's version aliases.
+Use `list_artifact_versions_tool` when aliases are needed.
+
 </details>
 
 <details>
@@ -93,8 +223,11 @@ LLMs are not mind readers, ensure you specify the W&B Entity and W&B Project to 
 **→ Avoid asking overly broad questions**
 Questions such as "what is my best evaluation?" are probably overly broad and you'll get to an answer faster by refining your question to be more specific such as: "what eval had the highest f1 score?"
 
-**→ Ensure all data was retrieved**
-When asking broad, general questions such as "what are my best performing runs/evaluations?" it's always a good idea to ask the LLM to check that it retrieved all the available runs. The MCP tools are designed to fetch the correct amount of data, but sometimes there can be a tendency from the LLMs to only retrieve the latest runs or the last N runs.
+**→ Check result coverage for broad questions**
+Collection and evaluation tools report fields such as `total_count`,
+`returned_count`, `has_more`, `project_exhaustive`, `sampled`, and `truncated`.
+For broad questions, ask the client to explain these fields rather than assuming
+that a bounded result represents the entire project.
 
 </details>
 
@@ -102,11 +235,13 @@ When asking broad, general questions such as "what are my best performing runs/e
 
 ## Quick Start
 
-We recommend using our **hosted server** at `https://mcp.withwandb.com` - no installation required! <br>
+We recommend using our **hosted server** at `https://mcp.withwandb.com/mcp` - no installation required! <br>
 
 > 🔑 Get your API key from [wandb.ai/authorize](https://wandb.ai/authorize) <br>
 
-> 🌐 To connect to a **W&B Dedicated / On-Prem Instance** currently only the **local** MCP configuration can be used with an additional `WANDB_BASE_URL` env variable (the default is `api.wandb.ai`)
+> 🌐 For **W&B Dedicated / Self-Managed**, use the instance MCP endpoint when
+> enabled by your operator chart (`https://<your-instance>/mcp`). Local STDIO
+> remains available by setting `WANDB_BASE_URL=https://<your-instance>`.
 
 ### Cursor
 <details>
@@ -141,7 +276,8 @@ resp = client.responses.create(
 print(resp.output_text)
 ```
 
-> **Note**: OpenAI's MCP is server-side, so localhost URLs won't work. For local servers, see [Option 2](#general-installation-guide) with ngrok.
+> **Note**: OpenAI's MCP is server-side, so localhost URLs won't work. Use the
+> hosted W&B endpoint or an authenticated Helm deployment.
 </details>
 
 ### Claude Code
@@ -216,8 +352,6 @@ For local installation, see [Option 2](#general-installation-guide) below.
 <details>
 <summary>Configuration setup</summary>
 
-Mistral Le Chat is currently the best supported chat assistant for API-key based MCP authentication.
-
 Use the **Custom MCP Connector** flow:
 
 1. Open Le Chat and go to **Connectors**.
@@ -228,14 +362,15 @@ Use the **Custom MCP Connector** flow:
 
 If the UI asks for a token value, paste the raw W&B API key. If it asks for the full `Authorization` header value, use `Bearer <your-wandb-api-key>`.
 
-If adding the W&B connector from the Le Chat connector directory returns an `integrations.addIntegrationFromStore` 500 error, use the Custom MCP Connector flow above. That error happens in Mistral's connector-store add flow before Le Chat reaches the W&B MCP endpoint.
 </details>
 
 ### Claude Desktop
 <details>
 <summary>Configuration setup</summary>
 
-Add to your Claude config file. Claude desktop currently doesn't support remote MCPs to be added so we're adding the local MCP. Be careful to add the full path to `uv` for the command because Claude Desktop potentially doesn't find your `uv` installation otherwise.
+For a local STDIO connection, add the server to the Claude Desktop
+configuration. Use the absolute path to `uvx` if the desktop application cannot
+resolve your shell `PATH`.
 
 ```bash
 # macOS
@@ -249,10 +384,10 @@ notepad %APPDATA%\Claude\claude_desktop_config.json
 {
   "mcpServers": {
     "wandb": {
-     "command": "/Users/niware_wb/.local/bin/uvx",
+      "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/wandb/wandb-mcp-server",
+        "git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z",
         "wandb_mcp_server"
       ],
       "env": {
@@ -266,8 +401,6 @@ notepad %APPDATA%\Claude\claude_desktop_config.json
 Restart Claude Desktop to activate.
 </details>
 
-We're working on adding OAuth support so that we can integrate with ChatGPT.
-
 ---
 
 ## General Installation Guide
@@ -275,17 +408,19 @@ We're working on adding OAuth support so that we can integrate with ChatGPT.
 <details>
 <summary><strong>Option 1: Hosted Server (Recommended)</strong></summary>
 
-The hosted server provides a zero-configuration experience with enterprise-grade reliability. This server is maintained by the W&B team, automatically updated with new features, and scales to handle any workload. Perfect for teams and production use cases where you want to focus on your ML work rather than infrastructure.
+The hosted server provides a managed, zero-installation experience. It uses
+bounded workload profiles, request deadlines, and retryable overload responses
+to protect W&B while serving multiple users.
 
 ### Using the Public Server
 
-The easiest way is using our hosted server at `https://mcp.withwandb.com`.
+The easiest way is using our hosted server at `https://mcp.withwandb.com/mcp`.
 
 **Benefits:**
 - ✅ Zero installation
-- ✅ Always up-to-date
-- ✅ Automatic scaling
-- ✅ No maintenance
+- ✅ Managed, reviewed release updates
+- ✅ Managed workload limits
+- ✅ No server maintenance
 
 Simply use the configurations shown in [Quick Start](#quick-start).
 </details>
@@ -293,7 +428,12 @@ Simply use the configurations shown in [Quick Start](#quick-start).
 <details>
 <summary><strong>Option 2: Local Development (STDIO)</strong></summary>
 
-Run the MCP server locally for development, testing, or when you need full control over your data. The local server runs directly on your machine with STDIO transport for desktop clients or HTTP transport for web-based clients. Ideal for developers who want to customize the server or work in air-gapped environments. **See below for client specific installation**.
+Run the MCP server locally for development, testing, or when you need direct
+control over its configuration. The local server runs on your machine with
+STDIO transport for desktop clients or HTTP transport for web-based clients.
+It still requires network access to the configured W&B instance and any enabled
+documentation or telemetry endpoints. **See below for client-specific
+installation.**
 
 ### Running the Server Locally
 
@@ -302,12 +442,9 @@ Run the MCP server locally for development, testing, or when you need full contr
 # Install uv if needed
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install the server
-uv pip install git+https://github.com/wandb/wandb-mcp-server
-
-# Run with STDIO transport (for desktop clients)
+# Replace vX.Y.Z with a signed, available release from the release index.
 export WANDB_API_KEY="your-api-key"
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server
 ```
 
 > 📖 For complete command line options and environment variables, see the [Command Line Reference](#command-line-reference) in the More Information section.
@@ -322,12 +459,12 @@ Add to your MCP client config (for detailed client-specific configs see below):
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/wandb/wandb-mcp-server",
+        "git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z",
         "wandb_mcp_server"
       ],
       "env": {
         "WANDB_API_KEY": "YOUR_API_KEY",
-        "WANDB_BASE_URL": "YOUR_BASE_URL", #optional for dedicated or on-prem installations
+        "WANDB_BASE_URL": "https://your-wandb-instance.example.com"
       }
     }
   }
@@ -361,12 +498,12 @@ Manual local (dedicated or on-prem) config in `mcp.json`:
   "command": "uvx",
     "args": [
       "--from",
-      "git+https://github.com/wandb/wandb-mcp-server",
+      "git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z",
       "wandb_mcp_server"
     ],
     "env": {
       "WANDB_API_KEY": "YOUR-API_KEY",
-      "WANDB_BASE_URL": "https://your-wandb-instance.example.com", # optional
+      "WANDB_BASE_URL": "https://your-wandb-instance.example.com"
     }
 }
 ```
@@ -377,13 +514,13 @@ Manual local (dedicated or on-prem) config in `mcp.json`:
 codex mcp add wandb \
     --env WANDB_API_KEY=your_api_key_here \
     --env WANDB_BASE_URL=https://your-wandb-instance.example.com \
-    -- uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
+    -- uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server
 ```
 
 ### Claude Code
 Add `--scope user` for global config.
 ```bash
-claude mcp add wandb -e WANDB_API_KEY=your-api-key -e WANDB_BASE_URL=your-base-url -- uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
+claude mcp add wandb -e WANDB_API_KEY=your-api-key -e WANDB_BASE_URL=your-base-url -- uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server
 ```
 
 ### Claude Desktop
@@ -400,15 +537,15 @@ notepad %APPDATA%\Claude\claude_desktop_config.json
 {
   "mcpServers": {
     "wandb": {
-     "command": "/Users/niware_wb/.local/bin/uvx",
+      "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/wandb/wandb-mcp-server",
+        "git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z",
         "wandb_mcp_server"
       ],
       "env": {
         "WANDB_API_KEY": "<your-api-key>",
-        "WANDB_BASE_URL": "https://your-wandb-instance.example.com", # optional
+        "WANDB_BASE_URL": "https://your-wandb-instance.example.com"
       }
     }
   }
@@ -417,39 +554,35 @@ notepad %APPDATA%\Claude\claude_desktop_config.json
 
 Restart Claude Desktop to activate.
 
-### Testing with ngrok (for server-side clients)
-
-For clients like OpenAI and LeChat that require public URLs:
-
-```bash
-# 1. Start HTTP server
-uvx wandb-mcp-server --transport http --port 8080
-
-# 2. Expose with ngrok
-ngrok http 8080
-
-# 3. Use the ngrok URL in your client configuration
-```
+The standalone HTTP entrypoint is intentionally loopback-only and must not be
+published through ngrok or another tunnel. Use the authenticated hosted wrapper
+or the `operator-wandb` Helm deployment for a remotely accessible endpoint.
 
 </details>
 
 <details>
-<summary><strong>Option 3: Self-Hosted HTTP Server (Advanced)</strong></summary>
+<summary><strong>Option 3: Local HTTP Development</strong></summary>
 
-This public repository focuses on the STDIO transport. If you need a fully managed HTTP deployment (Docker, Cloud Run, Hugging Face, etc.), start from this codebase and add your own HTTP entrypoint in a separate repo. The production-grade hosted server maintained by W&B now lives in a private repository built on top of this one.
+The package exposes an unauthenticated Streamable HTTP transport only for local
+development. It requires an explicit acknowledgement and accepts loopback binds
+only. Use the authenticated hosted wrapper or Helm image for production HTTP.
 
 ### Running HTTP Server Locally
 
 For lightweight experimentation and testing, you can run the FastMCP HTTP transport directly:
 
 ```bash
-# Basic HTTP server
-uvx wandb_mcp_server --transport http --host 0.0.0.0 --port 8080
+# Basic loopback HTTP server
+export MCP_AUTH_DISABLED=true
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server \
+  --transport http \
+  --host 127.0.0.1 \
+  --port 8080
 
 # With Weave tracing enabled
-uvx wandb_mcp_server \
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server \
   --transport http \
-  --host 0.0.0.0 \
+  --host 127.0.0.1 \
   --port 8080 \
   --weave_entity your-entity \
   --weave_project mcp-server-logs
@@ -457,25 +590,31 @@ uvx wandb_mcp_server \
 
 > 📖 For all available command line options, see the [Command Line Reference](#command-line-reference) in the More Information section.
 
-**Note**: Clients must continue to provide their own W&B API key via Bearer token per the MCP spec.
+**Note**: This entrypoint has no bearer-authentication middleware. It uses the
+single server-side `WANDB_API_KEY` and refuses non-loopback binds.
 </details>
 
 <details>
 <summary><strong>Option 4: Dedicated / On-Prem Deployment</strong></summary>
 
-For W&B Dedicated and On-Prem customers, the MCP server is available as an optional subchart in the `operator-wandb` Helm chart. Enable it with one line in your `WeightsAndBiases` CR:
+For W&B Dedicated and Self-Managed customers, the MCP server is available as an
+optional component in the `operator-wandb` Helm chart. Enable it in your
+`WeightsAndBiases` values:
 
 ```yaml
 mcp-server:
   install: true
 ```
 
-The server becomes accessible at `https://<your-instance>/mcp`. It automatically connects to your in-cluster Weave trace server and W&B API.
+When an MCP-capable chart release is available, the server becomes accessible
+at `https://<your-instance>/mcp`. The chart keeps this public URL for clients
+and user-facing links while routing server-side W&B API calls to the
+namespace-local API service.
 
 **Requirements:**
 - `weave-trace` must be installed (`weave-trace.install: true`)
-- Operator chart version >= 0.42.0
-- Image `wandb/mcp-server:0.3.0` or later
+- An `operator-wandb` release whose notes explicitly include MCP support
+- The immutable MCP image digest recorded by that chart release
 
 **Client configuration** for dedicated instances:
 
@@ -512,7 +651,7 @@ When running the server locally, you can customize its behavior with command lin
 | `--transport` | string | `stdio` | Transport type: `stdio` for local MCP client communication or `http` for HTTP server |
 | `--host` | string | `localhost` | Host to bind HTTP server to (only used with `--transport http`) |
 | `--port` | integer | `8080` | Port to run the HTTP server on (only used with `--transport http`) |
-| `--wandb_api_key` | string | None | Weights & Biases API key for authentication |
+| `--wandb_api_key` | string | None | Compatibility-only API key input; prefer `WANDB_API_KEY` so the key is not exposed in process arguments |
 | `--weave_entity` | string | None | The W&B entity to log traced MCP server calls to |
 | `--weave_project` | string | `weave-mcp-server` | The W&B project to log traced MCP server calls to |
 
@@ -521,18 +660,75 @@ When running the server locally, you can customize its behavior with command lin
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `WANDB_API_KEY` | Your W&B API key (alternative to `--wandb_api_key` flag) | Yes |
-| `WANDB_BASE_URL` | Custom W&B instance URL (for dedicated/on-prem instances) | No |
+| `WANDB_BASE_URL` | Public W&B instance URL used for credentials and user-facing links | No |
+| `WANDB_INTERNAL_BASE_URL` | Optional server-side W&B Models/API URL; Dedicated charts set this to the in-cluster API service. Weave trace routing remains controlled by `WF_TRACE_SERVER_URL`. | No |
+| `WB_AGENT_BASE_URL` | Explicit approved HTTPS origin required only by the ARIA tool profile | No |
 | `MCP_SERVER_LOG_LEVEL` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` | No |
-| `WANDB_SILENT` | Set to `"False"` to suppress W&B output | No |
-| `WEAVE_SILENT` | Set to `"False"` to suppress Weave output | No |
+| `WANDB_SILENT` | Set to `"True"` to suppress W&B SDK output (default: `true`) | No |
+| `WEAVE_SILENT` | Set to `"True"` to suppress Weave SDK output (default: `true`) | No |
 | `WANDB_DEBUG` | Set to `"true"` to enable detailed W&B logging | No |
-| `MCP_AUTH_DISABLED` | Disable HTTP authentication (development only) | No |
+| `MCP_AUTH_DISABLED` | Must be `true` to acknowledge unauthenticated loopback HTTP development | No |
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
-| `WANDB_MCP_ENABLE_WEAVE_TOOLS` | Enable Weave trace tools (default: `true`; set `false` for installs without a trace backend) | No |
-| `WANDB_MCP_ENABLE_WEAVE_AGENT_TOOLS` | Enable Weave Agents (OTel/GenAI) tools (default: `false`) | No |
-| `WANDB_MCP_READ_ONLY` | Omit report creation and analysis logging write tools (default: `false`) | No |
-| `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events. Useful as a workaround for older stdio builds that wrote analytics to stdout. | No |
-| `MAX_RESPONSE_TOKENS` | Token budget for response truncation (default: `30000`) | No |
+| `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events | No |
+| `MCP_ANALYTICS_QUEUE_CAPACITY` | Maximum outstanding events per optional Segment or Datadog forwarder (default: `256`) | No |
+| `MCP_REQUEST_SUCCESS_SAMPLE_RATE` | Deterministic sample rate for successful HTTP request telemetry (default: `0.10`; failures and requests over two seconds are always retained). | No |
+| `MCP_LOG_PRIVACY_LEVEL` | Telemetry privacy level: `off`, `standard`, or `strict` (unset default: `off`; empty/invalid values fail startup) | No |
+
+<!-- BEGIN GENERATED: PUBLIC FEATURE PROFILES -->
+<!-- Generated by scripts/public_release.py docs. Do not edit this block. -->
+
+Release-controlled orthogonal selectors:
+
+| Variable | Default | Effect |
+|---|---:|---|
+| `WANDB_MCP_TOOL_PROFILE` | `models-weave` | Selects one exact reviewed product-capability profile. |
+| `WANDB_MCP_ACCESS_MODE` | `read-write` | `read-only` subtracts every write tool. |
+| `MCP_WORKLOAD_PROFILE` | `local` | Selects query/history limits, admission mode and wait, deadlines, sessions, and HTTP rate policy. |
+| `MCP_CAPACITY_CLASS` | `small` | Selects bounded actor/process capacities and worker counts. |
+
+Exact tool profiles:
+
+| Tool profile | Groups | Managed workloads | Read-write | Read-only |
+|---|---|---|---:|---:|
+| `models-only` | models | shared, dedicated | 17 | 15 |
+| `models-weave` | models, weave | shared, dedicated | 22 | 20 |
+| `models-weave-agents` | models, weave, agents | shared | 30 | 28 |
+| `models-weave-agents-aria` | models, weave, agents, aria | local only | 33 | 30 |
+| `models-weave-graphql-compat` | models, weave, raw-graphql | local only | 23 | 21 |
+
+Exact workload defaults:
+
+| Workload | Collection rows | History samples | Metric keys | Range span | Full-detail rows | Admission / HTTP rate |
+|---|---:|---:|---:|---:|---:|---|
+| `shared` | 100 | 500 | 20 | 5,000 | 3 | application admission and HTTP rate limiting off |
+| `dedicated` | 250 | 1,500 | 50 | 20,000 | 10 | admission on; 60/key/minute, 1000/process/minute |
+| `local` | 1,000 | 5,000 | 100 | 100,000 | 25 | application admission and HTTP rate limiting off |
+
+Exact capacity classes:
+
+| Capacity class | Actor | Process | Sync workers | Count workers |
+|---|---:|---:|---:|---:|
+| `small` | 4 | 4 | 4 | 4 |
+| `medium` | 4 | 8 | 8 | 8 |
+| `large` | 8 | 16 | 16 | 8 |
+
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:f60ff283adf64c5b6644d29095d70ac50357accbaaed5f5215dc2a2eb9f0944b`.
+<!-- END GENERATED: PUBLIC FEATURE PROFILES -->
+
+For the standalone console entrypoint, credential resolution is command-line
+compatibility input, then the `.netrc` entry for `WANDB_BASE_URL`, then
+`WANDB_API_KEY` (including a repository-root `.env` loaded by the CLI). Prefer
+the environment and remove stale `.netrc` entries for the same host; never pass
+a key in release automation or a process argument.
+
+Workload profiles are authoritative in managed deployments. They select query
+and history limits, admission mode and wait, deadlines, session bounds, and
+HTTP request-rate policy. Low-level numeric overrides are rejected for
+`shared` and `dedicated`; only `local` accepts bounded advanced overrides.
+The generated tables above contain the exact workload and capacity defaults.
+`MCP_CAPACITY_CLASS` independently selects actor/process capacity and worker
+counts; it does not change product capabilities, query semantics, or caller
+authorization.
 
 #### Usage Examples
 
@@ -540,32 +736,29 @@ When running the server locally, you can customize its behavior with command lin
 ```bash
 # Basic usage with environment variable
 export WANDB_API_KEY="your-api-key"
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server
-
-# Or with API key as argument
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server --wandb_api_key your-api-key
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server
 ```
 
 For stdio clients such as Claude Desktop, stdout is reserved for MCP JSON-RPC
-messages. The server routes logs and analytics to stderr in stdio mode so
-desktop clients do not parse diagnostics as protocol messages. If you are using
-an older version and see JSON-RPC parse warnings containing analytics fields
-such as `schema_version` or `event_type`, set `MCP_ANALYTICS_DISABLED=true` as
-a workaround.
+messages. The server routes logs and analytics to stderr so clients do not parse
+diagnostics as protocol messages.
 
 **HTTP Transport (for testing and development):**
 ```bash
 # Basic HTTP server on localhost:8080
-uvx wandb_mcp_server --transport http --host 127.0.0.1 --port 8080
-
-# Bind to all interfaces with custom port
-uvx wandb_mcp_server --transport http --host 0.0.0.0 --port 9090
+export MCP_AUTH_DISABLED=true
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server \
+  --transport http \
+  --host 127.0.0.1 \
+  --port 8080
 ```
 
 **With Weave Tracing (log MCP calls to W&B):**
 ```bash
-uvx wandb_mcp_server \
+export MCP_AUTH_DISABLED=true
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server \
   --transport http \
+  --host 127.0.0.1 \
   --port 8080 \
   --weave_entity my-team \
   --weave_project mcp-monitoring
@@ -573,13 +766,18 @@ uvx wandb_mcp_server \
 
 **View all options:**
 ```bash
-uvx --from git+https://github.com/wandb/wandb-mcp-server wandb_mcp_server --help
+uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server --help
 ```
 
 ### Contributing & Releasing
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** -- Development setup, testing, PR process, architecture overview
 - **[RELEASING.md](RELEASING.md)** -- Version bumping, release checklist, deployment pipeline
+- **[Release index](docs/releases/README.md)** -- Availability and immutable artifacts by channel
+- **[Query capability matrix](docs/query-capabilities.md)** -- Typed reads and the opt-in compatibility path
+- **[Observability](docs/OBSERVABILITY.md)** -- Logging, telemetry privacy, and supported collection modes
+- **[Tool-development skill](.agents/skills/develop-wandb-mcp-tools/SKILL.md)** -- Safe implementation and validation workflow
+- **[Release skill](.agents/skills/release-wandb-mcp-server/SKILL.md)** -- Exact-candidate release validation and handoff
 
 ### Key Resources
 
@@ -610,7 +808,6 @@ resp = client.responses.create(
             "server_description": "Query W&B data",
             "server_url": "https://mcp.withwandb.com/mcp",
             "authorization": os.getenv('WANDB_API_KEY'),
-            "require_approval": "never",
         },
     ],
     input="How many traces are in wandb-smle/hiring-agent-demo-public?",
@@ -627,20 +824,21 @@ print(resp.output_text)
 Unit tests run without API keys or network access:
 
 ```bash
-pip install -e ".[test]"
-pytest tests/ -v
+uv sync --frozen --extra test --extra http
+uv run pytest tests/ -m "not integration" -v
 ```
 
 CI runs automatically on every push and PR via GitHub Actions.
 
-#### Two-Repo Model
+#### Release artifact model
 
-| Repo | Visibility | Contains |
-|------|-----------|----------|
-| `wandb/wandb-mcp-server` | Public | Tool logic, core server, unit tests |
-| `wandb/wandb-mcp-server-internal` | Private | LLM evals, load tests, Dockerfile, Helm, CI/CD |
-
-The internal repo installs the public repo as a pip dependency.
+The public Python source, W&B-managed deployment image, and Dedicated/Self-Managed
+chart are independently versioned artifacts. Managed builds pin this repository
+to a signed source tag, and the chart pins a verified image digest. Local
+source installs should use `@vX.Y.Z` with a version marked available in the
+[release index](docs/releases/README.md); an unqualified GitHub branch is a
+development input, not an immutable release. See [RELEASING.md](RELEASING.md)
+for the required attestation and digest handoff checks.
 
 ### Support
 

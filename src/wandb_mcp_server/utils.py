@@ -4,8 +4,10 @@ import json as _json
 import logging
 import netrc
 import os
+import re
 import subprocess
 import sys
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -14,6 +16,12 @@ from urllib.parse import urlparse
 import simple_parsing
 from rich.logging import RichHandler
 from rich.console import Console
+
+from wandb_mcp_server.error_sanitizer import (
+    MAX_EXTERNAL_ERROR_CHARS,
+    sanitize_sensitive_text,
+    sanitize_sensitive_value,
+)
 
 os.environ["WANDB_SILENT"] = "True"
 os.environ["WEAVE_SILENT"] = "True"
@@ -65,10 +73,125 @@ class _JsonLogFormatter(logging.Formatter):
             payload["session_id_prefix"] = session_prefix
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
+        else:
+            sanitized_exc_info = getattr(record, "_wandb_mcp_sanitized_exc_info", None)
+            if sanitized_exc_info:
+                payload["exc_info"] = sanitized_exc_info
         # stack_info is separate from exc_info; include if present
         if record.stack_info:
             payload["stack_info"] = self.formatStack(record.stack_info)
         return _json.dumps(payload, default=str)
+
+
+def _sanitize_rendered_log_message(record: logging.LogRecord, message: object) -> str:
+    """Sanitize a rendered message without changing its logging arguments."""
+    exception_text = getattr(record, "_wandb_mcp_sanitized_message_suffix", "")
+    if exception_text:
+        message = f"{message}\n{exception_text}"
+    return sanitize_sensitive_text(
+        message,
+        max_chars=MAX_EXTERNAL_ERROR_CHARS,
+    )
+
+
+_LOG_PERCENT_TOKEN_RE = re.compile(r"%(?:\([^)]+\))?[#0\- +]?(?:\d+|\*)?(?:\.(?:\d+|\*))?[hlL]?[diouxXeEfFgGcrsa%]")
+
+
+def _sanitize_log_message_template(message: str) -> str:
+    """Redact literal values without consuming printf-style placeholders."""
+    tokens: list[str] = []
+
+    def _protect_token(match: re.Match[str]) -> str:
+        tokens.append(match.group(0))
+        # A leading comma keeps key/value redaction from interpreting the
+        # sentinel as the value in templates such as ``api_key=%s``.
+        return f",<wandb-mcp-log-token-{len(tokens) - 1}>,"
+
+    sanitized = sanitize_sensitive_text(_LOG_PERCENT_TOKEN_RE.sub(_protect_token, message))
+    for index, token in enumerate(tokens):
+        sanitized = sanitized.replace(f",<wandb-mcp-log-token-{index}>,", token)
+    return sanitized
+
+
+class _SensitiveLogRecord(logging.LogRecord):
+    """A pickle-safe LogRecord that sanitizes only its rendered message."""
+
+    __slots__ = ()
+    _wandb_mcp_sensitive_get_message = True
+
+    def getMessage(self) -> str:
+        return _sanitize_rendered_log_message(self, super().getMessage())
+
+
+def _install_sensitive_get_message(record: logging.LogRecord) -> None:
+    """Make ``getMessage`` safe without replacing ``msg`` or clearing ``args``."""
+    if getattr(type(record), "_wandb_mcp_sensitive_get_message", False) or getattr(
+        record, "_wandb_mcp_sensitive_get_message", False
+    ):
+        return
+
+    if type(record) is logging.LogRecord:
+        record.__class__ = _SensitiveLogRecord
+    elif not record.args:
+        # Preserve custom record classes and any formatter-specific behavior.
+        # Argument-bearing records are still protected by shape-preserving
+        # argument sanitization in the filter.
+        record.msg = sanitize_sensitive_text(
+            record.msg,
+            max_chars=MAX_EXTERNAL_ERROR_CHARS,
+        )
+
+
+class _SensitiveDataFilter(logging.Filter):
+    """Ensure credentials and internal service addresses never reach logs.
+
+    Some third-party formatters, including Uvicorn's access formatter, treat
+    ``LogRecord.args`` as a structured protocol. Sanitize those values without
+    flattening the record so downstream formatters retain their expected shape.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if record.args:
+                record.args = sanitize_sensitive_value(record.args)
+                if isinstance(record.msg, str):
+                    record.msg = _sanitize_log_message_template(record.msg)
+            _install_sensitive_get_message(record)
+            if record.exc_info:
+                exception_text = sanitize_sensitive_text(
+                    "".join(traceback.format_exception(*record.exc_info)),
+                    max_chars=MAX_EXTERNAL_ERROR_CHARS,
+                )
+                record._wandb_mcp_sanitized_exc_info = exception_text
+                if os.environ.get("MCP_LOG_FORMAT", "rich").strip().lower() != "json":
+                    record._wandb_mcp_sanitized_message_suffix = exception_text
+                record.exc_info = None
+                record.exc_text = None
+            if hasattr(record, "json_fields"):
+                record.json_fields = sanitize_sensitive_value(record.json_fields)
+        except Exception:
+            # Logging must remain non-fatal. The sanitizer is intentionally
+            # conservative, but a malformed third-party record cannot break
+            # request handling.
+            pass
+        return True
+
+
+def _install_sensitive_record_factory() -> None:
+    """Sanitize every log record, including third-party/root logger output."""
+    current_factory = logging.getLogRecordFactory()
+    if getattr(current_factory, "_wandb_mcp_sensitive", False):
+        return
+    sanitizer = _SensitiveDataFilter()
+
+    def _sanitizing_factory(*args, **kwargs):
+        factory = _SensitiveLogRecord if current_factory is logging.LogRecord else current_factory
+        record = factory(*args, **kwargs)
+        sanitizer.filter(record)
+        return record
+
+    _sanitizing_factory._wandb_mcp_sensitive = True  # type: ignore[attr-defined]
+    logging.setLogRecordFactory(_sanitizing_factory)
 
 
 def _build_log_handler() -> logging.Handler:
@@ -85,16 +208,18 @@ def _build_log_handler() -> logging.Handler:
     if log_format == "json":
         handler: logging.Handler = logging.StreamHandler(sys.stderr)
         handler.setFormatter(_JsonLogFormatter())
-        return handler
-    # Default: rich output, preserves today's behavior for local dev + Cloud Run.
-    stderr_console = Console(stderr=True)
-    return RichHandler(
-        console=stderr_console,
-        show_time=True,
-        show_level=True,
-        show_path=False,
-        markup=True,
-    )
+    else:
+        # Default: rich output, preserves today's behavior for local dev + Cloud Run.
+        stderr_console = Console(stderr=True)
+        handler = RichHandler(
+            console=stderr_console,
+            show_time=True,
+            show_level=True,
+            show_path=False,
+            markup=True,
+        )
+    handler.addFilter(_SensitiveDataFilter())
+    return handler
 
 
 # Third-party loggers we explicitly reconfigure in JSON mode so every line emitted by
@@ -135,6 +260,7 @@ def configure_process_logging() -> None:
     if _process_logging_configured:
         return
     _process_logging_configured = True
+    _install_sensitive_record_factory()
 
     if os.environ.get("MCP_LOG_FORMAT", "rich").strip().lower() != "json":
         return
@@ -408,7 +534,7 @@ def get_git_commit():
         result = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
         return str(result.stdout.strip())[:8]
     except Exception as e:
-        logger.warning(f"Failed to get git commit: {e}")
+        logger.warning("Failed to resolve git commit (%s)", type(e).__name__)
         return "unknown"
 
 

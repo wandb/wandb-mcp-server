@@ -3,6 +3,7 @@
 import json
 from typing import Optional
 
+from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -94,9 +95,15 @@ def list_entity_projects(
                     )
                 entities_projects[ent] = projects_data
             except Exception as e:
-                logger.warning(f"Failed to list projects for entity {ent}: {e}")
-                ctx.mark_error(f"{type(e).__name__}: {e}")
-                entities_projects[ent] = [{"error": str(e)}]
+                raise_for_wandb_server_busy(e)
+                logger.warning("Failed to list projects for one entity (%s)", type(e).__name__)
+                ctx.mark_error(type(e).__name__)
+                entities_projects[ent] = [
+                    {
+                        "error": "project_query_failed",
+                        "message": "W&B project listing failed for this entity.",
+                    }
+                ]
 
         return json.dumps(
             {

@@ -88,10 +88,8 @@ class TestInferTraceSchema:
         mock_service.query_traces.return_value = mock_result
         return mock_service
 
-    @patch("wandb_mcp_server.mcp_tools.infer_schema.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
-    def test_basic_schema_inference(self, mock_count, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+    def test_basic_schema_inference(self, mock_count):
         mock_count.side_effect = [100, 25]
 
         mock_service = self._make_mock_service(
@@ -117,10 +115,8 @@ class TestInferTraceSchema:
         assert "limit" in call_kwargs, "Should use 'limit', not 'target_limit'"
         assert call_kwargs["limit"] == 20
 
-    @patch("wandb_mcp_server.mcp_tools.infer_schema.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
-    def test_empty_project(self, mock_count, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+    def test_empty_project(self, mock_count):
         mock_count.side_effect = [0, 0]
 
         mock_service = self._make_mock_service([])
@@ -132,10 +128,8 @@ class TestInferTraceSchema:
         assert result["fields"] == []
         assert "note" in result
 
-    @patch("wandb_mcp_server.mcp_tools.infer_schema.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
-    def test_top_values_limited(self, mock_count, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+    def test_top_values_limited(self, mock_count):
         mock_count.side_effect = [50, 10]
 
         traces = [{"status": f"val{i % 7}"} for i in range(20)]
@@ -147,10 +141,8 @@ class TestInferTraceSchema:
         status_field = next(f for f in result["fields"] if f["path"] == "status")
         assert len(status_field["top_values"]) <= 3
 
-    @patch("wandb_mcp_server.mcp_tools.infer_schema.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
-    def test_nested_fields_flattened(self, mock_count, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
+    def test_nested_fields_flattened(self, mock_count):
         mock_count.side_effect = [10, 5]
 
         mock_service = self._make_mock_service(
@@ -166,20 +158,18 @@ class TestInferTraceSchema:
         assert "summary.weave.status" in field_paths
         assert "summary.weave.latency_ms" in field_paths
 
-    @patch("wandb_mcp_server.mcp_tools.infer_schema.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
-    def test_query_failure_returns_error(self, mock_count, mock_api_mgr):
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
-        mock_count.side_effect = Exception("Network timeout")
+    def test_query_failure_returns_error(self, mock_count):
+        mock_count.side_effect = Exception("customer-error-canary")
 
         result = json.loads(infer_trace_schema("e", "p"))
-        assert "error" in result
+        assert result["error"] == "schema_query_failed"
+        assert result["message"] == "The Weave trace schema query failed."
+        assert "customer-error-canary" not in json.dumps(result)
 
-    @patch("wandb_mcp_server.mcp_tools.infer_schema.WandBApiManager")
     @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
-    def test_pydantic_trace_objects_handled(self, mock_count, mock_api_mgr):
+    def test_pydantic_trace_objects_handled(self, mock_count):
         """Non-dict trace objects with model_dump() should be converted, not dropped."""
-        mock_api_mgr.get_api.return_value = MagicMock(viewer="test-user")
         mock_count.side_effect = [5, 2]
 
         pydantic_trace = MagicMock()
@@ -192,6 +182,25 @@ class TestInferTraceSchema:
         field_paths = [f["path"] for f in result["fields"]]
         assert "id" in field_paths
         assert "op_name" in field_paths
+
+    @patch("wandb_mcp_server.mcp_tools.infer_schema.MCP_MAX_SCHEMA_SAMPLE_ROWS", 3)
+    @patch("wandb_mcp_server.mcp_tools.count_traces.count_traces")
+    def test_profile_cap_and_non_exhaustive_scope_are_explicit(self, mock_count):
+        mock_count.side_effect = [10, 4]
+        mock_service = self._make_mock_service([{"id": f"t-{index}"} for index in range(3)])
+
+        with patch("wandb_mcp_server.mcp_tools.query_weave.get_trace_service", return_value=mock_service):
+            result = json.loads(infer_trace_schema("e", "p", sample_size=50))
+
+        scope = result["sample_scope"]
+        assert scope["requested_count"] == 50
+        assert scope["applied_limit"] == 3
+        assert scope["returned_count"] == 3
+        assert scope["total_count"] == 10
+        assert scope["has_more"] is True
+        assert scope["project_exhaustive"] is False
+        assert scope["coverage"] == 0.3
+        assert mock_service.query_traces.call_args.kwargs["limit"] == 3
 
 
 class TestInferSchemaToolDescription:
