@@ -119,6 +119,7 @@ async def test_public_success_reaches_both_sinks_once() -> None:
                 "query": "private query text",
                 "max_items": 50,
                 "include_files": True,
+                "private-client-argument-canary": True,
             },
         )
 
@@ -141,6 +142,7 @@ async def test_public_success_reaches_both_sinks_once() -> None:
     assert segment[0]["userId"] == expected_actor
     assert "private-team" not in str(segment[0])
     assert "private query text" not in str(segment[0])
+    assert "private-client-argument-canary" not in str(segment[0])
     assert datadog[0]["attributes"]["tool"]["name"] == "query_public_tool"
     assert datadog[0]["attributes"]["usage_dimensions"] == {
         "admission_outcome": "disabled",
@@ -150,6 +152,7 @@ async def test_public_success_reaches_both_sinks_once() -> None:
         "queue_ms_bucket": "0",
     }
     assert "params" not in datadog[0]["attributes"]
+    assert "private-client-argument-canary" not in str(datadog[0])
 
 
 @pytest.mark.usefixtures("_enable_analytics")

@@ -628,6 +628,35 @@ class TestTrackToolCall:
         assert "query" not in dimensions
         assert "private-team" not in json.dumps(capture.event)
 
+    @pytest.mark.parametrize("level", ["off", "standard", "strict"])
+    def test_usage_dimensions_reject_client_defined_field_names(self, capture, monkeypatch, level):
+        monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", level)
+        AnalyticsTracker(enabled=True).track_tool_call(
+            tool_name="query_wandb_tool",
+            session_id="s",
+            viewer_info=None,
+            params={
+                "private-boolean-canary": True,
+                "private-list-canary": [],
+                "private-map-canary": {},
+                "include_files": True,
+                "columns": ["private-column-canary"],
+                "filters": {"private-filter-canary": 1},
+                "limit": 100,
+                "resource": "runs",
+            },
+        )
+
+        assert capture.event["usage_dimensions"] == {
+            "columns_count": 1,
+            "has_filters": True,
+            "filter_key_count": 1,
+            "include_files": True,
+            "limit_bucket": "51-100",
+            "resource": "runs",
+        }
+        assert "canary" not in json.dumps(capture.event)
+
 
 # -- track_request -------------------------------------------------------------
 

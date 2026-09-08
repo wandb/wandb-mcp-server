@@ -78,6 +78,44 @@ _USAGE_COUNTABLE_NUMBER_KEYS = frozenset(
     }
 )
 
+# Only these reviewed argument names may produce boolean or collection-shape
+# dimensions. An unknown JSON key is customer input even when its value is not.
+_USAGE_SHAPE_KEYS = frozenset(
+    {
+        "columns",
+        "config_keys",
+        "expand_columns",
+        "filter",
+        "filters",
+        "group_by",
+        "history_keys",
+        "include",
+        "include_artifacts",
+        "include_costs",
+        "include_details",
+        "include_feedback",
+        "include_file_diff",
+        "include_files",
+        "include_history_overlap",
+        "include_per_task",
+        "include_turn",
+        "keys",
+        "metadata_only",
+        "metrics",
+        "panels",
+        "plots_html",
+        "return_full_data",
+        "roles",
+        "summary_keys",
+        "tags",
+        "trace_ids",
+        "truncate_content",
+        "turn_ids",
+        "variables",
+    }
+)
+_USAGE_FIELD_NAMES = _USAGE_SHAPE_KEYS | _USAGE_COUNTABLE_NUMBER_KEYS | _USAGE_ENUM_VALUES.keys()
+
 # ---------------------------------------------------------------------------
 # Privacy levels
 #
@@ -516,14 +554,12 @@ def _usage_dimensions(params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not params:
         return {}
     dimensions: Dict[str, Any] = {}
-    excluded = _FREE_TEXT_KEYS | _IDENTIFIER_KEYS_FOR_HASHING
-    for raw_key in sorted(params):
+    for key in sorted(_USAGE_FIELD_NAMES):
         if len(dimensions) >= _MAX_USAGE_DIMENSIONS:
             break
-        key = str(raw_key).lower()
-        value = params[raw_key]
-        if any(pattern in key for pattern in _SENSITIVE_PARAM_PATTERNS) or key in excluded:
+        if key not in params:
             continue
+        value = params[key]
         if key in {"filter", "filters"}:
             dimensions["has_filters"] = bool(value)
             if isinstance(value, dict) and len(dimensions) < _MAX_USAGE_DIMENSIONS:

@@ -55,6 +55,36 @@ def test_sanitizes_nested_cyclic_and_credential_values() -> None:
     assert sanitized["cycle"] == "<cyclic value>"
 
 
+def test_redaction_markers_do_not_expand_when_sanitized_again(monkeypatch) -> None:
+    monkeypatch.setenv("WANDB_INTERNAL_BASE_URL", "http://internal")
+    monkeypatch.setenv("EXAMPLE_SECRET", "redacted")
+    text = "<internal W&B API> <redacted> http://internal redacted"
+
+    sanitized = sanitize_sensitive_text(text)
+
+    assert sanitized == "<internal W&B API> <redacted> <internal W&B API> <redacted>"
+    assert sanitize_sensitive_text(sanitized) == sanitized
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "token=private-before<redacted>private-after",
+        "https://private-before<redacted>:private-after@example.invalid",
+    ],
+)
+def test_marker_spelling_cannot_hide_parts_of_a_credential(text) -> None:
+    sanitized = sanitize_sensitive_text(text)
+    assert "private-before" not in sanitized
+    assert "private-after" not in sanitized
+
+
+def test_configured_secret_containing_marker_is_still_redacted(monkeypatch) -> None:
+    secret = "private-before<redacted>private-after"
+    monkeypatch.setenv("EXAMPLE_SECRET", secret)
+    assert sanitize_sensitive_text(secret) == "<redacted>"
+
+
 def test_log_filter_sanitizes_message_arguments_and_exception() -> None:
     try:
         raise RuntimeError(f"upstream {INTERNAL_URL} api_key={SECRET}")

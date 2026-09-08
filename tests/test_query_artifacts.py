@@ -70,12 +70,20 @@ def _make_file(name="model.pt", size=1000000, digest="aaa111"):
 
 
 class _RealArtifactPaginatorService:
-    """Fake transport beneath W&B's real 0.28 Artifacts paginator."""
+    """Fake transport beneath the locked and latest W&B Artifacts paginator."""
 
     def __init__(self, *, total=40, tags_by_index=None):
         self.calls = 0
         self.total = total
         self.tags_by_index = tags_by_index or {}
+
+    def feature_enabled(self, feature):
+        # W&B 0.29 probes this before constructing the paginator. Model an
+        # older server so the existing artifact fixture needs no optional field.
+        from wandb.proto.wandb_internal_pb2 import ServerFeature
+
+        assert ServerFeature.Name(feature) == "ARTIFACT_DIGEST_ALGORITHM"
+        return False
 
     def execute_graphql(self, _query, variables=None, **kwargs):
         self.calls += 1

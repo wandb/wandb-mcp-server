@@ -12,6 +12,7 @@ import httpx
 
 from wandb_mcp_server.admission import current_tool_deadline
 from wandb_mcp_server.config import MAX_ACCUMULATED_BYTES, MAX_RESPONSE_TOKENS, MCP_TOOL_TIMEOUT_SECONDS
+from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text
 from wandb_mcp_server.instrumented_server import run_sync_in_current_tool
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.trace_utils import count_tokens_conservative
@@ -56,25 +57,30 @@ def _fit_text(text: str, deadline: float) -> str:
     """Choose a Unicode-safe prefix; the notice is included in the exact budget."""
     if time.monotonic() >= deadline:
         raise TimeoutError
+    text = sanitize_sensitive_text(text)
     token_count = count_tokens_conservative(text)
     if time.monotonic() >= deadline:
         raise TimeoutError
     if token_count <= MAX_RESPONSE_TOKENS:
         return text
-    if count_tokens_conservative(_TRUNCATION_NOTICE) > MAX_RESPONSE_TOKENS:
+    notice = sanitize_sensitive_text(_TRUNCATION_NOTICE)
+    if count_tokens_conservative(notice) > MAX_RESPONSE_TOKENS:
         return "."
     low, high = 0, len(text)
     while low < high:
         if time.monotonic() >= deadline:
             raise TimeoutError
         midpoint = (low + high + 1) // 2
-        if count_tokens_conservative(text[:midpoint] + _TRUNCATION_NOTICE) <= MAX_RESPONSE_TOKENS:
+        # A prefix may cut through a redaction marker. Sanitize that exact
+        # candidate before counting so the outer boundary cannot expand it.
+        candidate = sanitize_sensitive_text(text[:midpoint] + notice)
+        if count_tokens_conservative(candidate) <= MAX_RESPONSE_TOKENS:
             low = midpoint
         else:
             high = midpoint - 1
     if time.monotonic() >= deadline:
         raise TimeoutError
-    return text[:low] + _TRUNCATION_NOTICE
+    return sanitize_sensitive_text(text[:low] + notice)
 
 
 def _decode_response(raw: bytes, content_type: str, deadline: float) -> str:

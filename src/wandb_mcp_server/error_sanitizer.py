@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from urllib.parse import urlparse
 
 _REDACTED_INTERNAL = "<internal W&B API>"
 _REDACTED_SECRET = "<redacted>"
+_REDACTION_MARKER_RE = re.compile(r"(<internal W&B API>|<redacted>)")
 MAX_EXTERNAL_ERROR_CHARS = 4_096
 _KUBERNETES_URL_RE = re.compile(
     r"(?i)\bhttps?://(?:[^/\s@]+@)?"
@@ -55,6 +56,11 @@ def _configured_secrets() -> tuple[str, ...]:
     return tuple(sorted(values, key=len, reverse=True))
 
 
+def _redact_plain_parts(text: str, redact: Callable[[str], str]) -> str:
+    """Keep application redaction markers stable across repeated boundaries."""
+    return "".join(part if index % 2 else redact(part) for index, part in enumerate(_REDACTION_MARKER_RE.split(text)))
+
+
 def sanitize_sensitive_text(
     value: object,
     *,
@@ -62,14 +68,20 @@ def sanitize_sensitive_text(
 ) -> str:
     """Return text with known secrets and internal service addresses removed."""
     text = str(value)
+    secrets = _configured_secrets()
+    # A real configured secret may itself contain a marker spelling. Remove
+    # the complete secret before treating standalone markers as safe output.
+    for secret in secrets:
+        if _REDACTION_MARKER_RE.search(secret):
+            text = text.replace(secret, _REDACTED_SECRET)
     internal_url = (os.environ.get("WANDB_INTERNAL_BASE_URL") or "").rstrip("/")
     if internal_url:
-        text = text.replace(internal_url, _REDACTED_INTERNAL)
+        text = _redact_plain_parts(text, lambda part: part.replace(internal_url, _REDACTED_INTERNAL))
         parsed = urlparse(internal_url if "://" in internal_url else f"http://{internal_url}")
         if parsed.netloc:
-            text = text.replace(parsed.netloc, _REDACTED_INTERNAL)
+            text = _redact_plain_parts(text, lambda part: part.replace(parsed.netloc, _REDACTED_INTERNAL))
         if parsed.hostname:
-            text = text.replace(parsed.hostname, _REDACTED_INTERNAL)
+            text = _redact_plain_parts(text, lambda part: part.replace(parsed.hostname, _REDACTED_INTERNAL))
     text = _KUBERNETES_URL_RE.sub(_REDACTED_INTERNAL, text)
     text = _KUBERNETES_HOST_RE.sub(_REDACTED_INTERNAL, text)
     text = _URL_CREDENTIAL_RE.sub(r"\1<redacted>@", text)
@@ -79,8 +91,8 @@ def sanitize_sensitive_text(
         lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED_SECRET}",
         text,
     )
-    for secret in _configured_secrets():
-        text = text.replace(secret, _REDACTED_SECRET)
+    for secret in secrets:
+        text = _redact_plain_parts(text, lambda part, secret=secret: part.replace(secret, _REDACTED_SECRET))
     if max_chars is not None and len(text) > max_chars:
         omitted = len(text) - max_chars
         text = f"{text[:max_chars]}… <truncated {omitted} chars>"

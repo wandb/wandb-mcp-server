@@ -214,3 +214,29 @@ async def test_mcp_boundary_does_not_return_40002_tokens(upstream, monkeypatch):
     result = await server.call_tool("search_wandb_docs_tool", {"query": "query"})
     content = result[0] if isinstance(result, tuple) else result
     assert sum(count_tokens_conservative(item.text) for item in content) <= 30000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("internal_url", ["http://api", "http://internal", "http://limit"])
+@pytest.mark.parametrize("budget", [11, 31, 30000])
+async def test_mcp_response_budget_includes_redaction(upstream, monkeypatch, internal_url, budget):
+    from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text
+    from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
+    from wandb_mcp_server.server import register_tools
+    from wandb_mcp_server.runtime_contract import resolve_runtime_selection
+
+    monkeypatch.setenv("WANDB_INTERNAL_BASE_URL", internal_url)
+    monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-only")
+    monkeypatch.setenv("MCP_WORKLOAD_PROFILE", "dedicated")
+    monkeypatch.setattr(docs, "MAX_RESPONSE_TOKENS", budget)
+    upstream({"result": {"content": [{"type": "text", "text": (internal_url + " ") * 10000}]}})
+    server = InstrumentedFastMCP("docs-redaction-audit")
+    register_tools(server, resolve_runtime_selection())
+    try:
+        result = await server.call_tool("search_wandb_docs_tool", {"query": "query"})
+    finally:
+        server.shutdown_sync_executor()
+    content = result[0] if isinstance(result, tuple) else result
+    assert sum(count_tokens_conservative(item.text) for item in content) <= budget
+    assert all(internal_url not in item.text for item in content)
+    assert all(sanitize_sensitive_text(item.text) == item.text for item in content)
