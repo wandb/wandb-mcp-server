@@ -153,8 +153,8 @@ and ignore surrounding whitespace.
 
 | Level | Product tool telemetry | Canonical log and Datadog identity | Segment identity | Verbose request-body logs |
 |---|---|---|---|---|
-| `off` (default) | compact `usage_dimensions` only | authenticated username when already available; otherwise API-key fingerprint | pseudonym only | INFO |
-| `standard` | compact `usage_dimensions` only | authenticated username when already available; otherwise API-key fingerprint | pseudonym only | demoted to DEBUG |
+| `off` (default) | compact `usage_dimensions` only | authenticated username when already available; otherwise omitted | pseudonym only | INFO |
+| `standard` | compact `usage_dimensions` only | authenticated username when already available; otherwise omitted | pseudonym only | demoted to DEBUG |
 | `strict` | compact `usage_dimensions` only | SHA-256 pseudonym; no plaintext username | pseudonym only | demoted to DEBUG |
 
 Sensitive key-name redaction (`api_key`, `token`, `secret`, `password`,
@@ -176,14 +176,17 @@ At `off` and `standard`, the canonical event and Datadog's `usr.id` use an
 authenticated W&B username when one was supplied by the authenticated request
 path or was already materialized in that actor's endpoint-bound API-client
 cache. Logging never initializes a client, fetches a viewer, or evaluates a
-lazy viewer property. Early events therefore use the API-key-derived
-fingerprint until a functional request has populated the cache. An entity,
+lazy viewer property. Events omit user identity until a functional request has
+populated the cache. An entity,
 email address, or email domain is not a username and is never substituted for
 one.
 
 At `off` and `standard`, both canonical identity fields use that authenticated
-username when it is available and otherwise use the API-key-derived
-fingerprint. Segment does not copy either serialized identity field: it always
+username when it is available and otherwise omit it; no hash fallback is
+displayed. Datadog receives that identity only as `usr.id`, without duplicate
+`actor_id`/`user_id` attributes or a copy in session messages. Historical log
+entries keep their original identities. Segment does not copy either serialized
+identity field: it always
 uses a separately carried pseudonym for `userId` and never receives a plaintext
 username. It uses the API-key fingerprint when available and a SHA-256 username
 pseudonym only as a fallback. Raw usernames are also excluded from Segment
@@ -201,10 +204,18 @@ tool arguments.
 Datadog receives the same bounded `usage_dimensions` as the canonical event and
 never receives `params`. At `off` and `standard`, `usr.id` may contain the
 cache-only authenticated username described above; at `strict`, it contains the
-API-key-derived pseudonym. Only deployment, harness, method, public tool,
-success, and error class are tags. Actor IDs, user IDs, session IDs, versions,
-durations, and error messages remain attributes to avoid high-cardinality
-indexing costs.
+API-key-derived pseudonym. Unresolved users are not counted as identified users;
+request and tool totals still include their events. Only deployment, harness, method, public tool,
+success, and error class are tags. Identity is carried only in `usr.id`;
+session IDs, versions, durations, and error messages remain untagged attributes
+to avoid high-cardinality indexing costs. Datadog receives the reserved
+nanosecond `duration`, not a duplicate `duration_ms` attribute. Canonical logs
+and Segment retain their existing millisecond field. The duplicate `labels`
+bag and `tool.success` are omitted. Identical `mcp_tool_name`/`tool.mcp_name`
+aliases are omitted; distinct implementation/public names are retained.
+`tool_name` and `tool.name` remain because existing queries use both.
+The standard `env` tag remains; the duplicate `environment` tag is omitted,
+while application environment remains available as an untagged attribute.
 
 ### Diagnosing tool failures
 
@@ -252,8 +263,8 @@ Schema 1.1 canonical fields:
 | `client_vendor` | Vendor bucket, such as `openai`, `anthropic`, `cursor`, `google`, or `mistral`. |
 | `call_type` | Exact MCP JSON-RPC method, such as `initialize`, `tools/list`, or `tools/call`. |
 | `tool_name` | Public MCP tool name; emitted exactly once per public invocation. |
-| `actor_id` | Canonical/Datadog identity: cache-only authenticated username at `off`/`standard`, or an API-key pseudonym when no username is available and at `strict`. Segment never receives this field as plaintext. |
-| `user_id` | Same canonical/Datadog identity policy as `actor_id`; retained as the user-oriented compatibility field. Segment never receives this field as plaintext. |
+| `actor_id` | Canonical identity: cache-only authenticated username at `off`/`standard` (omitted when unavailable), or a pseudonym at `strict`. Datadog maps identity to `usr.id` only; Segment never receives this field as plaintext. |
+| `user_id` | Same canonical identity policy as `actor_id`; retained for canonical-log compatibility, not duplicated in Datadog. Segment never receives this field as plaintext. |
 | `mcp_client_family` | One-release compatibility alias for the previous family field. |
 | `mcp_client_app` | One-release compatibility alias for the previous app field. |
 | `mcp_client_source` | Signal used for classification: `initialize_client_info`, `meta_client_info`, `session_metadata`, `user_agent`, or `unknown`. |
@@ -286,11 +297,12 @@ Recommended product analyses:
 ### Identifier hashing at `strict`
 
 When the request has an API-key fingerprint, `strict` keeps
-`wandb_key:<24 hex chars>` as the canonical and Datadog identity even when a
+`user:<24 hex chars>` as the canonical and Datadog identity even when a
 cached username becomes available. The fingerprint is a prefix of SHA-256, not
 part of the API key and not a credential. If no key fingerprint is available,
 an authenticated username is represented as `<h:sha256_prefix>` (the first 12
-hex characters of SHA-256). Segment applies the same pseudonymous-only rule at
+hex characters of SHA-256). Segment keeps its existing `wandb_key:` pseudonym
+format for analytics continuity and applies the same pseudonymous-only rule at
 every privacy level.
 
 Hashing is deterministic and does not prevent correlation. Hashes of predictable

@@ -799,7 +799,11 @@ class AnalyticsTracker:
                 # Missing enrichment must not interfere with the request.
                 pass
         pseudonym = actor if type(actor) is _KeyFingerprint else _private_identity(username or actor)
-        display = pseudonym if level == _PRIVACY_LEVEL_STRICT else username or actor
+        display = pseudonym if level == _PRIVACY_LEVEL_STRICT else username
+        if type(display) is _KeyFingerprint:
+            # This is a hash, not a credential. Keep the historical Segment ID
+            # private while giving application logs and Datadog a neutral label.
+            display = _IdentityPseudonym(f"user:{display.removeprefix('wandb_key:')}")
         _, email_domain = cls._apply_identity_privacy(
             None, email_domain or cls._extract_email_domain(viewer_info), level=level
         )
@@ -1005,7 +1009,6 @@ class AnalyticsTracker:
             event = {
                 **self._base_event("user_session"),
                 "session_id": session_id,
-                "api_key_hash": api_key_hash[:16] if api_key_hash else None,
                 "metadata": self._sanitise_params(metadata, level=level) if metadata else None,
             }
             event = self._event_with_identity(event, viewer_info, api_key_hash=api_key_hash, level=level)

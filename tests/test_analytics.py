@@ -478,14 +478,14 @@ class TestTrackUserSession:
             t.track_user_session(session_id="s", viewer_info="v")
         assert not any("ANALYTICS_EVENT" in r.message for r in caplog.records)
 
-    def test_api_key_hash_truncated(self, capture):
+    def test_api_key_hash_is_not_serialized(self, capture):
         AnalyticsTracker(enabled=True).track_user_session(
             session_id="s",
             viewer_info="u@t.com",
             api_key_hash="abcdef1234567890extra",
         )
         assert capture.event is not None
-        assert len(capture.event["api_key_hash"]) == 16
+        assert "api_key_hash" not in capture.event
 
     def test_uses_utc_timestamps(self, capture):
         AnalyticsTracker(enabled=True).track_user_session(session_id="s", viewer_info="v")

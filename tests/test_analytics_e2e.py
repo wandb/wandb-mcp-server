@@ -144,6 +144,9 @@ async def test_public_success_reaches_both_sinks_once() -> None:
     assert "private query text" not in str(segment[0])
     assert "private-client-argument-canary" not in str(segment[0])
     assert datadog[0]["attributes"]["tool"]["name"] == "query_public_tool"
+    assert datadog[0]["attributes"]["tool"] == {"name": "query_public_tool"}
+    for redundant in ("labels", "actor_id", "user_id", "mcp_tool_name"):
+        assert redundant not in datadog[0]["attributes"]
     assert datadog[0]["attributes"]["usage_dimensions"] == {
         "admission_outcome": "disabled",
         "cost_class": "heavy",

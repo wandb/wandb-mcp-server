@@ -52,25 +52,6 @@ def _build_retry_session() -> requests.Session:
     return session
 
 
-def _datadog_safe_labels(event: Dict[str, Any]) -> Dict[str, str]:
-    """Return low-cardinality labels safe for Datadog attributes."""
-    labels: Dict[str, str] = {"event_type": str(event.get("event_type", "unknown"))}
-    for key in (
-        "tool_name",
-        "success",
-        "runtime_surface",
-        "transport",
-        "deployment_type",
-        "agent_harness",
-        "client_vendor",
-        "call_type",
-    ):
-        value = event.get(key)
-        if value is not None:
-            labels[key] = str(value)
-    return labels
-
-
 def map_to_datadog_log(
     event: Dict[str, Any],
     *,
@@ -108,7 +89,7 @@ def map_to_datadog_log(
         f"service:{dd_service}",
         f"event_type:{event_type}",
     ]
-    for key in ("runtime_surface", "transport", "deployment_type", "environment"):
+    for key in ("runtime_surface", "transport", "deployment_type"):
         value = event.get(key)
         if value is not None:
             tags.append(f"{key}:{value}")
@@ -156,7 +137,6 @@ def map_to_datadog_log(
 
     duration_ms = event.get("duration_ms")
     if duration_ms is not None:
-        attributes["duration_ms"] = duration_ms
         attributes["duration"] = int(duration_ms * 1_000_000)
 
     if event_type == "request":
@@ -204,13 +184,9 @@ def map_to_datadog_log(
             "message": str(error_str).split(": ", 1)[-1][:1000],
         }
 
-    actor_id = event.get("actor_id")
-    user_id = event.get("user_id") or actor_id
+    user_id = event.get("user_id") or event.get("actor_id")
     if user_id:
-        attributes["user_id"] = user_id
         attributes["usr"] = {"id": user_id}
-    if actor_id:
-        attributes["actor_id"] = actor_id
 
     if event.get("error_diagnostics"):
         attributes["error_diagnostics"] = event["error_diagnostics"]
@@ -219,20 +195,16 @@ def map_to_datadog_log(
     if usage_dimensions:
         attributes["usage_dimensions"] = usage_dimensions
 
-    labels = _datadog_safe_labels(event)
-    if labels:
-        attributes["labels"] = labels
-
     if event_type == "tool_call":
         tool_attrs: Dict[str, Any] = {}
         if tool_name:
             tool_attrs["name"] = tool_name
             attributes["tool_name"] = tool_name
-        if mcp_tool_name:
+        # Legacy callers may distinguish implementation and public tool names.
+        # The instrumented boundary uses one public name, so omit its aliases.
+        if mcp_tool_name and mcp_tool_name != tool_name:
             tool_attrs["mcp_name"] = mcp_tool_name
             attributes["mcp_tool_name"] = mcp_tool_name
-        if success is not None:
-            tool_attrs["success"] = success
         if tool_attrs:
             attributes["tool"] = tool_attrs
 
@@ -293,11 +265,6 @@ def _build_message(event: Dict[str, Any]) -> str:
         duration = event.get("duration_ms")
         if duration is not None:
             parts.append(f"({duration:.0f}ms)")
-    elif event_type == "user_session":
-        user_id = event.get("user_id")
-        if user_id and user_id != "anonymous":
-            parts.append(f"user={user_id}")
-
     return " ".join(parts)
 
 
