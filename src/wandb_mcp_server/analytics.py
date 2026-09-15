@@ -800,6 +800,10 @@ class AnalyticsTracker:
                 pass
         pseudonym = actor if type(actor) is _KeyFingerprint else _private_identity(username or actor)
         display = pseudonym if level == _PRIVACY_LEVEL_STRICT else username or actor
+        if type(display) is _KeyFingerprint:
+            # This is a hash, not a credential. Keep the historical Segment ID
+            # private while giving application logs and Datadog a neutral label.
+            display = _IdentityPseudonym(f"user:{display.removeprefix('wandb_key:')}")
         _, email_domain = cls._apply_identity_privacy(
             None, email_domain or cls._extract_email_domain(viewer_info), level=level
         )

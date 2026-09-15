@@ -182,8 +182,10 @@ email address, or email domain is not a username and is never substituted for
 one.
 
 At `off` and `standard`, both canonical identity fields use that authenticated
-username when it is available and otherwise use the API-key-derived
-fingerprint. Segment does not copy either serialized identity field: it always
+username when it is available and otherwise display the API-key-derived
+fingerprint as `user:<24 hex chars>`. This neutral label contains a SHA-256
+digest prefix, never the credential. Historical log entries keep their old
+`wandb_key:` label. Segment does not copy either serialized identity field: it always
 uses a separately carried pseudonym for `userId` and never receives a plaintext
 username. It uses the API-key fingerprint when available and a SHA-256 username
 pseudonym only as a fallback. Raw usernames are also excluded from Segment
@@ -286,11 +288,12 @@ Recommended product analyses:
 ### Identifier hashing at `strict`
 
 When the request has an API-key fingerprint, `strict` keeps
-`wandb_key:<24 hex chars>` as the canonical and Datadog identity even when a
+`user:<24 hex chars>` as the canonical and Datadog identity even when a
 cached username becomes available. The fingerprint is a prefix of SHA-256, not
 part of the API key and not a credential. If no key fingerprint is available,
 an authenticated username is represented as `<h:sha256_prefix>` (the first 12
-hex characters of SHA-256). Segment applies the same pseudonymous-only rule at
+hex characters of SHA-256). Segment keeps its existing `wandb_key:` pseudonym
+format for analytics continuity and applies the same pseudonymous-only rule at
 every privacy level.
 
 Hashing is deterministic and does not prevent correlation. Hashes of predictable

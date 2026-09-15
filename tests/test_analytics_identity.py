@@ -12,6 +12,7 @@ from wandb_mcp_server.api_client import WandBApiManager
 
 
 FINGERPRINT = "wandb_key:" + "a" * 24
+DISPLAY_FINGERPRINT = "user:" + "a" * 24
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +48,21 @@ def mapped(event):
     return dd, segment
 
 
+@pytest.mark.parametrize("level", ["off", "standard", "strict"])
+@pytest.mark.parametrize("event_type", ["tool_call", "user_session", "request"])
+def test_fallback_display_is_neutral_without_changing_segment_identity(monkeypatch, level, event_type):
+    monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", level)
+    event = emit(monkeypatch, event_type)
+    prepared = analytics._prepare_event(analytics._prepare_event(event))
+    dd, segment = mapped(prepared)
+    assert event["actor_id"] == event["user_id"] == DISPLAY_FINGERPRINT
+    assert prepared["actor_id"] == prepared["user_id"] == DISPLAY_FINGERPRINT
+    assert dd["attributes"]["usr"]["id"] == dd["attributes"]["actor_id"] == DISPLAY_FINGERPRINT
+    assert "wandb_key:" not in json.dumps([event, prepared, dd])
+    if segment is not None:
+        assert segment["userId"] == FINGERPRINT, "a display rename must not split existing analytics actors"
+
+
 @pytest.mark.parametrize("level", ["off", "standard"])
 @pytest.mark.parametrize("event_type", ["tool_call", "user_session", "request"])
 def test_cached_username_is_preferred_only_in_approved_sinks(monkeypatch, level, event_type):
@@ -67,8 +83,8 @@ def test_missing_cached_username_keeps_fingerprint(monkeypatch, level):
     monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", level)
     event = emit(monkeypatch, "tool_call")
     dd, segment = mapped(event)
-    assert event["actor_id"] == FINGERPRINT
-    assert dd["attributes"]["usr"]["id"] == FINGERPRINT
+    assert event["actor_id"] == DISPLAY_FINGERPRINT
+    assert dd["attributes"]["usr"]["id"] == DISPLAY_FINGERPRINT
     assert segment["userId"] == FINGERPRINT
 
 
@@ -83,10 +99,10 @@ def test_strict_cached_username_is_hashed_consistently(monkeypatch, event_type):
     event = emit(monkeypatch, event_type)
     dd, segment = mapped(event)
     pseudonym = event["user_id"]
-    assert pseudonym == FINGERPRINT
+    assert pseudonym == DISPLAY_FINGERPRINT
     assert event["actor_id"] == dd["attributes"]["usr"]["id"] == pseudonym
     if segment is not None:
-        assert segment["userId"] == pseudonym
+        assert segment["userId"] == FINGERPRINT
     retained = json.dumps([event, dd, segment])
     assert "private-user" not in retained
     assert "private@example.invalid" not in retained
@@ -124,7 +140,7 @@ def test_strict_direct_sink_cannot_bypass_identity_privacy(monkeypatch, sink):
     assert event["actor_id"] == "raw-actor", "privacy projection must not mutate caller data"
 
 
-@pytest.mark.parametrize("raw_identity", ["<h:123456abcdef>", FINGERPRINT])
+@pytest.mark.parametrize("raw_identity", ["<h:123456abcdef>", FINGERPRINT, DISPLAY_FINGERPRINT])
 @pytest.mark.parametrize("sink", ["canonical", "datadog", "segment"])
 def test_strict_hash_shaped_plain_identity_is_not_trusted(monkeypatch, raw_identity, sink):
     monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "strict")
@@ -150,10 +166,11 @@ def test_strict_internal_pseudonyms_remain_stable_across_sinks(monkeypatch, has_
     event = emit(monkeypatch, "tool_call", {"username": "private-user"})
     again = analytics._prepare_event(event)
     dd, segment = mapped(again)
-    expected = FINGERPRINT if has_key else analytics._hash_identifier("private-user")
+    expected = DISPLAY_FINGERPRINT if has_key else analytics._hash_identifier("private-user")
     assert event["actor_id"] == again["actor_id"] == expected
     assert event["user_id"] == again["user_id"] == expected
-    assert dd["attributes"]["usr"]["id"] == segment["userId"] == expected
+    assert dd["attributes"]["usr"]["id"] == expected
+    assert segment["userId"] == (FINGERPRINT if has_key else expected)
 
 
 def test_username_extraction_does_not_invoke_properties(monkeypatch):
@@ -165,7 +182,7 @@ def test_username_extraction_does_not_invoke_properties(monkeypatch):
             pytest.fail("analytics read a potentially network-backed property")
 
     event = emit(monkeypatch, "tool_call", NetworkBackedViewer())
-    assert event["actor_id"] == FINGERPRINT
+    assert event["actor_id"] == DISPLAY_FINGERPRINT
 
 
 def test_supplied_authenticated_username_wins_over_cached_value(monkeypatch):
@@ -220,8 +237,8 @@ def test_segment_never_forwards_freeform_session_metadata(monkeypatch, level, so
 def test_username_never_falls_back_to_team_or_email(monkeypatch, viewer):
     monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "standard")
     event = emit(monkeypatch, "tool_call", viewer)
-    assert event["actor_id"] == event["user_id"] == FINGERPRINT
-    assert mapped(event)[0]["attributes"]["usr"]["id"] == FINGERPRINT
+    assert event["actor_id"] == event["user_id"] == DISPLAY_FINGERPRINT
+    assert mapped(event)[0]["attributes"]["usr"]["id"] == DISPLAY_FINGERPRINT
 
 
 @pytest.mark.parametrize("level", ["off", "standard", "strict"])
@@ -240,7 +257,7 @@ def test_diagnostic_error_event_obeys_identity_destination_policy(monkeypatch, l
     )
     event = events[0]
     dd, segment = mapped(event)
-    display = FINGERPRINT if level == "strict" else "diagnostic-user"
+    display = DISPLAY_FINGERPRINT if level == "strict" else "diagnostic-user"
     assert event["actor_id"] == dd["attributes"]["usr"]["id"] == display
     assert segment["userId"] == FINGERPRINT
     assert segment["properties"]["error_diagnostics"]["category"] == "input_validation"

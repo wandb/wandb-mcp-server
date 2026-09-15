@@ -55,7 +55,7 @@ async def test_concurrent_worker_calls_emit_only_their_own_identity(monkeypatch,
         assert len(events) == len(actors)
         assert all(event["success"] for event in events)
         expected = (
-            {"wandb_key:" + hashlib.sha256(key.encode()).hexdigest()[:24] for key in actors}
+            {"user:" + hashlib.sha256(key.encode()).hexdigest()[:24] for key in actors}
             if level == "strict"
             else set(actors.values())
         )
