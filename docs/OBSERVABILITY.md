@@ -181,10 +181,13 @@ fingerprint until a functional request has populated the cache. An entity,
 email address, or email domain is not a username and is never substituted for
 one.
 
-The separate `actor_id` remains an API-key-derived fingerprint. Segment always
-uses a pseudonym for `userId` and never receives a plaintext username. It uses
-the API-key fingerprint when available and a SHA-256 username pseudonym only as
-a fallback. Raw usernames are also excluded from Segment properties.
+At `off` and `standard`, both canonical identity fields use that authenticated
+username when it is available and otherwise use the API-key-derived
+fingerprint. Segment does not copy either serialized identity field: it always
+uses a separately carried pseudonym for `userId` and never receives a plaintext
+username. It uses the API-key fingerprint when available and a SHA-256 username
+pseudonym only as a fallback. Raw usernames are also excluded from Segment
+properties.
 
 `strict` retains a SHA-256 pseudonym instead of a plaintext username. These
 identifiers allow correlation; they are not anonymous. Usernames and pseudonyms
@@ -249,8 +252,8 @@ Schema 1.1 canonical fields:
 | `client_vendor` | Vendor bucket, such as `openai`, `anthropic`, `cursor`, `google`, or `mistral`. |
 | `call_type` | Exact MCP JSON-RPC method, such as `initialize`, `tools/list`, or `tools/call`. |
 | `tool_name` | Public MCP tool name; emitted exactly once per public invocation. |
-| `actor_id` | Pseudonymous `wandb_key:<24 hex chars>` cohort identifier. |
-| `user_id` | Canonical/Datadog display identity: cache-only authenticated username at `off`/`standard`, or the actor pseudonym at `strict`. Segment never receives this field as plaintext. |
+| `actor_id` | Canonical/Datadog identity: cache-only authenticated username at `off`/`standard`, or an API-key pseudonym when no username is available and at `strict`. Segment never receives this field as plaintext. |
+| `user_id` | Same canonical/Datadog identity policy as `actor_id`; retained as the user-oriented compatibility field. Segment never receives this field as plaintext. |
 | `mcp_client_family` | One-release compatibility alias for the previous family field. |
 | `mcp_client_app` | One-release compatibility alias for the previous app field. |
 | `mcp_client_source` | Signal used for classification: `initialize_client_info`, `meta_client_info`, `session_metadata`, `user_agent`, or `unknown`. |

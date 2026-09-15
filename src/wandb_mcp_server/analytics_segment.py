@@ -49,7 +49,8 @@ _EVENT_NAME_MAP: Dict[str, str] = {
 
 _SESSION_PROPERTY_KEYS: List[str] = [
     "session_id",
-    "metadata",
+    # Free-form session metadata can contain usernames under arbitrary keys.
+    # Segment receives only the explicitly reviewed dimensions below.
     "mcp_client_version",
     "mcp_client_confidence",
 ]

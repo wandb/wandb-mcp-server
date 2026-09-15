@@ -195,6 +195,27 @@ def test_segment_without_key_hashes_username_even_in_direct_mapper(monkeypatch, 
         assert raw not in json.dumps(result)
 
 
+@pytest.mark.parametrize("level", ["off", "standard", "strict"])
+@pytest.mark.parametrize("source", ["direct", "canonical"])
+def test_segment_never_forwards_freeform_session_metadata(monkeypatch, level, source):
+    monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", level)
+    metadata = {"viewer": "private-viewer-canary", "nested": {"arbitrary": "private-identity-canary"}}
+    if source == "canonical":
+        events = []
+        tracker = analytics.AnalyticsTracker()
+        monkeypatch.setattr(tracker, "_emit", lambda event, labels: events.append(event))
+        tracker.track_user_session("synthetic-session", None, api_key_hash="a" * 64, metadata=metadata)
+        event = events[0]
+    else:
+        event = {"event_type": "user_session", "user_id": "test-user", "metadata": metadata}
+    event["mcp_client_app"] = "cursor"
+    segment = map_to_segment_track(event)
+    assert "metadata" not in segment["properties"]
+    assert segment["properties"]["mcp_client_app"] == "cursor"
+    assert "private-viewer-canary" not in json.dumps(segment)
+    assert "private-identity-canary" not in json.dumps(segment)
+
+
 @pytest.mark.parametrize("viewer", [{"entity": "team"}, {"email": "member@example.invalid"}, "member@example.invalid"])
 def test_username_never_falls_back_to_team_or_email(monkeypatch, viewer):
     monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "standard")
