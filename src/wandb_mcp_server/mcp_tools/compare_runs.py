@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from wandb_mcp_server.admission import ToolDeadlineExceeded
 from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.config import MCP_MAX_HISTORY_KEYS, MCP_MAX_HISTORY_SAMPLES
+from wandb_mcp_server.error_diagnostics import ToolInputValidationError, record_exception_diagnostics
 from wandb_mcp_server.mcp_tools.run_history import get_run_history
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
@@ -156,7 +157,11 @@ def _validate_key_list(name: str, value: Optional[List[str]]) -> None:
         or len(value) > MCP_MAX_HISTORY_KEYS
         or not all(isinstance(key, str) and key.strip() for key in value)
     ):
-        raise ValueError(f"{name} must contain at most {MCP_MAX_HISTORY_KEYS} non-empty strings")
+        raise ToolInputValidationError(
+            f"{name} must contain at most {MCP_MAX_HISTORY_KEYS} non-empty strings",
+            field=name,
+            code="too_long" if isinstance(value, list) and len(value) > MCP_MAX_HISTORY_KEYS else "value_error",
+        )
 
 
 def compare_runs(
@@ -173,7 +178,7 @@ def compare_runs(
 ) -> str:
     """Compare two W&B runs."""
     if isinstance(history_samples, bool) or not isinstance(history_samples, int) or history_samples < 1:
-        raise ValueError("history_samples must be a positive integer")
+        raise ToolInputValidationError("history_samples must be a positive integer", field="history_samples")
     history_samples = min(history_samples, MCP_MAX_HISTORY_SAMPLES)
     for name, value in (
         ("history_keys", history_keys),
@@ -182,7 +187,7 @@ def compare_runs(
     ):
         _validate_key_list(name, value)
     if not isinstance(x_axis, str) or not x_axis.strip():
-        raise ValueError("x_axis must be a non-empty string")
+        raise ToolInputValidationError("x_axis must be a non-empty string", field="x_axis")
     api = WandBApiManager.get_api()
     with track_tool_execution(
         "compare_runs",
@@ -238,6 +243,7 @@ def compare_runs(
                 )
             compatibility_caveat = None
         except Exception as selective_error:
+            record_exception_diagnostics(selective_error)
             if isinstance(selective_error, ToolDeadlineExceeded):
                 raise
             if isinstance(selective_error, GraphQLResponseTooLarge):

@@ -263,11 +263,11 @@ class TestExtractUserId:
         assert self.t._extract_user_id(SimpleNamespace(username="jdoe")) == "jdoe"
 
     def test_entity_attr(self):
-        assert self.t._extract_user_id(SimpleNamespace(entity="team")) == "team"
+        assert self.t._extract_user_id(SimpleNamespace(entity="team")) is None
 
-    def test_email_attr_returns_domain_not_full_address(self):
+    def test_email_attr_is_not_a_username(self):
         """Email-only viewers must return domain, never the full address (PII)."""
-        assert self.t._extract_user_id(SimpleNamespace(email="e@x.com")) == "x.com"
+        assert self.t._extract_user_id(SimpleNamespace(email="e@x.com")) is None
 
     def test_string(self):
         assert self.t._extract_user_id("raw") == "raw"
@@ -276,15 +276,15 @@ class TestExtractUserId:
     def test_sentinel_strings_return_none(self, value):
         assert self.t._extract_user_id(value) is None
 
-    def test_string_email_returns_domain(self):
+    def test_string_email_is_not_a_username(self):
         """String inputs that look like emails must return domain only."""
-        assert self.t._extract_user_id("alice@wandb.com") == "wandb.com"
+        assert self.t._extract_user_id("alice@wandb.com") is None
 
     def test_username_dict(self):
         assert self.t._extract_user_id({"username": "jdoe"}) == "jdoe"
 
     def test_entity_dict(self):
-        assert self.t._extract_user_id({"entity": "team"}) == "team"
+        assert self.t._extract_user_id({"entity": "team"}) is None
 
     def test_username_priority(self):
         v = SimpleNamespace(username="u", entity="e", email="x@y.com")
@@ -297,13 +297,13 @@ class TestExtractUserId:
         """Arbitrary objects should not be str()-ified (data leakage guard)."""
         assert self.t._extract_user_id(42) is None
 
-    def test_empty_username_falls_through(self):
+    def test_empty_username_does_not_fall_back_to_team(self):
         v = SimpleNamespace(username="", entity="team")
-        assert self.t._extract_user_id(v) == "team"
+        assert self.t._extract_user_id(v) is None
 
-    def test_unknown_username_falls_through_to_entity(self):
+    def test_unknown_username_does_not_fall_back_to_team(self):
         v = SimpleNamespace(username="unknown", entity="team")
-        assert self.t._extract_user_id(v) == "team"
+        assert self.t._extract_user_id(v) is None
 
     def test_unknown_entity_returns_none(self):
         v = SimpleNamespace(entity="unknown")
@@ -496,7 +496,7 @@ class TestTrackUserSession:
         AnalyticsTracker(enabled=True).track_user_session(session_id="s", viewer_info="v", api_key_hash=None)
         assert capture.event is not None
         assert "api_key_hash" not in capture.event
-        assert "actor_id" not in capture.event
+        assert capture.event["actor_id"] == capture.event["user_id"] == "v"
 
     def test_event_fields_complete(self, capture):
         AnalyticsTracker(enabled=True).track_user_session(

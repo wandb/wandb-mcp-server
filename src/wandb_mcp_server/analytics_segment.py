@@ -80,6 +80,7 @@ _TOOL_CALL_PROPERTY_KEYS: List[str] = [
     "usage_dimensions",
     "success",
     "error",
+    "error_diagnostics",
     "duration_ms",
 ]
 
@@ -95,12 +96,20 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     Returns:
         Segment Track-compatible dict, or None if unmappable.
     """
+    from wandb_mcp_server.analytics import _IdentityEvent, _prepare_event, _private_identity, _strict_event_identities
+
+    event = _prepare_event(event)
     event_type = event.get("event_type")
     segment_event_name = _EVENT_NAME_MAP.get(event_type)
     if not segment_event_name:
         return None
 
-    user_id = event.get("actor_id") or event.get("user_id") or "anonymous"
+    # The canonical event may contain an approved display username. Segment
+    # always receives the internally carried key pseudonym (or a hash fallback).
+    # A similarly named JSON field cannot supply this routing identity.
+    trusted_identity = event._segment_identity if type(event) is _IdentityEvent else None
+    user_id = trusted_identity or _private_identity(event.get("actor_id") or event.get("user_id")) or "anonymous"
+    event = _strict_event_identities(event)
 
     property_keys = {
         "user_session": _SESSION_PROPERTY_KEYS,

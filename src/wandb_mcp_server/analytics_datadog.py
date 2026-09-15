@@ -83,10 +83,9 @@ def map_to_datadog_log(
     Produces structured top-level attributes that Datadog auto-extracts for
     dashboards, monitors, and SLO definitions without custom Log Pipelines.
 
-    PII policy: ``params``, ``api_key_hash``, ``metadata``, and ``email_domain``
-    are intentionally excluded from the Datadog payload.  Only ``user_id``
-    (which is already a non-PII identifier: username or domain) is forwarded
-    as ``@usr.id``.
+    ``params``, ``api_key_hash``, ``metadata``, and ``email_domain`` are excluded.
+    Usernames are identifying data; strict mode hashes identity fields before
+    forwarding them to this sink.
 
     Args:
         event: Internal analytics event dict (as emitted by AnalyticsTracker).
@@ -97,6 +96,9 @@ def map_to_datadog_log(
     Returns:
         Dict suitable for the Datadog HTTP Logs Intake API.
     """
+    from wandb_mcp_server.analytics import _prepare_event
+
+    event = _prepare_event(event)
     event_type = event.get("event_type", "unknown")
 
     status = _resolve_severity(event)
@@ -209,6 +211,9 @@ def map_to_datadog_log(
         attributes["usr"] = {"id": user_id}
     if actor_id:
         attributes["actor_id"] = actor_id
+
+    if event.get("error_diagnostics"):
+        attributes["error_diagnostics"] = event["error_diagnostics"]
 
     usage_dimensions = event.get("usage_dimensions")
     if usage_dimensions:

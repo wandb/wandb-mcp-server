@@ -18,6 +18,7 @@ import importlib.metadata
 import json
 import logging
 import os
+import re
 import sys
 from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
@@ -200,6 +201,26 @@ def _resolve_privacy_level() -> str:
     return resolve_privacy_level()
 
 
+class _IdentityPseudonym(str):
+    """In-process provenance for an identifier hashed by this module."""
+
+
+class _KeyFingerprint(_IdentityPseudonym):
+    """An actor derived from a trusted API-key digest, never a viewer field."""
+
+
+class _IdentityEvent(dict):
+    """Carry a pseudonymous Segment identity without adding a serialized field."""
+
+    __slots__ = ("_segment_identity",)
+
+    def __init__(self, event: Dict[str, Any], *, segment_identity: Optional[str] = None):
+        super().__init__(event)
+        self._segment_identity = (
+            segment_identity if type(segment_identity) in {_IdentityPseudonym, _KeyFingerprint} else None
+        )
+
+
 def _hash_identifier(value: Any) -> str:
     """Hash an identifier to a short sha256 prefix for strict-mode analytics.
 
@@ -210,7 +231,7 @@ def _hash_identifier(value: Any) -> str:
     if value is None or value == "":
         return "<empty>"
     digest = hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
-    return f"<h:{digest[:12]}>"
+    return _IdentityPseudonym(f"<h:{digest[:12]}>")
 
 
 def is_verbose_log_site_gated() -> bool:
@@ -470,13 +491,19 @@ def _compact_value(value: Any) -> Any:
 def _prepare_event(event: Dict[str, Any]) -> Dict[str, Any]:
     """Compact and hard-bound an analytics event to the 4 KiB contract."""
     from wandb_mcp_server.error_sanitizer import sanitize_sensitive_value
+    from wandb_mcp_server.error_diagnostics import sanitize_error_diagnostics
 
-    event = sanitize_sensitive_value(event)
+    segment_identity = event._segment_identity if type(event) is _IdentityEvent else None
+    event = _restore_identity_provenance(event, sanitize_sensitive_value(event))
+    if _resolve_privacy_level() == _PRIVACY_LEVEL_STRICT:
+        event = _strict_event_identities(event)
+    if "error_diagnostics" in event:
+        event["error_diagnostics"] = sanitize_error_diagnostics(event["error_diagnostics"])
     compacted = _compact_value(event)
     if not isinstance(compacted, dict):
         return {}
     if len(json.dumps(compacted, default=str, separators=(",", ":")).encode()) <= _MAX_EVENT_BYTES:
-        return compacted
+        return _IdentityEvent(compacted, segment_identity=segment_identity)
 
     compacted["event_truncated"] = True
     for key in (
@@ -491,7 +518,7 @@ def _prepare_event(event: Dict[str, Any]) -> Dict[str, Any]:
     if "error" in compacted:
         compacted["error"] = str(compacted["error"])[:200]
     if len(json.dumps(compacted, default=str, separators=(",", ":")).encode()) <= _MAX_EVENT_BYTES:
-        return compacted
+        return _IdentityEvent(compacted, segment_identity=segment_identity)
 
     essential_keys = {
         "schema_version",
@@ -515,6 +542,7 @@ def _prepare_event(event: Dict[str, Any]) -> Dict[str, Any]:
         "mcp_tool_name",
         "success",
         "error",
+        "error_diagnostics",
         "duration_ms",
         "request_id",
         "method",
@@ -526,8 +554,8 @@ def _prepare_event(event: Dict[str, Any]) -> Dict[str, Any]:
     for key, value in list(essential.items()):
         if isinstance(value, str):
             limit = 256 if key in {"error", "path", "session_id"} else 128
-            essential[key] = value[:limit]
-    return essential
+            essential[key] = value[:limit] if len(value) > limit else value
+    return _IdentityEvent(essential, segment_identity=segment_identity)
 
 
 def _number_bucket(value: int | float) -> str:
@@ -587,7 +615,10 @@ def actor_id_from_api_key_hash(api_key_hash: Optional[str]) -> Optional[str]:
     normalized = str(api_key_hash).strip().lower()
     if not normalized:
         return None
-    return f"wandb_key:{normalized[:24]}"
+    actor = f"wandb_key:{normalized[:24]}"
+    if re.fullmatch(r"[0-9a-f]{16,64}", normalized):
+        return _KeyFingerprint(actor)
+    return actor
 
 
 def current_actor_id() -> Optional[str]:
@@ -609,6 +640,65 @@ def current_actor_id() -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def _private_identity(value: Any) -> Optional[str]:
+    """Keep SHA-256 pseudonyms stable when an event crosses multiple sinks."""
+    if not isinstance(value, str) or not value:
+        return None
+    if type(value) in {_IdentityPseudonym, _KeyFingerprint}:
+        return value
+    return _hash_identifier(value)
+
+
+def _restore_identity_provenance(original: Any, sanitized: Any) -> Any:
+    """Preserve only internal hash markers that sanitization did not alter.
+
+    String contents never establish trust. Serialized/replayed identifiers are
+    ordinary untrusted strings and are hashed again in strict mode.
+    """
+    if type(original) in {_IdentityPseudonym, _KeyFingerprint} and original == sanitized:
+        return original
+    if isinstance(original, dict) and isinstance(sanitized, dict):
+        return {key: _restore_identity_provenance(original.get(key), child) for key, child in sanitized.items()}
+    if isinstance(original, (list, tuple)) and isinstance(sanitized, (list, tuple)):
+        projected = [_restore_identity_provenance(before, after) for before, after in zip(original, sanitized)]
+        return tuple(projected) if isinstance(sanitized, tuple) else projected
+    return sanitized
+
+
+def _viewer_fields(viewer: Any) -> Dict[str, Any]:
+    """Inspect materialized viewer data without evaluating lazy properties."""
+    if type(viewer) is dict:
+        return viewer
+    try:
+        fields = vars(viewer)
+    except TypeError:
+        return {}
+    attrs = fields.get("_attrs")
+    return attrs if type(attrs) is dict else fields
+
+
+def _strict_event_identities(value: Any) -> Any:
+    """Hash identity fields defensively, including nested session metadata."""
+    if isinstance(value, dict):
+        projected = {
+            key: _private_identity(child)
+            if key in {"actor_id", "user_id", "username", "email", "email_domain", "api_key_hash"}
+            else _strict_event_identities(child)
+            for key, child in value.items()
+        }
+        actor = value.get("actor_id")
+        if type(actor) is _KeyFingerprint:
+            # Do not change a strict-mode actor when its username becomes known.
+            projected["user_id"] = actor
+        elif "actor_id" in value and not projected["actor_id"]:
+            projected["actor_id"] = projected.get("user_id")
+        return projected
+    if isinstance(value, (list, tuple)):
+        projected = [_strict_event_identities(child) for child in value]
+        return tuple(projected) if isinstance(value, tuple) else projected
+    return value
 
 
 def _request_should_be_emitted(
@@ -656,11 +746,9 @@ class AnalyticsTracker:
             email = None
             if isinstance(viewer_info, str):
                 email = viewer_info
-            elif hasattr(viewer_info, "email"):
-                email = viewer_info.email
-            elif isinstance(viewer_info, dict) and "email" in viewer_info:
-                email = viewer_info["email"]
-            if email and "@" in email:
+            else:
+                email = _viewer_fields(viewer_info).get("email")
+            if isinstance(email, str) and "@" in email:
                 return email.split("@")[1].lower()
             return None
         except Exception:
@@ -668,46 +756,57 @@ class AnalyticsTracker:
 
     @staticmethod
     def _extract_user_id(viewer_info: Any) -> Optional[str]:
-        """Return the best available non-PII user identifier.
+        """Return a bounded authenticated username, never a team or email.
 
-        Prefers ``username`` > ``entity`` (the W&B team/org slug).
-        Email is deliberately **not** returned to avoid logging PII;
-        when only an email is available the domain portion is returned
-        instead.  Raw string inputs are returned only when they do not
-        look like email addresses.  Returns ``None`` for unrecognised
-        types rather than stringifying arbitrary objects.
+        Callers supply authenticated viewer data. Inspect only materialized
+        fields: SDK properties can otherwise trigger a telemetry-only lookup.
         """
         try:
-            for attr in ("username", "entity"):
-                if hasattr(viewer_info, attr):
-                    val = getattr(viewer_info, attr)
-                    if val:
-                        text = str(val).strip()
-                        if text.lower() not in _MISSING_IDENTITY_VALUES:
-                            return text
-            if isinstance(viewer_info, dict):
-                for key in ("username", "entity"):
-                    val = viewer_info.get(key)
-                    if val:
-                        text = str(val).strip()
-                        if text.lower() not in _MISSING_IDENTITY_VALUES:
-                            return text
-            if hasattr(viewer_info, "email"):
-                email = getattr(viewer_info, "email")
-                if email and "@" in str(email):
-                    domain = str(email).split("@", 1)[1].strip().lower()
-                    return domain or None
-            if isinstance(viewer_info, str):
-                text = viewer_info.strip()
-                if text.lower() in _MISSING_IDENTITY_VALUES:
-                    return None
-                if "@" in text:
-                    domain = text.split("@", 1)[1].strip().lower()
-                    return domain or None
-                return text
+            value = viewer_info if isinstance(viewer_info, str) else _viewer_fields(viewer_info).get("username")
+            if not isinstance(value, str):
+                return None
+            username = value.strip()
+            if (
+                username.lower() not in _MISSING_IDENTITY_VALUES
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", username) is not None
+            ):
+                return username
             return None
         except Exception:
             return None
+
+    @classmethod
+    def _event_with_identity(
+        cls,
+        event: Dict[str, Any],
+        viewer_info: Any = None,
+        *,
+        api_key_hash: Optional[str] = None,
+        email_domain: Optional[str] = None,
+        level: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Resolve identity from authenticated inputs/cache, without API calls."""
+        if level is None:
+            level = _resolve_privacy_level()
+        actor = actor_id_from_api_key_hash(api_key_hash) or current_actor_id()
+        username = cls._extract_user_id(viewer_info)
+        if username is None:
+            try:
+                from wandb_mcp_server.api_client import WandBApiManager
+
+                username = cls._extract_user_id(WandBApiManager.get_cached_viewer_info())
+            except Exception:
+                # Missing enrichment must not interfere with the request.
+                pass
+        pseudonym = actor if type(actor) is _KeyFingerprint else _private_identity(username or actor)
+        display = pseudonym if level == _PRIVACY_LEVEL_STRICT else username or actor
+        _, email_domain = cls._apply_identity_privacy(
+            None, email_domain or cls._extract_email_domain(viewer_info), level=level
+        )
+        return _IdentityEvent(
+            {**event, "actor_id": display, "user_id": display, "email_domain": email_domain},
+            segment_identity=pseudonym,
+        )
 
     # ------------------------------------------------------------------
     # Param sanitisation
@@ -903,19 +1002,13 @@ class AnalyticsTracker:
             return
         try:
             level = _resolve_privacy_level()
-            user_id = self._extract_user_id(viewer_info)
-            email_domain = self._extract_email_domain(viewer_info)
-            user_id, email_domain = self._apply_identity_privacy(user_id, email_domain, level=level)
-            actor_id = actor_id_from_api_key_hash(api_key_hash) or current_actor_id()
             event = {
                 **self._base_event("user_session"),
                 "session_id": session_id,
-                "actor_id": actor_id,
-                "user_id": user_id,
-                "email_domain": email_domain,
                 "api_key_hash": api_key_hash[:16] if api_key_hash else None,
                 "metadata": self._sanitise_params(metadata, level=level) if metadata else None,
             }
+            event = self._event_with_identity(event, viewer_info, api_key_hash=api_key_hash, level=level)
             try:
                 from wandb_mcp_server.harness import current_harness_context
 
@@ -945,29 +1038,26 @@ class AnalyticsTracker:
         error: Optional[str] = None,
         duration_ms: Optional[float] = None,
         mcp_tool_name: Optional[str] = None,
+        error_diagnostics: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Record an MCP tool invocation."""
         if not self.enabled:
             return
         try:
             level = _resolve_privacy_level()
-            user_id = self._extract_user_id(viewer_info)
-            email_domain = self._extract_email_domain(viewer_info)
-            user_id, email_domain = self._apply_identity_privacy(user_id, email_domain, level=level)
             public_tool_name = mcp_tool_name or tool_name
             event = {
                 **self._base_event("tool_call"),
                 "session_id": session_id,
-                "actor_id": current_actor_id(),
-                "user_id": user_id,
-                "email_domain": email_domain,
                 "tool_name": public_tool_name,
                 "mcp_tool_name": public_tool_name,
                 "usage_dimensions": _usage_dimensions(params),
                 "success": success,
                 "error": error,
+                "error_diagnostics": error_diagnostics,
                 "duration_ms": duration_ms,
             }
+            event = self._event_with_identity(event, viewer_info, level=level)
             labels = {
                 "event_type": "tool_call",
                 "tool_name": public_tool_name,
@@ -1004,19 +1094,16 @@ class AnalyticsTracker:
                 duration_ms=duration_ms,
             ):
                 return
-            user_id, email_domain = self._apply_identity_privacy(user_id, email_domain)
             event = {
                 **self._base_event("request"),
                 "request_id": request_id,
                 "session_id": session_id,
-                "actor_id": current_actor_id(),
-                "user_id": user_id,
-                "email_domain": email_domain,
                 "method": method,
                 "path": path,
                 "status_code": status_code,
                 "duration_ms": duration_ms,
             }
+            event = self._event_with_identity(event, user_id, email_domain=email_domain)
             self._emit(
                 _prepare_event(event),
                 {

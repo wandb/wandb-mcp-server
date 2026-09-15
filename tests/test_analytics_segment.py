@@ -65,7 +65,7 @@ class TestMapToSegmentTrack:
         )
         result = map_to_segment_track(event)
         assert result is not None
-        assert result["userId"] == "alice"
+        assert result["userId"] == "<h:2bd806c97f0e>"
         assert result["event"] == f"{SEGMENT_EVENT_PREFIX}.tool_call"
         assert result["properties"]["tool_name"] == "query_wandb_gql"
         assert result["properties"]["mcp_tool_name"] == "query_wandb_tool"
@@ -122,7 +122,7 @@ class TestMapToSegmentTrack:
         )
         result = map_to_segment_track(event)
         assert result["event"] == f"{SEGMENT_EVENT_PREFIX}.session_start"
-        assert result["userId"] == "wandb_key:abcd1234"
+        assert result["userId"] == "<h:38cb09a62dd5>"
         assert "email_domain" not in result["properties"]
         assert result["properties"]["runtime_surface"] == "local_stdio"
         assert result["properties"]["transport"] == "stdio"
@@ -195,7 +195,7 @@ class TestSegmentForwarder:
         }
         result = f.forward(event)
         assert result is not None
-        assert result["userId"] == "bob"
+        assert result["userId"] == "<h:81b637d8fcd2>"
 
     @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
     def test_dry_run_skips_unmappable(self):
@@ -217,7 +217,7 @@ class TestSegmentForwarder:
         f.forward(event)
         payloads = f.get_forwarded_payloads()
         assert len(payloads) == 1
-        assert payloads[0]["userId"] == "carol"
+        assert payloads[0]["userId"] == "<h:4c26d9074c27>"
 
     @patch.dict("os.environ", {"MCP_SEGMENT_FORWARD": "true"})
     @patch("wandb_mcp_server.analytics_segment._build_retry_session")
