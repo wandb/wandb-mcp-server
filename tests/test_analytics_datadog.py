@@ -98,10 +98,83 @@ class TestSeverityMapping:
 class TestDatadogAttributes:
     """Structured attributes for automatic DD faceting and dashboards."""
 
+    def test_environment_has_one_tag_without_losing_application_context(self):
+        event = _make_event("tool_call", environment="staging")
+        entry = map_to_datadog_log(event, dd_env="staging", dd_version="v", dd_service="mcp")
+        assert "env:staging" in entry["ddtags"].split(",")
+        assert not any(tag.startswith("environment:") for tag in entry["ddtags"].split(","))
+        assert entry["attributes"]["environment"] == "staging"
+
+    @pytest.mark.parametrize("event_type", ["tool_call", "user_session", "request"])
+    def test_identity_appears_only_in_reserved_usr_field(self, event_type):
+        event = _make_event(event_type, actor_id="test-user", user_id="test-user")
+        entry = map_to_datadog_log(event, dd_env="test", dd_version="v", dd_service="mcp")
+        assert entry["attributes"]["usr"] == {"id": "test-user"}
+        assert "actor_id" not in entry["attributes"]
+        assert "user_id" not in entry["attributes"]
+        assert "test-user" not in entry["message"]
+        assert "test-user" not in entry["ddtags"]
+        assert event["actor_id"] == event["user_id"] == "test-user"
+
+    def test_redundant_attributes_are_removed_without_losing_operational_fields(self):
+        event = _make_event(
+            "tool_call",
+            tool_name="query_wandb_tool",
+            mcp_tool_name="query_wandb_tool",
+            success=False,
+            duration_ms=12.5,
+            error="input_validation: Invalid tool arguments",
+            error_diagnostics={
+                "category": "input_validation",
+                "exception_type": "ToolError",
+                "cause_type": "ValidationError",
+                "validation_fields": ["resource"],
+                "validation_codes": ["literal_error"],
+            },
+            usage_dimensions={"resource": "project"},
+            runtime_surface="cloud_run",
+            transport="http",
+            deployment_type="hosted",
+            agent_harness="generic",
+            call_type="tools/call",
+        )
+        entry = map_to_datadog_log(event, dd_env="staging", dd_version="v", dd_service="mcp")
+        attrs = entry["attributes"]
+        for redundant in ("labels", "mcp_tool_name", "duration_ms"):
+            assert redundant not in attrs
+        assert attrs["tool"] == {"name": "query_wandb_tool"}
+        assert attrs["tool_name"] == "query_wandb_tool"
+        assert attrs["event_type"] == "tool_call"
+        assert attrs["success"] is False
+        assert attrs["duration"] == 12_500_000
+        assert attrs["error"] == {"kind": "input_validation", "message": "Invalid tool arguments"}
+        assert attrs["error_diagnostics"] == event["error_diagnostics"]
+        assert attrs["usage_dimensions"] == {"resource": "project"}
+        assert entry["status"] == "error"
+        for tag in (
+            "env:staging",
+            "service:mcp",
+            "event_type:tool_call",
+            "tool_name:query_wandb_tool",
+            "success:false",
+        ):
+            assert tag in entry["ddtags"].split(",")
+
     def test_duration_in_nanoseconds(self):
         event = _make_event("tool_call", tool_name="query_traces", success=True, duration_ms=245.5)
         entry = map_to_datadog_log(event, dd_env="s", dd_version="v", dd_service="svc")
         assert entry["attributes"]["duration"] == 245_500_000
+
+    @pytest.mark.parametrize(
+        "duration_ms,duration_ns", [(0, 0), (0.125, 125_000), (12.345678, 12_345_678), (245.5, 245_500_000)]
+    )
+    def test_latency_has_one_precise_measure_and_readable_message(self, duration_ms, duration_ns):
+        event = _make_event("tool_call", tool_name="query_wandb_tool", success=True, duration_ms=duration_ms)
+        entry = map_to_datadog_log(event, dd_env="staging", dd_version="v", dd_service="mcp")
+        assert "duration_ms" not in entry["attributes"]
+        assert entry["attributes"]["duration"] == duration_ns
+        assert f"({duration_ms:.0f}ms)" in entry["message"]
+        assert event["duration_ms"] == duration_ms
 
     def test_duration_absent_when_none(self):
         event = _make_event("tool_call", tool_name="x", success=True)
@@ -160,7 +233,8 @@ class TestDatadogAttributes:
         tool = entry["attributes"]["tool"]
         assert tool["name"] == "count_traces"
         assert tool["mcp_name"] == "count_weave_traces_tool"
-        assert tool["success"] is True
+        assert "success" not in tool
+        assert entry["attributes"]["success"] is True
         assert entry["attributes"]["tool_name"] == "count_traces"
         assert entry["attributes"]["mcp_tool_name"] == "count_weave_traces_tool"
         assert entry["attributes"]["runtime_surface"] == "cloud_run"
@@ -235,11 +309,11 @@ class TestDatadogAttributes:
         assert attrs["timestamp"] == "2026-05-27T17:58:00+00:00"
         assert attrs["tool_name"] == "get_run_history"
         assert attrs["success"] is True
-        assert attrs["duration_ms"] == 546.08
+        assert attrs["duration"] == 546_080_000
+        assert "duration_ms" not in attrs
         assert attrs["usage_dimensions"] == {"samples_bucket": "11-25"}
         assert "params" not in attrs
-        assert attrs["labels"]["tool_name"] == "get_run_history"
-        assert attrs["labels"]["event_type"] == "tool_call"
+        assert "labels" not in attrs
 
 
 # ---------------------------------------------------------------------------
@@ -733,7 +807,8 @@ class TestE2ETrackerToDatadog:
             entry = payloads[0]
             assert entry["status"] == "error"
             assert entry["attributes"]["error"]["kind"] == "CommError"
-            assert entry["attributes"]["tool"]["success"] is False
+            assert entry["attributes"]["success"] is False
+            assert "success" not in entry["attributes"]["tool"]
 
     @patch.dict(
         "os.environ",

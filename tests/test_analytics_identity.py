@@ -50,14 +50,22 @@ def mapped(event):
 
 @pytest.mark.parametrize("level", ["off", "standard", "strict"])
 @pytest.mark.parametrize("event_type", ["tool_call", "user_session", "request"])
-def test_fallback_display_is_neutral_without_changing_segment_identity(monkeypatch, level, event_type):
+def test_missing_username_is_omitted_outside_strict_without_changing_segment(monkeypatch, level, event_type):
     monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", level)
     event = emit(monkeypatch, event_type)
     prepared = analytics._prepare_event(analytics._prepare_event(event))
     dd, segment = mapped(prepared)
-    assert event["actor_id"] == event["user_id"] == DISPLAY_FINGERPRINT
-    assert prepared["actor_id"] == prepared["user_id"] == DISPLAY_FINGERPRINT
-    assert dd["attributes"]["usr"]["id"] == dd["attributes"]["actor_id"] == DISPLAY_FINGERPRINT
+    assert "api_key_hash" not in event and "api_key_hash" not in prepared
+    if level == "strict":
+        assert event["actor_id"] == event["user_id"] == DISPLAY_FINGERPRINT
+        assert prepared["actor_id"] == prepared["user_id"] == DISPLAY_FINGERPRINT
+        assert dd["attributes"]["usr"]["id"] == DISPLAY_FINGERPRINT
+    else:
+        assert event.get("actor_id") is None and event.get("user_id") is None
+        assert "actor_id" not in prepared and "user_id" not in prepared
+        assert "usr" not in dd["attributes"]
+        assert "a" * 24 not in json.dumps([event, prepared, dd])
+    assert "actor_id" not in dd["attributes"] and "user_id" not in dd["attributes"]
     assert "wandb_key:" not in json.dumps([event, prepared, dd])
     if segment is not None:
         assert segment["userId"] == FINGERPRINT, "a display rename must not split existing analytics actors"
@@ -71,7 +79,8 @@ def test_cached_username_is_preferred_only_in_approved_sinks(monkeypatch, level,
     event = emit(monkeypatch, event_type)
     dd, segment = mapped(event)
     assert event["user_id"] == event["actor_id"] == "cached-user"
-    assert dd["attributes"]["usr"]["id"] == dd["attributes"]["actor_id"] == "cached-user"
+    assert dd["attributes"]["usr"]["id"] == "cached-user"
+    assert "actor_id" not in dd["attributes"] and "user_id" not in dd["attributes"]
     if segment is not None:
         assert segment["userId"] == FINGERPRINT
         assert "cached-user" not in json.dumps(segment)
@@ -79,12 +88,13 @@ def test_cached_username_is_preferred_only_in_approved_sinks(monkeypatch, level,
 
 
 @pytest.mark.parametrize("level", ["off", "standard", "strict"])
-def test_missing_cached_username_keeps_fingerprint(monkeypatch, level):
+def test_missing_cached_username_keeps_fingerprint_only_in_strict(monkeypatch, level):
     monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", level)
     event = emit(monkeypatch, "tool_call")
     dd, segment = mapped(event)
-    assert event["actor_id"] == DISPLAY_FINGERPRINT
-    assert dd["attributes"]["usr"]["id"] == DISPLAY_FINGERPRINT
+    expected = DISPLAY_FINGERPRINT if level == "strict" else None
+    assert event.get("actor_id") == event.get("user_id") == expected
+    assert dd["attributes"].get("usr", {}).get("id") == expected
     assert segment["userId"] == FINGERPRINT
 
 
@@ -182,7 +192,7 @@ def test_username_extraction_does_not_invoke_properties(monkeypatch):
             pytest.fail("analytics read a potentially network-backed property")
 
     event = emit(monkeypatch, "tool_call", NetworkBackedViewer())
-    assert event["actor_id"] == DISPLAY_FINGERPRINT
+    assert event.get("actor_id") is None and event.get("user_id") is None
 
 
 def test_supplied_authenticated_username_wins_over_cached_value(monkeypatch):
@@ -237,8 +247,8 @@ def test_segment_never_forwards_freeform_session_metadata(monkeypatch, level, so
 def test_username_never_falls_back_to_team_or_email(monkeypatch, viewer):
     monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "standard")
     event = emit(monkeypatch, "tool_call", viewer)
-    assert event["actor_id"] == event["user_id"] == DISPLAY_FINGERPRINT
-    assert mapped(event)[0]["attributes"]["usr"]["id"] == DISPLAY_FINGERPRINT
+    assert event.get("actor_id") is None and event.get("user_id") is None
+    assert "usr" not in mapped(event)[0]["attributes"]
 
 
 @pytest.mark.parametrize("level", ["off", "standard", "strict"])
