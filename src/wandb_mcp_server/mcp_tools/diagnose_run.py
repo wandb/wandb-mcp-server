@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from wandb_mcp_server.admission import ToolDeadlineExceeded
 from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.config import MCP_MAX_HISTORY_KEYS, MCP_MAX_HISTORY_SAMPLES
+from wandb_mcp_server.error_diagnostics import ToolInputValidationError, record_exception_diagnostics
 from wandb_mcp_server.mcp_tools.run_history import get_run_history
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
@@ -184,7 +185,11 @@ def _validate_optional_keys(name: str, value: Optional[List[str]]) -> None:
         or len(value) > MCP_MAX_HISTORY_KEYS
         or not all(isinstance(key, str) and key.strip() for key in value)
     ):
-        raise ValueError(f"{name} must contain at most {MCP_MAX_HISTORY_KEYS} non-empty strings")
+        raise ToolInputValidationError(
+            f"{name} must contain at most {MCP_MAX_HISTORY_KEYS} non-empty strings",
+            field=name,
+            code="too_long" if isinstance(value, list) and len(value) > MCP_MAX_HISTORY_KEYS else "value_error",
+        )
 
 
 def diagnose_run(
@@ -202,9 +207,9 @@ def diagnose_run(
     for name, value in (("config_keys", config_keys), ("summary_keys", summary_keys)):
         _validate_optional_keys(name, value)
     if not isinstance(x_axis, str) or not x_axis.strip():
-        raise ValueError("x_axis must be a non-empty string")
+        raise ToolInputValidationError("x_axis must be a non-empty string", field="x_axis")
     if isinstance(samples, bool) or not isinstance(samples, int) or samples < 1:
-        raise ValueError("samples must be a positive integer")
+        raise ToolInputValidationError("samples must be a positive integer", field="samples")
     effective_samples = min(samples, MCP_MAX_HISTORY_SAMPLES)
     api = WandBApiManager.get_api()
     with track_tool_execution(
@@ -250,6 +255,7 @@ def diagnose_run(
                     }
                 )
         except Exception as e:
+            record_exception_diagnostics(e)
             if isinstance(e, ToolDeadlineExceeded):
                 raise
             if isinstance(e, GraphQLResponseTooLarge):
@@ -326,6 +332,7 @@ def diagnose_run(
                 )
             history_rows = list(history_result.get("rows") or [])
         except Exception as e:
+            record_exception_diagnostics(e)
             if isinstance(e, ToolDeadlineExceeded):
                 raise
             raise_for_wandb_server_busy(e)

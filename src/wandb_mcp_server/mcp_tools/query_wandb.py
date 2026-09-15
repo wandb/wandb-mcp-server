@@ -26,6 +26,7 @@ from wandb_mcp_server.config import (
     structured_error,
 )
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.error_diagnostics import ToolInputValidationError, record_exception_diagnostics
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_selective_reads import (
@@ -146,7 +147,7 @@ _MAX_ENUM_BYTES = 64
 _MAX_FILTER_DEPTH = 12
 
 
-class WandBQueryValidationError(ValueError):
+class WandBQueryValidationError(ToolInputValidationError):
     """Raised before any W&B client is obtained for an invalid request."""
 
 
@@ -671,7 +672,7 @@ def _validate_request(
     ):
         raise WandBQueryValidationError("unsupported resource")
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-        raise WandBQueryValidationError("limit must be a positive integer")
+        raise WandBQueryValidationError("limit must be a positive integer", field="limit")
     if filters is not None and not isinstance(filters, dict):
         raise WandBQueryValidationError("filters must be a dictionary")
     _validate_filter_bound(filters)
@@ -680,13 +681,13 @@ def _validate_request(
     if resource != "runs" and order != "-created_at":
         raise WandBQueryValidationError("order is supported only for resource='runs'")
     if resource == "run" and (not isinstance(run_id, str) or not run_id.strip()):
-        raise WandBQueryValidationError("run_id is required for resource='run'")
+        raise WandBQueryValidationError("run_id is required for resource='run'", field="run_id", code="missing")
     if resource != "run" and run_id is not None:
         raise WandBQueryValidationError("run_id is supported only for resource='run'")
     if run_id is not None:
         _validate_text_bound("run_id", run_id, _MAX_IDENTIFIER_BYTES)
     if resource == "sweep" and (not isinstance(sweep_id, str) or not sweep_id.strip()):
-        raise WandBQueryValidationError("sweep_id is required for resource='sweep'")
+        raise WandBQueryValidationError("sweep_id is required for resource='sweep'", field="sweep_id", code="missing")
     if resource != "sweep" and sweep_id is not None:
         raise WandBQueryValidationError("sweep_id is supported only for resource='sweep'")
     if sweep_id is not None:
@@ -895,6 +896,7 @@ def _sdk_error_result(
     entity_name: str,
     project_name: str,
 ) -> Dict[str, Any]:
+    record_exception_diagnostics(exc)
     status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
     response = getattr(exc, "response", None)
     if status is None and response is not None:
@@ -1025,9 +1027,11 @@ def query_wandb(
         ):
             raise WandBCursorValidationError("cursor continuation kind is not supported for this collection query")
     except WandBCursorValidationError as exc:
+        record_exception_diagnostics(exc)
         safe_resource = resource if isinstance(resource, str) and resource in _INCLUDE_FIELDS else "unknown"
         return structured_error("invalid_cursor", str(exc), source="wandb_sdk", resource=safe_resource)
     except WandBQueryValidationError as exc:
+        record_exception_diagnostics(exc)
         safe_resource = resource if isinstance(resource, str) and resource in _INCLUDE_FIELDS else "unknown"
         return structured_error("invalid_request", str(exc), source="wandb_sdk", resource=safe_resource)
 
@@ -1037,6 +1041,7 @@ def query_wandb(
         if sdk_fallback_offset is not None:
             _validate_sdk_fallback_window(sdk_fallback_offset, applied_limit)
     except WandBCursorValidationError as exc:
+        record_exception_diagnostics(exc)
         return structured_error("invalid_cursor", str(exc), source="wandb_sdk", resource=resource)
     path = f"{entity_name}/{project_name}"
 
@@ -1453,7 +1458,6 @@ def query_wandb(
                 project_name=project_name,
             )
         except Exception as exc:
-            logger.error("W&B SDK query failed (%s)", type(exc).__name__)
             ctx.mark_error(f"sdk_query_failed: {type(exc).__name__}")
             return _sdk_error_result(
                 exc,

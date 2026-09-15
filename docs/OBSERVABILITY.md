@@ -151,11 +151,11 @@ An unset privacy level defaults to `off`. Explicitly empty or invalid values
 fail startup without logging the supplied value. Valid levels are case-insensitive
 and ignore surrounding whitespace.
 
-| Level | Product tool telemetry | Identity compatibility fields | Verbose request-body logs |
-|---|---|---|---|
-| `off` (default) | compact `usage_dimensions` only | pass-through | INFO |
-| `standard` | compact `usage_dimensions` only | pass-through | demoted to DEBUG |
-| `strict` | compact `usage_dimensions` only | hashed -> `<h:sha256_prefix>` | demoted to DEBUG |
+| Level | Product tool telemetry | Canonical log and Datadog identity | Segment identity | Verbose request-body logs |
+|---|---|---|---|---|
+| `off` (default) | compact `usage_dimensions` only | authenticated username when already available; otherwise API-key fingerprint | pseudonym only | INFO |
+| `standard` | compact `usage_dimensions` only | authenticated username when already available; otherwise API-key fingerprint | pseudonym only | demoted to DEBUG |
+| `strict` | compact `usage_dimensions` only | SHA-256 pseudonym; no plaintext username | pseudonym only | demoted to DEBUG |
 
 Sensitive key-name redaction (`api_key`, `token`, `secret`, `password`,
 `credential`, `auth`) runs at every level. Truncation of strings >200 chars
@@ -172,19 +172,68 @@ runs at every level.
 
 ### Why the split
 
-Schema 1.1 uses a pseudonymous `actor_id` derived from the API-key digest and
-compact usage dimensions, so product analysis does not require raw resource
-identifiers or tool arguments. Kubernetes agent mode keeps collection within
-the operator-selected logging path. Compact dimensions reduce storage and
-indexing cost in either topology. `standard` remains the safe application-log
-default; `strict` also hashes legacy identity fields for regulated deployments.
+At `off` and `standard`, the canonical event and Datadog's `usr.id` use an
+authenticated W&B username when one was supplied by the authenticated request
+path or was already materialized in that actor's endpoint-bound API-client
+cache. Logging never initializes a client, fetches a viewer, or evaluates a
+lazy viewer property. Early events therefore use the API-key-derived
+fingerprint until a functional request has populated the cache. An entity,
+email address, or email domain is not a username and is never substituted for
+one.
+
+At `off` and `standard`, both canonical identity fields use that authenticated
+username when it is available and otherwise use the API-key-derived
+fingerprint. Segment does not copy either serialized identity field: it always
+uses a separately carried pseudonym for `userId` and never receives a plaintext
+username. It uses the API-key fingerprint when available and a SHA-256 username
+pseudonym only as a fallback. Raw usernames are also excluded from Segment
+properties.
+
+`strict` retains a SHA-256 pseudonym instead of a plaintext username. These
+identifiers allow correlation; they are not anonymous. Usernames and pseudonyms
+both need appropriate log access and retention controls. Kubernetes agent mode
+keeps collection within the operator-selected logging path. Compact dimensions
+reduce storage and indexing cost without retaining raw resource identifiers or
+tool arguments.
 
 ### Datadog product dimensions
 
 Datadog receives the same bounded `usage_dimensions` as the canonical event and
-never receives `params`. Only deployment, harness, method, public tool, success,
-and error class are tags. Actor IDs, session IDs, versions, durations, and error
-messages remain attributes to avoid high-cardinality indexing costs.
+never receives `params`. At `off` and `standard`, `usr.id` may contain the
+cache-only authenticated username described above; at `strict`, it contains the
+API-key-derived pseudonym. Only deployment, harness, method, public tool,
+success, and error class are tags. Actor IDs, user IDs, session IDs, versions,
+durations, and error messages remain attributes to avoid high-cardinality
+indexing costs.
+
+### Diagnosing tool failures
+
+Failed public tool events can include `error_diagnostics` alongside the existing
+public error code. It contains only fixed categories and bounded metadata:
+
+- `category`: for example, `input_validation`, `authentication_failed`,
+  `permission_denied`, `resource_not_found`, `tool_timeout`, or `upstream_error`.
+- `exception_type` and `cause_type`: allowlisted exception classes, including
+  the cause behind a generic `ToolError` wrapper.
+- `validation_fields` and `validation_codes`: up to eight public top-level
+  parameter names and validation codes. Nested dictionary keys and values are
+  excluded.
+- `upstream_status`: a recognized HTTP error status, when provided as typed
+  exception metadata.
+
+For example, a stale caller schema can produce `category=input_validation`,
+`cause_type=ValidationError`, `validation_fields=["entity_name", "resource"]`,
+and `validation_codes=["missing"]`, without recording the submitted query.
+Datadog exposes these as `@error_diagnostics.category`,
+`@error_diagnostics.cause_type`, and the other corresponding attributes.
+
+Use the diagnostic category and public tool name together. `invalid_value`
+means a `ValueError` occurred; it does not by itself prove the caller was at
+fault. If a backend does not expose a typed cause or status, the event stays
+generic rather than guessing from its message. Error diagnostics never contain
+exception text, stack locals, request values, resource identifiers, upstream
+response bodies, or credentials. They are omitted from successful calls,
+including calls that recovered from an internal failure.
 
 ## MCP client harness dimensions
 
@@ -203,7 +252,8 @@ Schema 1.1 canonical fields:
 | `client_vendor` | Vendor bucket, such as `openai`, `anthropic`, `cursor`, `google`, or `mistral`. |
 | `call_type` | Exact MCP JSON-RPC method, such as `initialize`, `tools/list`, or `tools/call`. |
 | `tool_name` | Public MCP tool name; emitted exactly once per public invocation. |
-| `actor_id` | Pseudonymous `wandb_key:<24 hex chars>` cohort identifier. |
+| `actor_id` | Canonical/Datadog identity: cache-only authenticated username at `off`/`standard`, or an API-key pseudonym when no username is available and at `strict`. Segment never receives this field as plaintext. |
+| `user_id` | Same canonical/Datadog identity policy as `actor_id`; retained as the user-oriented compatibility field. Segment never receives this field as plaintext. |
 | `mcp_client_family` | One-release compatibility alias for the previous family field. |
 | `mcp_client_app` | One-release compatibility alias for the previous app field. |
 | `mcp_client_source` | Signal used for classification: `initialize_client_info`, `meta_client_info`, `session_metadata`, `user_agent`, or `unknown`. |
@@ -235,13 +285,21 @@ Recommended product analyses:
 
 ### Identifier hashing at `strict`
 
-`<h:sha256_prefix>` uses the first 12 hex chars of `sha256(value)`.
-Deterministic (the same entity name always hashes to the same digest), so
-legacy identity joins remain possible during the schema transition. New
-product dashboards should use `actor_id` and `usage_dimensions`. The hash is
-not reversible without a rainbow table over known W&B entity names,
-which is out of scope for legal defensibility (the retained data is no
-longer plaintext customer identifiers).
+When the request has an API-key fingerprint, `strict` keeps
+`wandb_key:<24 hex chars>` as the canonical and Datadog identity even when a
+cached username becomes available. The fingerprint is a prefix of SHA-256, not
+part of the API key and not a credential. If no key fingerprint is available,
+an authenticated username is represented as `<h:sha256_prefix>` (the first 12
+hex characters of SHA-256). Segment applies the same pseudonymous-only rule at
+every privacy level.
+
+Hashing is deterministic and does not prevent correlation. Hashes of predictable
+values such as usernames can also be matched against candidate names. Do not
+describe either representation as anonymous or as a substitute for access and
+retention controls. The strict policy applies before canonical emission and is
+reapplied at the Datadog mapping. Segment independently enforces its
+pseudonymous-only identity policy so a direct sink call cannot expose a raw
+username.
 
 ## Managed serverless deployments
 

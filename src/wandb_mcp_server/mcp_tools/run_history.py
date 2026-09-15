@@ -33,6 +33,7 @@ from wandb_mcp_server.config import (
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.error_diagnostics import ToolInputValidationError
 from wandb_mcp_server.wandb_selective_reads import (
     MAX_SAFE_HISTORY_STEP,
     SelectiveReadUnavailable,
@@ -296,16 +297,18 @@ def _resolve_bounded_history_run(
     return bounded_run, bounded_run.lastHistoryStep
 
 
-def _history_text_bytes(name: str, value: object) -> int:
+def _history_text_bytes(name: str, value: object, *, field: str | None = None) -> int:
     """Validate one history identifier and return its UTF-8 byte length."""
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name} must be a non-empty string")
+        raise ToolInputValidationError(f"{name} must be a non-empty string", field=field or name)
     try:
         encoded_length = len(value.encode("utf-8"))
     except UnicodeEncodeError:
-        raise ValueError(f"{name} must contain valid UTF-8 text") from None
+        raise ToolInputValidationError(f"{name} must contain valid UTF-8 text", field=field or name) from None
     if encoded_length > _MAX_HISTORY_IDENTIFIER_BYTES:
-        raise ValueError(f"{name} exceeds the {_MAX_HISTORY_IDENTIFIER_BYTES}-byte limit")
+        raise ToolInputValidationError(
+            f"{name} exceeds the {_MAX_HISTORY_IDENTIFIER_BYTES}-byte limit", field=field or name, code="too_long"
+        )
     return encoded_length
 
 
@@ -334,13 +337,13 @@ def get_run_history(
         )
     )
     if isinstance(samples, bool) or not isinstance(samples, int) or samples < 1:
-        raise ValueError("samples must be a positive integer")
+        raise ToolInputValidationError("samples must be a positive integer", field="samples")
     if stream not in {"default", "system"}:
-        raise ValueError("stream must be 'default' or 'system'")
+        raise ToolInputValidationError("stream must be 'default' or 'system'", field="stream", code="literal_error")
     if target_x is not None and (
         isinstance(target_x, bool) or not isinstance(target_x, (int, float)) or not math.isfinite(float(target_x))
     ):
-        raise ValueError("target_x must be a finite number")
+        raise ToolInputValidationError("target_x must be a finite number", field="target_x")
     if tolerance is not None and (
         target_x is None
         or isinstance(tolerance, bool)
@@ -348,45 +351,67 @@ def get_run_history(
         or not math.isfinite(float(tolerance))
         or tolerance < 0
     ):
-        raise ValueError("tolerance must be a finite non-negative number and requires target_x")
+        raise ToolInputValidationError(
+            "tolerance must be a finite non-negative number and requires target_x", field="tolerance"
+        )
     if target_x is not None and (min_step is not None or max_step is not None):
-        raise ValueError("target_x cannot be combined with min_step or max_step")
+        raise ToolInputValidationError("target_x cannot be combined with min_step or max_step", field="target_x")
     if stream == "system" and target_x is not None:
-        raise ValueError("target_x is supported only for the default history stream")
+        raise ToolInputValidationError("target_x is supported only for the default history stream", field="target_x")
     if stream == "system" and (min_step is not None or max_step is not None):
-        raise ValueError("step-range scans are supported only for the default history stream")
+        raise ToolInputValidationError(
+            "step-range scans are supported only for the default history stream", field="stream"
+        )
     for name, value in (("min_step", min_step), ("max_step", max_step)):
         if value is None:
             continue
         if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError(f"{name} must be an integer")
+            raise ToolInputValidationError(f"{name} must be an integer", field=name, code="int_type")
         if value < 0:
-            raise ValueError(f"{name} must be non-negative")
+            raise ToolInputValidationError(f"{name} must be non-negative", field=name, code="greater_than_equal")
         if value > MAX_SAFE_HISTORY_STEP:
-            raise ValueError(f"{name} must be at most {MAX_SAFE_HISTORY_STEP}")
+            raise ToolInputValidationError(
+                f"{name} must be at most {MAX_SAFE_HISTORY_STEP}", field=name, code="less_than_equal"
+            )
     if keys is not None and (
         not isinstance(keys, list)
         or not all(isinstance(key, str) and key.strip() for key in keys)
         or len(keys) > MCP_MAX_HISTORY_KEYS
     ):
-        raise ValueError(f"keys must contain at most {MCP_MAX_HISTORY_KEYS} non-empty strings")
+        raise ToolInputValidationError(
+            f"keys must contain at most {MCP_MAX_HISTORY_KEYS} non-empty strings",
+            field="keys",
+            code="too_long" if isinstance(keys, list) and len(keys) > MCP_MAX_HISTORY_KEYS else "value_error",
+        )
     for index, key in enumerate(keys or ()):
-        input_bytes += _history_text_bytes(f"keys[{index}]", key)
+        input_bytes += _history_text_bytes(f"keys[{index}]", key, field="keys")
     if input_bytes > _MAX_HISTORY_INPUT_BYTES:
-        raise ValueError(f"history identifiers exceed the {_MAX_HISTORY_INPUT_BYTES}-byte total limit")
+        raise ToolInputValidationError(
+            f"history identifiers exceed the {_MAX_HISTORY_INPUT_BYTES}-byte total limit", code="too_long"
+        )
     if MCP_WORKLOAD_PROFILE != "local" and not keys:
-        raise ValueError(
+        raise ToolInputValidationError(
             f"The managed {MCP_WORKLOAD_PROFILE} workload profile requires explicit history keys "
-            f"(1-{MCP_MAX_HISTORY_KEYS} metrics)."
+            f"(1-{MCP_MAX_HISTORY_KEYS} metrics).",
+            field="keys",
+            code="missing",
         )
     if min_step is not None and max_step is not None:
         if max_step < min_step:
-            raise ValueError("max_step must be greater than or equal to min_step")
+            raise ToolInputValidationError(
+                "max_step must be greater than or equal to min_step", field="max_step", code="greater_than_equal"
+            )
         if max_step - min_step + 1 > MCP_MAX_HISTORY_RANGE_STEPS:
-            raise ValueError(f"history step range cannot exceed {MCP_MAX_HISTORY_RANGE_STEPS} steps")
+            raise ToolInputValidationError(
+                f"history step range cannot exceed {MCP_MAX_HISTORY_RANGE_STEPS} steps",
+                field="max_step",
+                code="less_than_equal",
+            )
     elif MCP_WORKLOAD_PROFILE != "local" and (min_step is not None or max_step is not None):
-        raise ValueError(
-            f"The managed {MCP_WORKLOAD_PROFILE} workload profile requires both min_step and max_step for range scans"
+        raise ToolInputValidationError(
+            f"The managed {MCP_WORKLOAD_PROFILE} workload profile requires both min_step and max_step for range scans",
+            field="min_step" if min_step is None else "max_step",
+            code="missing",
         )
 
     requested_keys = list(dict.fromkeys(keys or []))

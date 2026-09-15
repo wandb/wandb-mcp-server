@@ -210,6 +210,35 @@ class WandBApiManager:
         return api_key
 
     @classmethod
+    def get_cached_viewer_info(cls) -> dict[str, str] | None:
+        """Read an already-discovered username without creating a client or request.
+
+        W&B's ``viewer`` property performs a lookup on first access. Only inspect
+        its populated backing fields on this actor's unexpired, endpoint-bound
+        client. A cold cache or a tool that has not needed viewer data therefore
+        leaves telemetry on its key fingerprint.
+        """
+        api_key = cls.get_api_key()
+        if not api_key:
+            return None
+        cache_key = hashlib.sha256(f"{WANDB_API_BASE_URL}\0{api_key}".encode()).hexdigest()
+        with cls._api_cache_lock:
+            cached = cls._api_cache.get(cache_key)
+            if cached is None or cached[0] <= time.monotonic():
+                return None
+            try:
+                viewer = vars(cached[1]).get("_viewer")
+                attrs = vars(viewer).get("_attrs")
+            except TypeError:
+                return None
+            if type(attrs) is not dict:
+                return None
+            username = attrs.get("username")
+            if not isinstance(username, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", username) is None:
+                return None
+            return {"username": username}
+
+    @classmethod
     def get_api(cls, api_key: Optional[str] = None) -> wandb.Api:
         """
         Get a W&B API instance with the specified or current API key.

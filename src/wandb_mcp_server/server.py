@@ -1098,9 +1098,10 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             )
         except Exception as e:
             from wandb_mcp_server.api_client import raise_for_wandb_server_busy
+            from wandb_mcp_server.error_diagnostics import record_exception_diagnostics
 
+            record_exception_diagnostics(e)
             raise_for_wandb_server_busy(e)
-            logger.error("Run-history query failed (%s)", type(e).__name__)
             return json.dumps(
                 {
                     "error": "history_query_failed",

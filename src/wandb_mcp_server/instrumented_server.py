@@ -42,6 +42,12 @@ from wandb_mcp_server.error_sanitizer import (
     sanitize_sensitive_text,
     sanitize_sensitive_value,
 )
+from wandb_mcp_server.error_diagnostics import (
+    ToolErrorDiagnostics,
+    current_error_diagnostics,
+    record_exception_diagnostics,
+    sanitize_error_diagnostics,
+)
 from wandb_mcp_server.harness import (
     HarnessContext,
     context_from_sdk_request,
@@ -233,14 +239,8 @@ def _telemetry_error(category: str) -> str:
 
 def _exception_error_category(exc: BaseException) -> str:
     """Return a bounded exception class name without copying exception text."""
-    candidate = type(exc).__name__
-    if (
-        0 < len(candidate) <= 64
-        and candidate[0].isalpha()
-        and all(character.isalnum() or character == "_" for character in candidate)
-    ):
-        return candidate
-    return "exception"
+    diagnostic = sanitize_error_diagnostics({"category": "tool_error", "exception_type": type(exc).__name__})
+    return diagnostic.get("exception_type", "other_exception") if diagnostic else "other_exception"
 
 
 def _structured_result_error_category(result: Any) -> str | None:
@@ -390,6 +390,8 @@ class InstrumentedFastMCP(FastMCP):
         sync_state = _SyncCallState()
         sync_state_token = _current_sync_call_state.set(sync_state)
         sync_executor_token = _current_sync_executor.set(self._sync_executor)
+        diagnostics = ToolErrorDiagnostics(frozenset())
+        diagnostics_token = current_error_diagnostics.set(diagnostics)
         started = time.monotonic()
         success = True
         error: str | None = None
@@ -399,6 +401,9 @@ class InstrumentedFastMCP(FastMCP):
         admission_outcome = "disabled"
         queue_ms = 0.0
         try:
+            tool = self._tool_manager.get_tool(name)
+            if tool is not None:
+                diagnostics.public_fields = frozenset(tool.parameters.get("properties", {}))
             cost_class, weight = _dispatch_tool_cost(name, arguments)
             if self._admission_controller is not None:
                 admission_started = time.monotonic()
@@ -436,6 +441,7 @@ class InstrumentedFastMCP(FastMCP):
                 async with asyncio.timeout(MCP_TOOL_TIMEOUT_SECONDS):
                     result = await super().call_tool(name, arguments)
             except TimeoutError as exc:
+                record_exception_diagnostics(exc)
                 success = False
                 is_write = name in _NON_IDEMPOTENT_WRITE_TOOLS
                 error = (
@@ -465,6 +471,7 @@ class InstrumentedFastMCP(FastMCP):
                     )
                 ) from exc
             except BaseException as exc:
+                record_exception_diagnostics(exc)
                 if name in _ARIA_TOOL_COSTS:
                     # ARIA already maps its own response codes, bounded
                     # Retry-After value, and submission ambiguity. Handle that
@@ -552,11 +559,14 @@ class InstrumentedFastMCP(FastMCP):
                 error = _telemetry_error(_structured_result_error_category(result) or "tool_error")
             return result
         except BaseException as exc:
+            record_exception_diagnostics(exc)
             success = False
             if error is None:
-                error = _telemetry_error(type(exc).__name__)
+                error = _telemetry_error(_exception_error_category(exc))
             raise
         finally:
+            diagnostics.active = False
+            current_error_diagnostics.reset(diagnostics_token)
             if deadline_token is not None:
                 current_tool_deadline.reset(deadline_token)
             if lease is not None:
@@ -595,6 +605,7 @@ class InstrumentedFastMCP(FastMCP):
                     success=success,
                     error=error,
                     duration_ms=duration_ms,
+                    error_diagnostics=diagnostics.value if not success else None,
                 )
             except Exception as analytics_error:
                 logger.debug("Tool analytics failed for %s (%s)", name, type(analytics_error).__name__)
