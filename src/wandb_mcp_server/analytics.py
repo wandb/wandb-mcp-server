@@ -47,6 +47,21 @@ _MAX_PARAM_LIST_ITEMS = 20
 _MAX_USAGE_DIMENSIONS = 12
 _MAX_EVENT_BYTES = 4096
 _SLOW_REQUEST_MS = 2_000.0
+_REQUEST_REASONS = frozenset(
+    {
+        "auth_missing",
+        "auth_invalid",
+        "session_invalid",
+        "session_signature",
+        "session_actor_mismatch",
+        "session_unverifiable",
+        "session_future",
+        "session_unknown",
+        "session_busy",
+        "session_capacity",
+        "internal_error",
+    }
+)
 
 _configured_transport: Optional[str] = None
 _analytics_startup_logged = False
@@ -495,6 +510,9 @@ def _prepare_event(event: Dict[str, Any]) -> Dict[str, Any]:
 
     segment_identity = event._segment_identity if type(event) is _IdentityEvent else None
     event = _restore_identity_provenance(event, sanitize_sensitive_value(event))
+    reason = event.get("request_reason")
+    if not isinstance(reason, str) or reason not in _REQUEST_REASONS:
+        event.pop("request_reason", None)
     if _resolve_privacy_level() == _PRIVACY_LEVEL_STRICT:
         event = _strict_event_identities(event)
     if "error_diagnostics" in event:
@@ -548,6 +566,7 @@ def _prepare_event(event: Dict[str, Any]) -> Dict[str, Any]:
         "method",
         "path",
         "status_code",
+        "request_reason",
         "event_truncated",
     }
     essential = {key: value for key, value in compacted.items() if key in essential_keys}
@@ -1085,6 +1104,7 @@ class AnalyticsTracker:
         duration_ms: Optional[float] = None,
         user_id: Optional[str] = None,
         email_domain: Optional[str] = None,
+        request_reason: Optional[str] = None,
     ) -> None:
         """Record an HTTP request."""
         if not self.enabled:
@@ -1105,6 +1125,7 @@ class AnalyticsTracker:
                 "path": path,
                 "status_code": status_code,
                 "duration_ms": duration_ms,
+                "request_reason": request_reason,
             }
             event = self._event_with_identity(event, user_id, email_domain=email_domain)
             self._emit(

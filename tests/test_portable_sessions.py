@@ -57,15 +57,14 @@ def test_portable_session_rejects_another_api_key() -> None:
         _manager().restore_portable_session(session_id, "api-key-b")
 
 
-def test_portable_session_expires() -> None:
+def test_portable_session_age_does_not_expire_same_actor_recovery() -> None:
     with patch("wandb_mcp_server.session_manager.time.time", return_value=1000):
         session_id = _manager(ttl=60).create_session(
             "api-key-a",
             metadata={"agent_harness": "claude_code"},
         )
     with patch("wandb_mcp_server.session_manager.time.time", return_value=1061):
-        with pytest.raises(ValueError, match="expired"):
-            _manager(ttl=60).restore_portable_session(session_id, "api-key-a")
+        assert _manager(ttl=60).restore_portable_session(session_id, "api-key-a")["agent_harness"] == "claude_code"
 
 
 def test_legacy_session_is_accepted_without_attribution() -> None:

@@ -14,6 +14,7 @@ Key features:
 import base64
 import hashlib
 import hmac
+import re
 import time
 import uuid
 from collections import defaultdict
@@ -61,6 +62,27 @@ current_api_key_hash: ContextVar[Optional[str]] = ContextVar("api_key_hash", def
 
 class SessionCapacityError(ValueError):
     """Raised when a key has reached its maximum number of concurrent sessions."""
+
+
+class SessionBusyError(ValueError):
+    """Raised when deletion would interrupt an active session request."""
+
+
+class SessionValidationError(ValueError):
+    """Session rejection with an allowlisted, non-sensitive diagnostic reason."""
+
+    _MESSAGES = {
+        "session_invalid": "Malformed portable session",
+        "session_unverifiable": "Portable session cannot be verified",
+        "session_signature": "Portable session signature mismatch",
+        "session_actor_mismatch": "Session API key mismatch",
+        "session_future": "Portable session issued in the future",
+        "session_unknown": "Unknown session",
+    }
+
+    def __init__(self, reason: str):
+        self.reason = reason if reason in self._MESSAGES else "session_invalid"
+        super().__init__(self._MESSAGES[self.reason])
 
 
 @dataclass
@@ -157,7 +179,10 @@ class MultiTenantSessionManager:
 
     @staticmethod
     def _urlsafe_decode(value: str) -> bytes:
-        return base64.urlsafe_b64decode(value + ("=" * (-len(value) % 4)))
+        decoded = base64.b64decode(value + ("=" * (-len(value) % 4)), altchars=b"-_", validate=True)
+        if MultiTenantSessionManager._urlsafe_encode(decoded) != value:
+            raise ValueError("Non-canonical base64url")
+        return decoded
 
     def _portable_session_id(
         self,
@@ -188,48 +213,57 @@ class MultiTenantSessionManager:
     def restore_portable_session(self, session_id: str, api_key: str) -> Dict[str, Any]:
         """Verify a portable session and return its safe cross-worker metadata.
 
-        Legacy ``sess_`` IDs return an empty mapping for one session TTL.  Their
-        identity is intentionally not trusted because it was not signed.
+        The TTL governs idle local state, not a signed identifier's lifetime.
+        Every restoration is bound to the current bearer credential. Legacy IDs
+        return an empty mapping; their unsigned identity is never trusted.
         """
         if not session_id.startswith(_PORTABLE_SESSION_PREFIX):
             return {}
         if self._hmac_sha256_key is None:
-            raise ValueError("Portable session cannot be verified")
+            raise SessionValidationError("session_unverifiable")
         try:
             encoded = session_id[len(_PORTABLE_SESSION_PREFIX) :]
             # A 12-byte signature is always 16 unpadded base64url characters.
             # Parse by fixed width because '_' is itself part of base64url.
-            if len(encoded) <= 17 or encoded[-17] != "_":
+            if len(session_id) > 128 or len(encoded) <= 17 or encoded[-17] != "_":
                 raise ValueError("invalid portable session framing")
             encoded_payload = encoded[:-17]
             encoded_signature = encoded[-16:]
             payload = self._urlsafe_decode(encoded_payload)
             signature = self._urlsafe_decode(encoded_signature)
-        except Exception as exc:
-            raise ValueError("Malformed portable session") from exc
+        except ValueError as exc:
+            raise SessionValidationError("session_invalid") from exc
         expected = hmac.new(self._hmac_sha256_key, payload, hashlib.sha256).digest()[:12]
         if not hmac.compare_digest(signature, expected):
-            raise ValueError("Portable session signature mismatch")
+            raise SessionValidationError("session_signature")
         try:
             parts = payload.decode("ascii").split("|")
             if len(parts) == 6:
-                version, issued_hex, _nonce, key_prefix, harness_code, protocol_code = parts
+                version, issued_hex, nonce, key_prefix, harness_code, protocol_code = parts
                 session_event_code = "p"
             else:
-                version, issued_hex, _nonce, key_prefix, harness_code, protocol_code, session_event_code = parts
+                version, issued_hex, nonce, key_prefix, harness_code, protocol_code, session_event_code = parts
+            if not (
+                re.fullmatch(r"[0-9a-f]{1,16}", issued_hex)
+                and re.fullmatch(r"[0-9a-f]{16}", nonce)
+                and re.fullmatch(r"[0-9a-f]{24}", key_prefix)
+                and re.fullmatch(r"[a-z]", harness_code)
+                and re.fullmatch(r"[a-z]", protocol_code)
+            ):
+                raise ValueError("invalid payload fields")
             issued_at = int(issued_hex, 16)
         except (UnicodeDecodeError, ValueError) as exc:
-            raise ValueError("Malformed portable session payload") from exc
-        if version != "v1":
-            raise ValueError("Unsupported portable session version")
-        if session_event_code not in {"e", "p"}:
-            raise ValueError("Unsupported portable session event state")
+            raise SessionValidationError("session_invalid") from exc
+        if version != "v1" or session_event_code not in {"e", "p"}:
+            raise SessionValidationError("session_invalid")
         now = int(time.time())
-        if issued_at > now + 300 or now - issued_at > self._session_ttl:
-            raise ValueError("Portable session expired")
+        # Retain the existing cross-worker clock-skew allowance, but do not
+        # confuse idle-cache expiry with authentication expiry.
+        if issued_at > now + 300:
+            raise SessionValidationError("session_future")
         api_key_hash = self._hash_api_key(api_key)
         if not hmac.compare_digest(key_prefix, api_key_hash[:24]):
-            raise ValueError("Portable session API key mismatch")
+            raise SessionValidationError("session_actor_mismatch")
         harness = _HARNESSES_BY_CODE.get(harness_code, "unknown")
         protocol = _PROTOCOLS_BY_CODE.get(protocol_code, "unknown")
         return {
@@ -285,23 +319,21 @@ class MultiTenantSessionManager:
             if session_id in self._sessions:
                 session = self._sessions[session_id]
                 # Validate API key matches
-                if session.api_key_hash != api_key_hash:
+                if not hmac.compare_digest(session.api_key_hash, api_key_hash):
                     _log.error("API key mismatch!")
-                    raise ValueError("Session API key mismatch!")
+                    raise SessionValidationError("session_actor_mismatch")
                 session.update_access()
                 return session_id
 
             # Check max sessions per API key
-            existing_sessions = self._api_key_sessions[api_key_hash]
+            existing_sessions = self._api_key_sessions.get(api_key_hash, set())
             if len(existing_sessions) >= self._max_sessions_per_key:
                 # Clean up old sessions for this key
                 self._cleanup_api_key_sessions(api_key_hash)
 
                 # Check again after cleanup
-                if len(existing_sessions) >= self._max_sessions_per_key:
-                    _log.warning(
-                        f"Max sessions ({self._max_sessions_per_key}) reached for API key hash {api_key_hash[:8]}..."
-                    )
+                if len(self._api_key_sessions.get(api_key_hash, ())) >= self._max_sessions_per_key:
+                    _log.warning("Max sessions (%s) reached", self._max_sessions_per_key)
                     raise SessionCapacityError(
                         f"Maximum concurrent sessions ({self._max_sessions_per_key}) exceeded for this API key"
                     )
@@ -321,6 +353,23 @@ class MultiTenantSessionManager:
             _log.info("Created session %s...", get_session_prefix_from_session(session_id))
             return session_id
 
+    def acquire_request(
+        self,
+        api_key: str,
+        request_id: str,
+        session_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> tuple[str, bool]:
+        """Verify/create a session and pin its request before releasing the lock."""
+        with self._lock:
+            created = session_id not in self._sessions
+            session_id = self.create_session(api_key, session_id=session_id, metadata=metadata)
+            session = self._sessions[session_id]
+            session.active_requests.add(request_id)
+            if created:
+                session.update_access()
+            return session_id, created
+
     def validate_session(self, session_id: str, api_key: str) -> bool:
         """
         Validate that a session ID matches the provided API key.
@@ -337,6 +386,10 @@ class MultiTenantSessionManager:
             _log = logging.LoggerAdapter(
                 logger, {"session_id_prefix": f"[{_session_prefix}] " if _session_prefix else ""}
             )
+            try:
+                self.restore_portable_session(session_id, api_key)
+            except SessionValidationError:
+                return False
             if session_id not in self._sessions:
                 _log.warning("Session not found")
                 return False
@@ -344,7 +397,7 @@ class MultiTenantSessionManager:
             session = self._sessions[session_id]
             api_key_hash = self._hash_api_key(api_key)
 
-            if session.api_key_hash != api_key_hash:
+            if not hmac.compare_digest(session.api_key_hash, api_key_hash):
                 _log.error("API key validation failed!")
                 return False
 
@@ -398,8 +451,25 @@ class MultiTenantSessionManager:
             )
             if session_id in self._sessions:
                 session = self._sessions[session_id]
-                session.active_requests.discard(request_id)
-                _log.debug("Ended request %s...", get_session_prefix_from_session(request_id) or request_id)
+                if request_id in session.active_requests:
+                    session.active_requests.remove(request_id)
+                    session.last_accessed = datetime.now()
+                    _log.debug("Ended request %s...", get_session_prefix_from_session(request_id) or request_id)
+
+    def cleanup_authorized_session(self, session_id: str, api_key: str) -> None:
+        """Delete only an owned idle session; never create state for DELETE."""
+        with self._lock:
+            self.restore_portable_session(session_id, api_key)
+            session = self._sessions.get(session_id)
+            if session is None:
+                if session_id.startswith(_PORTABLE_SESSION_PREFIX):
+                    return
+                raise SessionValidationError("session_unknown")
+            if not hmac.compare_digest(session.api_key_hash, self._hash_api_key(api_key)):
+                raise SessionValidationError("session_actor_mismatch")
+            if session.active_requests:
+                raise SessionBusyError("Session has active requests")
+            self.cleanup_session(session_id)
 
     def cleanup_session(self, session_id: str):
         """
@@ -420,11 +490,7 @@ class MultiTenantSessionManager:
 
             # Check for active requests
             if session.active_requests:
-                _log.warning(
-                    "Cleaning up session %s... with %s active requests",
-                    get_session_prefix_from_session(session_id),
-                    len(session.active_requests),
-                )
+                raise SessionBusyError("Session has active requests")
 
             # Remove from api_key_sessions
             self._api_key_sessions[session.api_key_hash].discard(session_id)
@@ -443,16 +509,20 @@ class MultiTenantSessionManager:
     def _cleanup_api_key_sessions(self, api_key_hash: str):
         """Cleanup old sessions for a specific API key."""
         with self._lock:
-            session_ids = list(self._api_key_sessions[api_key_hash])
+            session_ids = self._api_key_sessions.get(api_key_hash, set())
 
             # Sort by last accessed time
             sessions_by_age = sorted(
-                [(sid, self._sessions[sid]) for sid in session_ids if sid in self._sessions],
+                [
+                    (sid, self._sessions[sid])
+                    for sid in session_ids
+                    if sid in self._sessions and not self._sessions[sid].active_requests
+                ],
                 key=lambda x: x[1].last_accessed,
             )
 
             # Remove oldest sessions until we're under the limit
-            while len(sessions_by_age) > self._max_sessions_per_key - 1:
+            while sessions_by_age and len(self._api_key_sessions.get(api_key_hash, ())) >= self._max_sessions_per_key:
                 old_session_id, _ = sessions_by_age.pop(0)
                 self.cleanup_session(old_session_id)
 
