@@ -5,12 +5,20 @@ from __future__ import annotations
 import copy
 import json
 import math
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
 from graphql.language import ast as gql_ast
 from graphql.language import printer as gql_printer
+from graphql.error import GraphQLSyntaxError
 
+from wandb_mcp_server.admission import ToolDeadlineExceeded, raise_if_tool_deadline_exceeded
+from wandb_mcp_server.error_diagnostics import (
+    ToolInputValidationError,
+    exception_diagnostics,
+    record_exception_diagnostics,
+)
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_graphql import (
@@ -29,6 +37,55 @@ MAX_GRAPHQL_FRAGMENTS = 32
 MAX_GRAPHQL_VARIABLE_DEPTH = 12
 MAX_GRAPHQL_VARIABLE_NODES = 5_000
 MAX_GRAPHQL_EXPANDED_SELECTIONS = MAX_GRAPHQL_FIELDS * 4
+
+
+@dataclass
+class GraphQLResultState:
+    """Invocation-local facts that survive FastMCP's result serialization."""
+
+    data_error_keys: frozenset[str] = frozenset()
+    failed: bool = False
+    active: bool = True
+
+
+current_graphql_result_state: ContextVar[GraphQLResultState | None] = ContextVar("graphql_result_state", default=None)
+
+
+def _mark_graphql_failure() -> None:
+    state = current_graphql_result_state.get()
+    if state is not None and state.active:
+        state.failed = True
+
+
+GRAPHQL_PUBLIC_ERROR_MESSAGES = {
+    "invalid_request": "The GraphQL request is invalid. Paginated connections must include first (or last); check the query and variables.",
+    "query_too_complex": "Nested paginated connections, multiple connections, or excessive query complexity are not supported. Paginated connections must include first (or last).",
+    "read_only_violation": "Only one read-only GraphQL query is supported.",
+    "response_too_large": "The GraphQL response exceeded the safety limit; request fewer items or fields.",
+    "pagination_cursor_unavailable": "The bounded GraphQL result has no safe continuation cursor.",
+    "pagination_cursor_non_advancing": "The GraphQL continuation cursor did not advance.",
+    "authentication_failed": "W&B authentication failed.",
+    "permission_denied": "W&B denied access to the requested data.",
+    "resource_not_found": "The requested W&B resource was not found.",
+    "server_busy": "W&B is temporarily busy; retry the bounded read.",
+    "tool_timeout": "The GraphQL read exceeded the tool deadline.",
+    "malformed_response": "W&B returned an invalid GraphQL page; any included data is incomplete.",
+    "upstream_error": "The W&B GraphQL read failed; any included data is incomplete.",
+}
+
+
+def safe_graphql_errors(errors: Any) -> list[dict[str, str]]:
+    """Keep fixed public codes, never backend messages, paths, or extensions."""
+    if not isinstance(errors, list):
+        return [{"error": "malformed_response", "message": GRAPHQL_PUBLIC_ERROR_MESSAGES["malformed_response"]}]
+    result: list[dict[str, str]] = []
+    for item in errors[:8]:
+        code = item.get("error") if isinstance(item, dict) else None
+        if not isinstance(code, str) or code not in GRAPHQL_PUBLIC_ERROR_MESSAGES:
+            code = "upstream_error"
+        result.append({"error": code, "message": GRAPHQL_PUBLIC_ERROR_MESSAGES[code]})
+    return result
+
 
 QUERY_WANDB_GRAPHQL_TOOL_DESCRIPTION = """Execute a bounded, query-only GraphQL document against W&B Models.
 
@@ -56,12 +113,12 @@ backend-work limit.
 """
 
 
-class GraphQLQueryValidationError(ValueError):
+class GraphQLQueryValidationError(ToolInputValidationError):
     """Raised before API construction when an opt-in raw query is unsafe."""
 
     def __init__(self, message: str, *, error: str = "invalid_request") -> None:
         self.error = error
-        super().__init__(message)
+        super().__init__(message, field="query")
 
 
 @dataclass
@@ -633,6 +690,7 @@ def _set_pagination_extension(
 
 
 def _response_too_large(message: str) -> dict[str, Any]:
+    _mark_graphql_failure()
     return {
         "errors": [
             {
@@ -651,6 +709,7 @@ def _edge_cursor(edge: Any, plan: _ConnectionPlan) -> str | None:
 
 
 def _pagination_error(error: str, message: str) -> dict[str, Any]:
+    _mark_graphql_failure()
     return {"errors": [{"error": error, "message": message}]}
 
 
@@ -781,6 +840,12 @@ def _fit_response_budget(
 
 
 def _validation_error(exc: Exception) -> dict[str, Any]:
+    _mark_graphql_failure()
+    record_exception_diagnostics(
+        exc
+        if isinstance(exc, ToolInputValidationError)
+        else ToolInputValidationError("Invalid GraphQL request", field="query")
+    )
     if isinstance(exc, GraphQLReadOnlyViolation):
         return {
             "errors": [
@@ -791,14 +856,60 @@ def _validation_error(exc: Exception) -> dict[str, Any]:
                 }
             ]
         }
+    code = exc.error if isinstance(exc, GraphQLQueryValidationError) else "invalid_request"
+    if code not in GRAPHQL_PUBLIC_ERROR_MESSAGES:
+        code = "invalid_request"
     return {
         "errors": [
             {
-                "error": getattr(exc, "error", "invalid_request"),
-                "message": str(exc),
+                "error": code,
+                "message": (
+                    "Syntax Error: The GraphQL document is invalid."
+                    if isinstance(exc, GraphQLSyntaxError)
+                    else GRAPHQL_PUBLIC_ERROR_MESSAGES[code]
+                ),
             }
         ]
     }
+
+
+def _upstream_exception_error(exc: Exception) -> dict[str, str]:
+    _mark_graphql_failure()
+    record_exception_diagnostics(exc)
+    try:
+        diagnostic = exception_diagnostics(exc)
+    except Exception:
+        diagnostic = {"category": "upstream_error", "exception_type": "other_exception"}
+    code = diagnostic["category"]
+    if code not in GRAPHQL_PUBLIC_ERROR_MESSAGES:
+        code = "upstream_error"
+    logger.error("Bounded GraphQL query failed (%s)", diagnostic.get("exception_type", "other_exception"))
+    return {"error": code, "message": GRAPHQL_PUBLIC_ERROR_MESSAGES[code]}
+
+
+def _root_error_data_keys(query: str) -> frozenset[str]:
+    """Inspect the validated, bounded AST, including bounded fragment expansion."""
+    document = validate_read_only_graphql(query)
+    operation = next(item for item in document.definitions if isinstance(item, gql_ast.OperationDefinitionNode))
+    fragments = {
+        item.name.value: item for item in document.definitions if isinstance(item, gql_ast.FragmentDefinitionNode)
+    }
+    return frozenset(
+        _field_name(item)
+        for item in _selection_fields(operation.selection_set, fragments)
+        if _field_name(item) in {"error", "errors"}
+    )
+
+
+def _append_partial_errors(
+    result: dict[str, Any], errors: list[dict[str, str]], *, errors_are_data: bool
+) -> dict[str, Any]:
+    _mark_graphql_failure()
+    if errors_are_data and "errors" in result:
+        # Do not overwrite a selected alias when a later backend page fails.
+        return {"data": result, "errors": errors}
+    result.setdefault("errors", []).extend(errors)
+    return result
 
 
 def query_paginated_wandb_gql(
@@ -823,6 +934,10 @@ def query_paginated_wandb_gql(
             variables,
             applied_page_size,
         )
+        data_error_keys = _root_error_data_keys(bounded_query)
+        state = current_graphql_result_state.get()
+        if state is not None and state.active:
+            state.data_error_keys = data_error_keys
     except Exception as exc:
         return _validation_error(exc)
 
@@ -840,12 +955,18 @@ def query_paginated_wandb_gql(
         mcp_tool_name="query_wandb_graphql_tool",
     ) as ctx:
         try:
+            raise_if_tool_deadline_exceeded()
             api = get_wandb_api()
+            raise_if_tool_deadline_exceeded()
             initial = execute_graphql(api, bounded_query, bounded_variables)
             if not isinstance(initial, Mapping):
                 raise TypeError("W&B returned a non-mapping GraphQL response")
             result = copy.deepcopy(dict(initial))
-            if "errors" in result or plan is None:
+            if result.get("errors") and "errors" not in data_error_keys:
+                _mark_graphql_failure()
+                result["errors"] = safe_graphql_errors(result["errors"])
+                return _fit_response_budget(result, None)
+            if plan is None:
                 return _fit_response_budget(result, None)
 
             connection = get_nested_value(result, plan.path)
@@ -944,6 +1065,7 @@ def query_paginated_wandb_gql(
             max_page_requests = max(1, math.ceil(applied_max_items / applied_page_size) + 2)
             page_requests = 1
             partial_error = False
+            partial_error_written = False
             last_page_had_edges = bool(initial_edges)
 
             while has_next and cursor and len(aggregated) < applied_max_items and page_requests < max_page_requests:
@@ -957,27 +1079,30 @@ def query_paginated_wandb_gql(
                         applied_max_items - len(aggregated),
                     )
                 try:
+                    raise_if_tool_deadline_exceeded()
                     page = execute_graphql(api, bounded_query, page_variables)
-                except GraphQLResponseTooLarge:
+                except ToolDeadlineExceeded:
+                    raise
+                except GraphQLResponseTooLarge as exc:
+                    record_exception_diagnostics(exc)
                     return _response_too_large(
                         "The W&B GraphQL response exceeded the safety limit; request fewer items or fields"
                     )
                 except Exception as exc:
-                    result.setdefault("errors", []).append(
-                        {
-                            "error": "upstream_error",
-                            "message": f"W&B GraphQL pagination failed ({type(exc).__name__})",
-                        }
+                    result = _append_partial_errors(
+                        result, [_upstream_exception_error(exc)], errors_are_data="errors" in data_error_keys
                     )
                     partial_error = True
+                    partial_error_written = True
                     break
                 page_requests += 1
                 if not isinstance(page, Mapping):
                     partial_error = True
                     break
-                if page.get("errors"):
-                    result.setdefault("errors", []).extend(copy.deepcopy(page["errors"]))
+                if page.get("errors") and "errors" not in data_error_keys:
+                    result = _append_partial_errors(result, safe_graphql_errors(page["errors"]), errors_are_data=False)
                     partial_error = True
+                    partial_error_written = True
                     break
                 page_connection = get_nested_value(dict(page), plan.path)
                 if not isinstance(page_connection, Mapping):
@@ -1012,23 +1137,22 @@ def query_paginated_wandb_gql(
                     partial_error = True
                     break
 
+            if partial_error and not partial_error_written:
+                result = _append_partial_errors(
+                    result,
+                    [{"error": "malformed_response", "message": GRAPHQL_PUBLIC_ERROR_MESSAGES["malformed_response"]}],
+                    errors_are_data="errors" in data_error_keys,
+                )
             stopped_at_limit = len(aggregated) >= applied_max_items and (has_next or cut_mid_page)
             stopped_at_request_bound = page_requests >= max_page_requests and has_next
             has_more = bool(has_next or cut_mid_page or partial_error or stopped_at_request_bound)
             connection[plan.edges_key] = aggregated
             edge_cursor = _edge_cursor(aggregated[-1], plan) if aggregated else None
             if cut_mid_page and edge_cursor is None:
-                return {
-                    "errors": [
-                        {
-                            "error": "pagination_cursor_unavailable",
-                            "message": (
-                                "The bounded GraphQL page stopped mid-page but no selected edge cursor "
-                                "permits safe continuation"
-                            ),
-                        }
-                    ]
-                }
+                return _pagination_error(
+                    "pagination_cursor_unavailable",
+                    "The bounded GraphQL page stopped mid-page but no selected edge cursor permits safe continuation",
+                )
             page_end_cursor = current_page_info.get(plan.end_cursor_key) if plan.end_cursor_key is not None else None
             last_cursor = (
                 edge_cursor
@@ -1062,19 +1186,14 @@ def query_paginated_wandb_gql(
             if stopped_at_limit:
                 result["extensions"]["wandb_mcp"]["limit_applied"] = applied_max_items
             return _fit_response_budget(result, plan)
-        except GraphQLResponseTooLarge:
+        except ToolDeadlineExceeded:
+            raise
+        except GraphQLResponseTooLarge as exc:
+            record_exception_diagnostics(exc)
             ctx.mark_error("response_too_large")
             return _response_too_large(
                 "The W&B GraphQL response exceeded the safety limit; request fewer items or fields"
             )
         except Exception as exc:
-            logger.error("Bounded GraphQL query failed (%s)", type(exc).__name__)
-            ctx.mark_error(f"query_failed: {type(exc).__name__}")
-            return {
-                "errors": [
-                    {
-                        "error": "upstream_error",
-                        "message": f"W&B GraphQL query failed ({type(exc).__name__})",
-                    }
-                ]
-            }
+            ctx.mark_error("query_failed")
+            return {"errors": [_upstream_exception_error(exc)]}

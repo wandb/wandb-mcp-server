@@ -50,6 +50,16 @@ WandBResponseMode = Literal["items", "count"]
 
 QUERY_WANDB_TOOL_DESCRIPTION = """Query W&B Models data through bounded W&B read APIs.
 
+Choose ONE input form. Prefer structured entity_name + project_name + resource
+for new calls. Existing GraphQL clients may instead pass query + optional
+variables, max_items (default 100), and items_per_page (default 20). GraphQL
+works on hosted, Dedicated, and local servers using the caller's W&B access.
+Do not mix the two forms, even when supplying a structured field's default.
+The legacy form preserves GraphQL response structure and accepts one bounded
+read-only query, including aliases and fragments. Mutations, subscriptions,
+multiple operations, and nested/multiple paginated connections are rejected.
+Deployment item/page limits, deadlines, and response budgets still apply.
+
 Use this read-only tool for project metadata, individual runs, filtered or sorted
 run collections, sweeps, and reports. For run history, artifacts, registries,
 automations, and integrations, prefer the dedicated MCP tools.
@@ -73,11 +83,11 @@ sweep inspection, or report discovery. It is the normal W&B Models query path.
 Parameters
 ----------
 entity_name : str
-    W&B entity or team name.
+    W&B entity or team name. Required for structured calls only.
 project_name : str
-    W&B project name.
+    W&B project name. Required for structured calls only.
 resource : "project" | "run" | "runs" | "sweep" | "sweeps" | "reports"
-    Resource to read through the SDK.
+    Resource to read through the SDK. Required for structured calls only.
 run_id : str, optional
     Required only for resource="run". This is the short W&B run ID, not its display name.
 sweep_id : str, optional
@@ -112,12 +122,23 @@ cursor : str, optional
     Opaque continuation cursor returned by a previous collection response. Reuse
     it only with the same resource, scope, filters, ordering, selector, and field
     projection. The next page may request a different limit.
+query : str, optional
+    Legacy GraphQL document, instead of all structured fields above.
+variables : dict, optional
+    GraphQL variables. Requires query; values must be bounded finite JSON.
+max_items : int, optional
+    Legacy GraphQL total item limit. Default 100, capped by the workload.
+items_per_page : int, optional
+    Legacy GraphQL page size. Default 20, capped by the workload.
 
 Returns
 -------
 dict
     Collection results include returned_count, total_count, has_more, limit, and
     project_exhaustive. Single-resource results use item.
+    Legacy calls retain the query's field/alias structure and bounded pagination
+    metadata. A nonempty GraphQL errors envelope is an MCP tool failure, including
+    partial responses; do not treat partial data as a complete result.
 
 For schema introspection, unmodeled fields, aliases, cross-resource nesting, or an
 exact GraphQL response shape, a local operator may select the explicit

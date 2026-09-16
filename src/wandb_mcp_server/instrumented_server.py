@@ -16,7 +16,7 @@ from typing import Any
 import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent, Tool
 
 from wandb_mcp_server.admission import (
     AdmissionRejected,
@@ -140,6 +140,10 @@ def register_current_sync_future(future: asyncio.Future[Any]) -> None:
     after protocol cancellation or timeout, just like ordinary synchronous
     tools dispatched by :meth:`add_tool`.
     """
+    # A response can time out without admission being enabled. Retrieving a
+    # late worker exception prevents the loop from logging its raw exception;
+    # it does not cancel physical work or release an admission lease early.
+    future.add_done_callback(lambda completed: None if completed.cancelled() else completed.exception())
     state = _current_sync_call_state.get()
     if state is not None:
         state.futures.append(future)
@@ -326,6 +330,102 @@ def _bounded_error_result(result: Any) -> Any:
     )
 
 
+def _graphql_payload(result: Any) -> tuple[dict[str, Any], bool] | None:
+    """Unwrap only FastMCP's result envelope, never nested customer data."""
+    if isinstance(result, dict):
+        return result, False
+    structured = None
+    if isinstance(result, CallToolResult):
+        structured = result.structuredContent
+        result = result.content
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
+        result, structured = result
+    if isinstance(result, (list, tuple)) and len(result) == 1 and isinstance(result[0], TextContent):
+        result = result[0].text
+    if isinstance(result, str):
+        try:
+            decoded = json.loads(result)
+        except (ValueError, TypeError):
+            decoded = None
+        if isinstance(decoded, dict):
+            # FastMCP wraps typed dictionaries in structuredContent.result but
+            # leaves text content as the original dictionary. Match both
+            # representations rather than interpreting a user's result alias.
+            wrapped = isinstance(structured, dict) and set(structured) == {"result"} and structured["result"] == decoded
+            return decoded, wrapped
+    return (structured, False) if isinstance(structured, dict) else None
+
+
+def _sanitize_graphql_data(value: Any) -> Any:
+    """Redact bounded JSON data without inferring errors from selected names."""
+    if isinstance(value, str):
+        return sanitize_sensitive_text(value)
+    if isinstance(value, dict):
+        return {sanitize_sensitive_text(key): _sanitize_graphql_data(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_graphql_data(child) for child in value]
+    return value
+
+
+def _graphql_success_result(result: Any) -> Any:
+    extracted = _graphql_payload(result)
+    if extracted is None:
+        return sanitize_sensitive_value(result)
+    payload, wrapped = extracted
+    safe_payload = _sanitize_graphql_data(payload)
+    # Both public representations must contain the same data. The generic
+    # sanitizer treats names such as error/message as error contexts and would
+    # truncate only structuredContent, despite those being valid selections.
+    content = [TextContent(type="text", text=json.dumps(safe_payload, ensure_ascii=False, separators=(",", ":")))]
+    structured = {"result": safe_payload} if wrapped else safe_payload
+    if isinstance(result, CallToolResult):
+        return result.model_copy(update={"content": content, "structuredContent": structured})
+    return content, structured
+
+
+def _graphql_failure_result(result: Any) -> tuple[CallToolResult, str] | None:
+    extracted = _graphql_payload(result)
+    if extracted is None:
+        return None
+    payload, wrapped = extracted
+    if not payload.get("errors"):
+        return None
+    from wandb_mcp_server.mcp_tools.query_wandb_gql import _fit_response_budget, safe_graphql_errors
+
+    safe_payload = dict(payload)
+    safe_payload["errors"] = safe_graphql_errors(payload["errors"])
+    # Backend error extensions can include debugging data. Keep only the
+    # engine's pagination facts, not arbitrary upstream diagnostic metadata.
+    extensions = safe_payload.pop("extensions", None)
+    if isinstance(extensions, dict) and isinstance(extensions.get("wandb_mcp"), dict):
+        pagination = extensions["wandb_mcp"]
+        safe_pagination = {
+            key: value
+            for key, value in pagination.items()
+            if (key in {"returned_count", "limit_applied"} and type(value) is int and value >= 0)
+            or (key in {"has_more", "truncated_by_response_budget"} and type(value) is bool)
+            or (key == "next_cursor" and (value is None or isinstance(value, str)))
+        }
+        safe_payload["extensions"] = {"wandb_mcp": safe_pagination}
+    # Do not apply the 4 KiB error-message budget to valid partial query data.
+    # The GraphQL engine has already applied the normal response budget.
+    safe_payload = _sanitize_graphql_data(safe_payload)
+    # Recheck after fixed error messages/redaction; those replacements can be
+    # longer than the original error even when the engine's payload fitted.
+    safe_payload = _fit_response_budget(safe_payload, None)
+    category = safe_payload["errors"][0]["error"]
+    return (
+        CallToolResult(
+            isError=True,
+            content=[
+                TextContent(type="text", text=json.dumps(safe_payload, ensure_ascii=False, separators=(",", ":")))
+            ],
+            structuredContent={"result": safe_payload} if wrapped else safe_payload,
+        ),
+        category,
+    )
+
+
 class InstrumentedFastMCP(FastMCP):
     """FastMCP server with bounded dispatch and one event per public tool call."""
 
@@ -345,6 +445,17 @@ class InstrumentedFastMCP(FastMCP):
             if MCP_ADMISSION_CONTROL_ENABLED
             else None
         )
+
+    async def list_tools(self) -> list[Tool]:
+        from wandb_mcp_server.mcp_tools.query_wandb_compat import add_query_interface_schema
+
+        return [
+            tool.model_copy(update={"inputSchema": add_query_interface_schema(tool.inputSchema)})
+            if tool.name == "query_wandb_tool"
+            and {"query", "resource"} <= tool.inputSchema.get("properties", {}).keys()
+            else tool
+            for tool in await super().list_tools()
+        ]
 
     def add_tool(self, fn: Any, *args: Any, **kwargs: Any) -> None:
         """Run synchronous tools off-loop so admission limits real concurrency."""
@@ -400,11 +511,29 @@ class InstrumentedFastMCP(FastMCP):
         cost_class, weight = "heavy", 4
         admission_outcome = "disabled"
         queue_ms = 0.0
+        graphql_mode = name == "query_wandb_graphql_tool" or (
+            name == "query_wandb_tool" and isinstance(arguments, dict) and "query" in arguments
+        )
+        graphql_state = None
+        graphql_token = None
+        if graphql_mode:
+            from wandb_mcp_server.mcp_tools.query_wandb_gql import GraphQLResultState, current_graphql_result_state
+
+            graphql_state = GraphQLResultState()
+            graphql_token = current_graphql_result_state.set(graphql_state)
         try:
             tool = self._tool_manager.get_tool(name)
             if tool is not None:
                 diagnostics.public_fields = frozenset(tool.parameters.get("properties", {}))
             cost_class, weight = _dispatch_tool_cost(name, arguments)
+            if (
+                name == "query_wandb_tool"
+                and tool is not None
+                and {"query", "resource"} <= tool.parameters.get("properties", {}).keys()
+            ):
+                from wandb_mcp_server.mcp_tools.query_wandb_compat import validate_query_interface
+
+                validate_query_interface(arguments)
             if self._admission_controller is not None:
                 admission_started = time.monotonic()
                 try:
@@ -472,6 +601,21 @@ class InstrumentedFastMCP(FastMCP):
                 ) from exc
             except BaseException as exc:
                 record_exception_diagnostics(exc)
+                if graphql_mode and isinstance(exc, Exception):
+                    from wandb_mcp_server.mcp_tools.query_wandb_gql import GRAPHQL_PUBLIC_ERROR_MESSAGES
+
+                    category = (diagnostics.value or {}).get("category", "upstream_error")
+                    if category == "input_validation":
+                        category = "invalid_request"
+                    if category not in GRAPHQL_PUBLIC_ERROR_MESSAGES:
+                        category = "upstream_error"
+                    success = False
+                    error = _telemetry_error(category)
+                    raise ToolError(
+                        json.dumps(
+                            {"errors": [{"error": category, "message": GRAPHQL_PUBLIC_ERROR_MESSAGES[category]}]}
+                        )
+                    ) from exc
                 if name in _ARIA_TOOL_COSTS:
                     # ARIA already maps its own response codes, bounded
                     # Retry-After value, and submission ambiguity. Handle that
@@ -548,6 +692,27 @@ class InstrumentedFastMCP(FastMCP):
                     # address. Safe exceptions retain their original type.
                     raise ToolError(sanitized_message) from exc
                 raise
+            errors_are_data = (
+                graphql_state is not None and "errors" in graphql_state.data_error_keys and not graphql_state.failed
+            )
+            if graphql_mode and not errors_are_data and (failure := _graphql_failure_result(result)) is not None:
+                result, category = failure
+                success = False
+                error = _telemetry_error(category)
+                if diagnostics.value is None:
+                    diagnostic_category = (
+                        "input_validation"
+                        if category in {"invalid_request", "query_too_complex", "read_only_violation"}
+                        else category
+                    )
+                    diagnostics.value = sanitize_error_diagnostics({"category": diagnostic_category}) or {
+                        "category": "upstream_error"
+                    }
+                return result
+            if graphql_mode:
+                # A GraphQL selection may legitimately be named error/result.
+                # Its successful data is not the SDK tool's error envelope.
+                return _graphql_success_result(result)
             structured_error = structured_result_error(result)
             result = sanitize_sensitive_value(
                 result,
@@ -567,6 +732,9 @@ class InstrumentedFastMCP(FastMCP):
         finally:
             diagnostics.active = False
             current_error_diagnostics.reset(diagnostics_token)
+            if graphql_state is not None and graphql_token is not None:
+                graphql_state.active = False
+                current_graphql_result_state.reset(graphql_token)
             if deadline_token is not None:
                 current_tool_deadline.reset(deadline_token)
             if lease is not None:

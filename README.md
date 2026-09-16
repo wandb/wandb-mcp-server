@@ -35,9 +35,9 @@ Version 0.4.0 makes W&B reads SDK-first, bounded, and workload-aware:
 - Dedicated and Self-Managed deployments can send W&B Models/API traffic over an
   internal Kubernetes service with `WANDB_INTERNAL_BASE_URL`, while public links
   continue to use `WANDB_BASE_URL`.
-- Raw GraphQL is local compatibility only and remains query-only; managed
-  Shared and Dedicated profiles reject it. Mutations and subscriptions are
-  rejected.
+- `query_wandb_tool` supports both structured SDK reads and bounded legacy
+  GraphQL queries across Shared, Dedicated, and local workloads. Mutations,
+  subscriptions, multiple operations, and mixed-mode inputs are rejected.
 - Three local-only ARIA tools support bounded asynchronous submission and
   polling when a deployment has an approved hosted W&B Agent path. Managed
   Shared and Dedicated profiles reject the ARIA profile in v0.4.
@@ -81,7 +81,7 @@ mutable image tags such as `latest` are not supported release channels.
 | **query_weave_traces_tool** | Analyze LLM traces with `detail_level` control | *"Show failed traces with full data"* |
 | **count_weave_traces_tool** | Count traces and get storage metrics | *"How many traces failed?"* |
 | **resolve_trace_roots_tool** | Resolve spans to their root traces | *"Find the root traces for these calls"* |
-| **query_wandb_tool** | Query projects, runs, sweeps, and reports through bounded W&B read APIs | *"Show me runs with loss < 0.1"* |
+| **query_wandb_tool** | Use structured W&B reads or a bounded, query-only GraphQL document | *"Show me runs with loss < 0.1"* |
 | **probe_project_tool** | Discover useful project fields and bounded samples | *"What metrics and config fields are available?"* |
 | **get_run_history_tool** | Bounded time-series data with sparse, multi-key outer-union sampling | *"Show loss and validation-loss curves for run abc123"* |
 | **compare_runs_tool** | Compare selected metrics and configuration across runs | *"Compare these three training runs"* |
@@ -106,16 +106,22 @@ mutable image tags such as `latest` are not supported release channels.
 **Read-only deployment mode:** Set `WANDB_MCP_ACCESS_MODE=read-only` to omit every tool
 classified as a write, including `create_wandb_report_tool`,
 `log_analysis_to_wandb`, and (in the ARIA profile) `aria_send_message`.
-`query_wandb_tool` is read-only in every mode. It normally uses documented W&B
-APIs and may use fixed, application-owned query-only projections to avoid
-per-result fan-out; callers cannot supply GraphQL to this tool.
+`query_wandb_tool` is read-only in every mode. Choose either structured SDK
+parameters (`entity_name`, `project_name`, `resource`, and optional selectors)
+or legacy `query`/`variables` inputs. Structured reads use documented W&B APIs
+and fixed, application-owned projections where needed to avoid per-result
+fan-out. GraphQL mode preserves the existing tool name for introspection,
+unmodeled fields, aliases, or read shapes the structured interface cannot express.
 
-**Advanced raw GraphQL:** Raw GraphQL is available only in the explicit local
-`models-weave-graphql-compat` profile. That profile adds the query-only
-`query_wandb_graphql_tool` for schema introspection, unmodeled fields,
-cross-resource nesting, aliases, or exact response shapes that the typed tool
-cannot represent. It accepts exactly one bounded query operation; mutations
-and subscriptions are always rejected. See the
+**GraphQL compatibility:** The legacy mode is available in every supported
+workload and both access modes; it does not require a new profile or additional
+permissions. Defaults are `max_items=100` and `items_per_page=20`, further bounded
+by the active workload's item/page limits, deadline, and response budget. Supply
+exactly one query operation and do not mix `query`/`variables` with structured
+SDK selectors. Mutations, subscriptions, multiple operations, and mixed-mode
+inputs are rejected before backend work. The separate `query_wandb_graphql_tool`
+remains local-only in the `models-weave-graphql-compat` profile; that extra tool
+is not required to use GraphQL through `query_wandb_tool`. See the
 [query capability matrix](docs/query-capabilities.md).
 
 On the supported W&B service transport, raw and fixed GraphQL responses are
@@ -131,12 +137,13 @@ Recommended deployment presets:
 | MT SaaS | `models-weave-agents`, `shared`, `read-write` (30 tools) |
 | Dedicated Models-only | `models-only`, `dedicated`, `read-write` (17 tools) |
 | Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (22 tools) |
-| Local GraphQL compatibility | `models-weave-graphql-compat`, `local`; choose either access mode |
+| Local extra GraphQL tool | `models-weave-graphql-compat`, `local`; choose either access mode |
 
-**Migration from v0.3.7:** `query_wandb_tool` now accepts structured SDK parameters
-(`entity_name`, `project_name`, `resource`, filters, ordering, and identifiers) instead
-of a GraphQL document. Existing raw-query callers must select the local
-`models-weave-graphql-compat` profile and call `query_wandb_graphql_tool`.
+**Compatibility with v0.3.7:** Existing query-only `query_wandb_tool` calls can
+keep their `query` and optional `variables` arguments. Structured SDK parameters
+are an additional mode, not a mandatory migration. Use one mode per call and
+refresh the client's tool definitions when upgrading. Authorization and bounded
+read safeguards apply to both modes; tool names and profile counts are unchanged.
 
 **Run history semantics:** for explicit multi-key default-history sampled and
 ranged collection reads, `get_run_history_tool` outer-joins requested metric
@@ -712,7 +719,7 @@ Exact capacity classes:
 | `medium` | 4 | 8 | 8 | 8 |
 | `large` | 8 | 16 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:f60ff283adf64c5b6644d29095d70ac50357accbaaed5f5215dc2a2eb9f0944b`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:c871737fad4aa9d7b2d973d14d7063e2a17877e9f97c38608996dd49e812c5a0`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line

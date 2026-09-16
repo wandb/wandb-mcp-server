@@ -169,6 +169,10 @@ def tool_cost(name: str, arguments: Mapping[str, Any] | None = None) -> tuple[st
     if not isinstance(arguments, Mapping):
         return "heavy", 4
     if name == "query_wandb_tool":
+        # Presence, not truthiness: malformed or mixed legacy calls must not
+        # borrow the cheaper typed-query classification before validation.
+        if any(field in arguments for field in ("query", "variables", "max_items", "items_per_page")):
+            return "heavy", 4
         resource = arguments.get("resource")
         if resource is not None and not isinstance(resource, str):
             return "heavy", 4

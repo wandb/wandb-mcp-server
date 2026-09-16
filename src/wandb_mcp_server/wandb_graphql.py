@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import json
+import time
 from typing import Any, Mapping
 
 from graphql import parse
@@ -11,6 +12,7 @@ from graphql.language import ast as gql_ast
 from wandb.proto.wandb_api_pb2 import ApiRequest, GraphQLRequest
 
 from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS
+from wandb_mcp_server.admission import ToolDeadlineExceeded, current_tool_deadline, raise_if_tool_deadline_exceeded
 
 
 class GraphQLReadOnlyViolation(ValueError):
@@ -114,7 +116,14 @@ def _execute_bounded_graphql(service_api: Any, query: str, variables: Mapping[st
                 variables_json=json.dumps(variables),
             )
         )
-        response = send(request, timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS)
+        deadline = current_tool_deadline.get()
+        timeout = MCP_WANDB_REQUEST_TIMEOUT_SECONDS
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ToolDeadlineExceeded("MCP tool execution deadline exceeded")
+            timeout = min(timeout, remaining)
+        response = send(request, timeout=timeout)
         data_json = getattr(getattr(response, "graphql_response", None), "data_json", None)
         if not isinstance(data_json, str):
             raise RuntimeError("W&B SDK compatibility error: GraphQL service response contained no JSON data.")
@@ -132,6 +141,7 @@ def _execute_bounded_graphql(service_api: Any, query: str, variables: Mapping[st
             "W&B SDK compatibility error: query_wandb_graphql_tool requires "
             "wandb>=0.28.0 with ServiceApi GraphQL support."
         )
+    raise_if_tool_deadline_exceeded()
     result = execute(query, variables=dict(variables))
     _ensure_bounded_decoded_response(result)
     return result

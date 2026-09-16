@@ -170,9 +170,43 @@ def test_query_capability_matrix_routes_typed_specialized_and_raw_reads():
     ):
         assert f"`{specialized_tool}`" in text
 
-    raw_rows = [line for line in text.splitlines() if line.startswith("|") and "query_wandb_graphql_tool" in line]
+    raw_rows = [line for line in text.splitlines() if line.startswith("|") and "query_wandb_tool(query=" in line]
     assert len(raw_rows) == 4
     assert all(line.rstrip().endswith("| Yes |") for line in raw_rows)
+
+
+def test_dual_mode_query_contract_is_documented_without_relaxing_safety():
+    for path in (README, QUERY_CAPABILITIES, RELEASE_NOTES):
+        text = " ".join(path.read_text().split())
+        assert "legacy `query`/`variables`" in text
+        assert "max_items=100" in text
+        assert "items_per_page=20" in text
+        assert "read-only" in text
+        assert "mutations" in text.lower()
+        assert "subscriptions" in text.lower()
+        assert "mixed" in text.lower()
+        assert "caller-supplied GraphQL by default" not in text
+        assert "callers cannot supply GraphQL to this tool" not in text
+        assert "Existing raw-query callers must select the local" not in text
+
+    text = " ".join(QUERY_CAPABILITIES.read_text().split())
+    assert "`shared`, `dedicated`, and `local`" in text
+    assert "`read-only` and `read-write`" in text
+    assert "separate `query_wandb_graphql_tool`" in text
+    assert "local-only" in text
+    assert "does not limit wire bytes, protobuf allocation, or W&B backend work" in text
+
+
+def test_dual_mode_query_has_explicit_read_only_compatibility_risk():
+    contract = json.loads(RUNTIME_CONTRACT.read_text())
+    models = {tool["name"]: tool for tool in contract["tool_groups"]["models"]["tools"]}
+    assert models["query_wandb_tool"] == {
+        "name": "query_wandb_tool",
+        "access": "read",
+        "risk": "compatibility",
+        "prerequisite": "wandb",
+    }
+    assert contract["tool_profiles"]["models-weave-graphql-compat"]["managed_workloads"] == []
 
 
 def test_history_safety_metadata_is_documented_truthfully():
