@@ -107,8 +107,8 @@ src/wandb_mcp_server/
 ├── wandb_selective_reads.py  # Bounded W&B field projections
 ├── wandb_urls.py             # Public-link construction and rewriting
 ├── mcp_tools/
-│   ├── query_wandb.py        # Default structured W&B SDK query surface
-│   ├── query_wandb_gql.py    # Optional, query-only raw GraphQL escape hatch
+│   ├── query_wandb.py        # Structured W&B SDK query implementation
+│   ├── query_wandb_gql.py    # Shared bounded, query-only GraphQL engine
 │   ├── run_history.py        # Bounded history reads
 │   ├── query_weave.py        # Weave trace queries
 │   ├── agents.py             # Opt-in Weave Agent read tools
@@ -148,8 +148,16 @@ services must require an explicit reviewed tool profile and typed endpoint,
 validate that endpoint, and bound input size, concurrency, polling, and response
 size. Tool visibility is never a substitute for request authorization.
 
-Raw GraphQL is a local-only compatibility profile, not the default
-implementation path. Application-owned documents must remain query-only.
+`query_wandb_tool` supports structured SDK reads and the legacy `query`/`variables`
+interface in every supported workload and access mode. Keep its mode dispatch
+unambiguous: GraphQL arguments cannot be mixed with structured SDK selectors.
+Route GraphQL through the existing bounded query-only engine; do not bypass its
+document, variable, pagination, deadline, response, or credential safeguards.
+Reject mutations, subscriptions, multiple operations, and mixed-mode inputs
+before backend work. The separate `query_wandb_graphql_tool` remains local-only
+in its explicit compatibility profile. Application-owned projections remain
+query-only too. Test both modes through the installed MCP SDK, including
+read-only registration, and preserve successful response shapes.
 
 Repo-local maintainer skills are available under `.agents/skills/`:
 

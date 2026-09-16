@@ -1,12 +1,38 @@
 # W&B Query Capability Matrix
 
-W&B MCP v0.4 does not expose caller-supplied GraphQL by default. Start with the
-typed read tools below. The compatibility tool is present only in the explicit
-local `models-weave-graphql-compat` profile and only for read shapes the typed
-tools cannot represent. Managed `shared` and `dedicated` workloads reject that
-profile.
+`query_wandb_tool` supports structured SDK reads and legacy `query`/`variables`
+inputs in `shared`, `dedicated`, and `local` workloads, with both `read-only` and
+`read-write` access. Choose structured reads for the common operations below,
+or GraphQL when an existing caller or an unmodeled read shape requires it.
+Both modes use the caller's existing W&B authorization; neither permits a write.
+The separate `query_wandb_graphql_tool` remains local-only in the explicit
+`models-weave-graphql-compat` profile. Managed workloads still reject that extra
+profile, not GraphQL mode on `query_wandb_tool`.
 
-## v0.3 GraphQL example migration
+## Two input modes, one tool
+
+For structured SDK reads, provide `entity_name`, `project_name`, `resource`, and
+the relevant selectors. For GraphQL reads, provide `query` and optional
+`variables`, with defaults `max_items=100` and `items_per_page=20`. Do not mix
+GraphQL arguments with structured SDK selectors; mixed-mode inputs fail before
+backend work. The active workload's bounds still apply to both modes.
+
+An existing query-only caller can retain this shape:
+
+```json
+{
+  "query": "query ProjectInfo($entity: String!, $project: String!) { project(name: $project, entityName: $entity) { name } }",
+  "variables": {"entity": "my-team", "project": "my-project"},
+  "max_items": 100,
+  "items_per_page": 20
+}
+```
+
+GraphQL mode accepts exactly one bounded query operation. It rejects mutations,
+subscriptions, and multiple operations. Refresh cached tool definitions when
+upgrading; no tool rename or profile change is needed for legacy callers.
+
+## Structured alternatives to legacy GraphQL examples
 
 Every named GraphQL example previously documented on `query_wandb_tool` has a
 typed v0.4 route. These calls no longer require callers to construct a GraphQL
@@ -39,10 +65,10 @@ change only the page `limit` when continuing; mismatched reuse returns
 | Run metric history, including sparse keys logged at different cadences | `get_run_history_tool` | No |
 | Artifacts and registries | `list_artifact_versions_tool`, `get_artifact_details_tool`, `list_registries_tool`, and `list_registry_collections_tool` | No |
 | Automations and integrations | `list_wandb_automations_tool` and `list_wandb_integrations_tool` | No |
-| Schema introspection or unmodeled/custom fields | `query_wandb_graphql_tool` | Yes |
-| Aliases or exact GraphQL response shape | `query_wandb_graphql_tool` | Yes |
-| Cross-resource/compound nesting | `query_wandb_graphql_tool` | Yes |
-| Sweep agents, report run sets, or Launch resources | `query_wandb_graphql_tool` | Yes |
+| Schema introspection or unmodeled/custom fields | `query_wandb_tool(query=..., variables=...)` | Yes |
+| Aliases or exact GraphQL response shape | `query_wandb_tool(query=..., variables=...)` | Yes |
+| Cross-resource/compound nesting | `query_wandb_tool(query=..., variables=...)` | Yes |
+| Sweep agents, report run sets, or Launch resources | `query_wandb_tool(query=..., variables=...)` | Yes |
 | Backward pagination | Use a typed forward read when possible | Compatibility-only; raw tool returns one bounded `last` page |
 
 ## Run history guarantees
@@ -93,8 +119,10 @@ The fixed projection is
 revalidated as query-only and accepts no caller-selected GraphQL, so this
 behavior is available in every supported managed tool profile.
 
-The compatibility tool accepts exactly one query operation and rejects
-mutations, subscriptions, mixed/multiple operations, nested or multiple
+## GraphQL processing safeguards
+
+Both GraphQL entry points use the same bounded engine. It accepts exactly one
+query operation and rejects mutations, subscriptions, mixed/multiple operations, nested or multiple
 paginated connections, and oversized documents. Its item, page, complexity, and
 output limits apply in every deployment. On the supported W&B ServiceApi path,
 the MCP checks the protobuf `data_json` string at 16 MiB before `json.loads`,

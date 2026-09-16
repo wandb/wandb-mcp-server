@@ -244,7 +244,8 @@ async def _exercise_profile(
                             write_stream,
                             client_info=types.Implementation(name=client_name, version="stdio-smoke"),
                         ) as session:
-                            await session.initialize()
+                            initialized = await session.initialize()
+                            assert initialized.protocolVersion == "2025-11-25"
                             await session.send_ping()
 
                             listed = await session.list_tools()
@@ -277,7 +278,26 @@ async def _exercise_profile(
                             query_schema = tools_by_name["query_wandb_tool"].inputSchema
                             query_properties = query_schema["properties"]
                             assert "resource" in query_properties
-                            assert "query" not in query_properties
+                            assert {"query", "variables", "max_items", "items_per_page"} <= query_properties.keys()
+                            assert len(query_schema["oneOf"]) == 2
+
+                            legacy_result = await session.call_tool(
+                                "query_wandb_tool",
+                                {"query": "query LegacyViewer { viewer { id username } }", "variables": {}},
+                            )
+                            assert legacy_result.isError is False
+                            legacy_payload = json.loads(_result_text(legacy_result))
+                            assert legacy_payload["viewer"]["id"] == _VIEWER["id"]
+                            assert legacy_payload["viewer"]["username"] == _VIEWER["username"]
+
+                            legacy_rejected = await session.call_tool(
+                                "query_wandb_tool",
+                                {"query": "mutation Forbidden { deleteRun(id: 1) }"},
+                            )
+                            assert legacy_rejected.isError is True
+                            assert (
+                                json.loads(_result_text(legacy_rejected))["errors"][0]["error"] == "read_only_violation"
+                            )
 
                             entity_result = await session.call_tool("list_entities_tool", {})
                             assert entity_result.isError is False
@@ -332,7 +352,7 @@ async def _exercise_profile(
                                     "query_wandb_graphql_tool",
                                     {"query": "mutation Forbidden { deleteRun(id: 1) }"},
                                 )
-                                assert graphql_result.isError is False
+                                assert graphql_result.isError is True
                                 graphql_payload = json.loads(_result_text(graphql_result))
                                 assert graphql_payload["errors"][0]["error"] == "read_only_violation"
 

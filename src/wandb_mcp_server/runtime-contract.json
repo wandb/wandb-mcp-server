@@ -58,7 +58,7 @@
         {"name": "log_analysis_to_wandb", "access": "write", "risk": "write", "prerequisite": "wandb"},
         {"name": "probe_project_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
         {"name": "query_wandb_entity_projects", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "query_wandb_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
+        {"name": "query_wandb_tool", "access": "read", "risk": "compatibility", "prerequisite": "wandb"},
         {"name": "search_wandb_docs_tool", "access": "read", "risk": "read", "prerequisite": "none"}
       ]
     },

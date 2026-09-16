@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Union
 import wandb
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import PositiveInt
+from pydantic import PositiveInt, StrictInt
 
 from wandb_mcp_server.config import (
     MCP_COUNT_TOOL_WORKERS,
@@ -880,9 +880,9 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
 
     @register_tool(description=QUERY_WANDB_TOOL_DESCRIPTION)
     def query_wandb_tool(
-        entity_name: str,
-        project_name: str,
-        resource: Literal["project", "run", "runs", "sweep", "sweeps", "reports"],
+        entity_name: Optional[str] = None,
+        project_name: Optional[str] = None,
+        resource: Optional[Literal["project", "run", "runs", "sweep", "sweeps", "reports"]] = None,
         run_id: Optional[str] = None,
         sweep_id: Optional[str] = None,
         report_name: Optional[str] = None,
@@ -894,7 +894,15 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         config_keys: Optional[List[str]] = None,
         response_mode: Literal["items", "count"] = "items",
         cursor: Optional[str] = None,
+        query: Optional[str] = None,
+        variables: Optional[Dict[str, Any]] = None,
+        max_items: StrictInt = 100,
+        items_per_page: StrictInt = 20,
     ) -> Dict[str, Any]:
+        if query is not None:
+            from wandb_mcp_server.mcp_tools.query_wandb_gql import query_paginated_wandb_gql
+
+            return query_paginated_wandb_gql(query, variables, max_items, items_per_page)
         return query_wandb(
             entity_name=entity_name,
             project_name=project_name,

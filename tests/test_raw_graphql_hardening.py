@@ -244,7 +244,8 @@ def test_fragment_fanout_hits_expansion_budget_before_api(monkeypatch):
     result = gql_tool.query_paginated_wandb_gql(query)
 
     assert result["errors"][0]["error"] == "query_too_complex"
-    assert "expanded selections" in result["errors"][0]["message"]
+    assert result["errors"][0]["error"] == "query_too_complex"
+    assert "query complexity" in result["errors"][0]["message"]
 
 
 def test_malformed_forward_cursor_is_rejected_before_api(monkeypatch):
@@ -264,7 +265,8 @@ def test_malformed_forward_cursor_is_rejected_before_api(monkeypatch):
     )
 
     assert result["errors"][0]["error"] == "invalid_request"
-    assert "after must be a string literal, variable, or null" in result["errors"][0]["message"]
+    assert result["errors"][0]["error"] == "invalid_request"
+    assert "check the query and variables" in result["errors"][0]["message"]
 
 
 def test_variable_size_depth_and_node_limits_reject_before_api(monkeypatch):

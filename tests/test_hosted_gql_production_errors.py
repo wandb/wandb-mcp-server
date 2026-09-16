@@ -102,7 +102,11 @@ def test_scalar_selection_error_is_not_rewritten(monkeypatch):
     executed_query, _ = client.executions[0]
     assert "tags {" in executed_query
     assert "first: 10" in executed_query
-    assert result == upstream_error
+    assert result == {
+        "errors": [
+            {"error": "upstream_error", "message": "The W&B GraphQL read failed; any included data is incomplete."}
+        ]
+    }
 
 
 def test_sampled_history_scalar_error_is_not_rewritten(monkeypatch):
@@ -140,7 +144,11 @@ def test_sampled_history_scalar_error_is_not_rewritten(monkeypatch):
     executed_query, _ = client.executions[0]
     assert "sampledHistory {" in executed_query
     assert "first: 10" in executed_query
-    assert result == upstream_error
+    assert result == {
+        "errors": [
+            {"error": "upstream_error", "message": "The W&B GraphQL read failed; any included data is incomplete."}
+        ]
+    }
 
 
 def test_ambiguous_connection_without_first_is_rejected_before_execute(
@@ -199,7 +207,11 @@ def test_existing_first_on_ambiguous_connection_is_not_changed(monkeypatch):
 
     executed_query, _ = client.executions[0]
     assert "views(first: 10, after: $__mcp_after)" in executed_query
-    assert result == upstream_error
+    assert result == {
+        "errors": [
+            {"error": "upstream_error", "message": "The W&B GraphQL read failed; any included data is incomplete."}
+        ]
+    }
 
 
 def test_valid_run_query_still_clamps_literal_first(monkeypatch):

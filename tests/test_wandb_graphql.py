@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 from importlib.metadata import version
 import json
+import time
 from pathlib import Path
 import tomllib
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ import pytest
 from wandb.apis.public.service_api import ServiceApi
 
 from wandb_mcp_server import wandb_graphql
+from wandb_mcp_server.admission import ToolDeadlineExceeded, current_tool_deadline
 from wandb_mcp_server.wandb_graphql import GraphQLResponseTooLarge, execute_graphql
 
 
@@ -130,3 +132,32 @@ def test_lockfile_pins_supported_wandb_versions():
 def test_installed_wandb_versions_meet_supported_floor():
     assert Version(version("wandb")) >= Version("0.28.0")
     assert Version(version("wandb-workspaces")) >= Version("0.4.4")
+
+
+def test_service_request_timeout_respects_remaining_tool_deadline():
+    timeouts = []
+
+    def send(request, timeout=None):
+        timeouts.append(timeout)
+        return SimpleNamespace(graphql_response=SimpleNamespace(data_json='{"viewer": {"id": "fixture"}}'))
+
+    api = SimpleNamespace(_service_api=SimpleNamespace(send_api_request=send))
+    token = current_tool_deadline.set(time.monotonic() + 0.5)
+    try:
+        assert execute_graphql(api, "{ viewer { id } }")["viewer"]["id"] == "fixture"
+        assert 0 < timeouts[0] <= 0.5
+    finally:
+        current_tool_deadline.reset(token)
+
+
+def test_expired_transport_deadline_never_sends_request():
+    def send(*args, **kwargs):
+        pytest.fail("expired request must never reach W&B")
+
+    api = SimpleNamespace(_service_api=SimpleNamespace(send_api_request=send))
+    token = current_tool_deadline.set(time.monotonic() - 1)
+    try:
+        with pytest.raises(ToolDeadlineExceeded):
+            execute_graphql(api, "{ viewer { id } }")
+    finally:
+        current_tool_deadline.reset(token)
