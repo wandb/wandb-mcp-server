@@ -261,6 +261,41 @@ async def test_graphql_partial_error_preserves_long_data_named_message(boundary,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("alias", ["viewer", "error", "errors", "result"])
+async def test_graphql_redaction_expansion_cannot_exceed_success_response_budget(boundary, monkeypatch, alias):
+    from wandb_mcp_server.trace_utils import count_tokens_conservative
+
+    server, tracker = boundary
+    monkeypatch.setattr("wandb_mcp_server.config.MAX_RESPONSE_TOKENS", 100)
+    payload = {alias: {"description": "Bearer x " * 20}}
+    assert count_tokens_conservative(json.dumps(payload, separators=(",", ":"))) <= 100
+    backend, _ = _install_backend(monkeypatch, [payload])
+
+    @server.tool()
+    def query_wandb_tool(query: str) -> Dict[str, Any]:
+        return gql_tool.query_paginated_wandb_gql(query)
+
+    request = types.CallToolRequest(
+        params=types.CallToolRequestParams(
+            name="query_wandb_tool", arguments={"query": f"{{ {alias}: viewer {{ description }} }}"}
+        )
+    )
+    result = (await server._mcp_server.request_handlers[types.CallToolRequest](request)).root
+    assert result.isError is True
+    assert count_tokens_conservative(result.content[0].text) <= 100
+    decoded = json.loads(result.content[0].text)
+    assert decoded["errors"][0]["error"] == "response_too_large"
+    assert result.structuredContent == {"result": decoded}
+    assert "Bearer x" not in result.model_dump_json()
+    backend.assert_called_once()
+    tracker.track_tool_call.assert_called_once()
+    event = tracker.track_tool_call.call_args.kwargs
+    assert event["success"] is False
+    assert event["error"] == "response_too_large: tool failed"
+    assert event["error_diagnostics"]["category"] == "response_too_large"
+
+
+@pytest.mark.asyncio
 async def test_graphql_root_errors_alias_does_not_hide_engine_failure(boundary, monkeypatch):
     server, tracker = boundary
     _install_backend(monkeypatch, [PermissionError(CANARY)])

@@ -367,20 +367,30 @@ def _sanitize_graphql_data(value: Any) -> Any:
     return value
 
 
-def _graphql_success_result(result: Any) -> Any:
+def _graphql_success_result(result: Any) -> tuple[Any, bool]:
     extracted = _graphql_payload(result)
     if extracted is None:
-        return sanitize_sensitive_value(result)
+        return sanitize_sensitive_value(result), False
+    from wandb_mcp_server.mcp_tools.query_wandb_gql import _fit_response_budget
+
     payload, wrapped = extracted
     safe_payload = _sanitize_graphql_data(payload)
+    fitted_payload = _fit_response_budget(safe_payload, None)
+    # With no connection plan the budget helper either preserves this object
+    # or returns its fixed response-too-large error. Do not inspect data keys:
+    # a successful selection may itself be named errors.
+    exceeded_budget = fitted_payload is not safe_payload
+    safe_payload = fitted_payload
     # Both public representations must contain the same data. The generic
     # sanitizer treats names such as error/message as error contexts and would
     # truncate only structuredContent, despite those being valid selections.
     content = [TextContent(type="text", text=json.dumps(safe_payload, ensure_ascii=False, separators=(",", ":")))]
     structured = {"result": safe_payload} if wrapped else safe_payload
+    if exceeded_budget:
+        return CallToolResult(content=content, structuredContent=structured, isError=True), True
     if isinstance(result, CallToolResult):
-        return result.model_copy(update={"content": content, "structuredContent": structured})
-    return content, structured
+        return result.model_copy(update={"content": content, "structuredContent": structured}), False
+    return (content, structured), False
 
 
 def _graphql_failure_result(result: Any) -> tuple[CallToolResult, str] | None:
@@ -712,7 +722,12 @@ class InstrumentedFastMCP(FastMCP):
             if graphql_mode:
                 # A GraphQL selection may legitimately be named error/result.
                 # Its successful data is not the SDK tool's error envelope.
-                return _graphql_success_result(result)
+                result, exceeded_budget = _graphql_success_result(result)
+                if exceeded_budget:
+                    success = False
+                    error = _telemetry_error("response_too_large")
+                    diagnostics.value = {"category": "response_too_large"}
+                return result
             structured_error = structured_result_error(result)
             result = sanitize_sensitive_value(
                 result,
