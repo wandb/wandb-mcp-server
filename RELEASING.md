@@ -24,6 +24,11 @@ Advancing one channel does not advance another. Record each channel state in
 the versioned release note and do not announce availability before the relevant
 artifact is verified.
 
+These are the stable-release states. An explicitly approved candidate-production
+or limited customer pilot follows the separate lane below; it does not mark
+public source, stable customer publication, or broad Dedicated qualification
+complete.
+
 ## 1. Prepare the public release PR
 
 Create `staging/<version>` from current `origin/main` and open a draft
@@ -123,9 +128,11 @@ uv run --no-sync python scripts/public_release.py \
   preflight --version "$VERSION" --gate source-released
 ```
 
-Production traffic cannot move before this merge and signed tag. A protected
-production identity may create a no-traffic revision only after source
-qualification.
+For this source-released path, production traffic cannot move before the merge
+and signed tag. A protected production identity may create a no-traffic revision
+only after source qualification. An approved candidate exception must instead
+use the hosted controller's exact-image authorization and staging evidence; it
+is not a source release.
 
 ## 4. Build once and attest
 
@@ -201,7 +208,7 @@ mutable tag as evidence.
 
 ## 6. Publish for customers and release Helm
 
-Customer publication is a separate protected action. Before it:
+Stable customer publication is a separate protected action. Before it:
 
 - Validate Dedicated installation, upgrade, and rollback against the exact
   digest.
@@ -214,6 +221,37 @@ Customer publication is a separate protected action. Before it:
 
 Do not publish `latest`, merge Helm, or deploy a customer as a side effect of
 managed production promotion.
+
+### Limited customer pilot
+
+An explicitly approved pilot may copy an already-promoted candidate image
+without waiting for the stable source release or the full live Dedicated matrix.
+Use the hosted pilot publisher with a successful **production promotion run ID**;
+it derives and verifies the production/staging evidence and exact image digest.
+Do not supply an arbitrary source SHA or digest, rebuild the image, or label the
+result as stable. A publication result must identify the verified public
+repository, pilot tag, digest, and provenance before instructions name the image.
+
+Image publication and chart selection are separate prerequisites. Use a
+compatible, exact-version chart, verify its package checksum, and preserve the
+installation's unrelated configuration. A reviewed PR preview can support a
+pilot without merging Helm. Publishing that image does not install it or
+authorize changing a customer deployment. For Helm-backed Operator v1, select
+the application chart through `spec.chart`; upgrading the controller alone does
+not select a compatible MCP chart. Orca/v2 migration is a separate operation.
+
+Record the selected pilot profile, access mode, capacity class, chart, and image.
+Authentication, session recovery, exact tools, functional results, privacy,
+routing, and a recoverable prior configuration remain mandatory checks. Pilot
+results do not establish the full 12-case Dedicated install/disable/re-enable/
+rollback qualification required for broad stable publication.
+
+When a version's approved rollout policy makes load/performance advisory,
+retain the actual measurements and threshold failures for review without
+changing the thresholds or manufacturing a pass. This does not relax
+correctness, access isolation, artifact verification, or rollback checks.
+Version-specific policy, pilot artifacts, and remaining qualification belong
+in the release note, not generic examples.
 
 ## Evidence and rollback rules
 
