@@ -140,6 +140,11 @@ def map_to_datadog_log(
         attributes["duration"] = int(duration_ms * 1_000_000)
 
     if event_type == "request":
+        from wandb_mcp_server.analytics import _REQUEST_REASONS
+
+        reason = event.get("request_reason")
+        if isinstance(reason, str) and reason in _REQUEST_REASONS:
+            attributes["request_reason"] = reason
         http_attrs: Dict[str, Any] = {}
         if event.get("status_code") is not None:
             http_attrs["status_code"] = event["status_code"]
