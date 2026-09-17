@@ -22,8 +22,8 @@ A Datadog Agent DaemonSet on every node:
   `containerCollectAll: true`. Per-pod Unified Service Tagging labels
   (`tags.datadoghq.com/{service,env,version}`) auto-join logs to APM traces.
 
-The agent holds the single DD API key (typically from a `datadog-secrets` Secret in the
-`datadog` namespace, managed once by cluster infra). Workloads hold no DD credentials.
+Configure the DD API key on the cluster's Datadog Agent using a Kubernetes
+Secret. MCP workloads do not need a DD API key in agent mode.
 This repository does not embed `ddtrace` or a DogStatsD client; APM and
 infrastructure metrics require separate cluster-level instrumentation.
 
@@ -73,7 +73,7 @@ itself. When `DD_AGENT_HOST` is also set (agent mode is active) this is logged a
 | `MCP_LOG_FORMAT` | `rich` | both | `json` for structured one-line-per-record output (preferred in containers / behind DD Agent). `rich` for pretty local dev. |
 | `MCP_DATADOG_FORWARD` | `false` | forwarder | Enable the in-app HTTP intake forwarder. |
 | `DD_AGENT_HOST` | unset | agent | Optional deployment signal that a node-local Datadog Agent is present. The in-app forwarder uses it only to classify a missing workload API key as expected agent mode. |
-| `DD_SERVICE` | `wandb-mcp-server` | both | UST service name. Chart and Cloud Run deploy both set this. |
+| `DD_SERVICE` | `wandb-mcp-server` | both | UST service name; set it in the deployment configuration. |
 | `DD_ENV` | `production` | both | UST environment tag. |
 | `DD_VERSION` | image tag | both | Service version; the in-app forwarder keeps it as an attribute rather than a high-cardinality tag. |
 | `DD_SITE` | `datadoghq.com` | forwarder | Datadog site; controls the intake URL. |
@@ -273,7 +273,7 @@ Schema 1.1 canonical fields:
 
 Debug-only fields such as raw-ish client names, versions, and user-agent product
 tokens are disabled by default. If enabled for classifier maintenance, they must
-remain sampled, bounded, and excluded from Datadog tags and default Hex
+remain sampled, bounded, and excluded from Datadog tags and default analytics
 dashboards.
 
 Recommended Datadog views:
