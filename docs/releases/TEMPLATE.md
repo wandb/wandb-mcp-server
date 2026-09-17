@@ -6,10 +6,12 @@
 
 | Channel | State | Immutable artifact |
 |---|---|---|
-| Public source | Candidate | Pending signed tag and GitHub Release |
-| W&B-hosted | Pending | Pending verified image digest |
-| Dedicated/Self-Managed | Pending | Pending verified image digest and chart |
-| Customer container | Pending | Pending verified public-registry digest |
+| Public source | Pending | Source revision; signed tag and GitHub Release when available |
+| Container | Pending | Public repository and verified immutable digest |
+| Dedicated/Self-Managed | Pending | Compatible chart version and installation notes |
+
+Report each artifact's actual status. Do not infer a signed source release or
+installation qualification from a published container.
 
 ## Summary
 
@@ -50,9 +52,10 @@ List bounded behavior, optional compatibility paths, and unavailable channels.
 
 ## Validation
 
-Link the signed public attestation and summarize exact-profile, compatibility,
-security, staging, and rollback evidence without customer or infrastructure
-identifiers.
+Link public attestations and summarize completed compatibility, security, and
+installation checks. State missing checks and known findings. Keep private
+workflow links, rollout procedures, customer identifiers, and infrastructure
+details out of public release notes.
 
 ## Immutable artifacts
 
@@ -61,12 +64,10 @@ identifiers.
 - GitHub Release: Pending (draft until channel evidence is complete)
 - Wheel and source-distribution checksums: Pending
 - Public qualification/provenance attestations: Pending
-- Hosted image digest: Pending
-- Customer image digest: Pending
+- Public container repository and digest: Pending
 - Helm chart version: Pending
 
 ## Rollback
 
 - Public source: fix forward from the signed tag.
-- Managed: restore and verify the captured previous configuration and traffic.
 - Dedicated/Self-Managed: restore the previous chart and image digest.
