@@ -9,6 +9,10 @@ Tests cover:
 """
 
 import logging
+import os
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
@@ -713,24 +717,28 @@ class TestSessionTTLAndRequests:
 
 
 class TestSessionEnvVarValidation:
-    def test_invalid_ttl_raises_clear_error(self):
-        with patch.dict("os.environ", {"SESSION_TTL_SECONDS": "30m"}):
-            from wandb_mcp_server.session_manager import reset_session_manager
+    @pytest.mark.parametrize(
+        ("variable", "value"),
+        [
+            ("SESSION_TTL_SECONDS", "30m"),
+            ("MAX_SESSIONS_PER_KEY", ""),
+        ],
+    )
+    def test_invalid_session_capacity_fails_at_startup(self, variable: str, value: str):
+        environment = os.environ.copy()
+        environment[variable] = value
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import runpy; runpy.run_path('src/wandb_mcp_server/config.py')",
+            ],
+            cwd=Path(__file__).parents[1],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
-            reset_session_manager()
-            with pytest.raises(ValueError, match="SESSION_TTL_SECONDS must be an integer"):
-                from wandb_mcp_server.session_manager import get_session_manager
-
-                get_session_manager()
-            reset_session_manager()
-
-    def test_invalid_max_sessions_raises_clear_error(self):
-        with patch.dict("os.environ", {"MAX_SESSIONS_PER_KEY": ""}):
-            from wandb_mcp_server.session_manager import reset_session_manager
-
-            reset_session_manager()
-            with pytest.raises(ValueError, match="MAX_SESSIONS_PER_KEY must be an integer"):
-                from wandb_mcp_server.session_manager import get_session_manager
-
-                get_session_manager()
-            reset_session_manager()
+        assert result.returncode != 0
+        assert variable in result.stderr

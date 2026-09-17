@@ -1,7 +1,7 @@
 """Log computed analysis data to W&B for visualization in reports.
 
 Creates a lightweight W&B run via the PublicApi (no wandb.init()),
-logs scalar summary metrics via GraphQL UpsertBucket, and returns
+logs scalar summary metrics through the SDK, and returns
 the run_id for use in create_wandb_report_tool panels.
 
 Security: Uses wandb.Api(api_key=...) per-request, same pattern as
@@ -14,9 +14,10 @@ from typing import Any, Dict, List, Optional
 
 import wandb
 
-from wandb_mcp_server.api_client import WandBApiManager
-from wandb_mcp_server.config import WANDB_BASE_URL
+from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
+from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_API_BASE_URL
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.wandb_urls import public_wandb_url
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -96,10 +97,9 @@ def log_analysis(
     if not api_key:
         raise Exception("No W&B API key available")
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "log_analysis_to_wandb",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,
@@ -111,7 +111,11 @@ def log_analysis(
         if not data:
             raise ValueError("data must be a non-empty list of dicts")
 
-        wandb_api = wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
+        wandb_api = wandb.Api(
+            api_key=api_key,
+            overrides={"base_url": WANDB_API_BASE_URL},
+            timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+        )
         run = wandb_api.create_run(entity=entity_name, project=project_name)
 
         try:
@@ -147,13 +151,24 @@ def log_analysis(
             run.update()
 
         except Exception as e:
-            logger.error(f"Failed to update analysis run: {e}", exc_info=True)
+            raise_for_wandb_server_busy(e)
+            # Analysis names, run identifiers, entity/project names, and SDK
+            # exception text may all contain customer-supplied data. Keep the
+            # operational signal categorical so it is safe for shared logs.
+            logger.error(
+                "Failed to update W&B analysis run (error_type=%s)",
+                type(e).__name__[:64],
+            )
             raise
 
         run_id = run.id
-        run_url = f"https://wandb.ai/{entity_name}/{project_name}/runs/{run_id}"
+        run_url = public_wandb_url(entity_name, project_name, "runs", run_id)
 
-        logger.info(f"Logged analysis '{analysis_name}' to run {run_id}")
+        logger.info(
+            "Logged W&B analysis run (rows=%d summary_keys=%d)",
+            len(data),
+            len(summary_data),
+        )
 
         return {
             "run_id": run_id,

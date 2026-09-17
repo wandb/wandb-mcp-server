@@ -88,13 +88,13 @@ async def validate_bearer_token(credentials: Optional[HTTPAuthorizationCredentia
 
     # Basic format validation
     if not is_valid_wandb_api_key(token):
-        logger.debug(f"Rejected API key: length={len(token)}")
+        logger.debug("Rejected an invalid W&B API key format")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid W&B API key format. Get your key at: https://wandb.ai/authorize",
         )
 
-    logger.debug(f"Bearer token validated successfully (length: {len(token)})")
+    logger.debug("Bearer token format validated successfully")
     return token
 
 
@@ -143,7 +143,7 @@ async def mcp_auth_middleware(request: Request, call_next):
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"error": e.detail}, headers=e.headers)
     except Exception as e:
-        logger.error(f"Authentication error: {e}")
+        logger.error("Authentication failed (%s)", type(e).__name__)
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"error": "Authentication failed"},
@@ -156,20 +156,19 @@ async def mcp_auth_middleware(request: Request, call_next):
 
     api_key_token = WandBApiManager.set_context_api_key(wandb_api_key)
 
+    # Authentication already established possession of a W&B API key. Do not
+    # add a separate viewer request solely for telemetry attribution.
     viewer = None
-    try:
-        api = WandBApiManager.get_api()
-        viewer = api.viewer
-        viewer_id = getattr(viewer, "username", None) or getattr(viewer, "entity", None) or "<unknown>"
-        logger.info(f"Authenticated W&B viewer: {viewer_id}")
-    except Exception as viewer_err:
-        logger.warning(f"Could not fetch W&B viewer: {viewer_err}")
 
     # --- Session management -----------------------------------------------
     # Finalize session_id *before* setting the contextvar so that
     # reset() always restores the original value (None), not a
     # stale/stolen session ID from a mismatch recovery path.
-    from wandb_mcp_server.session_manager import SessionCapacityError, current_session_id
+    from wandb_mcp_server.session_manager import (
+        SessionCapacityError,
+        current_api_key_hash,
+        current_session_id,
+    )
 
     session_id, is_new_session = _resolve_session_id(request, wandb_api_key)
     session_was_created = False
@@ -205,10 +204,12 @@ async def mcp_auth_middleware(request: Request, call_next):
         except Exception:
             logger.debug("Session creation failed on mismatch retry (non-fatal)")
     except Exception as sm_err:
-        logger.debug(f"Session manager unavailable (non-fatal): {sm_err}")
+        logger.debug("Session manager unavailable (non-fatal; %s)", type(sm_err).__name__)
 
     request.state.session_id = session_id
     session_ctx_token = current_session_id.set(session_id)
+    api_key_hash = hashlib.sha256(wandb_api_key.encode()).hexdigest()
+    api_key_hash_token = current_api_key_hash.set(api_key_hash)
 
     # --- Analytics: session event -----------------------------------------
     if session_was_created:
@@ -218,10 +219,10 @@ async def mcp_auth_middleware(request: Request, call_next):
             get_analytics_tracker().track_user_session(
                 session_id=session_id,
                 viewer_info=viewer,
-                api_key_hash=hashlib.sha256(wandb_api_key.encode()).hexdigest(),
+                api_key_hash=api_key_hash,
             )
         except Exception as analytics_err:
-            logger.debug(f"Analytics tracking failed (non-fatal): {analytics_err}")
+            logger.debug("Analytics tracking failed (non-fatal; %s)", type(analytics_err).__name__)
 
     # --- Execute request (errors here propagate as 500, not 401) ----------
     request_start = time.monotonic()
@@ -234,6 +235,7 @@ async def mcp_auth_middleware(request: Request, call_next):
     finally:
         WandBApiManager.reset_context_api_key(api_key_token)
         current_session_id.reset(session_ctx_token)
+        current_api_key_hash.reset(api_key_hash_token)
 
     if is_new_session:
         response.headers["Mcp-Session-Id"] = session_id

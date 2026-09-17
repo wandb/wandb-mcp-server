@@ -40,7 +40,7 @@ def _empty_query_result():
 
 @pytest.mark.asyncio
 async def test_metadata_only_over_hosted_limit_is_rejected(monkeypatch):
-    monkeypatch.setattr(cfg, "MCP_HOSTED_MODE", True)
+    monkeypatch.setattr(cfg, "MCP_WORKLOAD_PROFILE", "shared")
     monkeypatch.setattr(cfg, "MCP_MAX_QUERY_LIMIT", 100)
     called = False
 
@@ -61,7 +61,7 @@ async def test_metadata_only_over_hosted_limit_is_rejected(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_hosted_omitted_limit_defaults_to_query_cap(monkeypatch):
-    monkeypatch.setattr(cfg, "MCP_HOSTED_MODE", True)
+    monkeypatch.setattr(cfg, "MCP_WORKLOAD_PROFILE", "shared")
     monkeypatch.setattr(cfg, "MCP_MAX_QUERY_LIMIT", 100)
     seen_kwargs = {}
 
@@ -85,7 +85,7 @@ async def test_hosted_omitted_limit_defaults_to_query_cap(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_full_trace_hosted_limit_uses_full_cap(monkeypatch):
-    monkeypatch.setattr(cfg, "MCP_HOSTED_MODE", True)
+    monkeypatch.setattr(cfg, "MCP_WORKLOAD_PROFILE", "shared")
     monkeypatch.setattr(cfg, "MCP_MAX_FULL_TRACE_LIMIT", 25)
 
     tool = _registered_tools(monkeypatch)["query_weave_traces_tool"]
@@ -98,7 +98,7 @@ async def test_full_trace_hosted_limit_uses_full_cap(monkeypatch):
 @pytest.mark.parametrize("sort_by", ["total_cost", "completion_cost", "prompt_cost"])
 @pytest.mark.asyncio
 async def test_cost_sort_rejected_in_hosted_mode(monkeypatch, sort_by):
-    monkeypatch.setattr(cfg, "MCP_HOSTED_MODE", True)
+    monkeypatch.setattr(cfg, "MCP_WORKLOAD_PROFILE", "shared")
     called = False
 
     async def fake_query(*args, **kwargs):
@@ -117,7 +117,7 @@ async def test_cost_sort_rejected_in_hosted_mode(monkeypatch, sort_by):
 
 
 def test_service_rejects_direct_hosted_over_limit(monkeypatch):
-    monkeypatch.setattr(cfg, "MCP_HOSTED_MODE", True)
+    monkeypatch.setattr(cfg, "MCP_WORKLOAD_PROFILE", "dedicated")
     monkeypatch.setattr(cfg, "MCP_MAX_QUERY_LIMIT", 100)
 
     service = TraceService(api_key="test-key")
@@ -127,7 +127,7 @@ def test_service_rejects_direct_hosted_over_limit(monkeypatch):
 
 
 def test_service_defaults_direct_hosted_limit(monkeypatch):
-    monkeypatch.setattr(cfg, "MCP_HOSTED_MODE", True)
+    monkeypatch.setattr(cfg, "MCP_WORKLOAD_PROFILE", "dedicated")
     monkeypatch.setattr(cfg, "MCP_MAX_QUERY_LIMIT", 3)
 
     service = TraceService(api_key="test-key")
@@ -153,7 +153,7 @@ def test_service_defaults_direct_hosted_limit(monkeypatch):
 
 
 def test_service_rejects_direct_hosted_cost_sort(monkeypatch):
-    monkeypatch.setattr(cfg, "MCP_HOSTED_MODE", True)
+    monkeypatch.setattr(cfg, "MCP_WORKLOAD_PROFILE", "dedicated")
 
     service = TraceService(api_key="test-key")
 
@@ -228,7 +228,7 @@ async def test_count_tool_preserves_session_context_in_executor(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_trace_query_preflight_timeout_does_not_block_main_query(monkeypatch):
-    monkeypatch.setattr(cfg, "MCP_HOSTED_MODE", True)
+    monkeypatch.setattr(cfg, "MCP_WORKLOAD_PROFILE", "shared")
     monkeypatch.setattr(cfg, "MCP_MAX_QUERY_LIMIT", 100)
     monkeypatch.setattr(cfg, "MCP_TOOL_TIMEOUT_SECONDS", 1)
 

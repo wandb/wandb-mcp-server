@@ -5,20 +5,28 @@ on:
     branches: [main, "staging/**"]
   pull_request:
     branches: [main, "staging/**"]
+  schedule:
+    - cron: "17 8 * * 1"
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          version: "latest"
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          version: "0.11.27"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -27,12 +35,14 @@ jobs:
         run: uv sync --frozen --extra test --python ${{ matrix.python-version }}
 
       - name: Smoke test package import
-        run: uv run --no-sync python -c "import wandb_mcp_server; print('ok')"
+        run: |
+          uv run --no-sync python -c "import wandb_mcp_server; print('ok')"
+          uv run --no-sync python -c "from importlib.metadata import version; assert version('mcp') == '1.29.0'; print('mcp', version('mcp'))"
 
       - name: Lint with ruff
         run: |
-          uv run --no-sync ruff check src/ tests/
-          uv run --no-sync ruff format --check src/ tests/
+          uv run --no-sync ruff check .
+          uv run --no-sync ruff format --check .
 
       - name: Run unit tests
         run: uv run --no-sync pytest tests/ -m "not integration" -x -v --tb=short -q
@@ -41,25 +51,62 @@ jobs:
           WEAVE_SILENT: "True"
 
       - name: Build and smoke test wheel install
+        id: public-artifact
         run: |
-          uv build
+          VERSION="$(uv run --no-sync python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          ARTIFACT_DIR="$RUNNER_TEMP/public-artifacts-${{ matrix.python-version }}"
+          uv run --no-sync python scripts/public_release.py preflight --version "$VERSION" --gate candidate
+          uv run --no-sync python scripts/public_release.py build --version "$VERSION" --output-dir "$ARTIFACT_DIR"
+          WHEEL="$(find "$ARTIFACT_DIR" -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "$WHEEL"
           SMOKE_ENV="$RUNNER_TEMP/wandb-mcp-install-smoke"
           uv venv "$SMOKE_ENV" --python ${{ matrix.python-version }}
-          uv pip install --python "$SMOKE_ENV/bin/python" dist/*.whl
+          uv export --frozen --no-dev --no-emit-project --output-file "$RUNNER_TEMP/runtime-${{ matrix.python-version }}.txt"
+          uv pip install --python "$SMOKE_ENV/bin/python" --requirement "$RUNNER_TEMP/runtime-${{ matrix.python-version }}.txt"
+          uv pip install --python "$SMOKE_ENV/bin/python" --no-deps "$WHEEL"
+          uv pip check --python "$SMOKE_ENV/bin/python"
           "$SMOKE_ENV/bin/python" -c "import wandb_mcp_server; print('ok')"
+          "$SMOKE_ENV/bin/python" scripts/offline_tokenizer_smoke.py
+          "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; from packaging.version import Version; resolved = Version(version('mcp')); assert Version('1.28.1') <= resolved < Version('2'); print('fresh-wheel mcp', resolved)"
+          "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py \
+            --server-command "$SMOKE_ENV/bin/wandb_mcp_server" \
+            --contract release/public-contract.json \
+            --all-profiles \
+            --source-sha "$GITHUB_SHA" \
+            --wheel "$WHEEL" \
+            --evidence-out "$ARTIFACT_DIR/profile-evidence.json"
+          uv pip install --python "$SMOKE_ENV/bin/python" "mcp[cli]==1.28.1"
+          uv pip check --python "$SMOKE_ENV/bin/python"
+          "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; assert version('mcp') == '1.28.1'; print('minimum mcp', version('mcp'))"
+          "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py \
+            --server-command "$SMOKE_ENV/bin/wandb_mcp_server" \
+            --contract release/public-contract.json \
+            --all-profiles
+          echo "artifact-dir=$ARTIFACT_DIR" >> "$GITHUB_OUTPUT"
         env:
           WANDB_SILENT: "True"
           WEAVE_SILENT: "True"
 
+      - name: Upload candidate build and exact-profile evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-candidate-${{ matrix.python-version }}
+          path: ${{ steps.public-artifact.outputs.artifact-dir }}
+          if-no-files-found: error
+          retention-days: 30
+
   wandb-latest-compatibility:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          version: "latest"
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          version: "0.11.27"
 
       - name: Set up Python 3.12
         run: uv python install 3.12
@@ -72,11 +119,28 @@ jobs:
       - name: Show installed W&B SDK versions
         run: uv run --no-sync python -c "from importlib.metadata import version; print('wandb', version('wandb')); print('wandb-workspaces', version('wandb-workspaces'))"
 
-      - name: Verify latest W&B GraphQL compatibility
+      - name: Verify latest W&B SDK and optional GraphQL compatibility
         run: |
           uv run --no-sync pytest \
+            tests/test_query_wandb_sdk.py \
+            tests/test_query_wandb_hardening.py \
+            tests/test_aria.py \
+            tests/test_aria_registration.py \
+            tests/test_probe_project.py \
+            tests/test_wandb_selective_reads.py \
+            tests/test_run_history.py \
+            tests/test_compare_runs.py \
+            tests/test_diagnose_run.py \
+            tests/test_query_artifacts.py \
+            tests/test_query_registry.py \
+            tests/test_registry_read_correctness.py \
+            tests/test_summarize_evaluation.py \
+            tests/test_infer_schema.py \
+            tests/test_tool_registration.py \
+            tests/test_report_writer.py \
             tests/test_wandb_graphql.py \
             tests/test_wandb_graphql_read_only.py \
+            tests/test_raw_graphql_hardening.py \
             tests/test_hosted_gql_guardrails.py \
             tests/test_hosted_gql_production_errors.py \
             -k "not locked_wandb_versions_are_installed" \

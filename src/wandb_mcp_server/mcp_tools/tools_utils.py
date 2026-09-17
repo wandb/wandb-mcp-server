@@ -1,6 +1,5 @@
 import inspect
 import re
-import time
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Optional, Tuple, Type, Union
 
@@ -308,6 +307,17 @@ def get_retry_session(
     return session
 
 
+def get_no_retry_session() -> requests.Session:
+    """Return a session that performs exactly one HTTP attempt.
+
+    Functional MCP calls use this when retrying upstream overload would
+    amplify customer traffic. The normal ``requests`` adapters use a zero-retry
+    policy and return the original response, preserving status and headers for
+    the shared MCP overload mapper.
+    """
+    return requests.Session()
+
+
 class _ToolExecutionContext:
     """Mutable context yielded by ``track_tool_execution``.
 
@@ -337,52 +347,19 @@ def track_tool_execution(
     params: Dict[str, Any],
     mcp_tool_name: Optional[str] = None,
 ):
-    """Context manager that wraps MCP tool execution with timing and error capture.
+    """Compatibility context for implementation-local error bookkeeping.
 
-    Measures wall-clock duration, captures exceptions, and emits a
-    ``track_tool_call`` analytics event in ``finally`` so every invocation --
-    success or failure -- is recorded with real ``success``, ``error``, and
-    ``duration_ms`` values.
-
-    Yields a ``_ToolExecutionContext`` so tools that return error dicts
-    instead of raising can call ``ctx.mark_error(...)`` explicitly.
+    Product analytics are emitted once by :class:`InstrumentedFastMCP` at the
+    public ``tools/call`` boundary.  Keeping this context manager non-emitting
+    avoids double-counting nested implementation helpers while existing tools
+    migrate away from their local wrappers.
     """
-    from wandb_mcp_server.analytics import (
-        AnalyticsTracker,
-        get_analytics_tracker,
-        is_verbose_log_site_gated,
-    )
-    from wandb_mcp_server.session_manager import current_session_id
-
-    safe_params = AnalyticsTracker._sanitise_params(params)
-    # Demote to DEBUG at standard+ privacy levels. The analytics event emitted in
-    # the finally-block below still captures tool_name/params/success structurally,
-    # so BigQuery / DD / Segment pipelines see the same information regardless.
-    if is_verbose_log_site_gated():
-        _tools_logger.debug(f"ToolCall name={tool_name} params={safe_params}")
-    else:
-        _tools_logger.info(f"ToolCall name={tool_name} params={safe_params}")
+    _tools_logger.debug("Tool implementation started: %s", tool_name)
 
     ctx = _ToolExecutionContext()
-    start = time.monotonic()
     try:
         yield ctx
     except Exception as exc:
         ctx.success = False
         ctx.error = f"{type(exc).__name__}: {str(exc)[:500]}"
         raise
-    finally:
-        duration_ms = round((time.monotonic() - start) * 1000, 2)
-        try:
-            get_analytics_tracker().track_tool_call(
-                tool_name=tool_name,
-                session_id=current_session_id.get(),
-                viewer_info=viewer,
-                params=params,
-                success=ctx.success,
-                error=ctx.error,
-                duration_ms=duration_ms,
-                mcp_tool_name=mcp_tool_name,
-            )
-        except Exception:
-            _tools_logger.debug(f"Analytics tracking failed for {tool_name}")

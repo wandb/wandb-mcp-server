@@ -7,14 +7,8 @@ import argparse
 import os
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_DEFAULT_PROJECT = "wandb-mcp-report-layout-live"
 _SUMMARY_TABLE_KEYS = ("car_ap", "truck_ap")
 _RENDERABLE_TABLE_KEYS = ("loss_curve", "accuracy_curve", "pr_curve_table")
 _HISTORY_TABLE_KEY = "pr_curve"
@@ -29,7 +23,6 @@ class HarnessSettings:
     entity: str
     project: str
     api_key: str
-    loaded_env_files: tuple[Path, ...]
     data_mode: str
 
 
@@ -44,76 +37,26 @@ class HarnessResult:
     data_mode: str
 
 
-def env_file_candidates(explicit_env_file: str | None = None) -> list[Path]:
-    """Return `.env` files to load without exposing their contents."""
-    candidates: list[Path] = []
-    if explicit_env_file:
-        candidates.append(Path(explicit_env_file).expanduser())
-    candidates.extend(
-        [
-            Path.cwd() / ".env",
-            _REPO_ROOT / ".env",
-            _REPO_ROOT.parent / "WandBAgentFactory" / ".env",
-            _REPO_ROOT.parent / "wandb-mcp-server-test" / ".env",
-        ]
-    )
-
-    seen: set[Path] = set()
-    unique_candidates: list[Path] = []
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if resolved not in seen:
-            unique_candidates.append(resolved)
-            seen.add(resolved)
-    return unique_candidates
-
-
-def load_harness_env(explicit_env_file: str | None = None) -> tuple[Path, ...]:
-    """Load local env files in a deterministic order.
-
-    Existing shell variables win over `.env` values so callers can override
-    secrets or test targets from the command line.
-    """
-    loaded: list[Path] = []
-    for env_file in env_file_candidates(explicit_env_file):
-        if env_file.exists():
-            load_dotenv(env_file, override=False)
-            loaded.append(env_file)
-    return tuple(loaded)
-
-
 def resolve_settings(
     *,
-    explicit_env_file: str | None = None,
     entity: str | None = None,
     project: str | None = None,
     data_mode: str | None = None,
 ) -> HarnessSettings:
-    """Resolve live harness settings from args, `.env`, and W&B identity."""
-    loaded_env_files = load_harness_env(explicit_env_file)
+    """Resolve live harness settings from explicit args and process environment."""
     api_key = os.getenv("WANDB_API_KEY", "")
     if not api_key:
-        raise RuntimeError("WANDB_API_KEY is required. Set it in the shell or in one of the loaded .env files.")
+        raise RuntimeError("WANDB_API_KEY is required in the process environment")
 
-    resolved_entity = (
-        entity
-        or os.getenv("MCP_REPORT_TEST_ENTITY")
-        or os.getenv("MCP_LOGS_WANDB_ENTITY")
-        or os.getenv("WANDB_ENTITY")
-        or _viewer_username(api_key)
-    )
+    resolved_entity = entity or os.getenv("MCP_REPORT_TEST_ENTITY") or os.getenv("WANDB_ENTITY")
     if not resolved_entity:
-        raise RuntimeError(
-            "Could not resolve a W&B entity. Set MCP_REPORT_TEST_ENTITY, MCP_LOGS_WANDB_ENTITY, or WANDB_ENTITY."
-        )
+        raise RuntimeError("An explicit test entity is required via --entity, MCP_REPORT_TEST_ENTITY, or WANDB_ENTITY")
 
-    resolved_project = (
-        project
-        or os.getenv("MCP_REPORT_TEST_PROJECT")
-        or os.getenv("MCP_LOGS_WANDB_PROJECT")
-        or os.getenv("WANDB_PROJECT")
-        or _DEFAULT_PROJECT
-    )
+    resolved_project = project or os.getenv("MCP_REPORT_TEST_PROJECT") or os.getenv("WANDB_PROJECT")
+    if not resolved_project:
+        raise RuntimeError(
+            "An explicit test project is required via --project, MCP_REPORT_TEST_PROJECT, or WANDB_PROJECT"
+        )
     resolved_data_mode = data_mode or os.getenv("MCP_REPORT_DATA_MODE") or "api-shape"
     if resolved_data_mode not in _DATA_MODES:
         raise RuntimeError(f"data_mode must be one of: {', '.join(_DATA_MODES)}")
@@ -122,14 +65,12 @@ def resolve_settings(
         entity=resolved_entity,
         project=resolved_project,
         api_key=api_key,
-        loaded_env_files=loaded_env_files,
         data_mode=resolved_data_mode,
     )
 
 
 def run_live_report_layout_verification(settings: HarnessSettings) -> HarnessResult:
-    """Seed runs, create a report layout, reload it, and assert viewspec shape."""
-    import wandb
+    """Seed temporary fixtures, validate a report layout, and remove the fixtures."""
     import wandb_workspaces.reports.v2 as wr
 
     from wandb_mcp_server.api_client import WandBApiManager
@@ -138,45 +79,82 @@ def run_live_report_layout_verification(settings: HarnessSettings) -> HarnessRes
     os.environ["WANDB_API_KEY"] = settings.api_key
     WandBApiManager.set_context_api_key(settings.api_key)
 
-    run_ids = tuple(_seed_runs(settings.entity, settings.project))
-    for run_id in run_ids:
-        _wait_for_summary_tables(settings.entity, settings.project, run_id)
+    created_run_ids: list[str] = []
+    report_url: str | None = None
+    try:
+        _seed_runs(settings.entity, settings.project, created_run_ids)
+        run_ids = tuple(created_run_ids)
+        for run_id in run_ids:
+            _wait_for_summary_tables(settings.entity, settings.project, run_id)
 
-    report = create_report(
-        entity_name=settings.entity,
-        project_name=settings.project,
-        title=f"MCP report layout {settings.data_mode} verification {int(time.time())}",
-        description="Live MCP report layout harness verification.",
-        markdown_report_text="# MCP report layout live verification\n\n[TOC]",
-        panels=_report_layout_panels(run_ids, data_mode=settings.data_mode),
-    )
-    report_url = report["url"]
+        report = create_report(
+            entity_name=settings.entity,
+            project_name=settings.project,
+            title=f"MCP report layout {settings.data_mode} verification {int(time.time())}",
+            description="Live MCP report layout harness verification.",
+            markdown_report_text="# MCP report layout live verification\n\n[TOC]",
+            panels=_report_layout_panels(run_ids, data_mode=settings.data_mode),
+        )
+        report_url = report["url"]
 
-    report_model = wr.Report.from_url(report_url, as_model=True)
-    _assert_report_model(report_model, run_ids, data_mode=settings.data_mode)
+        report_model = wr.Report.from_url(report_url, as_model=True)
+        _assert_report_model(report_model, run_ids, data_mode=settings.data_mode)
+        return HarnessResult(
+            report_url=report_url,
+            run_ids=run_ids,
+            entity=settings.entity,
+            project=settings.project,
+            data_mode=settings.data_mode,
+        )
+    finally:
+        _delete_live_fixtures(
+            entity=settings.entity,
+            project=settings.project,
+            api_key=settings.api_key,
+            report_url=report_url,
+            run_ids=tuple(created_run_ids),
+        )
 
-    wandb.termlog(f"MCP report layout harness URL: {report_url}")
-    return HarnessResult(
-        report_url=report_url,
-        run_ids=run_ids,
-        entity=settings.entity,
-        project=settings.project,
-        data_mode=settings.data_mode,
-    )
+
+def _delete_live_fixtures(
+    *,
+    entity: str,
+    project: str,
+    api_key: str,
+    report_url: str | None,
+    run_ids: tuple[str, ...],
+) -> None:
+    """Delete every temporary write; cleanup failure fails live validation."""
+    import wandb
+    import wandb_workspaces.reports.v2 as wr
+
+    errors: list[str] = []
+    if report_url:
+        try:
+            report = wr.Report.from_url(report_url, as_model=True)
+            if report.delete() is False:
+                errors.append("temporary report deletion returned false")
+        except Exception as exc:
+            errors.append(f"temporary report deletion failed: {type(exc).__name__}")
+
+    try:
+        api = wandb.Api(api_key=api_key)
+    except Exception as exc:
+        errors.append(f"temporary run cleanup setup failed: {type(exc).__name__}")
+    else:
+        for run_id in run_ids:
+            try:
+                api.run(f"{entity}/{project}/{run_id}").delete()
+            except Exception as exc:
+                errors.append(f"temporary run deletion failed: {type(exc).__name__}")
+
+    if errors:
+        raise RuntimeError("; ".join(errors))
 
 
-def _viewer_username(api_key: str) -> str:
+def _seed_runs(entity: str, project: str, run_ids: list[str]) -> None:
     import wandb
 
-    api = wandb.Api(api_key=api_key)
-    viewer = api.viewer
-    return getattr(viewer, "username", "") or getattr(viewer, "entity", "")
-
-
-def _seed_runs(entity: str, project: str) -> list[str]:
-    import wandb
-
-    run_ids: list[str] = []
     for idx, model_name in enumerate(("baseline", "candidate")):
         with wandb.init(
             entity=entity,
@@ -186,6 +164,7 @@ def _seed_runs(entity: str, project: str) -> list[str]:
             tags=[_REPORT_TAG, model_name],
             config={"model_name": model_name, "seed": idx},
         ) as run:
+            run_ids.append(run.id)
             run.log(
                 {
                     "score": 0.71 + idx * 0.08,
@@ -198,8 +177,6 @@ def _seed_runs(entity: str, project: str) -> list[str]:
                     "pr_curve_table": _renderable_pr_curve_table(idx),
                 }
             )
-            run_ids.append(run.id)
-    return run_ids
 
 
 def _ap_table(label: str, run_offset: int):
@@ -511,7 +488,6 @@ def _iter_filter_nodes(node: Any):
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env-file", help="Optional explicit .env file path.")
     parser.add_argument("--entity", help="W&B entity for live verification.")
     parser.add_argument("--project", help="W&B project for live verification.")
     parser.add_argument(
@@ -529,18 +505,14 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     settings = resolve_settings(
-        explicit_env_file=args.env_file,
         entity=args.entity,
         project=args.project,
         data_mode=args.data_mode,
     )
-    loaded = ", ".join(str(path) for path in settings.loaded_env_files) or "none"
-    print(f"Loaded env files: {loaded}")
-    print(f"Using W&B target: {settings.entity}/{settings.project}")
+    print("Using the explicitly configured W&B test target.")
     print(f"Using data mode: {settings.data_mode}")
-    result = run_live_report_layout_verification(settings)
-    print(f"Report URL: {result.report_url}")
-    print(f"Seeded run IDs: {', '.join(result.run_ids)}")
+    run_live_report_layout_verification(settings)
+    print("Report layout verification passed; temporary fixtures were removed.")
 
 
 if __name__ == "__main__":

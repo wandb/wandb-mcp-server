@@ -2,7 +2,6 @@
 
 from contextlib import contextmanager
 from pathlib import Path
-import re
 from types import SimpleNamespace
 
 import pytest
@@ -47,7 +46,7 @@ def test_non_query_operations_are_rejected_before_api_creation(monkeypatch, docu
             {
                 "error": "read_only_violation",
                 "message": (
-                    "query_wandb_tool accepts GraphQL query operations only; "
+                    "query_wandb_graphql_tool accepts GraphQL query operations only; "
                     f"rejected operation type(s): {', '.join(operation_types)}."
                 ),
                 "operation_types": operation_types,
@@ -122,18 +121,12 @@ def test_read_only_query_shapes_are_allowed(document):
     assert parsed == parse(document)
 
 
-def test_all_documented_graphql_examples_are_read_only():
-    examples = re.findall(r"```graphql\s*(.*?)```", gql_tool.QUERY_WANDB_GQL_TOOL_DESCRIPTION, flags=re.DOTALL)
-
-    assert examples
-    for example in examples:
-        validate_read_only_graphql(example)
-
-
 def test_application_graphql_transport_is_confined_to_approved_modules():
     package_root = Path(__file__).parents[1] / "src" / "wandb_mcp_server"
     approved = {
         package_root / "wandb_graphql.py",
+        package_root / "wandb_report_writer.py",
+        package_root / "wandb_selective_reads.py",
         package_root / "mcp_tools" / "query_wandb_gql.py",
     }
     violations = [

@@ -2,8 +2,19 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 
+import wandb_mcp_server.mcp_tools.create_report as create_report_module
 from wandb_mcp_server.mcp_tools.create_report import _build_panel_blocks
+
+
+@pytest.fixture(autouse=True)
+def _stub_bounded_report_save(monkeypatch):
+    monkeypatch.setattr(
+        create_report_module,
+        "save_report_bounded",
+        lambda report, api: report,
+    )
 
 
 class TestSVGSupport:
@@ -52,6 +63,103 @@ class TestSVGSupport:
         )
 
         mock_wr.MarkdownBlock.assert_called()
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    @patch("wandb_mcp_server.api_client.WandBApiManager")
+    def test_success_logs_omit_report_scope_title_and_content_label(
+        self,
+        mock_api,
+        mock_wr,
+    ):
+        from wandb_mcp_server.mcp_tools.create_report import create_report
+
+        entity = "private-report-entity-canary"
+        project = "private-report-project-canary"
+        title = "private-report-title-canary"
+        label = "private-report-label-canary"
+        mock_api.get_api_key.return_value = "key"
+        mock_api.get_api.return_value = MagicMock(viewer={"username": "test"})
+        mock_wr.Report.return_value = MagicMock(url="https://wandb.ai/report")
+        mock_wr.MarkdownBlock = MagicMock()
+        mock_wr.P = MagicMock()
+
+        with patch.object(create_report_module.logger, "info") as info_log:
+            create_report(
+                entity_name=entity,
+                project_name=project,
+                title=title,
+                plots_html={label: "<div>safe fixture body</div>"},
+            )
+
+        rendered = "\n".join(" ".join(map(str, call.args)) for call in info_log.call_args_list)
+        assert "Added report content block (kind=html)" in rendered
+        assert "Created W&B report (panels=%d blocks=%d)" in rendered
+        for canary in (entity, project, title, label):
+            assert canary not in rendered
+
+
+class TestReportLogPrivacy:
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_panel_failure_log_omits_scope_title_and_exception_text(
+        self,
+        mock_wr,
+        monkeypatch,
+    ):
+        entity = "private-panel-entity-canary"
+        project = "private-panel-project-canary"
+        title = "private-panel-title-canary"
+        mock_wr.P = MagicMock()
+        monkeypatch.setattr(
+            create_report_module,
+            "_build_panel_block",
+            MagicMock(side_effect=RuntimeError(f"failed for {entity}/{project}/{title}")),
+        )
+
+        with patch.object(create_report_module.logger, "warning") as warning_log:
+            create_report_module._build_panel_blocks(
+                [{"type": "line", "title": title}],
+                entity,
+                project,
+            )
+
+        warning_log.assert_called_once_with(
+            "Failed to build report panel (error_type=%s)",
+            "RuntimeError",
+        )
+        rendered = " ".join(map(str, warning_log.call_args.args))
+        for canary in (entity, project, title):
+            assert canary not in rendered
+
+    @patch("wandb_mcp_server.mcp_tools.create_report.wr")
+    def test_layout_failure_log_omits_scope_title_and_exception_text(
+        self,
+        mock_wr,
+        monkeypatch,
+    ):
+        entity = "private-layout-entity-canary"
+        project = "private-layout-project-canary"
+        title = "private-layout-title-canary"
+        mock_wr.P = MagicMock()
+        monkeypatch.setattr(
+            create_report_module,
+            "_build_layout_block",
+            MagicMock(side_effect=RuntimeError(f"failed for {entity}/{project}/{title}")),
+        )
+
+        with patch.object(create_report_module.logger, "warning") as warning_log:
+            create_report_module._build_layout_blocks(
+                [{"type": "heading", "text": title}],
+                entity,
+                project,
+            )
+
+        warning_log.assert_called_once_with(
+            "Failed to build report layout block (error_type=%s)",
+            "RuntimeError",
+        )
+        rendered = " ".join(map(str, warning_log.call_args.args))
+        for canary in (entity, project, title):
+            assert canary not in rendered
 
 
 class TestNewPanelTypes:

@@ -1,20 +1,12 @@
 """Utility functions for processing Weave traces."""
 
-import functools
 import json
 import re
 from datetime import datetime
 from typing import Any, Dict, List
 
-import tiktoken
-
+from wandb_mcp_server.tokenizer import load_tokenizer as _get_tiktoken_encoding
 from wandb_mcp_server.utils import get_rich_logger
-
-
-@functools.lru_cache(maxsize=1)
-def _get_tiktoken_encoding():
-    """Cached tiktoken encoding to avoid per-call overhead."""
-    return tiktoken.get_encoding("cl100k_base")
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -54,7 +46,7 @@ def truncate_value(value: Any, max_length: int = 200) -> Any:
         try:
             # Handle special case for inputs/outputs that might have complex object references
             if "__type__" in value or "_type" in value:
-                logger.info(f"Found potential complex object: {value.get('__type__') or value.get('_type')}")
+                logger.info("Found a complex object during trace truncation")
                 # For very small max_length, return empty dict to ensure proper truncation tests pass
                 if max_length < 50:
                     return {}
@@ -64,31 +56,39 @@ def truncate_value(value: Any, max_length: int = 200) -> Any:
             result = {k: truncate_value(v, max_length) for k, v in value.items()}
             return result
         except Exception as e:
-            logger.warning(f"Error truncating dict: {e}, returning empty dict")
+            logger.warning("Error truncating trace mapping (%s); returning an empty mapping", type(e).__name__)
             return {}
     elif isinstance(value, list):
         try:
             result = [truncate_value(v, max_length) for v in value]
             return result
         except Exception as e:
-            logger.warning(f"Error truncating list: {e}, returning empty list")
+            logger.warning("Error truncating trace list (%s); returning an empty list", type(e).__name__)
             return []
     # For datetime objects and other non-JSON serializable types, convert to string
     elif not isinstance(value, (int, float, bool)):
         try:
             return str(value)[:max_length] + "..." if len(str(value)) > max_length else str(value)
         except Exception as e:
-            logger.warning(f"Error converting value to string: {e}, returning None")
+            logger.warning("Error converting trace value (%s); returning null", type(e).__name__)
             return None
     return value
 
 
 def count_tokens(text: str) -> int:
     """Count tokens in a string using tiktoken."""
+    return count_tokens_conservative(text)
+
+
+def count_tokens_conservative(text: str) -> int:
+    """Count tokens exactly, with a conservative no-tokenizer fallback."""
     try:
-        return len(_get_tiktoken_encoding().encode(text))
+        # Reserved-token spellings in user data are ordinary text, not control tokens.
+        return len(_get_tiktoken_encoding().encode(text, disallowed_special=()))
     except Exception:
-        return len(text.split())
+        # A UTF-8 byte upper bound is intentionally conservative for BPE-style
+        # tokenizers and cannot undercount dense CJK or unusual scalar data.
+        return max(1, len(text.encode("utf-8")))
 
 
 def calculate_token_counts(traces: List[Dict]) -> Dict[str, int]:
@@ -200,10 +200,6 @@ def process_traces(
         f"process_traces called with {len(traces)} traces, "
         f"detail_level={detail_level}, truncate_length={truncate_length}, return_full_data={return_full_data}"
     )
-
-    if traces:
-        trace_ids = [t.get("id") for t in traces]
-        logger.info(f"First few trace IDs: {trace_ids[:3]}")
 
     metadata = {
         "total_traces": len(traces),

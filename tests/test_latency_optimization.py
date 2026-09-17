@@ -70,7 +70,7 @@ class TestErrorFormatStandardization:
     """Verify tools return JSON errors, not plain strings."""
 
     @patch("wandb_mcp_server.mcp_tools.count_traces.WandBApiManager")
-    @patch("wandb_mcp_server.mcp_tools.count_traces.get_retry_session")
+    @patch("wandb_mcp_server.mcp_tools.count_traces.get_no_retry_session")
     def test_count_traces_error_returns_json(self, mock_session, mock_api_mgr):
         mock_api_mgr.get_api_key.return_value = "test-key-1234567890123456789012345678"
         mock_session.return_value.post.side_effect = Exception("Connection refused")

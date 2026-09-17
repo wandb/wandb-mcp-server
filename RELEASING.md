@@ -1,57 +1,274 @@
 # Releasing the W&B MCP Server
 
-## Overview
+This is the public-source release contract. Managed deployment details remain
+in the restricted deployment repository, and Dedicated/Self-Managed packaging
+remains in [`wandb/helm-charts`](https://github.com/wandb/helm-charts).
 
-This repo contains the MCP server logic (tools, protocol handling, analytics). Deployment infrastructure lives in the private `wandb/wandb-mcp-server-test` repo. See that repo's [RELEASING.md](https://github.com/wandb/wandb-mcp-server-test/blob/main/RELEASING.md) for the full deployment pipeline.
+The supported artifacts are a signed source tag, its GitHub Release, and one
+immutable container digest built from that tag. PyPI and mutable container tags
+are not release channels.
 
-## Version Bumping
+## Release states
 
-Versions are tracked in `pyproject.toml`:
+| State | Required evidence |
+|---|---|
+| Candidate | Public release PR, current-head CI/security, exact installed-wheel manifests, compatibility and migration tests |
+| Source released | Approved merge to `main`, signed `vX.Y.Z` tag, draft GitHub Release, public source attestation |
+| Staged | One image built from the tag; exact-digest functional, load, privacy, and rollback validation |
+| Production ready | Exact staged digest, credential preflight, captured previous traffic/configuration state, no-traffic validation |
+| Production | Protected approval, exact-digest cutover, monitoring, verified rollback path |
+| Customer ready | Dedicated install, upgrade, and rollback validation using the exact digest |
+| Customer released | Separate publication approval, verified public-registry digest, Helm release evidence |
 
-```toml
-[project]
-version = "0.3.0"
+Advancing one channel does not advance another. Record each channel state in
+the versioned release note and do not announce availability before the relevant
+artifact is verified.
+
+These are the stable-release states. An explicitly approved candidate-production
+or limited customer pilot follows the separate lane below; it does not mark
+public source, stable customer publication, or broad Dedicated qualification
+complete.
+
+## 1. Prepare the public release PR
+
+Create `staging/<version>` from current `origin/main` and open a draft
+`release: v<version>` PR to `main`. Set the version consistently in:
+
+- `pyproject.toml`
+- `src/wandb_mcp_server/__init__.py`
+- the root package entry in `uv.lock`
+
+Copy [the release-note template](docs/releases/TEMPLATE.md) to
+`docs/releases/v<version>.md`, add it to the
+[release index](docs/releases/README.md), and keep every channel pending.
+
+Component PRs target the staging branch and merge in dependency order with
+merge commits. Before each merge, refresh its head, inspect its cumulative
+diff, resolve conflicts on the component branch, run focused tests, and require
+current-head CI/security. Never bypass branch protection.
+
+For public tool or configuration changes, record migration, write behavior,
+exact tool profiles, access-mode behavior, and deployment availability. Update
+[`release/public-contract.json`](release/public-contract.json) whenever the
+public tool surface changes.
+
+## 2. Qualify the candidate
+
+After the candidate is committed, run the version-neutral preflight:
+
+```bash
+VERSION=X.Y.Z
+uv run --no-sync python scripts/public_release.py \
+  preflight --version "$VERSION" --gate candidate
 ```
 
-To release a new version:
+Then require:
 
-1. Create a PR bumping the version in `pyproject.toml`
-2. Update `__init__.py` `__version__` to match
-3. Ensure all tests pass: `uv run pytest tests/ -v --tb=short`
-4. Ensure lint passes: `uv run ruff check src/ tests/`
-5. Merge to `main`
+```bash
+uv lock --check
+uv sync --frozen --extra test --extra http --python 3.12
+uv run --no-sync ruff check .
+uv run --no-sync ruff format --check .
+uv run --no-sync pytest tests/ -m "not integration" -x -v --tb=short -q
+uv run --no-sync bandit -q -r src -ll
+uv run --no-sync python scripts/public_release.py docs --check
+```
 
-## What Happens After Merge
+CI must also pass on Python 3.11 and 3.12, against the locked and latest
+supported W&B SDKs, and through the minimum and locked MCP SDK versions.
+Security gates include Bandit, a complete Grype report with no High/Critical
+findings in the qualified runtime, and the repository's required Socket
+Security check. Missing external checks are blockers, not implicit passes.
 
-1. **Staging auto-deploys**: The test repo's `deploy-staging.yml` triggers on push to its `main`, resolves this repo's `main` to a SHA, and deploys to Cloud Run staging
-2. **Nightly eval runs**: `eval.yml` runs 7 CI smoke tasks via WandBAgentFactory and updates README badges
-3. **Manual promotion**: After staging is verified, a team member promotes to production via `promote-production.yml` in the test repo
+The installed-wheel harness must start the real console entrypoint through the
+official MCP client and compare `tools/list` with every exact
+tool-profile/access-mode manifest generated by the packaged runtime contract:
 
-## CI Workflows (this repo)
+```bash
+uv run --no-sync python scripts/public_release.py profiles --all
+```
 
-| Workflow | Trigger | Purpose |
-|---|---|---|
-| `ci.yml` | Push to main/staging/*, PR to main | Ruff lint + pytest on Python 3.11 + 3.12 |
-| `eval.yml` | Nightly cron (7 AM UTC) + manual | Run MCP eval suite, update README badges |
+Test counts and minimum tool counts are not release criteria.
 
-## Release Checklist
+## 3. Merge and create the source release
 
-- [ ] Version bumped in `pyproject.toml`
-- [ ] `__init__.py` `__version__` matches
-- [ ] All 401 unit tests pass
-- [ ] CI green on PR
-- [ ] Staging auto-deployed and healthy (14 tools, `/health` returns 200)
-- [ ] Nightly eval passes (or manual eval triggered)
-- [ ] Production promoted via test repo workflow
-- [ ] On-prem image published via `publish-image.yml` in test repo
-- [ ] Helm chart `values.yaml` image tag updated in helm-charts PR
-- [ ] QA validated on at least one instance (17/17 deployment tests)
+Obtain the required approval and merge the public release PR normally. Record
+the merge SHA and confirm its tree is the reviewed candidate tree. A tree
+difference invalidates candidate evidence.
 
-## Contacts
+Before creating a tag, use the protected workflow identity to bind the merge
+commit to its approved release PR, reviewed head tree, resolved conversations,
+and successful required checks:
 
-| Area | Person |
-|---|---|
-| MCP server code | Anish Shah (@ash0ts) |
-| Code review | Nico (@NiWaRe) |
-| Helm chart | Zachary Blasczyk |
-| Infrastructure | Kevin Chen (@wandb-kc) |
+```bash
+uv run --no-sync python scripts/public_release.py source-gate \
+  --repository wandb/wandb-mcp-server --sha "$MERGE_SHA" \
+  --output "$CANDIDATE_GATE_EVIDENCE"
+```
+
+Tag protection must restrict who can create `v*` refs. The source-release
+workflow rechecks this gate; possession of a signing key alone is not proof of
+review. Its `public-source-release` environment must require a non-self
+approval and prohibit administrator bypass before the workflow is enabled.
+
+Create an annotated, signed tag on that merge commit:
+
+```bash
+git switch main
+git pull --ff-only origin main
+git tag -s "v$VERSION" -m "W&B MCP Server v$VERSION"
+git verify-tag "v$VERSION"
+git push origin "v$VERSION"
+```
+
+The protected source-release workflow must verify the tag and run:
+
+```bash
+uv run --no-sync python scripts/public_release.py \
+  preflight --version "$VERSION" --gate source-released
+```
+
+For this source-released path, production traffic cannot move before the merge
+and signed tag. A protected production identity may create a no-traffic revision
+only after source qualification. An approved candidate exception must instead
+use the hosted controller's exact-image authorization and staging evidence; it
+is not a source release.
+
+## 4. Build once and attest
+
+Build in a new directory outside the checkout. The release utility rejects the
+repository's ignored `dist/` directory, any directory inside the source tree,
+and any nonempty output directory. It resolves the isolated build backend only
+from the hashed `release/build-requirements.lock` policy. When intentionally
+changing the build backend, regenerate that lock and review the complete diff:
+
+```bash
+uv pip compile release/build-requirements.in \
+  --universal --generate-hashes --no-header --no-annotate \
+  --output-file release/build-requirements.lock
+```
+
+```bash
+ARTIFACT_DIR="$(mktemp -d)"
+uv run --no-sync python scripts/public_release.py \
+  build --version "$VERSION" --output-dir "$ARTIFACT_DIR"
+```
+
+Install the exact wheel into clean Python 3.11 and 3.12 environments. Run the
+STDIO harness with `--all-profiles`, `--source-sha`, `--wheel`, and
+`--evidence-out`. Generate an SPDX SBOM and machine-readable vulnerability
+report for the exact artifacts.
+
+Create the deterministic qualification predicate:
+
+```bash
+uv run --no-sync python scripts/public_release.py attest \
+  --version "$VERSION" \
+  --profile-evidence "$PROFILE_EVIDENCE" \
+  --artifact "$WHEEL" \
+  --artifact "$SDIST" \
+  --artifact "$SBOM" \
+  --artifact "$VULNERABILITY_REPORT" \
+  --build-manifest "$BUILD_MANIFEST" \
+  --build-checksums "$BUILD_CHECKSUMS" \
+  --parent-evidence "$CANDIDATE_GATE_EVIDENCE" \
+  --output "$ARTIFACT_DIR/public-release-predicate.json"
+```
+
+The protected workflow keylessly signs the wheel, source distribution,
+container, and predicate; publishes checksums and provenance; and verifies the
+signature after every registry copy. The predicate is unsigned input to that
+workflow and is not evidence by itself.
+
+Never rebuild a different source state under an existing version or tag.
+
+The GitHub Release remains a draft until downstream channel evidence supports
+the announcement. Rerunning source qualification may prove identical assets;
+it must fail instead of replacing an asset with different bytes.
+
+## 5. Stage and promote the same digest
+
+The restricted controller imports the signed public attestation and records a
+versioned release manifest. It builds the container once, deploys its immutable
+digest to staging, and verifies health, authentication, protocol/session
+compatibility, exact tool manifests, representative reads and isolated writes,
+telemetry privacy, load, and rollback.
+
+After staging succeeds:
+
+1. Validate the same digest as a no-traffic production revision.
+2. Capture the complete previous runtime configuration and traffic map.
+3. Obtain protected production approval.
+4. Assign traffic to the already-tested digest and monitor it.
+5. On any failure or cancellation, restore and independently verify the exact
+   previous configuration and traffic map.
+
+The managed deployment never rebuilds during promotion and never treats a
+mutable tag as evidence.
+
+## 6. Publish for customers and release Helm
+
+Stable customer publication is a separate protected action. Before it:
+
+- Validate Dedicated installation, upgrade, and rollback against the exact
+  digest.
+- Verify internal W&B API routing, public user-facing links, exact tool profiles,
+  workload limits, and the absence of internal routes or credentials in output.
+- Copy the already-tested digest to the public registry without rebuilding,
+  then verify and sign the destination digest.
+- Update the Helm PR to the verified artifact and require chart dependency,
+  render, lint, schema, snapshot, and Kubernetes-matrix checks.
+
+Do not publish `latest`, merge Helm, or deploy a customer as a side effect of
+managed production promotion.
+
+### Limited customer pilot
+
+An explicitly approved pilot may copy an already-promoted candidate image
+without waiting for the stable source release or the full live Dedicated matrix.
+Use the hosted pilot publisher with a successful **production promotion run ID**;
+it derives and verifies the production/staging evidence and exact image digest.
+Do not supply an arbitrary source SHA or digest, rebuild the image, or label the
+result as stable. A publication result must identify the verified public
+repository, pilot tag, digest, and provenance before instructions name the image.
+
+Image publication and chart selection are separate prerequisites. Use a
+compatible, exact-version chart, verify its package checksum, and preserve the
+installation's unrelated configuration. A reviewed PR preview can support a
+pilot without merging Helm. Publishing that image does not install it or
+authorize changing a customer deployment. For Helm-backed Operator v1, select
+the application chart through `spec.chart`; upgrading the controller alone does
+not select a compatible MCP chart. Orca/v2 migration is a separate operation.
+
+Record the selected pilot profile, access mode, capacity class, chart, and image.
+Authentication, session recovery, exact tools, functional results, privacy,
+routing, and a recoverable prior configuration remain mandatory checks. Pilot
+results do not establish the full 12-case Dedicated install/disable/re-enable/
+rollback qualification required for broad stable publication.
+
+When a version's approved rollout policy makes load/performance advisory,
+retain the actual measurements and threshold failures for review without
+changing the thresholds or manufacturing a pass. This does not relax
+correctness, access isolation, artifact verification, or rollback checks.
+Version-specific policy, pilot artifacts, and remaining qualification belong
+in the release note, not generic examples.
+
+## Evidence and rollback rules
+
+Release evidence contains only source/tree SHAs, immutable digests, versions,
+exact public tool names, bounded pass/fail results, timings, and rollback state.
+It excludes credentials, prompts, filters, customer identifiers, raw responses,
+private routes, and secret names.
+
+Authoritative attestations live with the immutable artifact for the supported
+release lifetime. GitHub Actions artifacts are transport copies, not the
+durable ledger.
+
+- Managed rollback restores the complete previous configuration and traffic
+  map, then verifies health and authenticated reads.
+- Dedicated rollback restores the previous chart and image digest.
+- Public source fixes forward through review; never rewrite `main` or an
+  existing signed tag.
+
+The public release process does not authorize deployment, publication, customer
+rollout, or branch-protection bypasses.

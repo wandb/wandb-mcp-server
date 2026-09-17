@@ -343,10 +343,9 @@ def query_traces(
             timeout=request_timeout,
         )
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "query_traces",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,
@@ -462,10 +461,9 @@ async def query_paginated_weave_traces(
             retries=retries,
         )
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "query_paginated_weave_traces",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,
@@ -485,21 +483,28 @@ async def query_paginated_weave_traces(
             "debug_raw_traces": debug_raw_traces,
         },
     ):
-        result = service.query_paginated_traces(
-            entity_name=entity_name,
-            project_name=project_name,
-            chunk_size=chunk_size,
-            filters=filters,
-            sort_by=sort_by,
-            sort_direction=sort_direction,
-            target_limit=target_limit,
-            include_costs=include_costs,
-            include_feedback=include_feedback,
-            columns=columns,
-            expand_columns=expand_columns,
-            truncate_length=truncate_length,
-            return_full_data=return_full_data,
-            metadata_only=metadata_only,
+        from functools import partial
+
+        from wandb_mcp_server.instrumented_server import run_sync_in_current_tool
+
+        result = await run_sync_in_current_tool(
+            partial(
+                service.query_paginated_traces,
+                entity_name=entity_name,
+                project_name=project_name,
+                chunk_size=chunk_size,
+                filters=filters,
+                sort_by=sort_by,
+                sort_direction=sort_direction,
+                target_limit=target_limit,
+                include_costs=include_costs,
+                include_feedback=include_feedback,
+                columns=columns,
+                expand_columns=expand_columns,
+                truncate_length=truncate_length,
+                return_full_data=return_full_data,
+                metadata_only=metadata_only,
+            )
         )
 
         if debug_raw_traces and result.traces:

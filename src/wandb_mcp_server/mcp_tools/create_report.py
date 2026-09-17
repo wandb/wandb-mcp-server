@@ -11,10 +11,15 @@ import re
 import wandb_workspaces.reports.v2 as wr
 import wandb_workspaces.reports.v2.interface as wr_interface
 
-import wandb
-from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.config import WANDB_BASE_URL
+from wandb_mcp_server.api_client import (
+    WandBReportCreationFailed,
+    WandBWriteOutcomeUnknown,
+    raise_for_wandb_server_busy,
+)
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.wandb_report_writer import save_report_bounded
+from wandb_mcp_server.wandb_urls import publicize_wandb_url
 
 logger = get_rich_logger(__name__)
 
@@ -25,17 +30,9 @@ def _get_api_from_context():
     """Patched _get_api that reads API key from request context."""
     from wandb_mcp_server.api_client import WandBApiManager
 
-    api_key = WandBApiManager.get_api_key()
-
-    if not api_key:
-        raise Exception("No W&B API key available in context")
-
-    try:
-        # Uses explicit api_key from contextvar, not singleton
-        # and points to the configured base URL
-        return wandb.Api(api_key=api_key, overrides={"base_url": WANDB_BASE_URL})
-    except wandb.errors.UsageError as e:
-        raise Exception("Not logged in to W&B, check API key") from e
+    # The manager reads the API key from a ContextVar and returns a client
+    # configured with the resolved internal/public base URL and request timeout.
+    return WandBApiManager.get_api()
 
 
 # Patch once at import - concurrent-safe because it reads from contextvar
@@ -193,7 +190,7 @@ reports such as H2 / markdown / panel-grid / H2 / markdown / panel-grid:
 }
 
 Runset scoping:
-- run_ids means W&B internal run keys (Python SDK run.id / GraphQL Run.name), not display names.
+- run_ids means W&B internal run keys (Python SDK run.id), not display names.
 - run_ids are converted to deterministic Reports v2 filters, for example name in ["run_a", "run_b"].
 - filters may be passed as a Reports v2 expression string and wins over generated run_ids filters.
 - runset_query may be passed for explicit search behavior. Do not use custom_chart query for run filtering.
@@ -266,10 +263,9 @@ def create_report(
         logger.warning("No API key available for W&B")
         raise Exception("No W&B API key available")
 
-    api = WandBApiManager.get_api()
     with track_tool_execution(
         "create_report",
-        api.viewer,
+        None,
         {
             "entity_name": entity_name,
             "project_name": project_name,
@@ -302,10 +298,10 @@ def create_report(
                         else:
                             data_uri = content
                         blocks.append(wr.Image(url=data_uri, caption=label))
-                        logger.info(f"Added SVG Image block: {label}")
+                        logger.info("Added report content block (kind=svg)")
                     elif content:
                         blocks.append(wr.MarkdownBlock(content))
-                        logger.info(f"Added HTML MarkdownBlock: {label}")
+                        logger.info("Added report content block (kind=html)")
 
             security_notice = wr.P("*Report created via W&B MCP Server*")
             report.blocks = [security_notice] + blocks
@@ -322,15 +318,29 @@ def create_report(
                         report.blocks.append(wr.H2("Charts"))
                     report.blocks.extend(panel_blocks)
 
-            report.save()
+            api = WandBApiManager.get_api(api_key)
+            save_report_bounded(report, api)
 
-            logger.info(f"Created report: {title} (panels={len(panels or [])})")
+            logger.info(
+                "Created W&B report (panels=%d blocks=%d)",
+                len(panels or []),
+                len(report.blocks),
+            )
 
-            return {"url": report.url}
+            return {"url": publicize_wandb_url(report.url)}
 
         except Exception as e:
-            logger.error(f"Error creating report: {e}")
-            raise Exception(f"Error creating report: {e}")
+            raise_for_wandb_server_busy(e)
+            if isinstance(e, WandBWriteOutcomeUnknown):
+                logger.error("W&B did not confirm the bounded report write")
+                raise
+            # Workspaces exceptions may interpolate report titles, scope, or
+            # other customer values. Preserve only a bounded categorical type.
+            logger.error(
+                "Report creation failed after a bounded W&B write (error_type=%s)",
+                type(e).__name__[:64],
+            )
+            raise WandBReportCreationFailed() from e
 
 
 def _build_panel_blocks(
@@ -349,10 +359,13 @@ def _build_panel_blocks(
             if block is not None:
                 blocks.append(block)
             elif panel_type not in _KNOWN_PANEL_TYPES:
-                logger.warning(f"Unknown panel type: {panel_type}")
+                logger.warning("Skipped unsupported report panel type")
 
         except Exception as e:
-            logger.warning(f"Failed to build panel '{panel_title}': {e}", exc_info=True)
+            logger.warning(
+                "Failed to build report panel (error_type=%s)",
+                type(e).__name__[:64],
+            )
             blocks.append(wr.P(f"*Panel '{panel_title}' could not be rendered.*"))
 
     return blocks
@@ -569,14 +582,17 @@ def _build_layout_blocks(
             block = _build_layout_block(panel_spec, entity_name, project_name)
             if block is None:
                 if panel_type not in _KNOWN_PANEL_TYPES and panel_type not in _LAYOUT_BLOCK_TYPES:
-                    logger.warning(f"Unknown panel type: {panel_type}")
+                    logger.warning("Skipped unsupported report layout block type")
                 continue
             if isinstance(block, list):
                 blocks.extend(block)
             else:
                 blocks.append(block)
         except Exception as e:
-            logger.warning(f"Failed to build layout block '{panel_title}': {e}", exc_info=True)
+            logger.warning(
+                "Failed to build report layout block (error_type=%s)",
+                type(e).__name__[:64],
+            )
             blocks.append(wr.P(f"*Panel '{panel_title}' could not be rendered.*"))
     return blocks
 

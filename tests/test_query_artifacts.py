@@ -1,7 +1,11 @@
 """Tests for artifact tools (list_artifact_versions, get_artifact_details, compare_artifact_versions)."""
 
+import asyncio
 import json
 from unittest.mock import MagicMock, PropertyMock, patch
+
+from mcp.server.fastmcp import FastMCP
+from wandb.apis.public import Api
 
 from wandb_mcp_server.mcp_tools.query_artifacts import (
     COMPARE_ARTIFACT_VERSIONS_TOOL_DESCRIPTION,
@@ -11,6 +15,7 @@ from wandb_mcp_server.mcp_tools.query_artifacts import (
     get_artifact_details,
     list_artifact_versions,
 )
+from wandb_mcp_server.server import register_tools
 
 
 def _make_artifact(**overrides):
@@ -64,7 +69,125 @@ def _make_file(name="model.pt", size=1000000, digest="aaa111"):
     return f
 
 
+class _RealArtifactPaginatorService:
+    """Fake transport beneath the locked and latest W&B Artifacts paginator."""
+
+    def __init__(self, *, total=40, tags_by_index=None):
+        self.calls = 0
+        self.total = total
+        self.tags_by_index = tags_by_index or {}
+
+    def feature_enabled(self, feature):
+        # W&B 0.29 probes this before constructing the paginator. Model an
+        # older server so the existing artifact fixture needs no optional field.
+        from wandb.proto.wandb_internal_pb2 import ServerFeature
+
+        assert ServerFeature.Name(feature) == "ARTIFACT_DIGEST_ALGORITHM"
+        return False
+
+    def execute_graphql(self, _query, variables=None, **kwargs):
+        self.calls += 1
+        variables = variables or {}
+        page_size = variables["perPage"]
+        start = int(variables.get("cursor") or 0)
+        stop = min(start + page_size, self.total)
+        edges = [
+            {
+                "version": f"v{index}",
+                "node": {
+                    "__typename": "Artifact",
+                    "id": f"artifact-{index}",
+                    "artifactSequence": {
+                        "__typename": "ArtifactSequence",
+                        "name": "my-model",
+                        "project": {
+                            "id": "project-id",
+                            "internalId": "project-internal-id",
+                            "name": "project",
+                            "entity": {"name": "team"},
+                        },
+                    },
+                    "versionIndex": index,
+                    "artifactType": {"name": "model"},
+                    "description": None,
+                    "metadata": "{}",
+                    "ttlDurationSeconds": 0,
+                    "ttlIsInherited": False,
+                    "tags": [
+                        {
+                            "__typename": "Tag",
+                            "id": f"{tag}-tag",
+                            "name": tag,
+                        }
+                        for tag in self.tags_by_index.get(index, ["production"])
+                    ],
+                    "historyStep": None,
+                    "state": "COMMITTED",
+                    "size": 1,
+                    "digest": f"digest-{index}",
+                    "commitHash": None,
+                    "fileCount": 1,
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": None,
+                    "aliases": [],
+                },
+            }
+            for index in range(start, stop)
+        ]
+        has_next = stop < self.total
+        payload = {
+            "project": {
+                "artifactType": {
+                    "artifactCollection": {
+                        "__typename": "ArtifactSequence",
+                        "artifacts": {
+                            "totalCount": self.total,
+                            "pageInfo": {
+                                "__typename": "PageInfo",
+                                "endCursor": str(stop) if has_next else None,
+                                "hasNextPage": has_next,
+                            },
+                            "edges": edges,
+                        },
+                    }
+                }
+            }
+        }
+        parse = kwargs.get("parse")
+        return parse(json.dumps(payload)) if callable(parse) else payload
+
+
+class _RealArtifactPaginatorApi:
+    def __init__(self, service):
+        self.public_api = object.__new__(Api)
+        self.public_api._service_api = service
+        self.public_api.settings = {
+            "base_url": "https://api.wandb.ai",
+            "entity": "team",
+            "project": "project",
+        }
+        self.requested_tags = object()
+
+    def artifacts(self, *, type_name, name, order, tags, per_page):
+        self.requested_tags = tags
+        return self.public_api.artifacts(
+            type_name=type_name,
+            name=name,
+            order=order,
+            tags=tags,
+            per_page=per_page,
+        )
+
+
 class TestListArtifactVersions:
+    def test_public_schema_exposes_order_and_filters(self):
+        mcp = FastMCP("artifact-schema")
+        register_tools(mcp)
+        tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+
+        properties = tools["list_artifact_versions_tool"].inputSchema["properties"]
+        assert {"order", "tags", "created_after", "created_before"} <= properties.keys()
+
     @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
     def test_project_source(self, mock_api_mgr):
         mock_api = MagicMock()
@@ -80,14 +203,18 @@ class TestListArtifactVersions:
         result = json.loads(list_artifact_versions("team/project/my-model", type_name="model", source="project"))
 
         assert result["count"] == 2
+        assert result["returned_count"] == 2
+        assert result["project_exhaustive"] is True
         assert result["source"] == "project"
         assert result["versions"][0]["version"] == "v1"
+        assert mock_api.artifacts.call_args.kwargs["order"] == "-createdAt"
 
     @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
     def test_registry_source(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
         mock_registry = MagicMock()
+        mock_registry.__iter__.side_effect = lambda: iter([MagicMock()])
         mock_collections = MagicMock()
         mock_collections.versions.return_value = iter(
             [
@@ -95,13 +222,194 @@ class TestListArtifactVersions:
             ]
         )
         mock_registry.collections.return_value = mock_collections
-        mock_api.registry.return_value = mock_registry
+        mock_api.registries.return_value = mock_registry
         mock_api_mgr.get_api.return_value = mock_api
 
-        result = json.loads(list_artifact_versions("my-model", registry_name="model-registry", source="registry"))
+        result = json.loads(
+            list_artifact_versions(
+                "my-model",
+                registry_name="model-registry",
+                organization="my-org",
+                source="registry",
+            )
+        )
 
         assert result["count"] == 1
         assert result["source"] == "registry"
+        assert "compatibility_caveat" in result
+
+    @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
+    def test_project_filters_order_and_limit_plus_one(self, mock_api_mgr):
+        mock_api = MagicMock()
+        mock_api.artifacts.return_value = iter(
+            [
+                _make_artifact(version="v3", tags=["production"], created_at="2025-03-01T00:00:00Z"),
+                _make_artifact(version="v2", tags=["production"], created_at="2025-02-01T00:00:00Z"),
+                _make_artifact(version="v1", tags=["production"], created_at="2025-01-01T00:00:00Z"),
+            ]
+        )
+        mock_api_mgr.get_api.return_value = mock_api
+
+        result = json.loads(
+            list_artifact_versions(
+                "team/project/my-model",
+                type_name="model",
+                max_items=1,
+                order="+version",
+                tags=["production"],
+                created_after="2025-01-15T00:00:00Z",
+            )
+        )
+
+        assert result["returned_count"] == 1
+        assert result["has_more"] is True
+        assert result["project_exhaustive"] is False
+        assert result["items"][0]["version"] == "v3"
+        assert mock_api.artifacts.call_args.kwargs["order"] == "+versionIndex"
+        # W&B 0.28 filters tags while converting paginator pages. MCP leaves
+        # that SDK filter unset and applies it locally after its bounded scan.
+        assert mock_api.artifacts.call_args.kwargs["tags"] is None
+
+    def test_missing_project_tag_uses_bounded_real_sdk_paginator(self):
+        service = _RealArtifactPaginatorService()
+        api = _RealArtifactPaginatorApi(service)
+        with (
+            patch(
+                "wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager.get_api",
+                return_value=api,
+            ),
+            patch(
+                "wandb_mcp_server.mcp_tools.query_artifacts.MCP_MAX_WANDB_QUERY_ITEMS",
+                3,
+            ),
+        ):
+            result = json.loads(
+                list_artifact_versions(
+                    "team/project/my-model",
+                    type_name="model",
+                    tags=["does-not-exist"],
+                    max_items=2,
+                )
+            )
+
+        assert "error" not in result
+        assert result["items"] == []
+        assert result["versions"] == []
+        assert result["count"] == 0
+        assert result["has_more"] is True
+        assert result["project_exhaustive"] is False
+        assert result["scan"]["rows_examined"] == 4
+        assert api.requested_tags is None
+        assert service.calls == 2
+
+    def test_missing_project_tag_returns_partial_at_sdk_request_ceiling(self):
+        service = _RealArtifactPaginatorService(total=2_000)
+        api = _RealArtifactPaginatorApi(service)
+
+        with (
+            patch(
+                "wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager.get_api",
+                return_value=api,
+            ),
+            patch(
+                "wandb_mcp_server.mcp_tools.query_artifacts.MCP_MAX_WANDB_QUERY_ITEMS",
+                1_000,
+            ),
+        ):
+            result = json.loads(
+                list_artifact_versions(
+                    "team/project/my-model",
+                    type_name="model",
+                    tags=["does-not-exist"],
+                    max_items=2,
+                )
+            )
+
+        assert "error" not in result
+        assert result["items"] == []
+        assert result["total_count"] is None
+        assert result["has_more"] is True
+        assert result["project_exhaustive"] is False
+        assert result["scan"]["rows_examined"] == 800
+        assert result["scan"]["filter_exhaustive"] is False
+        assert service.calls == 8
+
+    def test_exhausted_missing_tag_is_truthful_and_multi_tag_filter_is_and(self):
+        exhausted_service = _RealArtifactPaginatorService(total=3)
+        exhausted_api = _RealArtifactPaginatorApi(exhausted_service)
+        with patch(
+            "wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager.get_api",
+            return_value=exhausted_api,
+        ):
+            exhausted = json.loads(
+                list_artifact_versions(
+                    "team/project/my-model",
+                    type_name="model",
+                    tags=["does-not-exist"],
+                    max_items=2,
+                )
+            )
+
+        assert exhausted["items"] == []
+        assert exhausted["total_count"] == 0
+        assert exhausted["has_more"] is False
+        assert exhausted["project_exhaustive"] is True
+
+        sparse_service = _RealArtifactPaginatorService(
+            total=5,
+            tags_by_index={3: ["production", "approved"]},
+        )
+        sparse_api = _RealArtifactPaginatorApi(sparse_service)
+        with patch(
+            "wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager.get_api",
+            return_value=sparse_api,
+        ):
+            sparse = json.loads(
+                list_artifact_versions(
+                    "team/project/my-model",
+                    type_name="model",
+                    tags=["production", "approved"],
+                    max_items=2,
+                )
+            )
+
+        assert [item["version"] for item in sparse["items"]] == ["v3"]
+        assert sparse["total_count"] == 1
+        assert sparse["has_more"] is False
+
+    @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
+    def test_invalid_filters_do_not_construct_api(self, mock_api_mgr):
+        result = json.loads(
+            list_artifact_versions(
+                "team/project/my-model",
+                type_name="model",
+                created_after="not-a-date",
+            )
+        )
+
+        assert result["error"] == "invalid_input"
+        mock_api_mgr.get_api.assert_not_called()
+
+    @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
+    def test_oversized_tag_filters_do_not_construct_api(self, mock_api_mgr):
+        too_many = json.loads(
+            list_artifact_versions(
+                "team/project/my-model",
+                type_name="model",
+                tags=[f"tag-{index}" for index in range(101)],
+            )
+        )
+        too_large = json.loads(
+            list_artifact_versions(
+                "team/project/my-model",
+                type_name="model",
+                tags=["x" * 513],
+            )
+        )
+
+        assert too_many["error"] == "invalid_input"
+        assert too_large["error"] == "invalid_input"
+        mock_api_mgr.get_api.assert_not_called()
 
     @patch("wandb_mcp_server.mcp_tools.query_artifacts.WandBApiManager")
     def test_project_source_requires_type_name(self, mock_api_mgr):
@@ -179,13 +487,14 @@ class TestGetArtifactDetails:
     def test_api_error_returns_json(self, mock_api_mgr):
         mock_api = MagicMock()
         mock_api.viewer = MagicMock()
-        mock_api.artifact.side_effect = Exception("Artifact not found")
+        mock_api.artifact.side_effect = Exception("customer-artifact-error-canary")
         mock_api_mgr.get_api.return_value = mock_api
 
         result = json.loads(get_artifact_details("team/proj/model:v99"))
 
-        assert "error" in result
-        assert "Artifact not found" in result["message"]
+        assert result["error"] == "api_error"
+        assert result["message"] == "The W&B artifact detail query failed."
+        assert "customer-artifact-error-canary" not in json.dumps(result)
 
 
 class TestCompareArtifactVersions:
