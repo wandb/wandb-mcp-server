@@ -702,6 +702,7 @@ Exact tool profiles:
 | `models-weave-agents` | models, weave, agents | shared | 30 | 28 |
 | `models-weave-agents-aria` | models, weave, agents, aria | local only | 33 | 30 |
 | `models-weave-graphql-compat` | models, weave, raw-graphql | local only | 23 | 21 |
+| `models-weave-agent-lens` | models, weave, agent-lens | local only | 31 | 29 |
 
 Exact workload defaults:
 
@@ -719,7 +720,7 @@ Exact capacity classes:
 | `medium` | 4 | 8 | 8 | 8 |
 | `large` | 8 | 16 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:c871737fad4aa9d7b2d973d14d7063e2a17877e9f97c38608996dd49e812c5a0`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:80f8a3b0c37fe58895d88e40b5f7236dfab1a83af1cef3d889e6b5e4a9b1cb37`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line

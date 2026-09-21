@@ -24,6 +24,7 @@ EXPECTED_COUNTS = {
     "models-weave-agents": {"read-write": 30, "read-only": 28},
     "models-weave-agents-aria": {"read-write": 33, "read-only": 30},
     "models-weave-graphql-compat": {"read-write": 23, "read-only": 21},
+    "models-weave-agent-lens": {"read-write": 31, "read-only": 29},
 }
 LEGACY_VARIABLES = (
     "WANDB_MCP_ENABLE_WEAVE_TOOLS",
@@ -44,7 +45,7 @@ def test_packaged_contract_has_exact_profiles_and_complete_tool_metadata():
         for tool in group["tools"]:
             assert set(tool) == {"name", "access", "risk", "prerequisite"}
             names.append(tool["name"])
-    assert len(names) == len(set(names)) == 34
+    assert len(names) == len(set(names)) == 43
 
     for profile, access_counts in EXPECTED_COUNTS.items():
         for access_mode, expected in access_counts.items():

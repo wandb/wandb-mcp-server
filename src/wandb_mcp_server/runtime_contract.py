@@ -166,11 +166,11 @@ def validate_runtime_contract(contract: Mapping[str, Any]) -> None:
     profiles = contract.get("tool_profiles")
     if not isinstance(groups, dict) or not groups or not isinstance(profiles, dict) or not profiles:
         raise ValueError("Runtime contract must define tool groups and profiles")
-    if set(groups) != {"models", "weave", "agents", "aria", "raw-graphql"}:
+    if set(groups) != {"models", "weave", "agents", "agent-lens", "aria", "raw-graphql"}:
         raise ValueError("Runtime contract tool groups are incomplete")
     allowed_access = {"read", "write"}
     allowed_risks = {"read", "write", "credential-forwarding", "non-idempotent-credential-forwarding", "compatibility"}
-    allowed_prerequisites = {"none", "wandb", "trace-backend", "aria-https-origin"}
+    allowed_prerequisites = {"none", "wandb", "trace-backend", "aria-https-origin", "agent-lens-https-origin"}
     for group_name, group in groups.items():
         if not isinstance(group_name, str) or not isinstance(group, dict):
             raise ValueError("Every runtime tool group must be non-empty")
@@ -205,6 +205,7 @@ def validate_runtime_contract(contract: Mapping[str, Any]) -> None:
         "models-weave-agents",
         "models-weave-agents-aria",
         "models-weave-graphql-compat",
+        "models-weave-agent-lens",
     }
     if set(profiles) != expected_profiles:
         raise ValueError("Runtime contract tool profiles are incomplete")
@@ -214,6 +215,7 @@ def validate_runtime_contract(contract: Mapping[str, Any]) -> None:
         "models-weave-agents": ["models", "weave", "agents"],
         "models-weave-agents-aria": ["models", "weave", "agents", "aria"],
         "models-weave-graphql-compat": ["models", "weave", "raw-graphql"],
+        "models-weave-agent-lens": ["models", "weave", "agent-lens"],
     }
     expected_managed_workloads = {
         "models-only": ["shared", "dedicated"],
@@ -221,6 +223,7 @@ def validate_runtime_contract(contract: Mapping[str, Any]) -> None:
         "models-weave-agents": ["shared"],
         "models-weave-agents-aria": [],
         "models-weave-graphql-compat": [],
+        "models-weave-agent-lens": [],
     }
     for profile_name, profile in profiles.items():
         if not isinstance(profile, dict):
@@ -407,6 +410,13 @@ def resolve_runtime_selection(environment: Mapping[str, str] | None = None) -> R
     groups = frozenset(contract["tool_profiles"][tool_profile]["groups"])
     if groups & {"weave", "agents"}:
         _validate_trace_backend_prerequisite(env, workload_profile)
+    if "agent-lens" in groups:
+        configured_agent_lens_url = env.get("AGENT_LENS_BASE_URL", "").strip()
+        if not configured_agent_lens_url:
+            raise ValueError("The Agent Lens tool profile requires an explicit AGENT_LENS_BASE_URL HTTPS origin")
+        from wandb_mcp_server.config import validate_agent_lens_base_url
+
+        validate_agent_lens_base_url(configured_agent_lens_url)
     if "aria" in groups:
         configured_aria_url = env.get("WB_AGENT_BASE_URL", "").strip()
         if not configured_aria_url:

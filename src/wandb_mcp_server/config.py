@@ -76,21 +76,27 @@ def _env_float(
     return value
 
 
-def validate_aria_base_url(value: str) -> str:
-    """Validate the operator-controlled ARIA endpoint before forwarding credentials."""
+def _validate_credential_origin(value: str, variable: str) -> str:
+    """Validate an operator-controlled origin before forwarding credentials to it.
+
+    Every service that receives the caller's W&B credential over its own origin
+    -- rather than through the W&B API client -- must clear this bar: absolute
+    HTTPS, a real hostname, and no embedded credentials, path, query or fragment
+    that could redirect the credential somewhere the operator did not intend.
+    """
     normalized = value.strip().rstrip("/")
     if not normalized or any(
         character.isspace() or ord(character) < 32 or ord(character) == 127 for character in normalized
     ):
-        raise ValueError("WB_AGENT_BASE_URL must be a valid absolute HTTPS URL")
+        raise ValueError(f"{variable} must be a valid absolute HTTPS URL")
     try:
         parsed = urlsplit(normalized)
         # Accessing port forces urllib to reject malformed port declarations.
         parsed.port
     except ValueError as exc:
-        raise ValueError("WB_AGENT_BASE_URL must be a valid absolute HTTPS URL") from exc
+        raise ValueError(f"{variable} must be a valid absolute HTTPS URL") from exc
     if parsed.scheme != "https" or not parsed.hostname:
-        raise ValueError("WB_AGENT_BASE_URL must be an absolute HTTPS URL")
+        raise ValueError(f"{variable} must be an absolute HTTPS URL")
     hostname = parsed.hostname
     try:
         ipaddress.ip_address(hostname)
@@ -98,7 +104,7 @@ def validate_aria_base_url(value: str) -> str:
         try:
             ascii_hostname = hostname.encode("idna").decode("ascii").rstrip(".")
         except UnicodeError as exc:
-            raise ValueError("WB_AGENT_BASE_URL must contain a valid hostname") from exc
+            raise ValueError(f"{variable} must contain a valid hostname") from exc
         labels = ascii_hostname.split(".")
         if (
             not ascii_hostname
@@ -112,14 +118,24 @@ def validate_aria_base_url(value: str) -> str:
                 for label in labels
             )
         ):
-            raise ValueError("WB_AGENT_BASE_URL must contain a valid hostname")
+            raise ValueError(f"{variable} must contain a valid hostname")
     if parsed.username is not None or parsed.password is not None:
-        raise ValueError("WB_AGENT_BASE_URL must not include credentials")
+        raise ValueError(f"{variable} must not include credentials")
     if parsed.query or parsed.fragment or "?" in normalized or "#" in normalized:
-        raise ValueError("WB_AGENT_BASE_URL must not include a query string or fragment")
+        raise ValueError(f"{variable} must not include a query string or fragment")
     if parsed.path not in {"", "/"}:
-        raise ValueError("WB_AGENT_BASE_URL must not include a path")
+        raise ValueError(f"{variable} must not include a path")
     return normalized
+
+
+def validate_aria_base_url(value: str) -> str:
+    """Validate the operator-controlled ARIA endpoint before forwarding credentials."""
+    return _validate_credential_origin(value, "WB_AGENT_BASE_URL")
+
+
+def validate_agent_lens_base_url(value: str) -> str:
+    """Validate the operator-controlled Agent Lens origin before forwarding credentials."""
+    return _validate_credential_origin(value, "AGENT_LENS_BASE_URL")
 
 
 # Centralized configuration for base URLs used across the project.
@@ -149,6 +165,24 @@ def resolve_aria_base_url(fallback: str | None = None) -> str:
     """Read and validate the effective ARIA URL after CLI dotenv loading."""
     configured = os.getenv("WB_AGENT_BASE_URL")
     return validate_aria_base_url(configured or fallback or WB_AGENT_BASE_URL)
+
+
+# Agent Lens origin. Unlike the services above there is deliberately no default:
+# Agent Lens is deployed per-environment and its tools are absent from every
+# managed profile, so an operator must name the origin to enable them at all.
+AGENT_LENS_BASE_URL: str = (os.getenv("AGENT_LENS_BASE_URL") or "").strip().rstrip("/")
+
+# Agent Lens mounts its Huma API under /api; the origin above is the bare host.
+AGENT_LENS_API_PREFIX = "/api"
+
+
+def resolve_agent_lens_base_url(fallback: str | None = None) -> str:
+    """Read and validate the effective Agent Lens URL after CLI dotenv loading."""
+    configured = os.getenv("AGENT_LENS_BASE_URL")
+    value = (configured or fallback or AGENT_LENS_BASE_URL).strip()
+    if not value:
+        raise ValueError("The Agent Lens tool profile requires an explicit AGENT_LENS_BASE_URL HTTPS origin")
+    return validate_agent_lens_base_url(value)
 
 
 # Tool selection is resolved later, immediately before registration. Workload
