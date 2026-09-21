@@ -83,6 +83,19 @@
         {"name": "search_weave_agents_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"}
       ]
     },
+    "agent-lens": {
+      "tools": [
+        {"name": "get_agent_lens_category_breakdowns_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
+        {"name": "get_agent_lens_clustering_status_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
+        {"name": "get_agent_lens_conversation_tags_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
+        {"name": "get_agent_lens_insights_coverage_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
+        {"name": "get_agent_lens_tag_distribution_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
+        {"name": "list_agent_lens_category_example_turns_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
+        {"name": "list_agent_lens_conversation_tag_names_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
+        {"name": "list_agent_lens_matching_turns_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
+        {"name": "list_agent_lens_tagged_conversations_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"}
+      ]
+    },
     "aria": {
       "tools": [
         {"name": "aria_get_turn", "access": "read", "risk": "credential-forwarding", "prerequisite": "aria-https-origin"},
@@ -121,6 +134,11 @@
       "groups": ["models", "weave", "raw-graphql"],
       "managed_workloads": [],
       "expected_tools": {"read-write": 23, "read-only": 21}
+    },
+    "models-weave-agent-lens": {
+      "groups": ["models", "weave", "agent-lens"],
+      "managed_workloads": [],
+      "expected_tools": {"read-write": 31, "read-only": 29}
     }
   },
   "workload_profiles": {

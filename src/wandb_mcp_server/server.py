@@ -104,6 +104,26 @@ from wandb_mcp_server.mcp_tools.query_weave import (
     QUERY_WEAVE_TRACES_TOOL_DESCRIPTION,
     query_paginated_weave_traces,
 )
+from wandb_mcp_server.mcp_tools.agent_lens import (
+    GET_CATEGORY_BREAKDOWNS_TOOL_DESCRIPTION,
+    GET_CLUSTERING_STATUS_TOOL_DESCRIPTION,
+    GET_CONVERSATION_TAGS_TOOL_DESCRIPTION,
+    GET_INSIGHTS_COVERAGE_TOOL_DESCRIPTION,
+    GET_TAG_DISTRIBUTION_TOOL_DESCRIPTION,
+    LIST_CATEGORY_EXAMPLE_TURNS_TOOL_DESCRIPTION,
+    LIST_CONVERSATION_TAG_NAMES_TOOL_DESCRIPTION,
+    LIST_MATCHING_TURNS_TOOL_DESCRIPTION,
+    LIST_TAGGED_CONVERSATIONS_TOOL_DESCRIPTION,
+    get_category_breakdowns,
+    get_clustering_status,
+    get_conversation_tags,
+    get_insights_coverage,
+    get_tag_distribution,
+    list_category_example_turns,
+    list_conversation_tag_names,
+    list_matching_turns,
+    list_tagged_conversations,
+)
 from wandb_mcp_server.mcp_tools.agents import (
     GET_AGENT_CONVERSATION_TOOL_DESCRIPTION,
     GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION,
@@ -144,11 +164,12 @@ logger = get_rich_logger("weave-mcp-server", default_level_str="WARNING", env_va
 
 
 @dataclass(frozen=True, slots=True)
-class _AgentTool:
-    """One Weave Agents (OTel/GenAI) tool: the MCP tool name, its implementation,
-    and its description. Each implementation in mcp_tools.agents is a complete
-    tool -- it builds its request and returns a JSON string -- so it is registered
-    directly (no wrapper) and its parameter schema comes from the function signature.
+class _DirectTool:
+    """One directly-registered tool: the MCP tool name, its implementation, and
+    its description. Implementations in mcp_tools.agents and mcp_tools.agent_lens
+    are complete tools -- each builds its own request and returns a JSON string --
+    so they are registered without a wrapper and their parameter schemas come
+    from the function signatures.
     """
 
     name: str
@@ -158,18 +179,47 @@ class _AgentTool:
 
 # Implementations for the agent tools selected by the packaged runtime contract.
 _AGENT_TOOLS = (
-    _AgentTool("list_weave_agents_tool", list_agents, LIST_AGENTS_TOOL_DESCRIPTION),
-    _AgentTool("list_weave_agent_versions_tool", list_agent_versions, LIST_AGENT_VERSIONS_TOOL_DESCRIPTION),
-    _AgentTool("query_weave_agent_spans_tool", query_agent_spans, QUERY_AGENT_SPANS_TOOL_DESCRIPTION),
-    _AgentTool("get_weave_agent_span_stats_tool", get_agent_span_stats, GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION),
-    _AgentTool(
+    _DirectTool("list_weave_agents_tool", list_agents, LIST_AGENTS_TOOL_DESCRIPTION),
+    _DirectTool("list_weave_agent_versions_tool", list_agent_versions, LIST_AGENT_VERSIONS_TOOL_DESCRIPTION),
+    _DirectTool("query_weave_agent_spans_tool", query_agent_spans, QUERY_AGENT_SPANS_TOOL_DESCRIPTION),
+    _DirectTool("get_weave_agent_span_stats_tool", get_agent_span_stats, GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION),
+    _DirectTool(
         "list_weave_agent_custom_attributes_tool",
         list_agent_custom_attributes,
         LIST_AGENT_CUSTOM_ATTRIBUTES_TOOL_DESCRIPTION,
     ),
-    _AgentTool("search_weave_agents_tool", search_agents, SEARCH_AGENTS_TOOL_DESCRIPTION),
-    _AgentTool("get_weave_agent_trace_tool", get_agent_trace, GET_AGENT_TRACE_TOOL_DESCRIPTION),
-    _AgentTool("get_weave_agent_conversation_tool", get_agent_conversation, GET_AGENT_CONVERSATION_TOOL_DESCRIPTION),
+    _DirectTool("search_weave_agents_tool", search_agents, SEARCH_AGENTS_TOOL_DESCRIPTION),
+    _DirectTool("get_weave_agent_trace_tool", get_agent_trace, GET_AGENT_TRACE_TOOL_DESCRIPTION),
+    _DirectTool("get_weave_agent_conversation_tool", get_agent_conversation, GET_AGENT_CONVERSATION_TOOL_DESCRIPTION),
+)
+
+# Agent Lens Insights and conversation-tag reads. Every one is a read, so this
+# group is unaffected by read-only mode; the contract gates it instead on an
+# explicitly configured AGENT_LENS_BASE_URL.
+_AGENT_LENS_TOOLS = (
+    _DirectTool("get_agent_lens_insights_coverage_tool", get_insights_coverage, GET_INSIGHTS_COVERAGE_TOOL_DESCRIPTION),
+    _DirectTool("get_agent_lens_clustering_status_tool", get_clustering_status, GET_CLUSTERING_STATUS_TOOL_DESCRIPTION),
+    _DirectTool(
+        "get_agent_lens_category_breakdowns_tool", get_category_breakdowns, GET_CATEGORY_BREAKDOWNS_TOOL_DESCRIPTION
+    ),
+    _DirectTool(
+        "list_agent_lens_category_example_turns_tool",
+        list_category_example_turns,
+        LIST_CATEGORY_EXAMPLE_TURNS_TOOL_DESCRIPTION,
+    ),
+    _DirectTool("list_agent_lens_matching_turns_tool", list_matching_turns, LIST_MATCHING_TURNS_TOOL_DESCRIPTION),
+    _DirectTool(
+        "list_agent_lens_conversation_tag_names_tool",
+        list_conversation_tag_names,
+        LIST_CONVERSATION_TAG_NAMES_TOOL_DESCRIPTION,
+    ),
+    _DirectTool("get_agent_lens_conversation_tags_tool", get_conversation_tags, GET_CONVERSATION_TAGS_TOOL_DESCRIPTION),
+    _DirectTool(
+        "list_agent_lens_tagged_conversations_tool",
+        list_tagged_conversations,
+        LIST_TAGGED_CONVERSATIONS_TOOL_DESCRIPTION,
+    ),
+    _DirectTool("get_agent_lens_tag_distribution_tool", get_tag_distribution, GET_TAG_DISTRIBUTION_TOOL_DESCRIPTION),
 )
 
 
@@ -1324,6 +1374,13 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     # Each implementation is a complete tool; its parameter schema is derived
     # from the function signature.
     for tool in _AGENT_TOOLS:
+        register_tool(name=tool.name, description=tool.description)(tool.impl)
+
+    # ----- Agent Lens (Insights and conversation tags) tools -----
+    # A distinct service with its own origin and classification data plane. The
+    # contract already refused the profile without a validated AGENT_LENS_BASE_URL,
+    # so reaching registration means the origin is configured and usable.
+    for tool in _AGENT_LENS_TOOLS:
         register_tool(name=tool.name, description=tool.description)(tool.impl)
 
     # ARIA forwards the caller's credential to a distinct hosted service and
