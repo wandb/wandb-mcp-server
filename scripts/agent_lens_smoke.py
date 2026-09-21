@@ -24,6 +24,7 @@ import os
 import sys
 from typing import Any, Callable
 
+from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.mcp_tools.agent_lens import (
     get_category_breakdowns,
     get_clustering_status,
@@ -35,10 +36,25 @@ from wandb_mcp_server.mcp_tools.agent_lens import (
     list_matching_turns,
     list_tagged_conversations,
 )
+from wandb_mcp_server.utils import get_server_args
 
 
 def _rfc3339(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _seed_api_key() -> str | None:
+    """Put a key in the request context, as the server does at startup.
+
+    WandBApiManager.get_api_key() reads a contextvar with no environment
+    fallback, so calling a tool outside a served request finds nothing. Resolve
+    the key through the same precedence the console entrypoint uses (env, then
+    .netrc, then .env) and seed the context for this process.
+    """
+    api_key = os.getenv("WANDB_API_KEY") or get_server_args().wandb_api_key
+    if api_key:
+        WandBApiManager.set_context_api_key(api_key)
+    return api_key
 
 
 def _run(label: str, call: Callable[[], str], verbose: bool) -> tuple[bool, Any]:
@@ -81,22 +97,38 @@ def main() -> int:
     if not 1 <= args.days <= 30:
         print("--days must be between 1 and 30.", file=sys.stderr)
         return 2
+    if not _seed_api_key():
+        print("No W&B API key found in WANDB_API_KEY, .netrc, or .env.", file=sys.stderr)
+        return 2
 
     entity, project = args.entity, args.project
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=args.days)
-    window = {"start_at": _rfc3339(start), "end_at": _rfc3339(end)}
 
-    print(f"Agent Lens smoke: {entity}/{project} over {window['start_at']}..{window['end_at']}")
+    print(f"Agent Lens smoke: {entity}/{project}")
 
     results = []
 
     print("\nInsights")
     ok, coverage = _run("insights coverage", lambda: get_insights_coverage(entity, project), args.verbose)
     results.append(ok)
-    if ok and isinstance(coverage, dict) and not coverage.get("latest_week"):
-        # Every ranged read below will be empty; say so once rather than nine times.
+
+    # Anchor the window on the last classified week rather than on today. The
+    # classification job lags, so a range ending now routinely misses every
+    # turn in a project that does have data -- which would look like a broken
+    # client instead of an empty range.
+    end = datetime.now(timezone.utc)
+    latest_week = coverage.get("latest_week") if ok and isinstance(coverage, dict) else None
+    if latest_week:
+        try:
+            end = datetime.strptime(latest_week, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=7)
+        except ValueError:
+            print(f"  warn  could not parse latest_week {latest_week!r}; anchoring the window on today")
+    elif ok:
+        # Every ranged read below will be empty; say so once rather than five times.
         print("  note  project has no classified Insights turns; ranged reads will be empty")
+
+    start = end - timedelta(days=args.days)
+    window = {"start_at": _rfc3339(start), "end_at": _rfc3339(end)}
+    print(f"  window {window['start_at']}..{window['end_at']}")
 
     results.append(_run("clustering status", lambda: get_clustering_status(entity, project), args.verbose)[0])
 
@@ -107,30 +139,40 @@ def main() -> int:
     )
     results.append(ok)
 
-    # Drill into a real category when the breakdown named one; otherwise these
-    # two tools would only ever be exercised against a guessed identifier.
-    category = None
+    # Drill into real categories from both families. The top-level `category` is
+    # an intent; `failure_breakdowns[].category` is a failure. Querying one as
+    # the other returns zero rows rather than an error, so exercising both is
+    # what actually proves the drilldowns work.
+    intent = failure = None
     if ok and isinstance(breakdowns, list) and breakdowns:
-        counts = breakdowns[0].get("counts") or []
-        category = counts[0].get("category") if counts else breakdowns[0].get("category")
+        intent = breakdowns[0].get("category")
+        for entry in breakdowns:
+            failures = entry.get("failure_breakdowns") or []
+            if failures:
+                failure = failures[0].get("category")
+                break
 
-    if category:
+    for signature_type, category in (("intent", intent), ("failure", failure)):
+        if not category:
+            print(f"  skip  example turns / matching turns ({signature_type}): none in range")
+            continue
         results.append(
             _run(
-                f"example turns ({category})",
-                lambda: list_category_example_turns(entity, project, "intent", category, **window, limit=5),
+                f"example turns ({signature_type}={category})",
+                lambda s=signature_type, c=category: list_category_example_turns(
+                    entity, project, s, c, **window, limit=5
+                ),
                 args.verbose,
             )[0]
         )
+        filter_name = "intent_category" if signature_type == "intent" else "failure_category"
         results.append(
             _run(
-                f"matching turns ({category})",
-                lambda: list_matching_turns(entity, project, **window, intent_category=category),
+                f"matching turns ({signature_type}={category})",
+                lambda n=filter_name, c=category: list_matching_turns(entity, project, **window, **{n: c}),
                 args.verbose,
             )[0]
         )
-    else:
-        print("  skip  example turns / matching turns: no category in range")
 
     print("\nConversation tags")
     ok, tag_names = _run("tag names", lambda: list_conversation_tag_names(entity, project), args.verbose)

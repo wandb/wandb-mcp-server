@@ -568,6 +568,21 @@ see the individual turns behind any number here, follow up with
 list_agent_lens_matching_turns_tool or list_agent_lens_category_example_turns_tool.
 </when_to_use>
 
+<reading_the_response>
+Each entry mixes the two category families, and passing one where the other is
+expected returns zero rows rather than an error:
+
+- The top-level `category` is an INTENT category (what the user wanted), e.g.
+  "action_request". Use it as `intent_category`, or with `signature_type="intent"`.
+- `counts[].category` and `failure_breakdowns[].category` are FAILURE categories
+  (what went wrong), e.g. "requirement_violation", plus the sentinel
+  "no_failure" for turns that succeeded. Use these as `failure_category`, or
+  with `signature_type="failure"`. "no_failure" is a count, not a drillable
+  category.
+- `cluster_breakdowns[].id` is a cluster UUID, not a category. Pass it as
+  `cluster_id` together with the `cluster_kind` naming its family.
+</reading_the_response>
+
 Parameters
 ----------
 entity_name : str
@@ -603,6 +618,9 @@ project_name : str
     The W&B project name.
 signature_type : str
     "intent" or "failure" -- which category family `category_id` belongs to.
+    It must match where `category_id` came from, or the result is empty:
+    "intent" for a top-level `category`, "failure" for a `counts[].category`
+    or `failure_breakdowns[].category`.
 category_id : str
     The category identifier from get_agent_lens_category_breakdowns_tool.
 {_WINDOW_PARAMS}
@@ -641,9 +659,12 @@ project_name : str
     The W&B project name.
 {_WINDOW_PARAMS}
 intent_category : str, optional
-    Restrict to one intent category.
+    Restrict to one intent category -- a top-level `category` from
+    get_agent_lens_category_breakdowns_tool.
 failure_category : str, optional
-    Restrict to one failure category.
+    Restrict to one failure category -- a `counts[].category` or
+    `failure_breakdowns[].category`. These two families are not
+    interchangeable; the wrong one returns zero rows rather than an error.
 cluster_id : str, optional
     Restrict to one cluster; requires `cluster_kind`.
 cluster_kind : str, optional
