@@ -178,7 +178,8 @@ single-flights one best-effort viewer lookup per bounded, endpoint-bound actor
 client; a failure remains non-fatal and is not retried until that cache entry is
 replaced. The lookup runs off the async event loop and is never used for
 authorization. An entity, email address, or email domain is not a username and
-is never substituted for one.
+is never substituted for one. `strict` mode and disabled analytics skip the
+lookup entirely.
 
 At `off` and `standard`, both canonical identity fields use that authenticated
 username when it is available and otherwise omit it; no hash fallback is

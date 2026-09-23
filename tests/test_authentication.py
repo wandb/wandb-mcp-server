@@ -95,6 +95,47 @@ async def test_auth_enrichment_restores_historical_segment_user_for_tool_event(m
     assert api.viewer_thread != event_loop_thread
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("privacy_level", "analytics_disabled"),
+    (("strict", "false"), ("standard", "true")),
+)
+async def test_auth_skips_unused_viewer_enrichment(
+    monkeypatch,
+    privacy_level: str,
+    analytics_disabled: str,
+):
+    from wandb_mcp_server.api_client import WandBApiManager
+
+    enrich = MagicMock(side_effect=AssertionError("viewer enrichment must not run"))
+    monkeypatch.setattr(WandBApiManager, "get_or_enrich_viewer_info", enrich)
+    manager = MagicMock()
+    manager.get_session.return_value = None
+    request = MagicMock()
+    request.url.path = "/mcp"
+    request.method = "POST"
+    request.headers = {"Authorization": f"Bearer {'a' * 40}"}
+    request.state = MagicMock()
+    response = MagicMock(status_code=200, headers={})
+
+    async def call_next(_):
+        return response
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "MCP_ANALYTICS_DISABLED": analytics_disabled,
+                "MCP_LOG_PRIVACY_LEVEL": privacy_level,
+            },
+        ),
+        patch("wandb_mcp_server.session_manager.get_session_manager", return_value=manager),
+    ):
+        await mcp_auth_middleware(request, call_next)
+
+    enrich.assert_not_called()
+
+
 class TestIsValidWandbApiKey:
     def test_valid_40_char_key(self):
         assert is_valid_wandb_api_key("a" * 40) is True

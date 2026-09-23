@@ -158,17 +158,22 @@ async def mcp_auth_middleware(request: Request, call_next):
     api_key_token = WandBApiManager.set_context_api_key(wandb_api_key)
 
     # Preserve the established product-analytics identity without making
-    # authentication or tool execution depend on telemetry. The API manager
-    # single-flights one best-effort viewer lookup per bounded actor client;
-    # failures are retained as ``None`` for that cache entry and stay non-fatal.
-    try:
-        viewer = await anyio.to_thread.run_sync(
-            WandBApiManager.get_or_enrich_viewer_info,
-            abandon_on_cancel=False,
-        )
-    except Exception as viewer_err:
-        viewer = None
-        logger.debug("Viewer telemetry enrichment failed (non-fatal; %s)", type(viewer_err).__name__)
+    # authentication or tool execution depend on telemetry. Strict privacy and
+    # disabled analytics never use a plaintext username, so they skip the
+    # lookup entirely. Otherwise the API manager single-flights one best-effort
+    # lookup per bounded actor client; failures stay non-fatal.
+    viewer = None
+    from wandb_mcp_server.privacy import resolve_privacy_level
+
+    analytics_disabled = os.environ.get("MCP_ANALYTICS_DISABLED", "false").strip().lower() == "true"
+    if not analytics_disabled and resolve_privacy_level() != "strict":
+        try:
+            viewer = await anyio.to_thread.run_sync(
+                WandBApiManager.get_or_enrich_viewer_info,
+                abandon_on_cancel=False,
+            )
+        except Exception as viewer_err:
+            logger.debug("Viewer telemetry enrichment failed (non-fatal; %s)", type(viewer_err).__name__)
 
     # --- Session management -----------------------------------------------
     # Finalize session_id *before* setting the contextvar so that
