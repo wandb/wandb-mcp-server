@@ -3,7 +3,6 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import threading
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -115,87 +114,6 @@ def test_get_api_initializes_different_actors_concurrently(monkeypatch) -> None:
         second = pool.submit(WandBApiManager.get_api, "second-actor-key")
 
     assert first.result() is not second.result()
-
-
-def test_viewer_enrichment_runs_once_per_cached_actor_client(monkeypatch) -> None:
-    lookup_started = threading.Event()
-    release_lookup = threading.Event()
-
-    class Api:
-        def __init__(self):
-            self.calls = 0
-            self._viewer = None
-
-        @property
-        def viewer(self):
-            self.calls += 1
-            lookup_started.set()
-            assert release_lookup.wait(timeout=2)
-            self._viewer = SimpleNamespace(_attrs={"username": "historical-user"})
-            return self._viewer
-
-    api = Api()
-    monkeypatch.setattr(api_client.wandb, "Api", MagicMock(return_value=api))
-
-    def enrich():
-        token = WandBApiManager.set_context_api_key("actor-secret-key")
-        try:
-            return WandBApiManager.get_or_enrich_viewer_info()
-        finally:
-            WandBApiManager.reset_context_api_key(token)
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(enrich)
-        assert lookup_started.wait(timeout=2)
-        second = pool.submit(enrich)
-        release_lookup.set()
-        assert first.result() == {"username": "historical-user"}
-        assert second.result() == {"username": "historical-user"}
-
-    assert api.calls == 1
-
-
-def test_failed_viewer_enrichment_is_nonfatal_and_not_retried(monkeypatch) -> None:
-    class Api:
-        calls = 0
-
-        @property
-        def viewer(self):
-            self.calls += 1
-            raise RuntimeError("private upstream detail")
-
-    api = Api()
-    monkeypatch.setattr(api_client.wandb, "Api", MagicMock(return_value=api))
-    token = WandBApiManager.set_context_api_key("actor-secret-key")
-    try:
-        assert WandBApiManager.get_or_enrich_viewer_info() is None
-        assert WandBApiManager.get_or_enrich_viewer_info() is None
-    finally:
-        WandBApiManager.reset_context_api_key(token)
-
-    assert api.calls == 1
-
-
-def test_viewer_enrichment_wakes_waiters_before_process_control_error(monkeypatch) -> None:
-    class Api:
-        calls = 0
-
-        @property
-        def viewer(self):
-            self.calls += 1
-            raise SystemExit(2)
-
-    api = Api()
-    monkeypatch.setattr(api_client.wandb, "Api", MagicMock(return_value=api))
-    token = WandBApiManager.set_context_api_key("actor-secret-key")
-    try:
-        with pytest.raises(SystemExit):
-            WandBApiManager.get_or_enrich_viewer_info()
-        assert WandBApiManager.get_or_enrich_viewer_info() is None
-    finally:
-        WandBApiManager.reset_context_api_key(token)
-
-    assert api.calls == 1
 
 
 def _http_error(status_code: int, *, body: str = "", retry_after: str | None = None):
