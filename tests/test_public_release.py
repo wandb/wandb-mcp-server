@@ -33,6 +33,10 @@ def _contract() -> dict:
     return public_release.load_contract(CONTRACT_PATH)
 
 
+def _current_version() -> str:
+    return public_release._read_version_facts(REPOSITORY_ROOT)["pyproject"]
+
+
 def test_contract_generates_every_exact_tool_profile_and_access_mode():
     contract = _contract()
     profiles = public_release.exhaustive_profiles(contract)
@@ -200,11 +204,11 @@ def test_installed_wheel_harness_is_loopback_only():
 
 def test_attestation_rejects_profile_evidence_from_another_source(monkeypatch, tmp_path):
     contract = _contract()
-    version = "0.4.0"
-    wheel = tmp_path / "wandb_mcp_server-0.4.0-py3-none-any.whl"
-    sdist = tmp_path / "wandb_mcp_server-0.4.0.tar.gz"
-    sbom = tmp_path / "wandb_mcp_server-0.4.0.spdx.json"
-    vulnerabilities = tmp_path / "wandb_mcp_server-0.4.0.vulnerabilities.json"
+    version = _current_version()
+    wheel = tmp_path / f"wandb_mcp_server-{version}-py3-none-any.whl"
+    sdist = tmp_path / f"wandb_mcp_server-{version}.tar.gz"
+    sbom = tmp_path / f"wandb_mcp_server-{version}.spdx.json"
+    vulnerabilities = tmp_path / f"wandb_mcp_server-{version}.vulnerabilities.json"
     wheel.write_text("wheel")
     sdist.write_text("sdist")
     sbom.write_text(json.dumps({"spdxVersion": "SPDX-2.3", "SPDXID": "SPDXRef-DOCUMENT", "packages": []}))
@@ -306,7 +310,7 @@ def test_attestation_rejects_obsolete_profile_evidence_schema(monkeypatch, tmp_p
         public_release.create_attestation(
             REPOSITORY_ROOT,
             CONTRACT_PATH,
-            "0.4.0",
+            _current_version(),
             (evidence_path,),
             (),
             tmp_path / "build.json",
@@ -382,11 +386,11 @@ def test_generated_feature_documentation_is_current():
 
 def test_vulnerability_evidence_rejects_high_or_critical_findings(monkeypatch, tmp_path):
     contract = _contract()
-    version = "0.4.0"
-    wheel = tmp_path / "wandb_mcp_server-0.4.0-py3-none-any.whl"
-    sdist = tmp_path / "wandb_mcp_server-0.4.0.tar.gz"
-    sbom = tmp_path / "wandb_mcp_server-0.4.0.spdx.json"
-    vulnerabilities = tmp_path / "wandb_mcp_server-0.4.0.vulnerabilities.json"
+    version = _current_version()
+    wheel = tmp_path / f"wandb_mcp_server-{version}-py3-none-any.whl"
+    sdist = tmp_path / f"wandb_mcp_server-{version}.tar.gz"
+    sbom = tmp_path / f"wandb_mcp_server-{version}.spdx.json"
+    vulnerabilities = tmp_path / f"wandb_mcp_server-{version}.vulnerabilities.json"
     wheel.write_text("wheel")
     sdist.write_text("sdist")
     sbom.write_text(json.dumps({"spdxVersion": "SPDX-2.3", "SPDXID": "SPDXRef-DOCUMENT", "packages": []}))

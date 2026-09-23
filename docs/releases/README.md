@@ -6,6 +6,7 @@ available only when its release note links an immutable, verified artifact.
 
 | Version | Status | Release notes |
 |---|---|---|
+| 0.4.1 | Release candidate | [v0.4.1](v0.4.1.md) |
 | 0.4.0 | Release candidate | [v0.4.0](v0.4.0.md) |
 
 Maintainers start new notes from [TEMPLATE.md](TEMPLATE.md) and follow the
