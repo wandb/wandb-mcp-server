@@ -3,6 +3,7 @@ name = "wandb_mcp_server"
 version = "0.4.1"
 requires-python = ">=3.11"
 dependencies = [
+    "anyio>=4.14.2",
     "weave>=0.52.35",
     "wandb[workspaces]>=0.28.0",
     "httpx>=0.28.1",
