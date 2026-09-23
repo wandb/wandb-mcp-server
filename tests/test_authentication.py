@@ -4,6 +4,9 @@ Tests directly exercise is_valid_wandb_api_key(), validate_bearer_token(),
 and _resolve_session_id() rather than mocking HTTP responses.
 """
 
+import json
+import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,6 +19,80 @@ from wandb_mcp_server.auth import (
     mcp_auth_middleware,
     validate_bearer_token,
 )
+
+
+@pytest.mark.asyncio
+async def test_auth_enrichment_restores_historical_segment_user_for_tool_event(monkeypatch):
+    from wandb_mcp_server.analytics import AnalyticsTracker
+    from wandb_mcp_server.analytics_segment import get_segment_forwarder, reset_segment_forwarder
+    from wandb_mcp_server.api_client import WandBApiManager
+
+    class Api:
+        def __init__(self):
+            self._viewer = None
+            self.viewer_lookups = 0
+            self.viewer_thread = None
+
+        @property
+        def viewer(self):
+            self.viewer_lookups += 1
+            self.viewer_thread = threading.get_ident()
+            self._viewer = SimpleNamespace(_attrs={"username": "historical-user"})
+            return self._viewer
+
+    api = Api()
+    event_loop_thread = threading.get_ident()
+    monkeypatch.setattr("wandb_mcp_server.api_client.wandb.Api", lambda **_: api)
+    manager = MagicMock()
+    manager.get_session.return_value = None
+    tracker = AnalyticsTracker(enabled=True)
+    request = MagicMock()
+    request.url.path = "/mcp"
+    request.method = "POST"
+    request.headers = {"Authorization": f"Bearer {'a' * 40}"}
+    request.state = MagicMock()
+    response = MagicMock(status_code=200, headers={})
+
+    async def call_next(_):
+        tracker.track_tool_call(
+            tool_name="query_wandb_tool",
+            session_id="synthetic-session",
+            viewer_info=None,
+            params={"query": "private-query-canary"},
+            success=True,
+        )
+        return response
+
+    WandBApiManager._clear_api_cache()
+    reset_segment_forwarder()
+    try:
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "MCP_ANALYTICS_DISABLED": "false",
+                    "MCP_LOG_PRIVACY_LEVEL": "standard",
+                    "MCP_SEGMENT_DRY_RUN": "true",
+                },
+            ),
+            patch("wandb_mcp_server.session_manager.get_session_manager", return_value=manager),
+            patch("wandb_mcp_server.analytics.get_analytics_tracker", return_value=tracker),
+        ):
+            reset_segment_forwarder()
+            await mcp_auth_middleware(request, call_next)
+            payloads = get_segment_forwarder().get_forwarded_payloads()
+    finally:
+        reset_segment_forwarder()
+        WandBApiManager._clear_api_cache()
+
+    tool_payload = next(payload for payload in payloads if payload["event"] == "mcp_server.tool_call")
+    assert tool_payload["userId"] == "historical-user"
+    assert tool_payload["properties"]["tool_name"] == "query_wandb_tool"
+    assert tool_payload["properties"]["success"] is True
+    assert "params" not in tool_payload["properties"]
+    assert "private-query-canary" not in json.dumps(tool_payload)
+    assert api.viewer_lookups == 1
+    assert api.viewer_thread != event_loop_thread
 
 
 class TestIsValidWandbApiKey:

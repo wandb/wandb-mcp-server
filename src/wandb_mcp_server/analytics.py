@@ -224,15 +224,21 @@ class _KeyFingerprint(_IdentityPseudonym):
     """An actor derived from a trusted API-key digest, never a viewer field."""
 
 
+class _SegmentUsername(str):
+    """A validated authenticated username carried only to the Segment sink."""
+
+
 class _IdentityEvent(dict):
-    """Carry a pseudonymous Segment identity without adding a serialized field."""
+    """Carry a trusted Segment identity without adding a serialized field."""
 
     __slots__ = ("_segment_identity",)
 
     def __init__(self, event: Dict[str, Any], *, segment_identity: Optional[str] = None):
         super().__init__(event)
         self._segment_identity = (
-            segment_identity if type(segment_identity) in {_IdentityPseudonym, _KeyFingerprint} else None
+            segment_identity
+            if type(segment_identity) in {_IdentityPseudonym, _KeyFingerprint, _SegmentUsername}
+            else None
         )
 
 
@@ -818,6 +824,9 @@ class AnalyticsTracker:
                 # Missing enrichment must not interfere with the request.
                 pass
         pseudonym = actor if type(actor) is _KeyFingerprint else _private_identity(username or actor)
+        segment_identity = (
+            pseudonym if level == _PRIVACY_LEVEL_STRICT or username is None else _SegmentUsername(username)
+        )
         display = pseudonym if level == _PRIVACY_LEVEL_STRICT else username
         if type(display) is _KeyFingerprint:
             # This is a hash, not a credential. Keep the historical Segment ID
@@ -828,7 +837,7 @@ class AnalyticsTracker:
         )
         return _IdentityEvent(
             {**event, "actor_id": display, "user_id": display, "email_domain": email_domain},
-            segment_identity=pseudonym,
+            segment_identity=segment_identity,
         )
 
     # ------------------------------------------------------------------

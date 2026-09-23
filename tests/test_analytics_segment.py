@@ -20,6 +20,7 @@ from wandb_mcp_server.analytics_segment import (
     map_to_segment_track,
     reset_segment_forwarder,
 )
+from wandb_mcp_server.harness import current_harness_context, extract_harness_context
 
 
 @pytest.fixture(autouse=True)
@@ -407,6 +408,44 @@ class TestEndToEndIntegration:
         assert p["event"] == f"{SEGMENT_EVENT_PREFIX}.tool_call"
         assert p["properties"]["tool_name"] == "query_weave"
 
+    @patch.dict(
+        "os.environ",
+        {"MCP_SEGMENT_DRY_RUN": "true", "MCP_LOG_PRIVACY_LEVEL": "standard"},
+    )
+    def test_v03_hex_payload_contract_remains_stable_and_private(self):
+        reset_segment_forwarder()
+        context = extract_harness_context(
+            {},
+            {
+                "method": "initialize",
+                "params": {"clientInfo": {"name": "codex-mcp-client", "version": "1"}},
+            },
+        ).with_call_type("tools/call")
+        token = current_harness_context.set(context)
+        try:
+            AnalyticsTracker(enabled=True).track_tool_call(
+                tool_name="query_wandb_tool",
+                session_id="synthetic-session",
+                viewer_info="historical-user",
+                params={"query": "private-query-canary", "api_key": "private-key-canary"},
+                success=True,
+            )
+        finally:
+            current_harness_context.reset(token)
+
+        [payload] = get_segment_forwarder().get_forwarded_payloads()
+        properties = payload["properties"]
+        assert payload["event"] == "mcp_server.tool_call"
+        assert payload["userId"] == "historical-user"
+        assert properties["tool_name"] == "query_wandb_tool"
+        assert properties["mcp_client_app"] == "codex_cli"
+        assert properties["agent_harness"] == "codex"
+        assert properties["success"] is True
+        assert "params" not in properties
+        retained = str(payload)
+        assert "private-query-canary" not in retained
+        assert "private-key-canary" not in retained
+
     @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})
     def test_tracker_user_session_reaches_forwarder(self):
         reset_segment_forwarder()
@@ -423,7 +462,7 @@ class TestEndToEndIntegration:
 
         payloads = forwarder.get_forwarded_payloads()
         assert len(payloads) == 1
-        assert payloads[0]["userId"] == f"wandb_key:{'a' * 24}"
+        assert payloads[0]["userId"] == "bob"
         assert payloads[0]["event"] == f"{SEGMENT_EVENT_PREFIX}.session_start"
 
     @patch.dict("os.environ", {"MCP_SEGMENT_DRY_RUN": "true"})

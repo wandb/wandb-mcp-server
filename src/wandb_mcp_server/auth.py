@@ -21,6 +21,7 @@ import time
 import uuid
 from typing import Optional
 
+import anyio
 from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -156,9 +157,18 @@ async def mcp_auth_middleware(request: Request, call_next):
 
     api_key_token = WandBApiManager.set_context_api_key(wandb_api_key)
 
-    # Authentication already established possession of a W&B API key. Do not
-    # add a separate viewer request solely for telemetry attribution.
-    viewer = None
+    # Preserve the established product-analytics identity without making
+    # authentication or tool execution depend on telemetry. The API manager
+    # single-flights one best-effort viewer lookup per bounded actor client;
+    # failures are retained as ``None`` for that cache entry and stay non-fatal.
+    try:
+        viewer = await anyio.to_thread.run_sync(
+            WandBApiManager.get_or_enrich_viewer_info,
+            abandon_on_cancel=False,
+        )
+    except Exception as viewer_err:
+        viewer = None
+        logger.debug("Viewer telemetry enrichment failed (non-fatal; %s)", type(viewer_err).__name__)
 
     # --- Session management -----------------------------------------------
     # Finalize session_id *before* setting the contextvar so that

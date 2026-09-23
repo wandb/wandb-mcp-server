@@ -188,6 +188,7 @@ class WandBApiManager:
 
     _api_cache: OrderedDict[str, tuple[float, wandb.Api]] = OrderedDict()
     _api_initializations: dict[str, Future[wandb.Api]] = {}
+    _viewer_enrichments: dict[str, Future[dict[str, str] | None]] = {}
     _api_cache_lock = threading.Lock()
     _api_cache_ttl_seconds = 300.0
     _api_cache_max_entries = 128
@@ -237,6 +238,61 @@ class WandBApiManager:
             if not isinstance(username, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", username) is None:
                 return None
             return {"username": username}
+
+    @classmethod
+    def get_or_enrich_viewer_info(cls) -> dict[str, str] | None:
+        """Resolve one authenticated username lookup per cached actor client.
+
+        The lookup is best-effort telemetry enrichment: callers must never use
+        its result for authentication or authorization. Concurrent requests for
+        one actor share the same future, and a failed lookup is not retried until
+        that actor's bounded API-client cache entry is replaced.
+        """
+        api_key = cls.get_api_key()
+        if not api_key:
+            return None
+        cache_key = hashlib.sha256(f"{WANDB_API_BASE_URL}\0{api_key}".encode()).hexdigest()
+        api = cls.get_api(api_key)
+        with cls._api_cache_lock:
+            enrichment = cls._viewer_enrichments.get(cache_key)
+            if enrichment is None:
+                enrichment = Future()
+                cls._viewer_enrichments[cache_key] = enrichment
+                is_enricher = True
+            else:
+                is_enricher = False
+
+        if not is_enricher:
+            return enrichment.result()
+
+        result: dict[str, str] | None = None
+        fatal_error: BaseException | None = None
+        try:
+            # ``viewer`` is cached by the SDK after this first lookup. Read only
+            # its materialized backing data so telemetry never invokes another
+            # lazy property while extracting the username.
+            viewer = api.viewer
+            try:
+                attrs = vars(viewer).get("_attrs")
+            except TypeError:
+                attrs = None
+            username = attrs.get("username") if type(attrs) is dict else None
+            result = (
+                {"username": username}
+                if isinstance(username, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", username) is not None
+                else None
+            )
+        except Exception:
+            pass
+        except BaseException as exc:
+            # Wake any same-actor waiters before propagating process-control
+            # exceptions such as KeyboardInterrupt or SystemExit.
+            fatal_error = exc
+        finally:
+            enrichment.set_result(result)
+        if fatal_error is not None:
+            raise fatal_error
+        return result
 
     @classmethod
     def get_api(cls, api_key: Optional[str] = None) -> wandb.Api:
@@ -301,7 +357,8 @@ class WandBApiManager:
             )
             cls._api_cache.move_to_end(cache_key)
             while len(cls._api_cache) > cls._api_cache_max_entries:
-                cls._api_cache.popitem(last=False)
+                evicted_key, _ = cls._api_cache.popitem(last=False)
+                cls._viewer_enrichments.pop(evicted_key, None)
             cls._api_initializations.pop(cache_key, None)
         initialization.set_result(api)
         return api
@@ -312,6 +369,7 @@ class WandBApiManager:
         expired = [key for key, (expires_at, _) in cls._api_cache.items() if expires_at <= now]
         for key in expired:
             cls._api_cache.pop(key, None)
+            cls._viewer_enrichments.pop(key, None)
 
     @classmethod
     def _clear_api_cache(cls) -> None:
@@ -319,6 +377,7 @@ class WandBApiManager:
         with cls._api_cache_lock:
             cls._api_cache.clear()
             cls._api_initializations.clear()
+            cls._viewer_enrichments.clear()
 
     @staticmethod
     def set_context_api_key(api_key: str) -> Any:

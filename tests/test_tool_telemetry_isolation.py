@@ -69,9 +69,12 @@ async def test_concurrent_worker_calls_emit_only_their_own_identity(monkeypatch,
             for event in events
         ]
         assert {dd["attributes"]["usr"]["id"] for dd, _ in sinks} == expected
-        pseudonyms = {"wandb_key:" + hashlib.sha256(key.encode()).hexdigest()[:24] for key in actors}
-        assert {segment["userId"] for _, segment in sinks} == pseudonyms
-        assert all(username not in json.dumps([segment for _, segment in sinks]) for username in actors.values())
+        expected_segment = (
+            {"wandb_key:" + hashlib.sha256(key.encode()).hexdigest()[:24] for key in actors}
+            if level == "strict"
+            else set(actors.values())
+        )
+        assert {segment["userId"] for _, segment in sinks} == expected_segment
         serialized = json.dumps([events, sinks])
         assert all(key not in serialized for key in actors)
         if level == "strict":
