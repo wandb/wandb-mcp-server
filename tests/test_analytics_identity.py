@@ -1,4 +1,4 @@
-"""Authenticated usernames and strict pseudonyms agree across analytics sinks."""
+"""Authenticated Segment usernames and strict pseudonyms stay compatible."""
 
 import json
 from types import SimpleNamespace
@@ -73,7 +73,7 @@ def test_missing_username_is_omitted_outside_strict_without_changing_segment(mon
 
 @pytest.mark.parametrize("level", ["off", "standard"])
 @pytest.mark.parametrize("event_type", ["tool_call", "user_session", "request"])
-def test_cached_username_is_preferred_only_in_approved_sinks(monkeypatch, level, event_type):
+def test_cached_username_preserves_segment_identity_at_off_and_standard(monkeypatch, level, event_type):
     monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", level)
     monkeypatch.setattr(WandBApiManager, "get_cached_viewer_info", lambda: {"username": "cached-user"})
     event = emit(monkeypatch, event_type)
@@ -82,8 +82,7 @@ def test_cached_username_is_preferred_only_in_approved_sinks(monkeypatch, level,
     assert dd["attributes"]["usr"]["id"] == "cached-user"
     assert "actor_id" not in dd["attributes"] and "user_id" not in dd["attributes"]
     if segment is not None:
-        assert segment["userId"] == FINGERPRINT
-        assert "cached-user" not in json.dumps(segment)
+        assert segment["userId"] == "cached-user"
     assert "_segment" not in json.dumps(event), "private routing provenance must not serialize"
 
 
@@ -200,15 +199,16 @@ def test_supplied_authenticated_username_wins_over_cached_value(monkeypatch):
     monkeypatch.setattr(WandBApiManager, "get_cached_viewer_info", lambda: {"username": "other-user"})
     event = emit(monkeypatch, "tool_call", SimpleNamespace(username="request-user"))
     assert event["user_id"] == event["actor_id"] == "request-user"
-    assert mapped(event)[1]["userId"] == FINGERPRINT
+    assert mapped(event)[1]["userId"] == "request-user"
 
 
 @pytest.mark.parametrize("level", ["off", "standard", "strict"])
-def test_segment_without_key_hashes_username_even_in_direct_mapper(monkeypatch, level):
+def test_segment_uses_trusted_username_only_outside_strict(monkeypatch, level):
     monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", level)
     monkeypatch.setattr(analytics, "current_actor_id", lambda: None)
     event = emit(monkeypatch, "tool_call", {"username": "private-user"})
-    assert mapped(event)[1]["userId"] == analytics._hash_identifier("private-user")
+    expected = "private-user" if level in {"off", "standard"} else analytics._hash_identifier("private-user")
+    assert mapped(event)[1]["userId"] == expected
     direct = {
         "event_type": "user_session",
         "actor_id": "private-user",
@@ -218,7 +218,7 @@ def test_segment_without_key_hashes_username_even_in_direct_mapper(monkeypatch, 
     }
     result = mapped(direct)[1]
     assert result["userId"] == analytics._hash_identifier("private-user")
-    for raw in ("private-user", "private@example.invalid", "forged-raw-identity"):
+    for raw in ("private@example.invalid", "forged-raw-identity"):
         assert raw not in json.dumps(result)
 
 
@@ -269,9 +269,11 @@ def test_diagnostic_error_event_obeys_identity_destination_policy(monkeypatch, l
     dd, segment = mapped(event)
     display = DISPLAY_FINGERPRINT if level == "strict" else "diagnostic-user"
     assert event["actor_id"] == dd["attributes"]["usr"]["id"] == display
-    assert segment["userId"] == FINGERPRINT
+    expected_segment = FINGERPRINT if level == "strict" else "diagnostic-user"
+    assert segment["userId"] == expected_segment
     assert segment["properties"]["error_diagnostics"]["category"] == "input_validation"
-    assert "diagnostic-user" not in json.dumps(segment)
+    if level == "strict":
+        assert "diagnostic-user" not in json.dumps(segment)
 
 
 @pytest.mark.parametrize("level", ["off", "standard", "strict"])

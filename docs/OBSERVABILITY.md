@@ -153,8 +153,8 @@ and ignore surrounding whitespace.
 
 | Level | Product tool telemetry | Canonical log and Datadog identity | Segment identity | Verbose request-body logs |
 |---|---|---|---|---|
-| `off` (default) | compact `usage_dimensions` only | authenticated username when already available; otherwise omitted | pseudonym only | INFO |
-| `standard` | compact `usage_dimensions` only | authenticated username when already available; otherwise omitted | pseudonym only | demoted to DEBUG |
+| `off` (default) | compact `usage_dimensions` only | authenticated username when already available; otherwise omitted | authenticated username when already available; key pseudonym fallback | INFO |
+| `standard` | compact `usage_dimensions` only | authenticated username when already available; otherwise omitted | authenticated username when already available; key pseudonym fallback | demoted to DEBUG |
 | `strict` | compact `usage_dimensions` only | SHA-256 pseudonym; no plaintext username | pseudonym only | demoted to DEBUG |
 
 Sensitive key-name redaction (`api_key`, `token`, `secret`, `password`,
@@ -172,25 +172,23 @@ runs at every level.
 
 ### Why the split
 
-At `off` and `standard`, the canonical event and Datadog's `usr.id` use an
-authenticated W&B username when one was supplied by the authenticated request
-path or was already materialized in that actor's endpoint-bound API-client
-cache. Logging never initializes a client, fetches a viewer, or evaluates a
-lazy viewer property. Events omit user identity until a functional request has
-populated the cache. An entity,
-email address, or email domain is not a username and is never substituted for
-one.
+At `off` and `standard`, the canonical event, Datadog's `usr.id`, and Segment's
+`userId` use an authenticated W&B username when functional work has already
+materialized it on that actor's unexpired, endpoint-bound API client. Telemetry
+never initializes a client, fetches a viewer, or evaluates a lazy viewer
+property. Until a functional request supplies the username, canonical logs omit
+identity and Segment uses the key pseudonym. An entity, email address, or email
+domain is not a username and is never substituted for one.
 
 At `off` and `standard`, both canonical identity fields use that authenticated
 username when it is available and otherwise omit it; no hash fallback is
 displayed. Datadog receives that identity only as `usr.id`, without duplicate
 `actor_id`/`user_id` attributes or a copy in session messages. Historical log
-entries keep their original identities. Segment does not copy either serialized
-identity field: it always
-uses a separately carried pseudonym for `userId` and never receives a plaintext
-username. It uses the API-key fingerprint when available and a SHA-256 username
-pseudonym only as a fallback. Raw usernames are also excluded from Segment
-properties.
+entries keep their original identities. Segment does not trust either
+serialized identity field. Instead, the runtime privately carries the validated
+authenticated username to `userId`; when it is unavailable, Segment uses the
+API-key fingerprint. Direct or replayed events cannot manufacture that trusted
+username provenance. Raw usernames remain excluded from Segment properties.
 
 `strict` retains a SHA-256 pseudonym instead of a plaintext username. These
 identifiers allow correlation; they are not anonymous. Usernames and pseudonyms
@@ -263,10 +261,10 @@ Schema 1.1 canonical fields:
 | `client_vendor` | Vendor bucket, such as `openai`, `anthropic`, `cursor`, `google`, or `mistral`. |
 | `call_type` | Exact MCP JSON-RPC method, such as `initialize`, `tools/list`, or `tools/call`. |
 | `tool_name` | Public MCP tool name; emitted exactly once per public invocation. |
-| `actor_id` | Canonical identity: cache-only authenticated username at `off`/`standard` (omitted when unavailable), or a pseudonym at `strict`. Datadog maps identity to `usr.id` only; Segment never receives this field as plaintext. |
-| `user_id` | Same canonical identity policy as `actor_id`; retained for canonical-log compatibility, not duplicated in Datadog. Segment never receives this field as plaintext. |
+| `actor_id` | Canonical identity: cache-only authenticated username at `off`/`standard` (omitted when unavailable), or a pseudonym at `strict`. Datadog maps identity to `usr.id` only; Segment derives `userId` from separately carried trusted provenance. |
+| `user_id` | Same canonical identity policy as `actor_id`; retained for canonical-log compatibility, not duplicated in Datadog. |
 | `mcp_client_family` | One-release compatibility alias for the previous family field. |
-| `mcp_client_app` | One-release compatibility alias for the previous app field. |
+| `mcp_client_app` | One-release compatibility alias for the previous app field. Its v0.3 categories remain stable (for example, `codex_cli`, `openai_responses`, `linear_agent`, and `claude`) while `agent_harness` carries the new taxonomy. |
 | `mcp_client_source` | Signal used for classification: `initialize_client_info`, `meta_client_info`, `session_metadata`, `user_agent`, or `unknown`. |
 | `mcp_protocol_version` | MCP protocol version observed on the request. |
 | `mcp_jsonrpc_method` | JSON-RPC method such as `initialize`, `tools.list`, or `tools.call`. |
@@ -301,17 +299,16 @@ When the request has an API-key fingerprint, `strict` keeps
 cached username becomes available. The fingerprint is a prefix of SHA-256, not
 part of the API key and not a credential. If no key fingerprint is available,
 an authenticated username is represented as `<h:sha256_prefix>` (the first 12
-hex characters of SHA-256). Segment keeps its existing `wandb_key:` pseudonym
-format for analytics continuity and applies the same pseudonymous-only rule at
-every privacy level.
+hex characters of SHA-256). Segment keeps the `wandb_key:` pseudonym format at
+`strict` and whenever no authenticated username is available.
 
 Hashing is deterministic and does not prevent correlation. Hashes of predictable
 values such as usernames can also be matched against candidate names. Do not
 describe either representation as anonymous or as a substitute for access and
 retention controls. The strict policy applies before canonical emission and is
-reapplied at the Datadog mapping. Segment independently enforces its
-pseudonymous-only identity policy so a direct sink call cannot expose a raw
-username.
+reapplied at the Datadog mapping. Segment accepts a plaintext username only
+with in-process authenticated provenance at `off`/`standard`; direct sink calls
+and all `strict` events remain pseudonymous.
 
 ## Managed serverless deployments
 
