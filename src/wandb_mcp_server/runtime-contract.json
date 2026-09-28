@@ -135,10 +135,10 @@
       "managed_workloads": [],
       "expected_tools": {"read-write": 23, "read-only": 21}
     },
-    "models-weave-agent-lens": {
-      "groups": ["models", "weave", "agent-lens"],
-      "managed_workloads": [],
-      "expected_tools": {"read-write": 31, "read-only": 29}
+    "models-weave-agents-agent-lens": {
+      "groups": ["models", "weave", "agents", "agent-lens"],
+      "managed_workloads": ["shared"],
+      "expected_tools": {"read-write": 39, "read-only": 37}
     }
   },
   "workload_profiles": {

@@ -9,11 +9,12 @@ and the `*_weave_agent_*` family.
 
 ## Enabling them
 
-The tools are absent from every managed profile and are not enabled by default.
-Select the profile and name the origin:
+The tools are not enabled by default. W&B-hosted operators may select the
+shared-only profile and name the reviewed origin:
 
 ```sh
-export WANDB_MCP_TOOL_PROFILE=models-weave-agent-lens
+export WANDB_MCP_TOOL_PROFILE=models-weave-agents-agent-lens
+export MCP_WORKLOAD_PROFILE=shared
 export AGENT_LENS_BASE_URL=https://<your-agent-lens-host>
 ```
 
@@ -23,8 +24,9 @@ clears, because both forward the caller's W&B credential to a non-W&B origin.
 The server refuses to start if the variable is missing or malformed, so a
 misconfiguration can never silently fall back to a different host.
 
-The profile is rejected on managed `shared` and `dedicated` workloads. It runs
-in `local` only.
+The profile is allowed on managed `shared` workloads and in local development.
+It is rejected on managed `dedicated` workloads. The default `models-weave`
+profile remains unchanged, and the endpoint alone never registers these tools.
 
 ## Authentication
 
@@ -42,7 +44,7 @@ request additionally carries the project in `X-Wandb-Entity` / `X-Wandb-Project`
 ## Read-only by construction
 
 All nine tools are declared `access: read` in the runtime contract, so the group
-is identical under `WANDB_MCP_ACCESS_MODE=read-only` (31 tools read-write, 29
+is identical under `WANDB_MCP_ACCESS_MODE=read-only` (39 tools read-write, 37
 read-only — the 2 dropped are models-group writes). Agent Lens mutations
 (creating tags, views, or alignment examples) are deliberately not exposed.
 
@@ -94,7 +96,9 @@ milliseconds, matching each endpoint's own contract.
 
 Oversized responses are trimmed to the token budget and annotated with
 `_truncation`, reporting the field trimmed and the original count so a partial
-answer is never mistaken for a complete one.
+answer is never mistaken for a complete one. Each download is also capped at
+4 MiB or the lower configured accumulated-byte limit before JSON decoding.
+Requests reject redirects and share the active MCP tool deadline.
 
 ## Errors
 
@@ -104,8 +108,9 @@ answer is never mistaken for a complete one.
 | `auth_required` | No W&B API key in context or environment |
 | `agent_lens_forbidden` | 401/403 — the key cannot read this project |
 | `agent_lens_unavailable` | 404 — origin does not expose the endpoint |
-| `agent_lens_invalid_request` | Rejected locally, or a 422 with the server's detail |
-| `agent_lens_query_failed` | Transport failure, unexpected status, or invalid JSON |
+| `agent_lens_invalid_request` | Rejected locally, or a 422 with a sanitized validation detail |
+| `agent_lens_query_failed` | Transport failure, unexpected status, malformed JSON, or oversized response |
+| `tool_timeout` | The request exhausted the current MCP tool deadline |
 
 429 and 503 are raised as retryable server-busy errors through the shared
 handler. Reads are never retried in-process; retrying belongs to the MCP caller.

@@ -16,22 +16,26 @@ in ``internal/api/project.go`` of github.com/wandb/agent-lens.
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import quote
 
 import requests
 
+from wandb_mcp_server.admission import current_tool_deadline
 from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.config import (
     AGENT_LENS_API_PREFIX,
+    MAX_ACCUMULATED_BYTES,
     MAX_RESPONSE_TOKENS,
     resolve_agent_lens_base_url,
     structured_error,
 )
+from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text
 from wandb_mcp_server.mcp_tools.tools_utils import get_no_retry_session, track_tool_execution
+from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.weave_api.processors import TraceProcessor
 
 logger = get_rich_logger(__name__)
 
@@ -53,6 +57,8 @@ def _category_examples_path(signature_type: str, category_id: str) -> str:
 
 
 _REQUEST_TIMEOUT_SECONDS = 30
+MAX_AGENT_LENS_RESPONSE_BYTES = 4 * 1024 * 1024
+_READ_CHUNK_BYTES = 64 * 1024
 
 # Agent Lens bounds every ranged Insights read to 30 days (insights.Window.Validate).
 # Rejecting locally turns a 422 round-trip into an actionable message.
@@ -72,6 +78,36 @@ def _drop_none(values: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in values.items() if v is not None}
 
 
+class _ResponseBoundaryError(ValueError):
+    """A bounded, externally safe Agent Lens response failure."""
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+def _compact_json(payload: Any) -> str:
+    return json.dumps(payload, default=str, ensure_ascii=False, separators=(",", ":"))
+
+
+def _response_tokens(payload: Any) -> int:
+    return count_tokens_conservative(_compact_json(payload))
+
+
+def _truncation_metadata(field: str, returned: int, original: int) -> Dict[str, Any]:
+    return {
+        "applied": True,
+        "field": field,
+        "returned": returned,
+        "original": original,
+        "note": (
+            f"Response truncated to fit the {MAX_RESPONSE_TOKENS}-token budget; dropped "
+            f"{original - returned} '{field}' item(s). Narrow with a tighter time range, a "
+            "smaller limit, or more specific filters."
+        ),
+    }
+
+
 def _truncate_response(payload: Any) -> Any:
     """Trim the response's primary list so the serialized payload fits the budget.
 
@@ -82,7 +118,7 @@ def _truncate_response(payload: Any) -> Any:
     """
     if not isinstance(payload, dict):
         return payload
-    if TraceProcessor.estimate_tokens(json.dumps(payload, default=str)) <= MAX_RESPONSE_TOKENS:
+    if _response_tokens(payload) <= MAX_RESPONSE_TOKENS:
         return payload
 
     data = payload.get("data")
@@ -91,36 +127,107 @@ def _truncate_response(payload: Any) -> Any:
     elif isinstance(data, dict) and isinstance(data.get("buckets"), list) and data["buckets"]:
         container, key = data, "buckets"
     else:
-        return payload  # nothing structural to trim
+        container = None
+        key = "data"
 
-    items = container[key]
-    original = len(items)
-    kept = list(items)
+    if container is not None:
+        items = container[key]
+        original = len(items)
+        kept = list(items)
 
-    def rebuilt(candidate: List[Any]) -> Dict[str, Any]:
-        if container is payload:
-            return {**payload, key: candidate}
-        return {**payload, "data": {**data, key: candidate}}
+        def rebuilt(candidate: List[Any]) -> Dict[str, Any]:
+            if container is payload:
+                result = {**payload, key: candidate}
+            else:
+                result = {**payload, "data": {**data, key: candidate}}
+            result["_truncation"] = _truncation_metadata(key, len(candidate), original)
+            return result
 
-    # Items vary in size, so re-measure and drop ~10% of the remainder (at least
-    # one) each pass. This converges quickly while overshooting as little as
-    # possible -- the same geometric shrink the Agents tools use.
-    while kept and TraceProcessor.estimate_tokens(json.dumps(rebuilt(kept), default=str)) > MAX_RESPONSE_TOKENS:
-        kept = kept[: -max(1, len(kept) // 10)]
+        # Include the notice during every measurement so the final serialized
+        # response, not just the retained upstream data, obeys the budget.
+        while kept and _response_tokens(rebuilt(kept)) > MAX_RESPONSE_TOKENS:
+            kept = kept[: -max(1, len(kept) // 10)]
 
-    result = rebuilt(kept)
-    result["_truncation"] = {
-        "applied": True,
-        "field": key,
-        "returned": len(kept),
-        "original": original,
-        "note": (
-            f"Response truncated to fit the {MAX_RESPONSE_TOKENS}-token budget; dropped "
-            f"{original - len(kept)} '{key}' item(s). Narrow with a tighter time range, a "
-            f"smaller limit, or more specific filters."
-        ),
+        result = rebuilt(kept)
+        if _response_tokens(result) <= MAX_RESPONSE_TOKENS:
+            return result
+
+    fallback: Dict[str, Any] = {
+        "error": "agent_lens_response_too_large",
+        "message": "The Agent Lens response exceeded the configured response budget.",
+        "_truncation": {"applied": True, "reason": "response_token_budget"},
     }
-    return result
+    if _response_tokens(fallback) <= MAX_RESPONSE_TOKENS:
+        return fallback
+    minimal = {"error": "agent_lens_response_too_large"}
+    return minimal if _response_tokens(minimal) <= MAX_RESPONSE_TOKENS else {}
+
+
+def _remaining_request_timeout() -> float:
+    """Bound the HTTP request by both its own cap and the active tool deadline."""
+    deadline = current_tool_deadline.get()
+    if deadline is None:
+        return float(_REQUEST_TIMEOUT_SECONDS)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Agent Lens tool deadline elapsed")
+    return max(0.001, min(float(_REQUEST_TIMEOUT_SECONDS), remaining))
+
+
+def _check_deadline() -> None:
+    deadline = current_tool_deadline.get()
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("Agent Lens tool deadline elapsed")
+
+
+def _bounded_response_bytes(response: Any) -> bytes:
+    """Read at most the reviewed byte cap before any JSON decoding occurs."""
+    byte_limit = min(MAX_AGENT_LENS_RESPONSE_BYTES, MAX_ACCUMULATED_BYTES)
+    encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
+    if encoding != "identity":
+        raise _ResponseBoundaryError("unsupported_encoding", "The Agent Lens API returned an invalid response.")
+
+    raw_length = response.headers.get("Content-Length")
+    expected_length: int | None = None
+    if raw_length is not None:
+        if not raw_length.isascii() or not raw_length.isdecimal():
+            raise _ResponseBoundaryError("invalid_length", "The Agent Lens API returned an invalid response.")
+        normalized = raw_length.lstrip("0") or "0"
+        if len(normalized) > len(str(byte_limit)) or int(normalized) > byte_limit:
+            raise _ResponseBoundaryError(
+                "response_too_large",
+                "The Agent Lens API response exceeded the download limit.",
+            )
+        expected_length = int(normalized)
+
+    raw = bytearray()
+    for chunk in response.iter_content(chunk_size=_READ_CHUNK_BYTES, decode_unicode=False):
+        _check_deadline()
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise _ResponseBoundaryError("malformed_response", "The Agent Lens API returned an invalid response.")
+        if len(raw) + len(chunk) > byte_limit:
+            raise _ResponseBoundaryError(
+                "response_too_large",
+                "The Agent Lens API response exceeded the download limit.",
+            )
+        raw.extend(chunk)
+    if expected_length is not None and len(raw) != expected_length:
+        raise _ResponseBoundaryError("inconsistent_length", "The Agent Lens API returned an invalid response.")
+    return bytes(raw)
+
+
+def _bounded_json_response(response: Any) -> Dict[str, Any]:
+    raw = _bounded_response_bytes(response)
+    _check_deadline()
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
+        raise _ResponseBoundaryError(
+            "malformed_response", "The Agent Lens API returned an invalid response."
+        ) from error
+    if not isinstance(payload, dict):
+        raise _ResponseBoundaryError("malformed_response", "The Agent Lens API returned an invalid response.")
+    return payload
 
 
 def _parse_timestamp(value: str, field: str) -> datetime:
@@ -193,6 +300,7 @@ def _agent_lens_request(
     url = f"{base_url}{AGENT_LENS_API_PREFIX}{path}"
     headers = {
         "Accept": "application/json",
+        "Accept-Encoding": "identity",
         "Authorization": f"Bearer {api_key}",
         "X-Wandb-Entity": entity_name,
         "X-Wandb-Project": project_name,
@@ -206,90 +314,111 @@ def _agent_lens_request(
         # Only the HTTP round-trip can raise here, so the try wraps just that;
         # the status-code branching below is plain control flow and stays outside.
         try:
+            request_timeout = _remaining_request_timeout()
             response = get_no_retry_session().request(
                 method,
                 url,
                 headers=headers,
                 params=params or None,
                 data=data,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
+                timeout=request_timeout,
+                allow_redirects=False,
+                stream=True,
+            )
+        except (TimeoutError, requests.Timeout):
+            ctx.mark_error("tool_timeout")
+            return _compact_json(
+                structured_error(
+                    "tool_timeout", "The Agent Lens request exceeded the MCP tool deadline.", retryable=True
+                )
             )
         except Exception as e:
             logger.error("Agent Lens request failed (%s)", type(e).__name__)
             ctx.mark_error(type(e).__name__)
-            return json.dumps(structured_error("agent_lens_query_failed", "The Agent Lens request failed."))
+            return _compact_json(structured_error("agent_lens_query_failed", "The Agent Lens request failed."))
 
-        if response.status_code in {401, 403}:
-            ctx.mark_error(f"http_{response.status_code}")
-            return json.dumps(
-                structured_error(
-                    "agent_lens_forbidden",
-                    "Agent Lens rejected the W&B API key for this project. Confirm the key can "
-                    f"read {entity_name}/{project_name} and that Agent Lens is enabled for it.",
-                    status_code=response.status_code,
-                )
-            )
-        if response.status_code == 404:
-            ctx.mark_error("agent_lens_unavailable")
-            return json.dumps(
-                structured_error(
-                    "agent_lens_unavailable",
-                    "The configured Agent Lens origin does not expose this endpoint (404); it may "
-                    "predate this API or have the feature disabled.",
-                    status_code=404,
-                )
-            )
-        if response.status_code == 422:
-            # Huma validation messages describe the caller's own arguments and
-            # contain no project data, so passing one through is worth more than
-            # a generic failure.
-            ctx.mark_error("http_422")
-            return json.dumps(
-                structured_error(
-                    "agent_lens_invalid_request",
-                    f"Agent Lens rejected the request arguments: {_detail(response)}",
-                    status_code=422,
-                )
-            )
-        if response.status_code != 200:
-            ctx.mark_error(f"http_{response.status_code}")
-            if response.status_code in {429, 503}:
-                overload = requests.HTTPError(
-                    f"Agent Lens returned HTTP {response.status_code}",
-                    response=response,
-                )
-                raise_for_wandb_server_busy(overload)
-            return json.dumps(
-                structured_error(
-                    "agent_lens_query_failed",
-                    f"The Agent Lens API returned HTTP {response.status_code}.",
-                    status_code=response.status_code,
-                )
-            )
-
-        # Parsing the body is the only other thing that can raise.
         try:
-            result = response.json()
-        except Exception as e:
-            logger.error("Agent Lens response was not valid JSON")
-            ctx.mark_error(type(e).__name__)
-            return json.dumps(
-                structured_error("agent_lens_query_failed", "The Agent Lens API returned an invalid response.")
+            _check_deadline()
+            if response.status_code in {401, 403}:
+                ctx.mark_error(f"http_{response.status_code}")
+                return _compact_json(
+                    structured_error(
+                        "agent_lens_forbidden",
+                        "Agent Lens rejected the W&B credential for this project. Confirm the credential has access "
+                        "and that Agent Lens is enabled for the project.",
+                        status_code=response.status_code,
+                    )
+                )
+            if response.status_code == 404:
+                ctx.mark_error("agent_lens_unavailable")
+                return _compact_json(
+                    structured_error(
+                        "agent_lens_unavailable",
+                        "The configured Agent Lens origin does not expose this endpoint (404); it may "
+                        "predate this API or have the feature disabled.",
+                        status_code=404,
+                    )
+                )
+            if response.status_code == 422:
+                ctx.mark_error("http_422")
+                try:
+                    validation_payload = _bounded_json_response(response)
+                    detail = _detail(validation_payload)
+                except _ResponseBoundaryError:
+                    detail = "the request did not satisfy the API schema"
+                return _compact_json(
+                    structured_error(
+                        "agent_lens_invalid_request",
+                        f"Agent Lens rejected the request arguments: {detail}",
+                        status_code=422,
+                    )
+                )
+            if response.status_code != 200:
+                ctx.mark_error(f"http_{response.status_code}")
+                if response.status_code in {429, 503}:
+                    overload = requests.HTTPError(
+                        f"Agent Lens returned HTTP {response.status_code}",
+                        response=response,
+                    )
+                    raise_for_wandb_server_busy(overload)
+                return _compact_json(
+                    structured_error(
+                        "agent_lens_query_failed",
+                        f"The Agent Lens API returned HTTP {response.status_code}.",
+                        status_code=response.status_code,
+                    )
+                )
+
+            try:
+                result = _bounded_json_response(response)
+            except _ResponseBoundaryError as error:
+                ctx.mark_error(error.reason)
+                return _compact_json(
+                    structured_error("agent_lens_query_failed", sanitize_sensitive_text(error, max_chars=512))
+                )
+        except TimeoutError:
+            ctx.mark_error("tool_timeout")
+            return _compact_json(
+                structured_error(
+                    "tool_timeout",
+                    "The Agent Lens request exceeded the MCP tool deadline.",
+                    retryable=True,
+                )
             )
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
 
-    return json.dumps(_truncate_response(result), default=str)
+    return _compact_json(_truncate_response(result))
 
 
-def _detail(response: Any) -> str:
-    """Pull Huma's validation detail, falling back to a bounded generic message."""
-    try:
-        payload = response.json()
-    except Exception:
-        return "the request did not satisfy the API schema"
-    if not isinstance(payload, dict):
-        return "the request did not satisfy the API schema"
+def _detail(payload: Dict[str, Any]) -> str:
+    """Pull a sanitized Huma validation detail from a bounded JSON object."""
     detail = payload.get("detail") or payload.get("title")
-    return str(detail)[:512] if detail else "the request did not satisfy the API schema"
+    if detail is None:
+        return "the request did not satisfy the API schema"
+    return sanitize_sensitive_text(detail, max_chars=512)
 
 
 def _invalid_argument(message: str) -> str:

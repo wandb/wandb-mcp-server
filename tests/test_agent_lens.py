@@ -8,11 +8,13 @@ github.com/wandb/agent-lens.
 """
 
 import json
+import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from wandb_mcp_server.admission import current_tool_deadline
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.mcp_tools import agent_lens as agent_lens_mod
 from wandb_mcp_server.mcp_tools.agent_lens import (
@@ -26,6 +28,7 @@ from wandb_mcp_server.mcp_tools.agent_lens import (
     list_matching_turns,
     list_tagged_conversations,
 )
+from wandb_mcp_server.trace_utils import count_tokens_conservative
 
 BASE_URL = "https://agent-lens.example.com"
 ENTITY = "acme"
@@ -34,15 +37,32 @@ WINDOW = {"start_at": "2026-09-01T00:00:00Z", "end_at": "2026-09-08T00:00:00Z"}
 
 
 class _FakeResponse:
-    def __init__(self, json_data, status_code=200):
+    def __init__(self, json_data, status_code=200, *, raw=None, headers=None, chunks=None):
         self._json = json_data
         self.status_code = status_code
-        self.headers = {}
+        self._raw = raw if raw is not None else json.dumps(json_data).encode("utf-8")
+        self._chunks = chunks
+        self.headers = dict(headers or {})
+        self.headers.setdefault(
+            "Content-Length", str(sum(len(chunk) for chunk in chunks) if chunks else len(self._raw))
+        )
+        self.closed = False
 
     def json(self):
         if self._json is None:
             raise json.JSONDecodeError("no json", "", 0)
         return self._json
+
+    def iter_content(self, chunk_size, decode_unicode=False):
+        del decode_unicode
+        if self._chunks is not None:
+            yield from self._chunks
+            return
+        for offset in range(0, len(self._raw), chunk_size):
+            yield self._raw[offset : offset + chunk_size]
+
+    def close(self):
+        self.closed = True
 
 
 class _FakeSession:
@@ -98,9 +118,12 @@ def test_get_requests_carry_bearer_auth_and_project_headers():
     assert call["url"] == f"{BASE_URL}/api/insights/latest-week"
     # Agent Lens parses a bearer token, not the trace server's basic auth.
     assert call["headers"]["Authorization"] == "Bearer test-key"
+    assert call["headers"]["Accept-Encoding"] == "identity"
     assert call["headers"]["X-Wandb-Entity"] == ENTITY
     assert call["headers"]["X-Wandb-Project"] == PROJECT
     assert call["data"] is None
+    assert call["allow_redirects"] is False
+    assert call["stream"] is True
     assert result["data"]["latest_week"] == "2026-09-14"
 
 
@@ -268,7 +291,8 @@ def test_rejected_credentials_map_to_a_forbidden_error(status):
         result = json.loads(get_insights_coverage(ENTITY, PROJECT))
     assert result["error"] == "agent_lens_forbidden"
     assert result["status_code"] == status
-    assert f"{ENTITY}/{PROJECT}" in result["message"]
+    assert ENTITY not in result["message"]
+    assert PROJECT not in result["message"]
 
 
 def test_404_reports_an_unavailable_endpoint():
@@ -282,6 +306,18 @@ def test_422_passes_through_the_validation_detail():
         result = json.loads(get_category_breakdowns(ENTITY, PROJECT, **WINDOW))
     assert result["error"] == "agent_lens_invalid_request"
     assert "end_at must be after start_at" in result["message"]
+
+
+def test_422_sanitizes_validation_detail():
+    with _mocked(
+        _FakeResponse(
+            {"detail": "authorization=Bearer test-key at service.svc.cluster.local"},
+            status_code=422,
+        )
+    ):
+        result = json.loads(get_category_breakdowns(ENTITY, PROJECT, **WINDOW))
+    assert "test-key" not in result["message"]
+    assert "service.svc" not in result["message"]
 
 
 def test_unexpected_status_maps_to_a_generic_failure():
@@ -299,9 +335,69 @@ def test_transport_failure_does_not_leak_the_exception_text():
 
 
 def test_invalid_json_body_maps_to_a_generic_failure():
-    with _mocked(_FakeResponse(None)):
+    with _mocked(_FakeResponse(None, raw=b"not-json")):
         result = json.loads(get_insights_coverage(ENTITY, PROJECT))
     assert result["error"] == "agent_lens_query_failed"
+
+
+def test_redirect_is_not_followed():
+    with _mocked(_FakeResponse({}, status_code=302, headers={"Location": "https://other.example"})) as session:
+        result = json.loads(get_insights_coverage(ENTITY, PROJECT))
+    assert len(session.calls) == 1
+    assert session.last["allow_redirects"] is False
+    assert result["error"] == "agent_lens_query_failed"
+    assert result["status_code"] == 302
+
+
+def test_response_is_bounded_before_json_decode(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(agent_lens_mod, "MAX_ACCUMULATED_BYTES", 64)
+    response = _FakeResponse({}, raw=b"{" + b"x" * 128, headers={"Content-Length": "129"})
+    response.json = MagicMock(side_effect=AssertionError("must not decode an oversized response"))
+    with _mocked(response):
+        result = json.loads(get_insights_coverage(ENTITY, PROJECT))
+    response.json.assert_not_called()
+    assert result["error"] == "agent_lens_query_failed"
+    assert "download limit" in result["message"]
+
+
+def test_chunked_response_is_bounded_before_json_decode(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(agent_lens_mod, "MAX_ACCUMULATED_BYTES", 64)
+    response = _FakeResponse({}, headers={}, chunks=[b"{" + b"x" * 40, b"y" * 40])
+    response.headers.pop("Content-Length")
+    with _mocked(response):
+        result = json.loads(get_insights_coverage(ENTITY, PROJECT))
+    assert result["error"] == "agent_lens_query_failed"
+    assert "download limit" in result["message"]
+
+
+def test_active_tool_deadline_bounds_request_timeout():
+    token = current_tool_deadline.set(time.monotonic() + 0.5)
+    try:
+        with _mocked(_ok({"latest_week": "2026-09-14"})) as session:
+            get_insights_coverage(ENTITY, PROJECT)
+    finally:
+        current_tool_deadline.reset(token)
+    assert 0 < session.last["timeout"] <= 0.5
+
+
+def test_expired_tool_deadline_stops_before_backend_request():
+    token = current_tool_deadline.set(time.monotonic() - 1)
+    try:
+        with _mocked(_ok({})) as session:
+            result = json.loads(get_insights_coverage(ENTITY, PROJECT))
+    finally:
+        current_tool_deadline.reset(token)
+    assert session.calls == []
+    assert result["error"] == "tool_timeout"
+
+
+def test_request_credentials_are_isolated_between_callers():
+    with _mocked(_ok({}), api_key="actor-one-key") as first:
+        get_insights_coverage(ENTITY, PROJECT)
+    with _mocked(_ok({}), api_key="actor-two-key") as second:
+        get_insights_coverage(ENTITY, PROJECT)
+    assert first.last["headers"]["Authorization"] == "Bearer actor-one-key"
+    assert second.last["headers"]["Authorization"] == "Bearer actor-two-key"
 
 
 # ----- truncation -----
@@ -315,6 +411,16 @@ def test_oversized_list_response_is_trimmed_and_annotated():
     assert result["_truncation"]["field"] == "data"
     assert result["_truncation"]["original"] == 4000
     assert 0 < len(result["data"]) < 4000
+
+
+def test_truncation_notice_is_included_in_final_token_budget(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(agent_lens_mod, "MAX_RESPONSE_TOKENS", 300)
+    rows = [{"conversation_id": f"c{i}", "trace_id": "t" * 100} for i in range(100)]
+    with _mocked(_ok(rows)):
+        serialized = list_matching_turns(ENTITY, PROJECT, **WINDOW, intent_category="billing")
+    result = json.loads(serialized)
+    assert result["_truncation"]["applied"] is True
+    assert count_tokens_conservative(serialized) <= 300
 
 
 def test_oversized_distribution_trims_the_nested_buckets():

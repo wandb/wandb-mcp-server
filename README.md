@@ -134,7 +134,7 @@ Recommended deployment presets:
 
 | Deployment | Settings |
 |---|---|
-| MT SaaS | `models-weave-agents`, `shared`, `read-write` (30 tools) |
+| MT SaaS with Agent Lens | `models-weave-agents-agent-lens`, `shared`, `read-write` (39 tools) |
 | Dedicated Models-only | `models-only`, `dedicated`, `read-write` (17 tools) |
 | Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (22 tools) |
 | Local extra GraphQL tool | `models-weave-graphql-compat`, `local`; choose either access mode |
@@ -172,8 +172,8 @@ caller-supplied GraphQL, and is part of every supported managed tool profile.
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
 
 These tools are present in the explicit `models-weave-agents` and
-`models-weave-agents-aria` profiles. MT SaaS uses the former; Dedicated v0.4
-rejects both profiles.
+`models-weave-agents-aria` profiles, and are also retained in the hosted
+`models-weave-agents-agent-lens` profile. Dedicated v0.4 rejects all three.
 
 | Tool | Description | Example Query |
 |------|-------------|---------------|
@@ -210,6 +210,12 @@ absolute HTTPS origin. Endpoint presence alone never enables the tools.
 two polling tools. Shared and Dedicated managed profiles reject ARIA.
 
 **ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
+
+**Agent Lens is explicit and hosted-only in managed v0.4.2:** W&B-hosted
+deployments may select `models-weave-agents-agent-lens` with the `shared`
+workload and an operator-reviewed `AGENT_LENS_BASE_URL`. The default
+`models-weave` profile and both Dedicated profiles omit these tools, and merely
+setting the endpoint never enables them. See the [Agent Lens tool guide](docs/agent-lens-tools.md).
 
 **Registry organization resolution:** Registry tools use the authenticated
 request's W&B client when `organization` is omitted. A single accessible
@@ -702,7 +708,7 @@ Exact tool profiles:
 | `models-weave-agents` | models, weave, agents | shared | 30 | 28 |
 | `models-weave-agents-aria` | models, weave, agents, aria | local only | 33 | 30 |
 | `models-weave-graphql-compat` | models, weave, raw-graphql | local only | 23 | 21 |
-| `models-weave-agent-lens` | models, weave, agent-lens | local only | 31 | 29 |
+| `models-weave-agents-agent-lens` | models, weave, agents, agent-lens | shared | 39 | 37 |
 
 Exact workload defaults:
 
@@ -720,7 +726,7 @@ Exact capacity classes:
 | `medium` | 4 | 8 | 8 | 8 |
 | `large` | 8 | 16 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:80f8a3b0c37fe58895d88e40b5f7236dfab1a83af1cef3d889e6b5e4a9b1cb37`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:8d0d10169eeba5d312e857f41d2647b0e7c9cb03ce8d211ee70c8625babc986e`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line
