@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import quote
+from uuid import UUID
 
 import requests
 
@@ -47,8 +48,8 @@ logger = get_rich_logger(__name__)
 LATEST_WEEK_PATH = "/insights/latest-week"
 CLUSTERING_STATUS_PATH = "/insights/clustering-status"
 CATEGORY_BREAKDOWNS_PATH = "/insights/intent-category-breakdowns"
-MATCHING_TURNS_PATH = "/insights/matching-turns"
-CONVERSATION_TAG_NAMES_PATH = "/conversation-tags"
+FAILURE_ATTRIBUTIONS_PATH = "/insights/failure-attributions/query"
+TAGS_PATH = "/tags"
 CONVERSATION_TAGS_QUERY_PATH = "/conversation-tags/query"
 TAGGED_CONVERSATIONS_PATH = "/conversation-tags/conversations/query"
 TAG_DISTRIBUTION_PATH = "/conversation-tags/distribution"
@@ -72,8 +73,9 @@ MAX_INSIGHTS_WINDOW_DAYS = 30
 # Server-enforced request bounds, mirrored here so an oversized argument fails
 # with a usable message instead of a generic 422.
 MAX_CONVERSATION_IDS = 5000
-MAX_TAG_FILTERS = 100
-MAX_CLUSTER_IDS = 20
+MAX_TAG_IDS = 100
+MAX_TOPIC_IDS = 20
+MAX_TRACE_IDS = 500
 MAX_EXAMPLE_LIMIT = 50
 MAX_TIME_BUCKET_SECONDS = 86400
 
@@ -351,6 +353,15 @@ def _bounded_list(values: Sequence[str], maximum: int, field: str) -> List[str]:
     return items
 
 
+def _bounded_uuid_list(values: Sequence[str], maximum: int, field: str) -> List[str]:
+    """Validate opaque UUID identifiers without echoing a rejected value."""
+    items = _bounded_list(values, maximum, field)
+    try:
+        return [str(UUID(item)) for item in items]
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(f"{field} must contain only UUIDs") from None
+
+
 def _agent_lens_request(
     tool_name: str,
     method: str,
@@ -594,7 +605,7 @@ def list_category_example_turns(
     category_id: str,
     start_at: str,
     end_at: str,
-    cluster_ids: Optional[List[str]] = None,
+    topic_ids: Optional[List[str]] = None,
     limit: int = 10,
     cursor: Optional[str] = None,
 ) -> str:
@@ -607,8 +618,8 @@ def list_category_example_turns(
         return _invalid_argument(f"limit must be between 1 and {MAX_EXAMPLE_LIMIT}")
     try:
         params: Dict[str, Any] = dict(_validated_window(start_at, end_at))
-        if cluster_ids:
-            params["cluster_ids[]"] = _bounded_list(cluster_ids, MAX_CLUSTER_IDS, "cluster_ids")
+        if topic_ids:
+            params["topic_ids[]"] = _bounded_list(topic_ids, MAX_TOPIC_IDS, "topic_ids")
     except ValueError as error:
         return _invalid_argument(str(error))
     params["limit"] = limit
@@ -629,54 +640,29 @@ def list_category_example_turns(
     )
 
 
-def list_matching_turns(
-    entity_name: str,
-    project_name: str,
-    start_at: str,
-    end_at: str,
-    intent_category: Optional[str] = None,
-    failure_category: Optional[str] = None,
-    cluster_id: Optional[str] = None,
-    cluster_kind: Optional[str] = None,
-) -> str:
-    """List turns matching a category or cluster, with failure attribution."""
-    if cluster_kind is not None and cluster_kind not in {"intent", "failure"}:
-        return _invalid_argument('cluster_kind must be "intent" or "failure"')
-    if bool(cluster_id) != bool(cluster_kind):
-        return _invalid_argument("cluster_id and cluster_kind must be supplied together")
-    if not any((intent_category, failure_category)):
-        return _invalid_argument("Provide at least one of intent_category or failure_category")
+def get_failure_attributions(entity_name: str, project_name: str, trace_ids: List[str]) -> str:
+    """Return Agent Lens failure attribution for the requested trace IDs."""
     try:
-        params: Dict[str, Any] = dict(_validated_window(start_at, end_at))
+        ids = _bounded_list(trace_ids, MAX_TRACE_IDS, "trace_ids")
     except ValueError as error:
         return _invalid_argument(str(error))
-    params.update(
-        _drop_none(
-            {
-                "intent_category": intent_category,
-                "failure_category": failure_category,
-                "cluster_id": cluster_id,
-                "cluster_kind": cluster_kind,
-            }
-        )
-    )
     return _agent_lens_request(
-        "list_matching_turns",
-        "GET",
-        MATCHING_TURNS_PATH,
+        "get_failure_attributions",
+        "POST",
+        FAILURE_ATTRIBUTIONS_PATH,
         entity_name,
         project_name,
-        {"entity_name": entity_name, "project_name": project_name},
-        params=params,
+        {"entity_name": entity_name, "project_name": project_name, "trace_count": len(ids)},
+        body={"trace_ids": ids},
     )
 
 
-def list_conversation_tag_names(entity_name: str, project_name: str) -> str:
-    """List every conversation tag name in use in the project."""
+def list_tags(entity_name: str, project_name: str) -> str:
+    """List the Agent Lens tag catalog for the project."""
     return _agent_lens_request(
-        "list_conversation_tag_names",
+        "list_tags",
         "GET",
-        CONVERSATION_TAG_NAMES_PATH,
+        TAGS_PATH,
         entity_name,
         project_name,
         {"entity_name": entity_name, "project_name": project_name},
@@ -704,10 +690,10 @@ def get_conversation_tags(entity_name: str, project_name: str, conversation_ids:
     )
 
 
-def list_tagged_conversations(entity_name: str, project_name: str, tags: List[str]) -> str:
-    """List conversation IDs carrying any of the given tags."""
+def list_tagged_conversations(entity_name: str, project_name: str, tag_ids: List[str]) -> str:
+    """List conversation IDs carrying any of the given tag IDs."""
     try:
-        names = _bounded_list(tags, MAX_TAG_FILTERS, "tags")
+        ids = _bounded_uuid_list(tag_ids, MAX_TAG_IDS, "tag_ids")
     except ValueError as error:
         return _invalid_argument(str(error))
     return _agent_lens_request(
@@ -716,8 +702,8 @@ def list_tagged_conversations(entity_name: str, project_name: str, tags: List[st
         TAGGED_CONVERSATIONS_PATH,
         entity_name,
         project_name,
-        {"entity_name": entity_name, "project_name": project_name, "tag_count": len(names)},
-        body={"tags": names},
+        {"entity_name": entity_name, "project_name": project_name, "tag_count": len(ids)},
+        body={"tag_ids": ids},
     )
 
 
@@ -814,7 +800,8 @@ breakdowns beneath each category and failure-severity counts.
 
 Start from get_agent_lens_insights_coverage_tool to pick a populated range. To
 see the individual turns behind any number here, follow up with
-list_agent_lens_matching_turns_tool or list_agent_lens_category_example_turns_tool.
+list_agent_lens_category_example_turns_tool, then pass returned trace IDs to
+get_agent_lens_failure_attributions_tool when failure detail is needed.
 </when_to_use>
 
 <reading_the_response>
@@ -828,8 +815,8 @@ expected returns zero rows rather than an error:
   "no_failure" for turns that succeeded. Use these as `failure_category`, or
   with `signature_type="failure"`. "no_failure" is a count, not a drillable
   category.
-- `cluster_breakdowns[].id` is a cluster UUID, not a category. Pass it as
-  `cluster_id` together with the `cluster_kind` naming its family.
+- `cluster_breakdowns[].id` is a topic identifier, not a category. Pass one or
+  more of these as `topic_ids` to the example-turn tool.
 </reading_the_response>
 
 Parameters
@@ -874,8 +861,8 @@ signature_type : str
 category_id : str
     The category identifier from get_agent_lens_category_breakdowns_tool.
 {_WINDOW_PARAMS}
-cluster_ids : list[str], optional
-    Restrict to specific clusters within the category (at most {MAX_CLUSTER_IDS}).
+topic_ids : list[str], optional
+    Restrict to specific topics within the category (at most {MAX_TOPIC_IDS}).
 limit : int, optional
     Turns per page, 1-{MAX_EXAMPLE_LIMIT} (default 10).
 cursor : str, optional
@@ -889,18 +876,13 @@ JSON with bounded example-turn metadata, including "conversation_id" and
 """
 
 
-LIST_MATCHING_TURNS_TOOL_DESCRIPTION = f"""List Agent Lens turns matching a category or cluster, with failure attribution.
+GET_FAILURE_ATTRIBUTIONS_TOOL_DESCRIPTION = f"""Fetch Agent Lens failure attribution for specific traces.
 
 <when_to_use>
-Use when you need the failure detail per turn, not just identifiers: each turn
-carries "failure_signature", "failure_reason", "failure_severity" and
-"failure_evidence_span_ids" (ordered most-important-first), which is what makes
-this the right tool for "why did these turns fail?".
-
-Provide at least one of `intent_category` or `failure_category`. `cluster_id`
-and `cluster_kind` are an optional refinement and must be supplied together.
-Prefer
-list_agent_lens_category_example_turns_tool when you only need paged identifiers.
+Use after list_agent_lens_category_example_turns_tool (or another trusted source
+of trace IDs) when you need the failure reason, severity, and evidence spans for
+those exact turns. This endpoint does not search by category; discover the
+relevant trace IDs first and keep the request bounded.
 </when_to_use>
 
 Parameters
@@ -909,33 +891,22 @@ entity_name : str
     The W&B entity (team or username).
 project_name : str
     The W&B project name.
-{_WINDOW_PARAMS}
-intent_category : str, optional
-    Restrict to one intent category -- a top-level `category` from
-    get_agent_lens_category_breakdowns_tool.
-failure_category : str, optional
-    Restrict to one failure category -- a `counts[].category` or
-    `failure_breakdowns[].category`. These two families are not
-    interchangeable; the wrong one returns zero rows rather than an error.
-cluster_id : str, optional
-    Refine the selected category to one cluster; requires `cluster_kind`.
-cluster_kind : str, optional
-    "intent" or "failure" -- which family `cluster_id` belongs to; requires
-    `cluster_id`.
+trace_ids : list[str]
+    1-{MAX_TRACE_IDS} trace identifiers.
 
 Returns
 -------
-JSON with {{"data": [MatchingTurn]}}, each holding "conversation_id",
-"trace_id", "intent_signature", "started_at" and the failure attribution fields.
+JSON with {{"data": [TurnFailureAttribution]}}, each holding "trace_id",
+"failure_reason", "failure_severity", and "failure_evidence_span_ids".
 """
 
 
-LIST_CONVERSATION_TAG_NAMES_TOOL_DESCRIPTION = """List every Agent Lens conversation tag name used in a project.
+LIST_TAGS_TOOL_DESCRIPTION = """List the Agent Lens tag catalog for a project.
 
 <when_to_use>
-Call this before filtering by tag. Tag names are project-defined free text, so
-guessing one usually returns nothing; this is the only way to learn the exact
-spellings that list_agent_lens_tagged_conversations_tool will match.
+Call this before filtering by tag. Tags are project-defined and the filtering
+endpoint accepts tag IDs, not names. Use the returned ID with
+list_agent_lens_tagged_conversations_tool.
 </when_to_use>
 
 Parameters
@@ -947,7 +918,8 @@ project_name : str
 
 Returns
 -------
-JSON with {"data": [str]} -- the distinct tag names.
+JSON with {"data": [Tag]}, including each tag's "id", "name", criteria,
+display color, agent filters, judge status, and timestamps.
 """
 
 
@@ -983,8 +955,8 @@ LIST_TAGGED_CONVERSATIONS_TOOL_DESCRIPTION = f"""List Agent Lens conversation ID
 
 <when_to_use>
 Use to go from tag to conversations -- "which conversations were tagged
-escalated?". Matching is OR across the supplied tags. Get exact tag spellings
-from list_agent_lens_conversation_tag_names_tool first, then pass the returned
+escalated?". Matching is OR across the supplied tag IDs. Get IDs from
+list_agent_lens_tags_tool first, then pass the returned conversation
 IDs to get_agent_lens_conversation_tags_tool for provenance or to the Weave
 trace tools for content.
 </when_to_use>
@@ -995,8 +967,8 @@ entity_name : str
     The W&B entity (team or username).
 project_name : str
     The W&B project name.
-tags : list[str]
-    1-{MAX_TAG_FILTERS} tag names; a conversation matches if it carries any.
+tag_ids : list[str]
+    1-{MAX_TAG_IDS} tag UUIDs; a conversation matches if it carries any.
 
 Returns
 -------

@@ -168,8 +168,8 @@ def resolve_aria_base_url(fallback: str | None = None) -> str:
 
 
 # Agent Lens origin. Unlike the services above there is deliberately no default:
-# Agent Lens is deployed per-environment and its tools are absent from every
-# managed profile, so an operator must name the origin to enable them at all.
+# its tools are absent from the default profile and require an explicitly
+# selected shared profile, so an operator must name the reviewed origin.
 AGENT_LENS_BASE_URL: str = (os.getenv("AGENT_LENS_BASE_URL") or "").strip().rstrip("/")
 
 # Agent Lens mounts its Huma API under /api; the origin above is the bare host.

@@ -25,11 +25,11 @@ from wandb_mcp_server.mcp_tools.agent_lens import (
     get_category_breakdowns,
     get_clustering_status,
     get_conversation_tags,
+    get_failure_attributions,
     get_insights_coverage,
     get_tag_distribution,
     list_category_example_turns,
-    list_conversation_tag_names,
-    list_matching_turns,
+    list_tags,
     list_tagged_conversations,
 )
 from wandb_mcp_server.trace_utils import count_tokens_conservative
@@ -176,10 +176,10 @@ def test_example_turns_percent_encodes_the_category_in_the_path():
     assert session.last["params"]["limit"] == 25
 
 
-def test_example_turns_sends_cluster_ids_under_the_repeated_key():
+def test_example_turns_sends_topic_ids_under_the_repeated_key():
     with _mocked(_FakeResponse({"data": [], "next_cursor": None})) as session:
-        list_category_example_turns(ENTITY, PROJECT, "intent", "billing", **WINDOW, cluster_ids=["c1", "c2"])
-    assert session.last["params"]["cluster_ids[]"] == ["c1", "c2"]
+        list_category_example_turns(ENTITY, PROJECT, "intent", "billing", **WINDOW, topic_ids=["t1", "t2"])
+    assert session.last["params"]["topic_ids[]"] == ["t1", "t2"]
 
 
 def test_example_turns_remove_message_bodies_but_keep_reviewed_metadata():
@@ -227,9 +227,10 @@ def test_post_reads_send_a_json_body():
 
 
 def test_tagged_conversations_sends_the_tag_filter():
+    tag_ids = ["30201f95-1221-433a-9ea5-1e513081962f"]
     with _mocked(_ok(["conv-1"])) as session:
-        list_tagged_conversations(ENTITY, PROJECT, ["escalated"])
-    assert json.loads(session.last["data"]) == {"tags": ["escalated"]}
+        list_tagged_conversations(ENTITY, PROJECT, tag_ids)
+    assert json.loads(session.last["data"]) == {"tag_ids": tag_ids}
 
 
 def test_tag_distribution_sends_epoch_bounds_and_bucket_width():
@@ -242,20 +243,20 @@ def test_tag_distribution_sends_epoch_bounds_and_bucket_width():
     }
 
 
-def test_tag_names_is_a_get_without_a_body():
-    with _mocked(_ok(["escalated", "resolved"])) as session:
-        list_conversation_tag_names(ENTITY, PROJECT)
+def test_tags_catalog_is_a_get_without_a_body():
+    with _mocked(_ok([{"id": "30201f95-1221-433a-9ea5-1e513081962f", "name": "escalated"}])) as session:
+        list_tags(ENTITY, PROJECT)
     assert session.last["method"] == "GET"
+    assert session.last["url"] == f"{BASE_URL}/api/tags"
     assert session.last["data"] is None
 
 
-def test_matching_turns_drops_unset_filters():
+def test_failure_attributions_posts_trace_ids():
     with _mocked(_ok([])) as session:
-        list_matching_turns(ENTITY, PROJECT, **WINDOW, intent_category="billing")
-    params = session.last["params"]
-    assert params["intent_category"] == "billing"
-    assert "failure_category" not in params
-    assert "cluster_id" not in params
+        get_failure_attributions(ENTITY, PROJECT, ["trace-1", "trace-2"])
+    assert session.last["method"] == "POST"
+    assert session.last["url"] == f"{BASE_URL}/api/insights/failure-attributions/query"
+    assert json.loads(session.last["data"]) == {"trace_ids": ["trace-1", "trace-2"]}
 
 
 # ----- local argument validation -----
@@ -278,47 +279,25 @@ def test_invalid_windows_are_rejected_without_a_request(start_at, end_at, expect
     assert expected in result["message"]
 
 
-def test_matching_turns_requires_at_least_one_filter():
+def test_failure_attributions_requires_a_trace_id():
     with _mocked(_ok([])) as session:
-        result = json.loads(list_matching_turns(ENTITY, PROJECT, **WINDOW))
+        result = json.loads(get_failure_attributions(ENTITY, PROJECT, []))
     assert session.calls == []
-    assert "at least one of" in result["message"]
+    assert "at least one value" in result["message"]
 
 
-def test_cluster_id_requires_its_kind():
+def test_failure_attributions_limits_trace_ids_to_500():
     with _mocked(_ok([])) as session:
-        result = json.loads(list_matching_turns(ENTITY, PROJECT, **WINDOW, cluster_id="c1"))
+        result = json.loads(get_failure_attributions(ENTITY, PROJECT, [f"trace-{index}" for index in range(501)]))
     assert session.calls == []
-    assert "must be supplied together" in result["message"]
+    assert "at most 500" in result["message"]
 
 
-def test_cluster_kind_requires_its_id():
+def test_tagged_conversations_rejects_non_uuid_tag_ids():
     with _mocked(_ok([])) as session:
-        result = json.loads(list_matching_turns(ENTITY, PROJECT, **WINDOW, cluster_kind="intent"))
+        result = json.loads(list_tagged_conversations(ENTITY, PROJECT, ["escalated"]))
     assert session.calls == []
-    assert "must be supplied together" in result["message"]
-
-
-def test_cluster_pair_is_only_a_category_refinement():
-    with _mocked(_ok([])) as session:
-        result = json.loads(list_matching_turns(ENTITY, PROJECT, **WINDOW, cluster_id="c1", cluster_kind="intent"))
-    assert session.calls == []
-    assert "intent_category or failure_category" in result["message"]
-
-
-def test_category_can_be_refined_by_a_cluster_pair():
-    with _mocked(_ok([])) as session:
-        list_matching_turns(
-            ENTITY,
-            PROJECT,
-            **WINDOW,
-            intent_category="billing",
-            cluster_id="c1",
-            cluster_kind="intent",
-        )
-    assert session.last["params"]["intent_category"] == "billing"
-    assert session.last["params"]["cluster_id"] == "c1"
-    assert session.last["params"]["cluster_kind"] == "intent"
+    assert "UUID" in result["message"]
 
 
 def test_signature_type_is_constrained_to_the_server_enum():
@@ -585,7 +564,7 @@ def test_request_credentials_are_isolated_between_callers():
 def test_oversized_list_response_is_trimmed_and_annotated():
     rows = [{"conversation_id": f"c{i}", "trace_id": "t" * 200} for i in range(4000)]
     with _mocked(_ok(rows)):
-        result = json.loads(list_matching_turns(ENTITY, PROJECT, **WINDOW, intent_category="billing"))
+        result = json.loads(list_tags(ENTITY, PROJECT))
     assert result["_truncation"]["applied"] is True
     assert result["_truncation"]["field"] == "data"
     assert result["_truncation"]["original"] == 4000
@@ -596,7 +575,7 @@ def test_truncation_notice_is_included_in_final_token_budget(monkeypatch: pytest
     monkeypatch.setattr(agent_lens_mod, "MAX_RESPONSE_TOKENS", 300)
     rows = [{"conversation_id": f"c{i}", "trace_id": "t" * 100} for i in range(100)]
     with _mocked(_ok(rows)):
-        serialized = list_matching_turns(ENTITY, PROJECT, **WINDOW, intent_category="billing")
+        serialized = list_tags(ENTITY, PROJECT)
     result = json.loads(serialized)
     assert result["_truncation"]["applied"] is True
     assert count_tokens_conservative(serialized) <= 300
@@ -636,9 +615,10 @@ def test_oversized_distribution_trims_the_nested_buckets():
 
 
 def test_small_response_is_returned_untouched():
-    with _mocked(_ok(["escalated"])):
-        result = json.loads(list_conversation_tag_names(ENTITY, PROJECT))
-    assert result == {"data": ["escalated"]}
+    tag = {"id": "30201f95-1221-433a-9ea5-1e513081962f", "name": "escalated"}
+    with _mocked(_ok([tag])):
+        result = json.loads(list_tags(ENTITY, PROJECT))
+    assert result == {"data": [tag]}
 
 
 # ----- live-smoke qualification harness -----
@@ -654,11 +634,18 @@ def _run_smoke_with_fixtures(
         "get_clustering_status": [{"signature_type": "intent"}],
         "get_category_breakdowns": [{"category": "action_request", "failure_breakdowns": []}],
         "list_category_example_turns": [{"conversation_id": "conv-1", "trace_id": "trace-1"}],
-        "list_matching_turns": [{"conversation_id": "conv-1", "trace_id": "trace-1"}],
-        "list_conversation_tag_names": ["reviewed"],
-        "get_conversation_tags": [{"conversation_id": "conv-1", "tag": "reviewed"}],
+        "get_failure_attributions": [{"trace_id": "trace-1", "failure_reason": "bad answer"}],
+        "list_tags": [{"id": "30201f95-1221-433a-9ea5-1e513081962f", "name": "reviewed"}],
+        "get_conversation_tags": [
+            {
+                "conversation_id": "conv-1",
+                "trace_id": "trace-1",
+                "tag_id": "30201f95-1221-433a-9ea5-1e513081962f",
+                "tag": "reviewed",
+            }
+        ],
         "list_tagged_conversations": ["conv-1"],
-        "get_tag_distribution": {"buckets": [{"tag_counts": {"reviewed": 1}}]},
+        "get_tag_distribution": {"buckets": [{"tag_counts": {"30201f95-1221-433a-9ea5-1e513081962f": 1}}]},
     }
     calls: list[str] = []
 
@@ -672,6 +659,31 @@ def _run_smoke_with_fixtures(
 
     for name in responses:
         monkeypatch.setattr(agent_lens_smoke, name, fake(name))
+
+    def exact_example_turns(
+        entity_name,
+        project_name,
+        signature_type,
+        category_id,
+        start_at,
+        end_at,
+        topic_ids=None,
+        limit=10,
+        cursor=None,
+    ):
+        assert (entity_name, project_name) == (ENTITY, PROJECT)
+        assert (signature_type, category_id) == ("intent", "action_request")
+        assert (start_at, end_at) == (WINDOW["start_at"], WINDOW["end_at"])
+        assert topic_ids == ["topic-1"]
+        assert limit == 5
+        assert cursor is None
+        calls.append("list_category_example_turns")
+        data = [] if empty_tool == "list_category_example_turns" else responses["list_category_example_turns"]
+        return json.dumps({"data": data})
+
+    # Preserve this signature in the harness test so a positional-argument
+    # regression cannot be hidden by the generic fake's *args/**kwargs.
+    monkeypatch.setattr(agent_lens_smoke, "list_category_example_turns", exact_example_turns)
     monkeypatch.setattr(agent_lens_smoke, "_seed_api_key", lambda: "test-key")
     monkeypatch.setenv("AGENT_LENS_BASE_URL", BASE_URL)
     monkeypatch.setattr(
@@ -691,6 +703,12 @@ def _run_smoke_with_fixtures(
             "intent",
             "--category-id",
             "action_request",
+            "--topic-id",
+            "topic-1",
+            "--trace-id",
+            "trace-1",
+            "--tag-id",
+            "30201f95-1221-433a-9ea5-1e513081962f",
             "--tag-name",
             "reviewed",
             "--conversation-id",

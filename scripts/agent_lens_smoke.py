@@ -14,6 +14,8 @@ Usage:
         --entity acme --project support-bot \\
         --start-at 2026-09-01T00:00:00Z --end-at 2026-09-08T00:00:00Z \\
         --signature-type intent --category-id action_request \\
+        --topic-id topic-123 --trace-id trace-123 \\
+        --tag-id 30201f95-1221-433a-9ea5-1e513081962f \\
         --tag-name reviewed --conversation-id conv-123
 
 The fixture arguments must identify populated, approved test data. The script
@@ -29,17 +31,18 @@ import json
 import os
 import sys
 from typing import Any, Callable
+from uuid import UUID
 
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.mcp_tools.agent_lens import (
     get_category_breakdowns,
     get_clustering_status,
     get_conversation_tags,
+    get_failure_attributions,
     get_insights_coverage,
     get_tag_distribution,
     list_category_example_turns,
-    list_conversation_tag_names,
-    list_matching_turns,
+    list_tags,
     list_tagged_conversations,
 )
 from wandb_mcp_server.utils import get_server_args
@@ -129,24 +132,35 @@ def _category_present(value: Any, signature_type: str, category_id: str) -> bool
     )
 
 
-def _conversation_tag_present(value: Any, conversation_id: str, tag_name: str) -> bool:
+def _conversation_tag_present(value: Any, conversation_id: str, tag_id: str, tag_name: str) -> bool:
     return isinstance(value, list) and any(
-        isinstance(item, dict) and item.get("conversation_id") == conversation_id and item.get("tag") == tag_name
+        isinstance(item, dict)
+        and item.get("conversation_id") == conversation_id
+        and item.get("tag_id") == tag_id
+        and item.get("tag") == tag_name
         for item in value
     )
 
 
-def _distribution_has_tag(value: Any, tag_name: str) -> bool:
+def _distribution_has_tag(value: Any, tag_id: str) -> bool:
     if not isinstance(value, dict) or not isinstance(value.get("buckets"), list):
         return False
     return any(
-        isinstance(bucket, dict) and isinstance(bucket.get("tag_counts"), dict) and tag_name in bucket["tag_counts"]
+        isinstance(bucket, dict) and isinstance(bucket.get("tag_counts"), dict) and tag_id in bucket["tag_counts"]
         for bucket in value["buckets"]
     )
 
 
-def _tag_name_present(value: Any, tag_name: str) -> bool:
-    return isinstance(value, list) and tag_name in value
+def _tag_present(value: Any, tag_id: str, tag_name: str) -> bool:
+    return isinstance(value, list) and any(
+        isinstance(item, dict) and item.get("id") == tag_id and item.get("name") == tag_name for item in value
+    )
+
+
+def _trace_present(value: Any, trace_id: str) -> bool:
+    return isinstance(value, list) and any(
+        isinstance(item, dict) and item.get("trace_id") == trace_id for item in value
+    )
 
 
 def _conversation_present(value: Any, conversation_id: str) -> bool:
@@ -166,6 +180,9 @@ def main() -> int:
         help="Category family for the qualified category fixture",
     )
     parser.add_argument("--category-id", required=True, help="Qualified category in the selected family")
+    parser.add_argument("--topic-id", required=True, help="Qualified topic ID refining the category fixture")
+    parser.add_argument("--trace-id", required=True, help="Qualified trace with failure-attribution data")
+    parser.add_argument("--tag-id", required=True, help="UUID of the qualified conversation-tag fixture")
     parser.add_argument("--tag-name", required=True, help="Qualified conversation-tag fixture")
     parser.add_argument("--conversation-id", required=True, help="Qualified conversation carrying that tag")
     parser.add_argument("--verbose", action="store_true", help="Print each full response")
@@ -183,9 +200,21 @@ def main() -> int:
     if end <= start or (end - start).total_seconds() > 30 * 24 * 60 * 60:
         print("The fixture window must be nonempty and no longer than 30 days.", file=sys.stderr)
         return 2
-    fixture_values = (args.category_id, args.tag_name, args.conversation_id)
+    fixture_values = (
+        args.category_id,
+        args.topic_id,
+        args.trace_id,
+        args.tag_id,
+        args.tag_name,
+        args.conversation_id,
+    )
     if any(not value.strip() for value in fixture_values):
-        print("Category, tag, and conversation fixtures must be nonempty.", file=sys.stderr)
+        print("Category, topic, trace, tag, and conversation fixtures must be nonempty.", file=sys.stderr)
+        return 2
+    try:
+        UUID(args.tag_id)
+    except ValueError:
+        print("--tag-id must be a UUID.", file=sys.stderr)
         return 2
     if not _seed_api_key():
         print("No W&B API key found in WANDB_API_KEY, .netrc, or .env.", file=sys.stderr)
@@ -193,8 +222,6 @@ def main() -> int:
 
     entity, project = args.entity, args.project
     window = {"start_at": args.start_at, "end_at": args.end_at}
-    filter_name = "intent_category" if args.signature_type == "intent" else "failure_category"
-
     print("Agent Lens smoke: exercising nine read endpoints against approved fixtures")
 
     results: list[bool] = []
@@ -233,28 +260,29 @@ def main() -> int:
                 args.signature_type,
                 args.category_id,
                 **window,
+                topic_ids=[args.topic_id],
                 limit=5,
             ),
             args.verbose,
-            qualifies=_nonempty_list,
+            qualifies=lambda data: _trace_present(data, args.trace_id),
         )[0]
     )
     results.append(
         _run(
-            "matching turns",
-            lambda: list_matching_turns(entity, project, **window, **{filter_name: args.category_id}),
+            "failure attributions",
+            lambda: get_failure_attributions(entity, project, [args.trace_id]),
             args.verbose,
-            qualifies=_nonempty_list,
+            qualifies=lambda data: _trace_present(data, args.trace_id),
         )[0]
     )
 
     print("\nConversation tags")
     results.append(
         _run(
-            "tag names",
-            lambda: list_conversation_tag_names(entity, project),
+            "tag catalog",
+            lambda: list_tags(entity, project),
             args.verbose,
-            qualifies=lambda data: _tag_name_present(data, args.tag_name),
+            qualifies=lambda data: _tag_present(data, args.tag_id, args.tag_name),
         )[0]
     )
     results.append(
@@ -262,13 +290,18 @@ def main() -> int:
             "conversation tags",
             lambda: get_conversation_tags(entity, project, [args.conversation_id]),
             args.verbose,
-            qualifies=lambda data: _conversation_tag_present(data, args.conversation_id, args.tag_name),
+            qualifies=lambda data: _conversation_tag_present(
+                data,
+                args.conversation_id,
+                args.tag_id,
+                args.tag_name,
+            ),
         )[0]
     )
     results.append(
         _run(
             "tagged conversations",
-            lambda: list_tagged_conversations(entity, project, [args.tag_name]),
+            lambda: list_tagged_conversations(entity, project, [args.tag_id]),
             args.verbose,
             qualifies=lambda data: _conversation_present(data, args.conversation_id),
         )[0]
@@ -284,7 +317,7 @@ def main() -> int:
                 time_bucket_seconds=86400,
             ),
             args.verbose,
-            qualifies=lambda data: _distribution_has_tag(data, args.tag_name),
+            qualifies=lambda data: _distribution_has_tag(data, args.tag_id),
         )[0]
     )
 

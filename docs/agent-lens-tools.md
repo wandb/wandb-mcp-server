@@ -56,13 +56,13 @@ read-only — the 2 dropped are models-group writes). Agent Lens mutations
 | `get_agent_lens_clustering_status_tool` | `GET /insights/clustering-status` |
 | `get_agent_lens_category_breakdowns_tool` | `GET /insights/intent-category-breakdowns` |
 | `list_agent_lens_category_example_turns_tool` | `GET /insights/{type}/categories/{id}/example-turns` |
-| `list_agent_lens_matching_turns_tool` | `GET /insights/matching-turns` |
-| `list_agent_lens_conversation_tag_names_tool` | `GET /conversation-tags` |
+| `get_agent_lens_failure_attributions_tool` | `POST /insights/failure-attributions/query` |
+| `list_agent_lens_tags_tool` | `GET /tags` |
 | `get_agent_lens_conversation_tags_tool` | `POST /conversation-tags/query` |
 | `list_agent_lens_tagged_conversations_tool` | `POST /conversation-tags/conversations/query` |
 | `get_agent_lens_tag_distribution_tool` | `POST /conversation-tags/distribution` |
 
-Three of these are `POST` endpoints that perform reads — Agent Lens uses a request
+Four of these are `POST` endpoints that perform reads — Agent Lens uses a request
 body where the filter would not fit in a query string. Read/write selection
 comes from the contract's `access` field, never from the HTTP method.
 
@@ -73,17 +73,22 @@ traces and no classified turns, and the usable range rarely reaches today:
 
 1. `get_agent_lens_insights_coverage_tool` — find a populated range.
 2. `get_agent_lens_category_breakdowns_tool` — the aggregate picture over that range.
-3. `list_agent_lens_matching_turns_tool` (failure detail per turn) or
-   `list_agent_lens_category_example_turns_tool` (paged identifiers and bounded
-   classification/failure metadata) to drill in.
-4. Pass the returned `trace_id` to `get_weave_agent_trace_tool` or
-   `query_weave_traces_tool` for the trace content itself. The Insights tools
-   return identifiers and attribution, never message bodies. In particular,
-   the example-turn projection removes upstream `agent_message` and `message`
-   fields before token truncation.
+3. `list_agent_lens_category_example_turns_tool` returns paged identifiers and
+   bounded classification/failure metadata for a category, optionally refined
+   with Agent Lens topic IDs.
+4. Pass one or more returned `trace_id` values to
+   `get_agent_lens_failure_attributions_tool` for bounded failure attribution,
+   or to `get_weave_agent_trace_tool` / `query_weave_traces_tool` for the trace
+   content itself.
 
-For tags, call `list_agent_lens_conversation_tag_names_tool` first: tag names are
-project-defined free text, so guessing a spelling usually returns nothing.
+The Insights tools return identifiers and attribution, never message bodies.
+In particular, the example-turn projection removes upstream `agent_message`
+and `message` fields before token truncation.
+
+For tags, call `list_agent_lens_tags_tool` first. It returns the project tag
+catalog, including each tag's UUID and display name. Pass UUIDs—not names—to
+`list_agent_lens_tagged_conversations_tool`; assignments returned by
+`get_agent_lens_conversation_tags_tool` include both `tag_id` and `tag`.
 
 ## Bounds
 
@@ -92,10 +97,11 @@ request fails with an actionable message instead of a bare `422`:
 
 - MCP limits ranged Insights reads to **30 days** as a response/work safety
   policy, even though current Agent Lens accepts any nonempty range.
-- `conversation_ids` ≤ 5000, `tags` ≤ 100, `cluster_ids` ≤ 20.
+- `conversation_ids` ≤ 5000, `tag_ids` ≤ 100, `topic_ids` ≤ 20, and
+  failure-attribution `trace_ids` ≤ 500.
 - `limit` 1–50 for example turns; `time_bucket_seconds` 1–86400.
-- Matching-turn reads require an intent or failure category. A cluster ID and
-  kind may refine that category only when supplied together.
+- Tag filters must be UUIDs. Failure-attribution reads require at least one
+  trace ID.
 
 Insights bounds are RFC 3339 timestamps; the tag distribution uses epoch
 milliseconds, matching each endpoint's own contract.
@@ -123,9 +129,10 @@ handler. Reads are never retried in-process; retrying belongs to the MCP caller.
 
 ## Maintenance
 
-Agent Lens generates an OpenAPI document at `/api/openapi.json` (Huma v2), but
-does not publish it as an artifact. To check this client against the live
-contract, run Agent Lens and diff the paths and field names above against that
-document. The response shapes here are transcribed from `internal/api/insights.go`
-and `internal/api/conversation_tags.go`; a field rename on that side is the most
+Agent Lens generates an OpenAPI document at `/api/openapi.json` (Huma v2). To
+check this client against the live contract, diff the paths and field names
+above against that document and run `scripts/agent_lens_smoke.py` with approved,
+populated fixture IDs. The response shapes here are transcribed from
+`internal/api/insights.go`, `internal/api/tags.go`, and
+`internal/api/conversation_tags.go`; a field rename on that side is the most
 likely source of drift.
