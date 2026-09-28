@@ -10,15 +10,21 @@ Reads only. Nothing here mutates Agent Lens state.
 
 Usage:
     AGENT_LENS_BASE_URL=https://<host> WANDB_API_KEY=<key> \\
-        uv run python scripts/agent_lens_smoke.py --entity acme --project support-bot
+        uv run python scripts/agent_lens_smoke.py \\
+        --entity acme --project support-bot \\
+        --start-at 2026-09-01T00:00:00Z --end-at 2026-09-08T00:00:00Z \\
+        --signature-type intent --category-id action_request \\
+        --tag-name reviewed --conversation-id conv-123
 
-Exits non-zero if any tool returns an error envelope.
+The fixture arguments must identify populated, approved test data. The script
+exits non-zero unless every one of the nine read endpoints returns matching
+fixture data; empty results are not counted as qualification success.
 """
 
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
 import os
 import sys
@@ -39,8 +45,15 @@ from wandb_mcp_server.mcp_tools.agent_lens import (
 from wandb_mcp_server.utils import get_server_args
 
 
-def _rfc3339(moment: datetime) -> str:
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _parse_rfc3339(value: str, field: str) -> datetime:
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise ValueError(f"{field} must be an RFC 3339 timestamp") from None
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc)
 
 
 def _seed_api_key() -> str | None:
@@ -57,12 +70,18 @@ def _seed_api_key() -> str | None:
     return api_key
 
 
-def _run(label: str, call: Callable[[], str], verbose: bool) -> tuple[bool, Any]:
+def _run(
+    label: str,
+    call: Callable[[], str],
+    verbose: bool,
+    *,
+    qualifies: Callable[[Any], bool],
+) -> tuple[bool, Any]:
     """Invoke one tool and summarize its envelope."""
     try:
         payload = json.loads(call())
     except Exception as error:  # a tool should return an envelope, never raise
-        print(f"  FAIL  {label}: raised {type(error).__name__}: {error}")
+        print(f"  FAIL  {label}: raised {type(error).__name__}")
         return False, None
 
     if isinstance(payload, dict) and "error" in payload:
@@ -70,6 +89,9 @@ def _run(label: str, call: Callable[[], str], verbose: bool) -> tuple[bool, Any]
         return False, None
 
     data = payload.get("data") if isinstance(payload, dict) else None
+    if not qualifies(data):
+        print(f"  FAIL  {label}: the qualified fixture returned no matching data")
+        return False, data
     if isinstance(data, list):
         shape = f"{len(data)} item(s)"
     elif isinstance(data, dict):
@@ -83,124 +105,174 @@ def _run(label: str, call: Callable[[], str], verbose: bool) -> tuple[bool, Any]
     return True, data
 
 
+def _nonempty_mapping(value: Any) -> bool:
+    return isinstance(value, dict) and bool(value)
+
+
+def _nonempty_list(value: Any) -> bool:
+    return isinstance(value, list) and bool(value)
+
+
+def _category_present(value: Any, signature_type: str, category_id: str) -> bool:
+    if not isinstance(value, list):
+        return False
+    if signature_type == "intent":
+        return any(isinstance(row, dict) and row.get("category") == category_id for row in value)
+    return any(
+        isinstance(row, dict)
+        and any(
+            isinstance(item, dict) and item.get("category") == category_id
+            for field in ("counts", "failure_breakdowns")
+            for item in (row.get(field) or [])
+        )
+        for row in value
+    )
+
+
+def _conversation_tag_present(value: Any, conversation_id: str, tag_name: str) -> bool:
+    return isinstance(value, list) and any(
+        isinstance(item, dict) and item.get("conversation_id") == conversation_id and item.get("tag") == tag_name
+        for item in value
+    )
+
+
+def _distribution_has_tag(value: Any, tag_name: str) -> bool:
+    if not isinstance(value, dict) or not isinstance(value.get("buckets"), list):
+        return False
+    return any(
+        isinstance(bucket, dict) and isinstance(bucket.get("tag_counts"), dict) and tag_name in bucket["tag_counts"]
+        for bucket in value["buckets"]
+    )
+
+
+def _tag_name_present(value: Any, tag_name: str) -> bool:
+    return isinstance(value, list) and tag_name in value
+
+
+def _conversation_present(value: Any, conversation_id: str) -> bool:
+    return isinstance(value, list) and conversation_id in value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--entity", required=True, help="W&B entity (team or username)")
     parser.add_argument("--project", required=True, help="W&B project name")
-    parser.add_argument("--days", type=int, default=7, help="Insights window size in days (max 30, default 7)")
+    parser.add_argument("--start-at", required=True, help="Inclusive RFC 3339 fixture-window start")
+    parser.add_argument("--end-at", required=True, help="Exclusive RFC 3339 fixture-window end")
+    parser.add_argument(
+        "--signature-type",
+        required=True,
+        choices=("intent", "failure"),
+        help="Category family for the qualified category fixture",
+    )
+    parser.add_argument("--category-id", required=True, help="Qualified category in the selected family")
+    parser.add_argument("--tag-name", required=True, help="Qualified conversation-tag fixture")
+    parser.add_argument("--conversation-id", required=True, help="Qualified conversation carrying that tag")
     parser.add_argument("--verbose", action="store_true", help="Print each full response")
     args = parser.parse_args()
 
     if not os.getenv("AGENT_LENS_BASE_URL"):
         print("AGENT_LENS_BASE_URL is required (absolute HTTPS origin, no path).", file=sys.stderr)
         return 2
-    if not 1 <= args.days <= 30:
-        print("--days must be between 1 and 30.", file=sys.stderr)
+    try:
+        start = _parse_rfc3339(args.start_at, "--start-at")
+        end = _parse_rfc3339(args.end_at, "--end-at")
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    if end <= start or (end - start).total_seconds() > 30 * 24 * 60 * 60:
+        print("The fixture window must be nonempty and no longer than 30 days.", file=sys.stderr)
+        return 2
+    fixture_values = (args.category_id, args.tag_name, args.conversation_id)
+    if any(not value.strip() for value in fixture_values):
+        print("Category, tag, and conversation fixtures must be nonempty.", file=sys.stderr)
         return 2
     if not _seed_api_key():
         print("No W&B API key found in WANDB_API_KEY, .netrc, or .env.", file=sys.stderr)
         return 2
 
     entity, project = args.entity, args.project
+    window = {"start_at": args.start_at, "end_at": args.end_at}
+    filter_name = "intent_category" if args.signature_type == "intent" else "failure_category"
 
-    print(f"Agent Lens smoke: {entity}/{project}")
+    print("Agent Lens smoke: exercising nine read endpoints against approved fixtures")
 
-    results = []
+    results: list[bool] = []
 
     print("\nInsights")
-    ok, coverage = _run("insights coverage", lambda: get_insights_coverage(entity, project), args.verbose)
-    results.append(ok)
-
-    # Anchor the window on the last classified week rather than on today. The
-    # classification job lags, so a range ending now routinely misses every
-    # turn in a project that does have data -- which would look like a broken
-    # client instead of an empty range.
-    end = datetime.now(timezone.utc)
-    latest_week = coverage.get("latest_week") if ok and isinstance(coverage, dict) else None
-    if latest_week:
-        try:
-            end = datetime.strptime(latest_week, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=7)
-        except ValueError:
-            print(f"  warn  could not parse latest_week {latest_week!r}; anchoring the window on today")
-    elif ok:
-        # Every ranged read below will be empty; say so once rather than five times.
-        print("  note  project has no classified Insights turns; ranged reads will be empty")
-
-    start = end - timedelta(days=args.days)
-    window = {"start_at": _rfc3339(start), "end_at": _rfc3339(end)}
-    print(f"  window {window['start_at']}..{window['end_at']}")
-
-    results.append(_run("clustering status", lambda: get_clustering_status(entity, project), args.verbose)[0])
-
-    ok, breakdowns = _run(
-        "category breakdowns",
-        lambda: get_category_breakdowns(entity, project, **window),
-        args.verbose,
+    results.append(
+        _run(
+            "insights coverage",
+            lambda: get_insights_coverage(entity, project),
+            args.verbose,
+            qualifies=_nonempty_mapping,
+        )[0]
     )
-    results.append(ok)
-
-    # Drill into real categories from both families. The top-level `category` is
-    # an intent; `failure_breakdowns[].category` is a failure. Querying one as
-    # the other returns zero rows rather than an error, so exercising both is
-    # what actually proves the drilldowns work.
-    intent = failure = None
-    if ok and isinstance(breakdowns, list) and breakdowns:
-        intent = breakdowns[0].get("category")
-        for entry in breakdowns:
-            failures = entry.get("failure_breakdowns") or []
-            if failures:
-                failure = failures[0].get("category")
-                break
-
-    for signature_type, category in (("intent", intent), ("failure", failure)):
-        if not category:
-            print(f"  skip  example turns / matching turns ({signature_type}): none in range")
-            continue
-        results.append(
-            _run(
-                f"example turns ({signature_type}={category})",
-                lambda s=signature_type, c=category: list_category_example_turns(
-                    entity, project, s, c, **window, limit=5
-                ),
-                args.verbose,
-            )[0]
-        )
-        filter_name = "intent_category" if signature_type == "intent" else "failure_category"
-        results.append(
-            _run(
-                f"matching turns ({signature_type}={category})",
-                lambda n=filter_name, c=category: list_matching_turns(entity, project, **window, **{n: c}),
-                args.verbose,
-            )[0]
-        )
+    results.append(
+        _run(
+            "clustering status",
+            lambda: get_clustering_status(entity, project),
+            args.verbose,
+            qualifies=_nonempty_list,
+        )[0]
+    )
+    results.append(
+        _run(
+            "category breakdowns",
+            lambda: get_category_breakdowns(entity, project, **window),
+            args.verbose,
+            qualifies=lambda data: _category_present(data, args.signature_type, args.category_id),
+        )[0]
+    )
+    results.append(
+        _run(
+            "category example turns",
+            lambda: list_category_example_turns(
+                entity,
+                project,
+                args.signature_type,
+                args.category_id,
+                **window,
+                limit=5,
+            ),
+            args.verbose,
+            qualifies=_nonempty_list,
+        )[0]
+    )
+    results.append(
+        _run(
+            "matching turns",
+            lambda: list_matching_turns(entity, project, **window, **{filter_name: args.category_id}),
+            args.verbose,
+            qualifies=_nonempty_list,
+        )[0]
+    )
 
     print("\nConversation tags")
-    ok, tag_names = _run("tag names", lambda: list_conversation_tag_names(entity, project), args.verbose)
-    results.append(ok)
-
-    conversation_ids = []
-    if ok and tag_names:
-        found, conversation_ids = _run(
-            f"tagged conversations ({tag_names[0]})",
-            lambda: list_tagged_conversations(entity, project, [tag_names[0]]),
+    results.append(
+        _run(
+            "tag names",
+            lambda: list_conversation_tag_names(entity, project),
             args.verbose,
-        )
-        results.append(found)
-        conversation_ids = conversation_ids or []
-    else:
-        print("  skip  tagged conversations: project has no tags")
-
-    if conversation_ids:
-        results.append(
-            _run(
-                "conversation tags",
-                lambda: get_conversation_tags(entity, project, conversation_ids[:20]),
-                args.verbose,
-            )[0]
-        )
-    else:
-        print("  skip  conversation tags: no tagged conversations")
-
+            qualifies=lambda data: _tag_name_present(data, args.tag_name),
+        )[0]
+    )
+    results.append(
+        _run(
+            "conversation tags",
+            lambda: get_conversation_tags(entity, project, [args.conversation_id]),
+            args.verbose,
+            qualifies=lambda data: _conversation_tag_present(data, args.conversation_id, args.tag_name),
+        )[0]
+    )
+    results.append(
+        _run(
+            "tagged conversations",
+            lambda: list_tagged_conversations(entity, project, [args.tag_name]),
+            args.verbose,
+            qualifies=lambda data: _conversation_present(data, args.conversation_id),
+        )[0]
+    )
     results.append(
         _run(
             "tag distribution",
@@ -212,9 +284,13 @@ def main() -> int:
                 time_bucket_seconds=86400,
             ),
             args.verbose,
+            qualifies=lambda data: _distribution_has_tag(data, args.tag_name),
         )[0]
     )
 
+    if len(results) != 9:
+        print("\nFAIL: qualification did not exercise exactly nine endpoints", file=sys.stderr)
+        return 1
     failed = results.count(False)
     print(f"\n{len(results) - failed}/{len(results)} checks passed")
     return 1 if failed else 0

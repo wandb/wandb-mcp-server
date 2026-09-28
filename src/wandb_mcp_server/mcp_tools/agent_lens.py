@@ -16,15 +16,18 @@ in ``internal/api/project.go`` of github.com/wandb/agent-lens.
 from __future__ import annotations
 
 import json
+import math
+import threading
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import quote
 
 import requests
 
 from wandb_mcp_server.admission import current_tool_deadline
-from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
+from wandb_mcp_server.api_client import WandBApiManager, WandBServerBusy
 from wandb_mcp_server.config import (
     AGENT_LENS_API_PREFIX,
     MAX_ACCUMULATED_BYTES,
@@ -59,9 +62,11 @@ def _category_examples_path(signature_type: str, category_id: str) -> str:
 _REQUEST_TIMEOUT_SECONDS = 30
 MAX_AGENT_LENS_RESPONSE_BYTES = 4 * 1024 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
+_DEFAULT_RETRY_AFTER_MS = 1_000
+_MAX_RETRY_AFTER_MS = 60_000
 
-# Agent Lens bounds every ranged Insights read to 30 days (insights.Window.Validate).
-# Rejecting locally turns a 422 round-trip into an actionable message.
+# MCP keeps ranged Insights reads within 30 days to bound work and responses,
+# even though current Agent Lens accepts any nonempty range.
 MAX_INSIGHTS_WINDOW_DAYS = 30
 
 # Server-enforced request bounds, mirrored here so an oversized argument fails
@@ -122,6 +127,20 @@ def _truncate_response(payload: Any) -> Any:
         return payload
 
     data = payload.get("data")
+    if isinstance(data, list) and data and payload.get("next_cursor") is not None:
+        # Returning a cursor after dropping rows would make the caller skip the
+        # omitted portion of this page. Fail the page instead so it can be
+        # retried with a smaller upstream limit.
+        cursor_error = {
+            "error": "agent_lens_response_too_large",
+            "message": (
+                "The Agent Lens page exceeded the response budget. Retry with a lower limit "
+                "so no paginated rows are skipped."
+            ),
+        }
+        if _response_tokens(cursor_error) <= MAX_RESPONSE_TOKENS:
+            return cursor_error
+        return {"error": "agent_lens_response_too_large"}
     if isinstance(data, list) and data:
         container, key = payload, "data"
     elif isinstance(data, dict) and isinstance(data.get("buckets"), list) and data["buckets"]:
@@ -163,24 +182,66 @@ def _truncate_response(payload: Any) -> Any:
     return minimal if _response_tokens(minimal) <= MAX_RESPONSE_TOKENS else {}
 
 
-def _remaining_request_timeout() -> float:
-    """Bound the HTTP request by both its own cap and the active tool deadline."""
-    deadline = current_tool_deadline.get()
-    if deadline is None:
-        return float(_REQUEST_TIMEOUT_SECONDS)
+def _project_response(tool_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove response fields that are outside the reviewed public contract."""
+    if tool_name != "list_category_example_turns":
+        return payload
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return payload
+    projected = [
+        {key: value for key, value in row.items() if key not in {"agent_message", "message"}}
+        if isinstance(row, dict)
+        else row
+        for row in data
+    ]
+    return {**payload, "data": projected}
+
+
+def _absolute_request_deadline() -> float:
+    """Capture one deadline for connect, headers, and the complete response body."""
+    request_cap = time.monotonic() + float(_REQUEST_TIMEOUT_SECONDS)
+    tool_deadline = current_tool_deadline.get()
+    return request_cap if tool_deadline is None else min(request_cap, tool_deadline)
+
+
+def _remaining_request_timeout(deadline: float) -> float:
+    """Return Requests' inactivity timeout from the captured absolute deadline."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("Agent Lens tool deadline elapsed")
-    return max(0.001, min(float(_REQUEST_TIMEOUT_SECONDS), remaining))
+    return max(0.001, remaining)
 
 
-def _check_deadline() -> None:
-    deadline = current_tool_deadline.get()
-    if deadline is not None and time.monotonic() >= deadline:
+def _check_deadline(deadline: float) -> None:
+    if time.monotonic() >= deadline:
         raise TimeoutError("Agent Lens tool deadline elapsed")
 
 
-def _bounded_response_bytes(response: Any) -> bytes:
+def _arm_response_deadline(response: Any, deadline: float) -> tuple[threading.Timer | None, threading.Event]:
+    """Close a streaming response when the absolute MCP deadline expires."""
+    expired = threading.Event()
+
+    def expire() -> None:
+        expired.set()
+        close = getattr(response, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as error:
+                logger.warning("Agent Lens response close failed at deadline (%s)", type(error).__name__)
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        expire()
+        return None, expired
+    timer = threading.Timer(remaining, expire)
+    timer.daemon = True
+    timer.start()
+    return timer, expired
+
+
+def _bounded_response_bytes(response: Any, deadline: float) -> bytes:
     """Read at most the reviewed byte cap before any JSON decoding occurs."""
     byte_limit = min(MAX_AGENT_LENS_RESPONSE_BYTES, MAX_ACCUMULATED_BYTES)
     encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
@@ -202,7 +263,7 @@ def _bounded_response_bytes(response: Any) -> bytes:
 
     raw = bytearray()
     for chunk in response.iter_content(chunk_size=_READ_CHUNK_BYTES, decode_unicode=False):
-        _check_deadline()
+        _check_deadline(deadline)
         if not isinstance(chunk, (bytes, bytearray)):
             raise _ResponseBoundaryError("malformed_response", "The Agent Lens API returned an invalid response.")
         if len(raw) + len(chunk) > byte_limit:
@@ -216,18 +277,43 @@ def _bounded_response_bytes(response: Any) -> bytes:
     return bytes(raw)
 
 
-def _bounded_json_response(response: Any) -> Dict[str, Any]:
-    raw = _bounded_response_bytes(response)
-    _check_deadline()
+def _bounded_json_response(response: Any, deadline: float) -> Dict[str, Any]:
+    raw = _bounded_response_bytes(response, deadline)
+    _check_deadline(deadline)
     try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
+        payload = json.loads(raw.decode("utf-8"), parse_constant=_reject_non_finite_json)
+    except (UnicodeError, ValueError, RecursionError) as error:
         raise _ResponseBoundaryError(
             "malformed_response", "The Agent Lens API returned an invalid response."
         ) from error
     if not isinstance(payload, dict):
         raise _ResponseBoundaryError("malformed_response", "The Agent Lens API returned an invalid response.")
     return payload
+
+
+def _reject_non_finite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON value: {value}")
+
+
+def _retry_after_ms(value: object) -> int:
+    """Parse Retry-After without consulting an unbounded response body."""
+    if value is None:
+        return _DEFAULT_RETRY_AFTER_MS
+    raw = str(value).strip()
+    try:
+        seconds = float(raw)
+        if not math.isfinite(seconds):
+            raise ValueError
+        seconds = max(0.0, seconds)
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(raw)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            seconds = max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return _DEFAULT_RETRY_AFTER_MS
+    return min(_MAX_RETRY_AFTER_MS, max(_DEFAULT_RETRY_AFTER_MS, round(seconds * 1_000)))
 
 
 def _parse_timestamp(value: str, field: str) -> datetime:
@@ -314,7 +400,8 @@ def _agent_lens_request(
         # Only the HTTP round-trip can raise here, so the try wraps just that;
         # the status-code branching below is plain control flow and stays outside.
         try:
-            request_timeout = _remaining_request_timeout()
+            request_deadline = _absolute_request_deadline()
+            request_timeout = _remaining_request_timeout(request_deadline)
             response = get_no_retry_session().request(
                 method,
                 url,
@@ -337,8 +424,9 @@ def _agent_lens_request(
             ctx.mark_error(type(e).__name__)
             return _compact_json(structured_error("agent_lens_query_failed", "The Agent Lens request failed."))
 
+        deadline_timer, deadline_expired = _arm_response_deadline(response, request_deadline)
         try:
-            _check_deadline()
+            _check_deadline(request_deadline)
             if response.status_code in {401, 403}:
                 ctx.mark_error(f"http_{response.status_code}")
                 return _compact_json(
@@ -362,9 +450,11 @@ def _agent_lens_request(
             if response.status_code == 422:
                 ctx.mark_error("http_422")
                 try:
-                    validation_payload = _bounded_json_response(response)
+                    validation_payload = _bounded_json_response(response, request_deadline)
                     detail = _detail(validation_payload)
-                except _ResponseBoundaryError:
+                except _ResponseBoundaryError as error:
+                    if deadline_expired.is_set():
+                        raise TimeoutError("Agent Lens tool deadline elapsed") from error
                     detail = "the request did not satisfy the API schema"
                 return _compact_json(
                     structured_error(
@@ -376,11 +466,12 @@ def _agent_lens_request(
             if response.status_code != 200:
                 ctx.mark_error(f"http_{response.status_code}")
                 if response.status_code in {429, 503}:
-                    overload = requests.HTTPError(
-                        f"Agent Lens returned HTTP {response.status_code}",
-                        response=response,
+                    raise WandBServerBusy(
+                        status_code=response.status_code,
+                        retry_after_ms=_retry_after_ms(
+                            response.headers.get("Retry-After") or response.headers.get("retry-after")
+                        ),
                     )
-                    raise_for_wandb_server_busy(overload)
                 return _compact_json(
                     structured_error(
                         "agent_lens_query_failed",
@@ -390,13 +481,17 @@ def _agent_lens_request(
                 )
 
             try:
-                result = _bounded_json_response(response)
+                result = _bounded_json_response(response, request_deadline)
             except _ResponseBoundaryError as error:
+                if deadline_expired.is_set():
+                    raise TimeoutError("Agent Lens tool deadline elapsed") from error
                 ctx.mark_error(error.reason)
                 return _compact_json(
                     structured_error("agent_lens_query_failed", sanitize_sensitive_text(error, max_chars=512))
                 )
-        except TimeoutError:
+            if deadline_expired.is_set():
+                raise TimeoutError("Agent Lens tool deadline elapsed")
+        except (TimeoutError, requests.Timeout):
             ctx.mark_error("tool_timeout")
             return _compact_json(
                 structured_error(
@@ -405,12 +500,37 @@ def _agent_lens_request(
                     retryable=True,
                 )
             )
+        except requests.RequestException as error:
+            if deadline_expired.is_set():
+                ctx.mark_error("tool_timeout")
+                return _compact_json(
+                    structured_error(
+                        "tool_timeout",
+                        "The Agent Lens request exceeded the MCP tool deadline.",
+                        retryable=True,
+                    )
+                )
+            ctx.mark_error(type(error).__name__)
+            return _compact_json(structured_error("agent_lens_query_failed", "The Agent Lens request failed."))
+        except Exception:
+            if deadline_expired.is_set():
+                ctx.mark_error("tool_timeout")
+                return _compact_json(
+                    structured_error(
+                        "tool_timeout",
+                        "The Agent Lens request exceeded the MCP tool deadline.",
+                        retryable=True,
+                    )
+                )
+            raise
         finally:
+            if deadline_timer is not None:
+                deadline_timer.cancel()
             close = getattr(response, "close", None)
             if callable(close):
                 close()
 
-    return _compact_json(_truncate_response(result))
+    return _compact_json(_truncate_response(_project_response(tool_name, result)))
 
 
 def _detail(payload: Dict[str, Any]) -> str:
@@ -522,10 +642,10 @@ def list_matching_turns(
     """List turns matching a category or cluster, with failure attribution."""
     if cluster_kind is not None and cluster_kind not in {"intent", "failure"}:
         return _invalid_argument('cluster_kind must be "intent" or "failure"')
-    if cluster_id and not cluster_kind:
-        return _invalid_argument("cluster_kind is required when filtering by cluster_id")
-    if not any((intent_category, failure_category, cluster_id)):
-        return _invalid_argument("Provide at least one of intent_category, failure_category, or cluster_id")
+    if bool(cluster_id) != bool(cluster_kind):
+        return _invalid_argument("cluster_id and cluster_kind must be supplied together")
+    if not any((intent_category, failure_category)):
+        return _invalid_argument("Provide at least one of intent_category or failure_category")
     try:
         params: Dict[str, Any] = dict(_validated_window(start_at, end_at))
     except ValueError as error:
@@ -732,8 +852,9 @@ LIST_CATEGORY_EXAMPLE_TURNS_TOOL_DESCRIPTION = f"""Page example turns for one Ag
 <when_to_use>
 Use to ground a category or cluster in concrete traces -- "show me turns from
 this failure category" -- after get_agent_lens_category_breakdowns_tool names it.
-Returns identifiers only ("conversation_id", "trace_id"), so fetch the trace
-content itself with get_weave_agent_trace_tool or query_weave_traces_tool.
+Returns bounded identifiers and classification/failure metadata, but removes
+the upstream `agent_message` and `message` bodies. Fetch trace content itself
+with get_weave_agent_trace_tool or query_weave_traces_tool.
 
 Pass the returned "next_cursor" back as `cursor` to page. Treat the cursor as
 opaque and keep every other argument identical across pages.
@@ -762,8 +883,9 @@ cursor : str, optional
 
 Returns
 -------
-JSON with {{"data": [{{"conversation_id", "trace_id"}}], "next_cursor"}}.
-A null "next_cursor" means the last page.
+JSON with bounded example-turn metadata, including "conversation_id" and
+"trace_id", plus "next_cursor". Message bodies are omitted. A null
+"next_cursor" means the last page.
 """
 
 
@@ -775,8 +897,9 @@ carries "failure_signature", "failure_reason", "failure_severity" and
 "failure_evidence_span_ids" (ordered most-important-first), which is what makes
 this the right tool for "why did these turns fail?".
 
-Provide at least one filter. `cluster_id` additionally requires `cluster_kind`
-to say which family the cluster belongs to. Prefer
+Provide at least one of `intent_category` or `failure_category`. `cluster_id`
+and `cluster_kind` are an optional refinement and must be supplied together.
+Prefer
 list_agent_lens_category_example_turns_tool when you only need paged identifiers.
 </when_to_use>
 
@@ -795,9 +918,10 @@ failure_category : str, optional
     `failure_breakdowns[].category`. These two families are not
     interchangeable; the wrong one returns zero rows rather than an error.
 cluster_id : str, optional
-    Restrict to one cluster; requires `cluster_kind`.
+    Refine the selected category to one cluster; requires `cluster_kind`.
 cluster_kind : str, optional
-    "intent" or "failure" -- which family `cluster_id` belongs to.
+    "intent" or "failure" -- which family `cluster_id` belongs to; requires
+    `cluster_id`.
 
 Returns
 -------

@@ -8,14 +8,18 @@ github.com/wandb/agent-lens.
 """
 
 import json
+import sys
+import threading
 import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
+from scripts import agent_lens_smoke
 from wandb_mcp_server.admission import current_tool_deadline
-from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.api_client import WandBApiManager, WandBServerBusy
 from wandb_mcp_server.mcp_tools import agent_lens as agent_lens_mod
 from wandb_mcp_server.mcp_tools.agent_lens import (
     get_category_breakdowns,
@@ -81,6 +85,31 @@ class _FakeSession:
     @property
     def last(self):
         return self.calls[-1]
+
+
+class _BodyPoisonResponse(_FakeResponse):
+    @property
+    def text(self):
+        raise AssertionError("overload classification must not read the streamed response body")
+
+
+class _BlockingResponse(_FakeResponse):
+    """A stream that releases only when the deadline closer closes it."""
+
+    def __init__(self):
+        super().__init__({})
+        self._released = threading.Event()
+
+    def iter_content(self, chunk_size, decode_unicode=False):
+        del chunk_size, decode_unicode
+        self._released.wait(timeout=2)
+        if self.closed:
+            raise requests.ConnectionError("stream closed at deadline")
+        yield self._raw
+
+    def close(self):
+        self.closed = True
+        self._released.set()
 
 
 @contextmanager
@@ -151,6 +180,40 @@ def test_example_turns_sends_cluster_ids_under_the_repeated_key():
     with _mocked(_FakeResponse({"data": [], "next_cursor": None})) as session:
         list_category_example_turns(ENTITY, PROJECT, "intent", "billing", **WINDOW, cluster_ids=["c1", "c2"])
     assert session.last["params"]["cluster_ids[]"] == ["c1", "c2"]
+
+
+def test_example_turns_remove_message_bodies_but_keep_reviewed_metadata():
+    upstream = {
+        "data": [
+            {
+                "conversation_id": "conv-1",
+                "trace_id": "trace-1",
+                "agent_message": "private agent response",
+                "message": "private user message",
+                "failure_reason": "missing context",
+                "duration_ms": 123,
+                "total_tokens": 42,
+                "cost_usd": 0.01,
+            }
+        ],
+        "next_cursor": "cursor-2",
+    }
+    with _mocked(_FakeResponse(upstream)):
+        result = json.loads(
+            list_category_example_turns(ENTITY, PROJECT, "failure", "missing-context", **WINDOW, limit=25)
+        )
+    row = result["data"][0]
+    assert "agent_message" not in row
+    assert "message" not in row
+    assert row == {
+        "conversation_id": "conv-1",
+        "trace_id": "trace-1",
+        "failure_reason": "missing context",
+        "duration_ms": 123,
+        "total_tokens": 42,
+        "cost_usd": 0.01,
+    }
+    assert result["next_cursor"] == "cursor-2"
 
 
 def test_post_reads_send_a_json_body():
@@ -226,7 +289,36 @@ def test_cluster_id_requires_its_kind():
     with _mocked(_ok([])) as session:
         result = json.loads(list_matching_turns(ENTITY, PROJECT, **WINDOW, cluster_id="c1"))
     assert session.calls == []
-    assert "cluster_kind is required" in result["message"]
+    assert "must be supplied together" in result["message"]
+
+
+def test_cluster_kind_requires_its_id():
+    with _mocked(_ok([])) as session:
+        result = json.loads(list_matching_turns(ENTITY, PROJECT, **WINDOW, cluster_kind="intent"))
+    assert session.calls == []
+    assert "must be supplied together" in result["message"]
+
+
+def test_cluster_pair_is_only_a_category_refinement():
+    with _mocked(_ok([])) as session:
+        result = json.loads(list_matching_turns(ENTITY, PROJECT, **WINDOW, cluster_id="c1", cluster_kind="intent"))
+    assert session.calls == []
+    assert "intent_category or failure_category" in result["message"]
+
+
+def test_category_can_be_refined_by_a_cluster_pair():
+    with _mocked(_ok([])) as session:
+        list_matching_turns(
+            ENTITY,
+            PROJECT,
+            **WINDOW,
+            intent_category="billing",
+            cluster_id="c1",
+            cluster_kind="intent",
+        )
+    assert session.last["params"]["intent_category"] == "billing"
+    assert session.last["params"]["cluster_id"] == "c1"
+    assert session.last["params"]["cluster_kind"] == "intent"
 
 
 def test_signature_type_is_constrained_to_the_server_enum():
@@ -320,11 +412,41 @@ def test_422_sanitizes_validation_detail():
     assert "service.svc" not in result["message"]
 
 
+def test_422_stream_timeout_is_sanitized_and_closes_response():
+    response = _FakeResponse({}, status_code=422)
+    response.iter_content = MagicMock(side_effect=requests.Timeout("private validation timeout"))
+    with _mocked(response):
+        result = json.loads(get_category_breakdowns(ENTITY, PROJECT, **WINDOW))
+    assert result["error"] == "tool_timeout"
+    assert "private validation" not in json.dumps(result)
+    assert response.closed is True
+
+
+def test_422_stream_request_failure_is_sanitized_and_closes_response():
+    response = _FakeResponse({}, status_code=422)
+    response.iter_content = MagicMock(side_effect=requests.ConnectionError("private-host.svc disconnected"))
+    with _mocked(response):
+        result = json.loads(get_category_breakdowns(ENTITY, PROJECT, **WINDOW))
+    assert result == {"error": "agent_lens_query_failed", "message": "The Agent Lens request failed."}
+    assert response.closed is True
+
+
 def test_unexpected_status_maps_to_a_generic_failure():
     with _mocked(_FakeResponse({}, status_code=500)):
         result = json.loads(get_insights_coverage(ENTITY, PROJECT))
     assert result["error"] == "agent_lens_query_failed"
     assert result["status_code"] == 500
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_overload_raises_bounded_server_busy_without_reading_body(status):
+    response = _BodyPoisonResponse({}, status_code=status, headers={"Retry-After": "999999"})
+    with _mocked(response):
+        with pytest.raises(WandBServerBusy) as raised:
+            get_insights_coverage(ENTITY, PROJECT)
+    assert raised.value.status_code == status
+    assert raised.value.retry_after_ms == 60_000
+    assert response.closed is True
 
 
 def test_transport_failure_does_not_leak_the_exception_text():
@@ -338,6 +460,43 @@ def test_invalid_json_body_maps_to_a_generic_failure():
     with _mocked(_FakeResponse(None, raw=b"not-json")):
         result = json.loads(get_insights_coverage(ENTITY, PROJECT))
     assert result["error"] == "agent_lens_query_failed"
+
+
+@pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity"])
+def test_non_finite_json_is_rejected_as_malformed(constant):
+    with _mocked(_FakeResponse({}, raw=b'{"data":' + constant + b"}")):
+        result = json.loads(get_insights_coverage(ENTITY, PROJECT))
+    assert result == {
+        "error": "agent_lens_query_failed",
+        "message": "The Agent Lens API returned an invalid response.",
+    }
+
+
+def test_stream_timeout_is_sanitized_and_closes_response():
+    response = _FakeResponse({})
+    response.iter_content = MagicMock(side_effect=requests.Timeout("secret upstream timeout"))
+    with _mocked(response):
+        result = json.loads(get_insights_coverage(ENTITY, PROJECT))
+    assert result["error"] == "tool_timeout"
+    assert "secret upstream" not in json.dumps(result)
+    assert response.closed is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.ConnectionError("private-host.svc disconnected"),
+        requests.exceptions.ChunkedEncodingError("credential=secret chunk failed"),
+        requests.RequestException("private request failure"),
+    ],
+)
+def test_stream_request_failures_are_sanitized_and_close_response(error):
+    response = _FakeResponse({})
+    response.iter_content = MagicMock(side_effect=error)
+    with _mocked(response):
+        result = json.loads(get_insights_coverage(ENTITY, PROJECT))
+    assert result == {"error": "agent_lens_query_failed", "message": "The Agent Lens request failed."}
+    assert response.closed is True
 
 
 def test_redirect_is_not_followed():
@@ -391,6 +550,26 @@ def test_expired_tool_deadline_stops_before_backend_request():
     assert result["error"] == "tool_timeout"
 
 
+@pytest.mark.parametrize("active_deadline_seconds", [None, 5.0])
+def test_absolute_request_cap_closes_a_blocked_stream_without_or_before_tool_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    active_deadline_seconds: float | None,
+):
+    monkeypatch.setattr(agent_lens_mod, "_REQUEST_TIMEOUT_SECONDS", 0.05)
+    response = _BlockingResponse()
+    deadline = None if active_deadline_seconds is None else time.monotonic() + active_deadline_seconds
+    token = current_tool_deadline.set(deadline)
+    started = time.monotonic()
+    try:
+        with _mocked(response):
+            result = json.loads(get_insights_coverage(ENTITY, PROJECT))
+    finally:
+        current_tool_deadline.reset(token)
+    assert result["error"] == "tool_timeout"
+    assert time.monotonic() - started < 1
+    assert response.closed is True
+
+
 def test_request_credentials_are_isolated_between_callers():
     with _mocked(_ok({}), api_key="actor-one-key") as first:
         get_insights_coverage(ENTITY, PROJECT)
@@ -423,6 +602,28 @@ def test_truncation_notice_is_included_in_final_token_budget(monkeypatch: pytest
     assert count_tokens_conservative(serialized) <= 300
 
 
+def test_paginated_page_fails_instead_of_returning_cursor_after_dropping_rows(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(agent_lens_mod, "MAX_RESPONSE_TOKENS", 300)
+    rows = [{"conversation_id": f"c{i}", "trace_id": "t" * 100} for i in range(100)]
+    with _mocked(_FakeResponse({"data": rows, "next_cursor": "would-skip-dropped-rows"})):
+        serialized = list_category_example_turns(
+            ENTITY,
+            PROJECT,
+            "intent",
+            "billing",
+            **WINDOW,
+            limit=50,
+        )
+    result = json.loads(serialized)
+    assert result["error"] == "agent_lens_response_too_large"
+    assert "lower limit" in result["message"]
+    assert "next_cursor" not in result
+    assert "data" not in result
+    assert count_tokens_conservative(serialized) <= 300
+
+
 def test_oversized_distribution_trims_the_nested_buckets():
     buckets = [{"time_bucket_start_ms": i, "tag_counts": {f"tag-{n}": n for n in range(50)}} for i in range(4000)]
     payload = {"time_bucket_seconds": 60, "after_ms": 0, "before_ms": 1, "buckets": buckets}
@@ -438,3 +639,86 @@ def test_small_response_is_returned_untouched():
     with _mocked(_ok(["escalated"])):
         result = json.loads(list_conversation_tag_names(ENTITY, PROJECT))
     assert result == {"data": ["escalated"]}
+
+
+# ----- live-smoke qualification harness -----
+
+
+def _run_smoke_with_fixtures(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    empty_tool: str | None = None,
+) -> tuple[int, list[str]]:
+    responses = {
+        "get_insights_coverage": {"latest_week": "2026-09-01"},
+        "get_clustering_status": [{"signature_type": "intent"}],
+        "get_category_breakdowns": [{"category": "action_request", "failure_breakdowns": []}],
+        "list_category_example_turns": [{"conversation_id": "conv-1", "trace_id": "trace-1"}],
+        "list_matching_turns": [{"conversation_id": "conv-1", "trace_id": "trace-1"}],
+        "list_conversation_tag_names": ["reviewed"],
+        "get_conversation_tags": [{"conversation_id": "conv-1", "tag": "reviewed"}],
+        "list_tagged_conversations": ["conv-1"],
+        "get_tag_distribution": {"buckets": [{"tag_counts": {"reviewed": 1}}]},
+    }
+    calls: list[str] = []
+
+    def fake(name: str):
+        def invoke(*_args, **_kwargs):
+            calls.append(name)
+            data = [] if name == empty_tool else responses[name]
+            return json.dumps({"data": data})
+
+        return invoke
+
+    for name in responses:
+        monkeypatch.setattr(agent_lens_smoke, name, fake(name))
+    monkeypatch.setattr(agent_lens_smoke, "_seed_api_key", lambda: "test-key")
+    monkeypatch.setenv("AGENT_LENS_BASE_URL", BASE_URL)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "agent_lens_smoke.py",
+            "--entity",
+            ENTITY,
+            "--project",
+            PROJECT,
+            "--start-at",
+            WINDOW["start_at"],
+            "--end-at",
+            WINDOW["end_at"],
+            "--signature-type",
+            "intent",
+            "--category-id",
+            "action_request",
+            "--tag-name",
+            "reviewed",
+            "--conversation-id",
+            "conv-1",
+        ],
+    )
+    return agent_lens_smoke.main(), calls
+
+
+def test_live_smoke_requires_matching_data_from_all_nine_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    result, calls = _run_smoke_with_fixtures(monkeypatch)
+    output = capsys.readouterr().out
+    assert result == 0
+    assert len(calls) == len(set(calls)) == 9
+    assert "9/9 checks passed" in output
+    assert "skip" not in output.lower()
+
+
+def test_live_smoke_empty_fixture_fails_but_still_exercises_all_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    result, calls = _run_smoke_with_fixtures(monkeypatch, empty_tool="get_clustering_status")
+    output = capsys.readouterr().out
+    assert result == 1
+    assert len(calls) == len(set(calls)) == 9
+    assert "8/9 checks passed" in output
+    assert "skip" not in output.lower()
