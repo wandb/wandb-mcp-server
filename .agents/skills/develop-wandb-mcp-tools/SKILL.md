@@ -30,6 +30,7 @@ description: Safely implement, fix, refactor, or review W&B MCP tools and their 
 - Add only bounded, low-cardinality telemetry dimensions.
 - Do not retry non-idempotent writes. Return an explicit unknown outcome when a timeout makes write completion ambiguous.
 - For optional external services, require an explicit reviewed profile and typed endpoint configuration, validate the endpoint, bound input and polling, disable redirects when credentials could cross origins, and keep the group out of managed profiles until its entitlement boundary is approved.
+- For credential-forwarding HTTP tools, stream through a finite byte cap before JSON decoding, reject unexpected redirects or encodings, and bound the request by the active MCP tool deadline.
 
 ## Test the behavior users actually invoke
 

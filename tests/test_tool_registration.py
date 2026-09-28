@@ -5,6 +5,7 @@ import inspect
 
 import pytest
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ListToolsResult
 
 from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
 from wandb_mcp_server.runtime_contract import load_runtime_contract, tools_for_profile
@@ -55,6 +56,8 @@ def test_default_public_profile_is_exact_models_weave():
         ("models-weave-agents-aria", "read-only", 30),
         ("models-weave-graphql-compat", "read-write", 23),
         ("models-weave-graphql-compat", "read-only", 21),
+        ("models-weave-agents-agent-lens", "read-write", 39),
+        ("models-weave-agents-agent-lens", "read-only", 37),
     ],
 )
 def test_every_supported_profile_has_one_exact_manifest(
@@ -68,6 +71,8 @@ def test_every_supported_profile_has_one_exact_manifest(
     monkeypatch.setenv("WANDB_MCP_ACCESS_MODE", access_mode)
     if "aria" in tool_profile:
         monkeypatch.setenv("WB_AGENT_BASE_URL", "https://wb-agent.wandb.ai")
+    if "agent-lens" in tool_profile:
+        monkeypatch.setenv("AGENT_LENS_BASE_URL", "https://agent-lens.example.com")
 
     names = _registered_tool_names()
 
@@ -101,6 +106,48 @@ def test_endpoint_presence_never_enables_aria(monkeypatch: pytest.MonkeyPatch):
     assert {"aria_send_message", "aria_get_turn", "aria_get_turns"}.isdisjoint(_registered_tool_names())
 
 
+def test_endpoint_presence_never_enables_agent_lens(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("AGENT_LENS_BASE_URL", "https://agent-lens.example.com")
+    assert not any(name.startswith(("get_agent_lens_", "list_agent_lens_")) for name in _registered_tool_names())
+
+
+def test_agent_lens_profile_requires_explicit_safe_https_origin(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-weave-agents-agent-lens")
+    with pytest.raises(ValueError, match="explicit AGENT_LENS_BASE_URL"):
+        register_tools(FastMCP("test"))
+    monkeypatch.setenv("AGENT_LENS_BASE_URL", "http://unsafe.example")
+    with pytest.raises(ValueError, match="AGENT_LENS_BASE_URL"):
+        register_tools(FastMCP("test"))
+
+
+def test_agent_lens_profile_is_shared_only(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MCP_WORKLOAD_PROFILE", "shared")
+    monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-weave-agents-agent-lens")
+    monkeypatch.setenv("WF_TRACE_SERVER_URL", "https://trace.wandb.ai")
+    monkeypatch.setenv("AGENT_LENS_BASE_URL", "https://agent-lens.example.com")
+    assert len(_registered_tool_names()) == 39
+
+    monkeypatch.setenv("MCP_WORKLOAD_PROFILE", "dedicated")
+    with pytest.raises(ValueError, match="not allowed with managed dedicated"):
+        register_tools(FastMCP("test"))
+
+
+def test_hosted_agent_lens_tools_list_stays_within_transport_budget(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MCP_WORKLOAD_PROFILE", "shared")
+    monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-weave-agents-agent-lens")
+    monkeypatch.setenv("WANDB_MCP_ACCESS_MODE", "read-write")
+    monkeypatch.setenv("WF_TRACE_SERVER_URL", "https://trace.wandb.ai")
+    monkeypatch.setenv("AGENT_LENS_BASE_URL", "https://agent-lens.example.com")
+
+    mcp = FastMCP("test")
+    register_tools(mcp)
+    tools = asyncio.run(mcp.list_tools())
+    payload = ListToolsResult(tools=tools).model_dump_json(exclude_none=True).encode("utf-8")
+
+    assert len(tools) == 39
+    assert len(payload) <= 128 * 1024
+
+
 def test_aria_profile_requires_explicit_safe_https_origin(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-weave-agents-aria")
     with pytest.raises(ValueError, match="explicit WB_AGENT_BASE_URL"):
@@ -118,6 +165,7 @@ def test_aria_profile_requires_explicit_safe_https_origin(monkeypatch: pytest.Mo
         ("dedicated", "models-weave-agents"),
         ("dedicated", "models-weave-agents-aria"),
         ("dedicated", "models-weave-graphql-compat"),
+        ("dedicated", "models-weave-agents-agent-lens"),
     ],
 )
 def test_managed_profiles_reject_aria_raw_graphql_and_unsupported_groups(
@@ -128,6 +176,7 @@ def test_managed_profiles_reject_aria_raw_graphql_and_unsupported_groups(
     monkeypatch.setenv("MCP_WORKLOAD_PROFILE", workload)
     monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", profile)
     monkeypatch.setenv("WB_AGENT_BASE_URL", "https://wb-agent.wandb.ai")
+    monkeypatch.setenv("AGENT_LENS_BASE_URL", "https://agent-lens.example.com")
     with pytest.raises(ValueError, match="not allowed with managed"):
         register_tools(FastMCP("test"))
 

@@ -202,6 +202,7 @@ def _server_environment(
         "MCP_WORKLOAD_PROFILE": "local",
         "MCP_CAPACITY_CLASS": "small",
         "WB_AGENT_BASE_URL": "https://127.0.0.1:9",
+        "AGENT_LENS_BASE_URL": "https://127.0.0.1:9",
     }
     if profile_environment:
         environment.update(profile_environment)
