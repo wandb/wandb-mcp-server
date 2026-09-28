@@ -196,7 +196,7 @@ jobs:
       - name: Scan the exact runtime SBOM
         id: grype
         continue-on-error: true
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           sbom: ${{ runner.temp }}/evidence/wandb_mcp_server-${{ needs.build.outputs.version }}.spdx.json
           fail-build: true
@@ -244,18 +244,18 @@ jobs:
 
       - name: Attest source artifacts with SLSA provenance
         id: provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/evidence/SHA256SUMS
 
       - name: Bind the runtime SBOM to the wheel
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/evidence/*.whl
           sbom-path: ${{ runner.temp }}/evidence/wandb_mcp_server-${{ needs.build.outputs.version }}.spdx.json
 
       - name: Sign the public release qualification predicate
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/evidence/SHA256SUMS
           predicate-type: https://wandb.ai/attestations/mcp-public-release/v2
