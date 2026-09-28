@@ -1,4 +1,5 @@
 import asyncio
+from importlib.metadata import version as distribution_version
 import json
 import logging
 import time
@@ -131,7 +132,7 @@ def test_every_aria_request_overrides_client_attribution_header() -> None:
         ("POST", aria.ARIA_CLIENT_IDENTITY),
         ("GET", aria.ARIA_CLIENT_IDENTITY),
     ]
-    assert aria.ARIA_CLIENT_IDENTITY == "wandb-mcp-server/0.4.0"
+    assert aria.ARIA_CLIENT_IDENTITY == f"wandb-mcp-server/{distribution_version('wandb-mcp-server')}"
 
 
 def test_concurrent_callers_keep_request_scoped_tokens_isolated(monkeypatch) -> None:

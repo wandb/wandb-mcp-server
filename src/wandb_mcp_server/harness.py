@@ -57,16 +57,29 @@ class HarnessContext:
     mcp_user_agent_product: str = ""
     mcp_client_confidence: str = _DEFAULT_CONFIDENCE
     mcp_client_mismatch: str = ""
+    canonical_agent_harness: str = ""
 
     @property
     def agent_harness(self) -> str:
         """Return the exact client product, not its vendor family."""
-        return self.mcp_client_app or _DEFAULT_CLIENT_APP
+        if self.canonical_agent_harness:
+            return self.canonical_agent_harness
+        _, canonical_app, _ = _classify_client(self.mcp_client_app)
+        return canonical_app
 
     @property
     def client_vendor(self) -> str:
         """Return the canonical vendor associated with the client family."""
         return _VENDOR_BY_FAMILY.get(self.mcp_client_family, "unknown")
+
+    @property
+    def compatibility_client_app(self) -> str:
+        """Return the stable v0.3 app category used by Segment/Hex."""
+        source = self.canonical_agent_harness
+        if not source or source == _DEFAULT_CLIENT_APP:
+            source = self.mcp_client_app
+        _, _, compatibility_app = _classify_client(source)
+        return compatibility_app
 
     @property
     def call_type(self) -> str:
@@ -93,7 +106,7 @@ class HarnessContext:
             "client_vendor": self.client_vendor,
             "call_type": self.call_type,
             "mcp_client_family": self.mcp_client_family,
-            "mcp_client_app": self.mcp_client_app,
+            "mcp_client_app": self.compatibility_client_app,
             "mcp_client_source": self.mcp_client_source,
             "mcp_protocol_version": self.mcp_protocol_version,
             "mcp_jsonrpc_method": self.mcp_jsonrpc_method,
@@ -217,36 +230,41 @@ def _protocol_from_meta(params: dict[str, Any]) -> str:
     return _sanitize_value(meta.get("io.modelcontextprotocol/protocolVersion"))
 
 
-def _classify_client(value: object) -> tuple[str, str]:
-    """Return the legacy family and canonical product name."""
+def _classify_client(value: object) -> tuple[str, str, str]:
+    """Return family, canonical product, and the v0.3 compatibility app.
+
+    ``mcp_client_app`` is consumed by the existing Segment/Hex model, so its
+    historical values remain stable while ``agent_harness`` carries the newer
+    canonical taxonomy.
+    """
     text = str(value or "").lower()
     if not text:
-        return _DEFAULT_CLIENT_FAMILY, _DEFAULT_CLIENT_APP
+        return _DEFAULT_CLIENT_FAMILY, _DEFAULT_CLIENT_APP, _DEFAULT_CLIENT_APP
     if "wandb-mcp-load-test" in text or "compatibility-check" in text or "load_test" in text:
-        return "load_test", "load_test"
-    if "mcp-inspector" in text or "modelcontextprotocol/inspector" in text:
-        return "mcp_inspector", "mcp_inspector"
+        return "load_test", "load_test", "load_test"
+    if "mcp-inspector" in text or "mcp_inspector" in text or "modelcontextprotocol/inspector" in text:
+        return "mcp_inspector", "mcp_inspector", "unknown"
     if "linear" in text:
-        return "linear", "linear"
+        return "linear", "linear", "linear_agent"
     if "mistral" in text or "lechat" in text or "le-chat" in text:
-        return "mistral", "lechat"
+        return "mistral", "lechat", "lechat"
     if "claude-code" in text or ("claude" in text and "code" in text):
-        return "claude", "claude_code"
+        return "claude", "claude_code", "claude_code"
     if "claude-desktop" in text or ("claude" in text and "desktop" in text):
-        return "claude", "claude_desktop"
+        return "claude", "claude_desktop", "claude_desktop"
     if "claude-ai" in text or "claude.ai" in text or "claude" in text or "anthropic" in text:
-        return "claude", "claude_ai"
+        return "claude", "claude_ai", "claude"
     if "codex" in text:
-        return "openai", "codex"
+        return "openai", "codex", "codex_cli"
     if "openai" in text or "chatgpt" in text:
-        return "openai", "unknown"
+        return "openai", "unknown", "openai_responses"
     if "cursor" in text:
-        return "cursor", "cursor"
+        return "cursor", "cursor", "cursor"
     if "gemini" in text:
-        return "gemini", "gemini_cli"
+        return "gemini", "gemini_cli", "gemini_cli"
     if "vscode" in text or "visual-studio-code" in text:
-        return "vscode", "vscode"
-    return _DEFAULT_CLIENT_FAMILY, _DEFAULT_CLIENT_APP
+        return "vscode", "vscode", "vscode"
+    return _DEFAULT_CLIENT_FAMILY, _DEFAULT_CLIENT_APP, _DEFAULT_CLIENT_APP
 
 
 def _lower_priority_mismatch(
@@ -257,10 +275,10 @@ def _lower_priority_mismatch(
 ) -> str:
     """Flag a known conflicting signal without changing trusted identity."""
     if meta_client_info:
-        _, meta_app = _classify_client(meta_client_info.get("name") or meta_client_info.get("title"))
+        _, meta_app, _ = _classify_client(meta_client_info.get("name") or meta_client_info.get("title"))
         if meta_app != "unknown" and trusted_app != "unknown" and meta_app != trusted_app:
             return "client_info"
-    _, user_agent_app = _classify_client(user_agent)
+    _, user_agent_app, _ = _classify_client(user_agent)
     if user_agent_app != "unknown" and trusted_app != "unknown" and user_agent_app != trusted_app:
         return "user_agent"
     return ""
@@ -276,10 +294,10 @@ def _context_from_client_info(
 ) -> HarnessContext:
     name = _debug_value(client_info.get("name"))
     version = _debug_value(client_info.get("version"))
-    family, app = _classify_client(name or client_info.get("title"))
+    family, app, compatibility_app = _classify_client(name or client_info.get("title"))
     return HarnessContext(
         mcp_client_family=family,
-        mcp_client_app=app,
+        mcp_client_app=compatibility_app,
         mcp_client_source=source,
         mcp_protocol_version=protocol_version,
         mcp_jsonrpc_method=_sanitize_value(call_type),
@@ -288,6 +306,7 @@ def _context_from_client_info(
         mcp_client_version=version,
         mcp_user_agent_product=user_agent_product,
         mcp_client_confidence="high" if family != "unknown" else "low",
+        canonical_agent_harness=app,
     )
 
 
@@ -299,8 +318,8 @@ def _context_from_session_metadata(
     user_agent_product: str,
     mismatch: str = "",
 ) -> HarnessContext:
-    app = _sanitize_value(session_metadata.get("agent_harness") or session_metadata.get("mcp_client_app"))
-    derived_family, _ = _classify_client(app)
+    stored_app = session_metadata.get("agent_harness") or session_metadata.get("mcp_client_app")
+    derived_family, app, compatibility_app = _classify_client(stored_app)
     family = _sanitize_value(session_metadata.get("mcp_client_family"), default=derived_family)
     if family == "unknown":
         family = derived_family
@@ -309,7 +328,7 @@ def _context_from_session_metadata(
         protocol_version = stored_protocol
     return HarnessContext(
         mcp_client_family=family,
-        mcp_client_app=app,
+        mcp_client_app=compatibility_app,
         mcp_client_source="session_metadata",
         mcp_protocol_version=protocol_version,
         mcp_jsonrpc_method=_sanitize_value(call_type),
@@ -318,6 +337,7 @@ def _context_from_session_metadata(
         mcp_user_agent_product=user_agent_product,
         mcp_client_confidence="high",
         mcp_client_mismatch=mismatch,
+        canonical_agent_harness=app,
     )
 
 
@@ -328,16 +348,17 @@ def _context_from_user_agent(
     call_type: str,
 ) -> HarnessContext:
     product = _first_user_agent_product(user_agent)
-    family, app = _classify_client(user_agent)
+    family, app, compatibility_app = _classify_client(user_agent)
     return HarnessContext(
         mcp_client_family=family,
-        mcp_client_app=app,
+        mcp_client_app=compatibility_app,
         mcp_client_source="user_agent" if user_agent else "unknown",
         mcp_protocol_version=protocol_version,
         mcp_jsonrpc_method=_sanitize_value(call_type),
         canonical_call_type=call_type,
         mcp_user_agent_product=product,
         mcp_client_confidence="medium" if family != "unknown" else "low",
+        canonical_agent_harness=app,
     )
 
 
@@ -401,7 +422,9 @@ def extract_harness_context(
             )
 
     if call_type != "initialize" and session_metadata:
-        session_app = _sanitize_value(session_metadata.get("agent_harness") or session_metadata.get("mcp_client_app"))
+        _, session_app, _ = _classify_client(
+            session_metadata.get("agent_harness") or session_metadata.get("mcp_client_app")
+        )
         return _context_from_session_metadata(
             session_metadata=session_metadata,
             protocol_version=protocol_version,
