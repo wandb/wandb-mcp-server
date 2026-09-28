@@ -19,6 +19,7 @@
   "runtime_contract": "src/wandb_mcp_server/runtime-contract.json",
   "qualification_tests": [
     "scripts/mcp_stdio_smoke.py",
+    "tests/test_agent_lens.py",
     "tests/test_documentation.py",
     "tests/test_graphql_compat_safety.py",
     "tests/test_public_release.py",
