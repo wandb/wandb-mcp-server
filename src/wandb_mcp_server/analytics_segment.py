@@ -97,7 +97,14 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     Returns:
         Segment Track-compatible dict, or None if unmappable.
     """
-    from wandb_mcp_server.analytics import _IdentityEvent, _prepare_event, _private_identity, _strict_event_identities
+    from wandb_mcp_server.analytics import (
+        _IdentityEvent,
+        _SegmentUsername,
+        _prepare_event,
+        _private_identity,
+        _resolve_privacy_level,
+        _strict_event_identities,
+    )
 
     event = _prepare_event(event)
     event_type = event.get("event_type")
@@ -106,9 +113,13 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     # The canonical event may contain an approved display username. Segment
-    # always receives the internally carried key pseudonym (or a hash fallback).
+    # receives that username only when it carries authenticated provenance.
+    # Replayed/direct events cannot manufacture that provenance, and strict
+    # mode always converts it to a pseudonym before forwarding.
     # A similarly named JSON field cannot supply this routing identity.
     trusted_identity = event._segment_identity if type(event) is _IdentityEvent else None
+    if type(trusted_identity) is _SegmentUsername and _resolve_privacy_level() == "strict":
+        trusted_identity = _private_identity(trusted_identity)
     user_id = trusted_identity or _private_identity(event.get("actor_id") or event.get("user_id")) or "anonymous"
     event = _strict_event_identities(event)
 

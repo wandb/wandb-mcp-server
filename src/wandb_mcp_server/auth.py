@@ -157,7 +157,8 @@ async def mcp_auth_middleware(request: Request, call_next):
     api_key_token = WandBApiManager.set_context_api_key(wandb_api_key)
 
     # Authentication already established possession of a W&B API key. Do not
-    # add a separate viewer request solely for telemetry attribution.
+    # add a separate viewer request solely for telemetry attribution. Tool
+    # analytics may reuse a viewer already materialized by functional work.
     viewer = None
 
     # --- Session management -----------------------------------------------

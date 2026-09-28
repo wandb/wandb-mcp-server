@@ -1,5 +1,7 @@
 """Unit tests for MCP harness classification."""
 
+import pytest
+
 from wandb_mcp_server.harness import extract_harness_context
 
 
@@ -16,7 +18,7 @@ def test_initialize_client_info_identifies_codex() -> None:
     )
 
     assert context.mcp_client_family == "openai"
-    assert context.mcp_client_app == "codex"
+    assert context.mcp_client_app == "codex_cli"
     assert context.agent_harness == "codex"
     assert context.client_vendor == "openai"
     assert context.mcp_client_source == "initialize_client_info"
@@ -74,7 +76,7 @@ def test_session_metadata_wins_over_later_spoofed_meta() -> None:
     )
 
     assert context.mcp_client_family == "openai"
-    assert context.mcp_client_app == "codex"
+    assert context.mcp_client_app == "codex_cli"
     assert context.mcp_client_source == "session_metadata"
     assert context.mcp_client_mismatch == "client_info"
     assert context.mcp_jsonrpc_method == "tools.call"
@@ -173,6 +175,48 @@ def test_supported_client_products_have_canonical_harnesses() -> None:
             },
         )
         assert (context.agent_harness, context.client_vendor) == expected
+
+
+@pytest.mark.parametrize(
+    ("client_name", "legacy_app", "canonical_harness"),
+    [
+        ("codex-mcp-client", "codex_cli", "codex"),
+        ("chatgpt", "openai_responses", "unknown"),
+        ("linear-agent", "linear_agent", "linear"),
+        ("claude-ai", "claude", "claude_ai"),
+    ],
+)
+def test_v03_client_app_alias_remains_stable(
+    client_name: str,
+    legacy_app: str,
+    canonical_harness: str,
+) -> None:
+    context = extract_harness_context(
+        {},
+        {
+            "method": "initialize",
+            "params": {"clientInfo": {"name": client_name, "version": "1"}},
+        },
+    )
+
+    assert context.mcp_client_app == legacy_app
+    assert context.analytics_fields()["mcp_client_app"] == legacy_app
+    assert context.agent_harness == canonical_harness
+
+
+def test_current_session_metadata_is_normalized_to_compatibility_alias() -> None:
+    context = extract_harness_context(
+        {},
+        {"method": "tools/call"},
+        session_metadata={
+            "agent_harness": "codex",
+            "mcp_client_app": "codex",
+            "mcp_client_family": "openai",
+        },
+    )
+
+    assert context.agent_harness == "codex"
+    assert context.mcp_client_app == "codex_cli"
 
 
 def test_meta_client_info_is_used_without_session_metadata() -> None:

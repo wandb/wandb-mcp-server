@@ -7,8 +7,9 @@
 | Channel | State | Immutable artifact |
 |---|---|---|
 | Public source | Pending | Source revision; signed tag and GitHub Release when available |
-| Container | Pending | Public repository and verified immutable digest |
-| Dedicated/Self-Managed | Pending | Compatible chart version and installation notes |
+| W&B-hosted | Pending | Verified immutable image digest and deployment evidence |
+| Customer container | Pending | Public repository and verified immutable digest |
+| Dedicated/Self-Managed | Pending | Compatible chart/configuration and installation evidence |
 
 Report each artifact's actual status. Do not infer a signed source release or
 installation qualification from a published container.
@@ -64,10 +65,12 @@ details out of public release notes.
 - GitHub Release: Pending (draft until channel evidence is complete)
 - Wheel and source-distribution checksums: Pending
 - Public qualification/provenance attestations: Pending
-- Public container repository and digest: Pending
+- Hosted image digest: Pending
+- Customer image repository and digest: Pending
 - Helm chart version: Pending
 
 ## Rollback
 
 - Public source: fix forward from the signed tag.
+- W&B-hosted: restore and verify the previous configuration, revision, and traffic.
 - Dedicated/Self-Managed: restore the previous chart and image digest.
