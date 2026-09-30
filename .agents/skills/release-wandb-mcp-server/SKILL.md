@@ -1,11 +1,38 @@
 ---
 name: release-wandb-mcp-server
-description: Prepare, qualify, audit, or hand off a public W&B MCP Server release using the repository's machine-enforced release contract. Use for release branches, versioning, exact installed-wheel profiles, source attestations, release notes, immutable artifact evidence, readiness reviews, or rollback preparation.
+description: Prepare, qualify, audit, or hand off a public W&B MCP Server source release using the repository's machine-enforced release contract, while keeping hosted and customer-image channels separate. Use for release branches, versioning, exact installed-wheel profiles, source attestations, release notes, immutable artifact evidence, readiness reviews, or rollback preparation.
 ---
 
 # Release W&B MCP Server
 
-## Follow the controller
+## Choose the release channel
+
+Public source, W&B-hosted deployment, customer-image publication, and
+installation qualification are independent channels:
+
+- A formal public source release uses the protected signed-tag workflow in
+  this repository.
+- A W&B-hosted deployment binds an approved immutable source commit and tree to
+  a staged image, then promotes that exact digest through the hosted release
+  controller.
+- Customer publication copies and verifies an immutable image through its own
+  publication gate.
+
+Do not turn a requirement from one channel into a prerequisite for another
+unless the selected channel's checked-in controller explicitly requires it.
+Missing repository administration for the formal source-release lane blocks
+that lane only. An actual source, security, provenance, or digest defect
+invalidates the affected artifact everywhere.
+
+When the request advances only a hosted or customer-image channel, use that
+channel's repository, controller, and runbook. Use this public repository to
+verify the exact source and runtime contract, not to invent an additional
+source-release gate.
+
+## Qualify the public-source channel
+
+Use this section when advancing the public-source channel or when another
+channel's checked-in controller explicitly requires its evidence.
 
 1. Read `RELEASING.md` and the target note under `docs/releases/` completely.
 2. Record exact source and tree SHAs. Treat moving branches and mutable tags as
@@ -25,29 +52,37 @@ description: Prepare, qualify, audit, or hand off a public W&B MCP Server releas
    subsets, or copied tool lists.
 5. Run the locked/latest SDK, Python, security, isolated-wheel, and installed
    MCP protocol gates specified by `RELEASING.md`.
-6. Stop at a draft candidate unless the user explicitly authorizes the next
-   action and repository protection allows it.
+6. Stop at a draft public candidate unless the user explicitly authorizes the
+   next public-source action and that channel's controller and protections
+   allow it.
 
 ## Fail closed
 
-Do not continue when the controller reports a dirty tree, inconsistent version,
-stale SHA, unsigned or misplaced tag, missing release note, incomplete exact
-profile evidence, mutable artifact, missing scan/SBOM, or mismatched digest.
-Record a skipped or unavailable check as a blocker, never a pass.
+Do not continue in the selected channel when its controller reports a dirty
+tree, inconsistent version, stale SHA, missing release note, incomplete exact
+profile evidence, mutable artifact, missing required scan/SBOM, or mismatched
+digest. An unsigned or misplaced tag blocks a formal public source release; it
+does not by itself invalidate a separately reviewed hosted image. Record a
+skipped or unavailable required check as a blocker, never a pass.
 
 After the approved release PR merges, `source-gate` must bind the merge SHA to
 the reviewed head tree, required current-head checks, approval, and resolved
 conversations before anyone creates the signed tag.
 
 If that post-merge gate or a final security check finds a source defect, stop
-before tagging or deployment. Fix it in a new reviewed PR, treat all earlier
-candidate evidence as stale, and stage the repaired tree again. Never amend the
-already-reviewed history or reuse evidence from the superseded tree.
+before tagging or deploying that tree. Fix it in a new reviewed PR, treat all
+earlier evidence for that tree as stale, and stage the repaired tree again.
+Never amend the already-reviewed history or reuse evidence from the superseded
+tree. If only the formal source-release repository settings are unavailable,
+stop that channel without presenting them as a runtime or hosted-deployment
+defect.
 
-Build only through `scripts/public_release.py build` into a new directory
-outside the checkout. Never reuse `dist/`. The `attest` command produces a
-deterministic predicate for the protected signer; it is not signed evidence by
-itself.
+Build public wheel and source-distribution artifacts only through
+`scripts/public_release.py build` into a new directory outside the checkout.
+Never reuse `dist/`. The `attest` command produces a deterministic predicate
+for the protected signer; it is not signed evidence by itself. Do not use this
+command to rebuild a hosted container; the hosted controller builds and binds
+that image.
 
 ## Keep public release documentation factual
 
@@ -66,10 +101,12 @@ profile or artifact evidence from the previous tree.
 ## Preserve authorization boundaries
 
 This skill does not authorize merging, tag creation, publication, deployment,
-production traffic, customer rollout, or branch-protection bypasses. Public
-source must merge and receive a verified signed tag before production traffic
-can move. Managed promotion and customer publication remain separate protected
-approvals.
+production traffic, customer rollout, or protection bypasses. Use only the
+existing reviewed gate for the selected channel. A verified signed tag is
+required to call a version a public source release, but is not by itself a
+prerequisite for a separately protected hosted promotion or customer-image
+publication. Managed promotion and customer publication remain separate
+authorizations.
 
 Never place credentials in arguments or evidence. Live credentials must come
 from a protected process environment, and release artifacts must exclude
@@ -78,14 +115,17 @@ secret names.
 
 ## Hand off exact evidence
 
-Provide the protected release controller with:
+Always provide the selected release controller with the exact source commit,
+source tree, runtime contract, and applicable profile evidence. Then provide
+the channel-specific evidence:
 
-- Version, signed tag, source SHA, and source tree SHA.
-- Packaged runtime-contract digest and exact profile/access-mode evidence digest.
-- Wheel, source distribution, checksum, SBOM, vulnerability report, signature,
-  and provenance digests.
-- Per-channel state from the release note.
-- The previous immutable artifact and tested rollback boundary.
+- Public source: signed tag, GitHub Release, wheel/source-distribution
+  checksums, SBOM, vulnerability report, signatures, and provenance.
+- W&B-hosted: verified digest-to-source provenance, signatures, applicable scan
+  evidence, configuration and functional results, production authorization,
+  and the tested rollback boundary.
+- Customer image: verified destination digest, provenance, compatibility
+  result, and publication state.
 
 Follow [the canonical release state machine](../../../RELEASING.md). Any source
 or tree change invalidates downstream evidence and restarts qualification.

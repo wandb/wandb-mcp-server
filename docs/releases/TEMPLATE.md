@@ -71,6 +71,7 @@ details out of public release notes.
 
 ## Rollback
 
-- Public source: fix forward from the signed tag.
+- Public source: fix forward from the recorded source commit; never rewrite a
+  published signed tag.
 - W&B-hosted: restore and verify the previous configuration, revision, and traffic.
 - Dedicated/Self-Managed: restore the previous chart and image digest.

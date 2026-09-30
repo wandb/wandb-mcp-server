@@ -15,7 +15,8 @@ convenience references, not substitutes for digest verification.
 |---|---|
 | Candidate | Public release PR, current-head CI/security, exact installed-wheel manifests, compatibility and migration tests |
 | Source released | Approved merge to `main`, signed `vX.Y.Z` tag, draft GitHub Release, public source attestation |
-| Container published | Public repository, verified digest, source provenance, signatures, and actual test/scan results |
+| W&B-hosted deployed | Verified immutable image digest and source provenance, hosted configuration and functional results, protected promotion, and tested rollback boundary |
+| Customer container published | Public repository, verified digest, source provenance, signatures, and actual test/scan results |
 | Installation verified | Compatible chart/configuration plus completed installation, functional, and rollback checks |
 
 Advancing one channel does not advance another. Record each channel state in
@@ -25,6 +26,20 @@ artifact is verified.
 Source qualification, container publication, and installation validation are
 separate results. Do not describe an image as a signed source release or a
 qualified installation when only publication has completed.
+
+Choose the channel before applying a gate:
+
+- **Public source:** approved source and tree, then a protected signed tag,
+  GitHub Release, and source attestations.
+- **W&B-hosted:** approved immutable source and tree, then a staged image and
+  promotion of that exact digest through the hosted controller.
+- **Customer container:** an immutable image copied and verified through the
+  customer-publication controller.
+
+Advancing one channel is not automatically a prerequisite for another. A
+checked-in channel controller may deliberately require evidence from another
+channel; follow that explicit policy rather than inferring a dependency from a
+version number or product feature.
 
 ## 1. Prepare the public release PR
 
@@ -87,15 +102,20 @@ uv run --no-sync python scripts/public_release.py profiles --all
 
 Test counts and minimum tool counts are not release criteria.
 
-## 3. Merge and create the source release
+## 3. Merge and create the formal public source release
+
+Complete this section only when advancing the public-source channel. A hosted
+or customer-image release follows its own controller and records its state
+separately.
 
 Obtain the required approval and merge the public release PR normally. Record
 the merge SHA and confirm its tree is the reviewed candidate tree. A tree
 difference invalidates candidate evidence.
 
-Before creating a tag, use the protected workflow identity to bind the merge
-commit to its approved release PR, reviewed head tree, resolved conversations,
-and successful required checks:
+Before creating a tag, run the source gate with authenticated GitHub read
+access to bind the merge commit to its approved release PR, reviewed head tree,
+resolved conversations, and successful required checks. The tag-triggered
+workflow reruns the same gate with its GitHub token:
 
 ```bash
 uv run --no-sync python scripts/public_release.py source-gate \
@@ -104,14 +124,27 @@ uv run --no-sync python scripts/public_release.py source-gate \
 ```
 
 If `source-gate` or the final security checks uncover a source defect after the
-release PR merges, stop before tagging or deployment. Land the repair in a new
-reviewed PR, invalidate the earlier candidate evidence, and stage the repaired
-tree again. Do not reuse evidence from the superseded tree.
+release PR merges, stop before tagging or deploying that tree. Land the repair
+in a new reviewed PR, invalidate the earlier evidence for that source, and
+stage the repaired tree again. Do not reuse evidence from the superseded tree.
+Missing administration for only the formal source-release lane blocks this
+section, not a separately protected hosted or customer-image channel.
 
-Tag protection must restrict who can create `v*` refs. The source-release
-workflow rechecks this gate; possession of a signing key alone is not proof of
-review. Its `public-source-release` environment must require a non-self
-approval and prohibit administrator bypass before the workflow is enabled.
+Before the repository's first formal public source release, a repository admin
+must complete the one-time GitHub setup:
+
+- an active tag rule restricting who may create `v*` refs; and
+- a `public-source-release` environment with a non-self reviewer, prevention of
+  self-review, administrator bypass disabled, and a deployment policy limited
+  to version tags.
+
+GitHub enforces these repository settings; this repository does not provision
+or audit them. The workflow verifies the signed tag and approved source tree,
+then binds its write/OIDC job to the protected environment. If the settings are
+absent or cannot be verified, do not push a formal source-release tag. This is
+release-process setup, not a runtime, Agent Lens, Core, Terraform, or IAM
+requirement. Registering a signing key grants no repository access or release
+authorization by itself.
 
 Create an annotated, signed tag on that merge commit:
 
@@ -133,7 +166,11 @@ uv run --no-sync python scripts/public_release.py \
 This completes source qualification only. It does not deploy the artifact or
 establish that a particular installation is running it.
 
-## 4. Build once and attest
+## 4. Build public source artifacts once and attest
+
+Complete this section only when advancing the formal public-source channel.
+Hosted and customer-image controllers build or copy their images independently
+and bind them to the same exact source facts.
 
 Build in a new directory outside the checkout. The release utility rejects the
 repository's ignored `dist/` directory, any directory inside the source tree,
@@ -185,7 +222,7 @@ The GitHub Release remains a draft until downstream channel evidence supports
 the announcement. Rerunning source qualification may prove identical assets;
 it must fail instead of replacing an asset with different bytes.
 
-## 5. Record public artifacts and compatibility
+## 5. Record public source artifacts and compatibility
 
 Record the exact source revision, artifact checksums, public signatures, and
 container digest in the versioned release note. Verify a copied image's
