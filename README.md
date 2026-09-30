@@ -31,18 +31,20 @@ Query and analyze your Weights & Biases data using natural language through the 
   robust. Tool telemetry excludes raw arguments and API keys; see the
   [privacy guidance](docs/OBSERVABILITY.md) before enabling verbose logging.
 
-The current 0.4.2 candidate adds an explicit Agent Lens opt-in for W&B-hosted
-MTSaaS. It does not add Agent Lens to the default local profile or to any
-Dedicated/customer profile. See the [v0.4.2 release note](docs/releases/v0.4.2.md)
-for its current qualification state and the [release index](docs/releases/README.md)
-for earlier 0.4 versions.
+The merged 0.4.2 source candidate adds an explicit Agent Lens opt-in for
+W&B-hosted MTSaaS. It does not add Agent Lens to the default local profile or
+to any Dedicated/customer profile. See the
+[v0.4.2 release note](docs/releases/v0.4.2.md) for its current qualification
+state and the [release index](docs/releases/README.md) for earlier 0.4 versions.
 
 ### Release availability
 
 Public source, W&B-hosted images, customer images, and installation artifacts
 advance independently. Use only immutable evidence recorded in the
 [release index](docs/releases/README.md); a version string or mutable container
-tag does not prove that another channel is available or qualified.
+tag does not prove that another channel is available or qualified. Formal
+public-source release controls are not automatically prerequisites for a
+separately reviewed hosted or customer-image release.
 
 ## What Can This Server Do?
 

@@ -329,6 +329,7 @@ def test_source_release_workflow_is_tag_only_pinned_and_draft():
     assert "--tag-verification github" in workflow
     assert "--draft" in workflow
     assert "--verify-tag" in workflow
+    assert "environment: public-source-release" in workflow
     assert "pypi" not in workflow.lower()
     assert "group: public-source-release" in workflow
     assert "--clobber" not in workflow
