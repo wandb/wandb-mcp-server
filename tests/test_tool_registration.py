@@ -148,6 +148,25 @@ def test_hosted_agent_lens_tools_list_stays_within_transport_budget(monkeypatch:
     assert len(payload) <= 128 * 1024
 
 
+def test_agent_lens_signature_type_schema_advertises_exact_enum(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MCP_WORKLOAD_PROFILE", "shared")
+    monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-weave-agents-agent-lens")
+    monkeypatch.setenv("WANDB_MCP_ACCESS_MODE", "read-write")
+    monkeypatch.setenv("WF_TRACE_SERVER_URL", "https://trace.wandb.ai")
+    monkeypatch.setenv("AGENT_LENS_BASE_URL", "https://agent-lens.example.com")
+
+    mcp = FastMCP("test")
+    register_tools(mcp)
+    tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+
+    schema = tools["list_agent_lens_category_example_turns_tool"].inputSchema
+    assert schema["properties"]["signature_type"] == {
+        "enum": ["intent", "failure"],
+        "title": "Signature Type",
+        "type": "string",
+    }
+
+
 def test_aria_profile_requires_explicit_safe_https_origin(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-weave-agents-aria")
     with pytest.raises(ValueError, match="explicit WB_AGENT_BASE_URL"):

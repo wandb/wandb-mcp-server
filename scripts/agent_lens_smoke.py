@@ -26,11 +26,12 @@ fixture data; empty results are not counted as qualification success.
 from __future__ import annotations
 
 import argparse
+import asyncio
 from datetime import datetime, timezone
 import json
 import os
 import sys
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from uuid import UUID
 
 from wandb_mcp_server.api_client import WandBApiManager
@@ -73,16 +74,16 @@ def _seed_api_key() -> str | None:
     return api_key
 
 
-def _run(
+async def _run(
     label: str,
-    call: Callable[[], str],
+    call: Callable[[], Awaitable[str]],
     verbose: bool,
     *,
     qualifies: Callable[[Any], bool],
 ) -> tuple[bool, Any]:
     """Invoke one tool and summarize its envelope."""
     try:
-        payload = json.loads(call())
+        payload = json.loads(await call())
     except Exception as error:  # a tool should return an envelope, never raise
         print(f"  FAIL  {label}: raised {type(error).__name__}")
         return False, None
@@ -167,7 +168,7 @@ def _conversation_present(value: Any, conversation_id: str) -> bool:
     return isinstance(value, list) and conversation_id in value
 
 
-def main() -> int:
+async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--entity", required=True, help="W&B entity (team or username)")
     parser.add_argument("--project", required=True, help="W&B project name")
@@ -228,96 +229,114 @@ def main() -> int:
 
     print("\nInsights")
     results.append(
-        _run(
-            "insights coverage",
-            lambda: get_insights_coverage(entity, project),
-            args.verbose,
-            qualifies=_nonempty_mapping,
+        (
+            await _run(
+                "insights coverage",
+                lambda: get_insights_coverage(entity, project),
+                args.verbose,
+                qualifies=_nonempty_mapping,
+            )
         )[0]
     )
     results.append(
-        _run(
-            "clustering status",
-            lambda: get_clustering_status(entity, project),
-            args.verbose,
-            qualifies=_nonempty_list,
+        (
+            await _run(
+                "clustering status",
+                lambda: get_clustering_status(entity, project),
+                args.verbose,
+                qualifies=_nonempty_list,
+            )
         )[0]
     )
     results.append(
-        _run(
-            "category breakdowns",
-            lambda: get_category_breakdowns(entity, project, **window),
-            args.verbose,
-            qualifies=lambda data: _category_present(data, args.signature_type, args.category_id),
+        (
+            await _run(
+                "category breakdowns",
+                lambda: get_category_breakdowns(entity, project, **window),
+                args.verbose,
+                qualifies=lambda data: _category_present(data, args.signature_type, args.category_id),
+            )
         )[0]
     )
     results.append(
-        _run(
-            "category example turns",
-            lambda: list_category_example_turns(
-                entity,
-                project,
-                args.signature_type,
-                args.category_id,
-                **window,
-                topic_ids=[args.topic_id],
-                limit=5,
-            ),
-            args.verbose,
-            qualifies=lambda data: _trace_present(data, args.trace_id),
+        (
+            await _run(
+                "category example turns",
+                lambda: list_category_example_turns(
+                    entity,
+                    project,
+                    args.signature_type,
+                    args.category_id,
+                    **window,
+                    topic_ids=[args.topic_id],
+                    limit=5,
+                ),
+                args.verbose,
+                qualifies=lambda data: _trace_present(data, args.trace_id),
+            )
         )[0]
     )
     results.append(
-        _run(
-            "failure attributions",
-            lambda: get_failure_attributions(entity, project, [args.trace_id]),
-            args.verbose,
-            qualifies=lambda data: _trace_present(data, args.trace_id),
+        (
+            await _run(
+                "failure attributions",
+                lambda: get_failure_attributions(entity, project, [args.trace_id]),
+                args.verbose,
+                qualifies=lambda data: _trace_present(data, args.trace_id),
+            )
         )[0]
     )
 
     print("\nConversation tags")
     results.append(
-        _run(
-            "tag catalog",
-            lambda: list_tags(entity, project),
-            args.verbose,
-            qualifies=lambda data: _tag_present(data, args.tag_id, args.tag_name),
+        (
+            await _run(
+                "tag catalog",
+                lambda: list_tags(entity, project),
+                args.verbose,
+                qualifies=lambda data: _tag_present(data, args.tag_id, args.tag_name),
+            )
         )[0]
     )
     results.append(
-        _run(
-            "conversation tags",
-            lambda: get_conversation_tags(entity, project, [args.conversation_id]),
-            args.verbose,
-            qualifies=lambda data: _conversation_tag_present(
-                data,
-                args.conversation_id,
-                args.tag_id,
-                args.tag_name,
-            ),
+        (
+            await _run(
+                "conversation tags",
+                lambda: get_conversation_tags(entity, project, [args.conversation_id]),
+                args.verbose,
+                qualifies=lambda data: _conversation_tag_present(
+                    data,
+                    args.conversation_id,
+                    args.tag_id,
+                    args.tag_name,
+                ),
+            )
         )[0]
     )
     results.append(
-        _run(
-            "tagged conversations",
-            lambda: list_tagged_conversations(entity, project, [args.tag_id]),
-            args.verbose,
-            qualifies=lambda data: _conversation_present(data, args.conversation_id),
+        (
+            await _run(
+                "tagged conversations",
+                lambda: list_tagged_conversations(entity, project, [args.tag_id]),
+                args.verbose,
+                qualifies=lambda data: _conversation_present(data, args.conversation_id),
+            )
         )[0]
     )
     results.append(
-        _run(
-            "tag distribution",
-            lambda: get_tag_distribution(
-                entity,
-                project,
-                after_ms=int(start.timestamp() * 1000),
-                before_ms=int(end.timestamp() * 1000),
-                time_bucket_seconds=86400,
-            ),
-            args.verbose,
-            qualifies=lambda data: _distribution_has_tag(data, args.tag_id),
+        (
+            await _run(
+                "tag distribution",
+                lambda: get_tag_distribution(
+                    entity,
+                    project,
+                    after_ms=int(start.timestamp() * 1000),
+                    before_ms=int(end.timestamp() * 1000),
+                    time_bucket_seconds=86400,
+                ),
+                args.verbose,
+                qualifies=lambda data: _distribution_has_tag(data, args.tag_id),
+            )
         )[0]
     )
 
@@ -330,4 +349,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(asyncio.run(main()))

@@ -1,13 +1,15 @@
 """Unit tests for the Agent Lens Insights and conversation-tag MCP tools.
 
-The HTTP boundary is mocked at the requests.Session level so we can assert
+The HTTP boundary is mocked at the httpx.AsyncClient level so we can assert
 request shaping, auth, response passthrough, truncation, and error mapping
 without a live Agent Lens. Canned response shapes mirror the Huma output
 structs in internal/api/insights.go and internal/api/conversation_tags.go of
 github.com/wandb/agent-lens.
 """
 
+import asyncio
 import json
+import socket
 import sys
 import threading
 import time
@@ -15,22 +17,22 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
-import requests
+import httpx
 
 from scripts import agent_lens_smoke
 from wandb_mcp_server.admission import current_tool_deadline
 from wandb_mcp_server.api_client import WandBApiManager, WandBServerBusy
 from wandb_mcp_server.mcp_tools import agent_lens as agent_lens_mod
 from wandb_mcp_server.mcp_tools.agent_lens import (
-    get_category_breakdowns,
-    get_clustering_status,
-    get_conversation_tags,
-    get_failure_attributions,
-    get_insights_coverage,
-    get_tag_distribution,
-    list_category_example_turns,
-    list_tags,
-    list_tagged_conversations,
+    get_category_breakdowns as _get_category_breakdowns,
+    get_clustering_status as _get_clustering_status,
+    get_conversation_tags as _get_conversation_tags,
+    get_failure_attributions as _get_failure_attributions,
+    get_insights_coverage as _get_insights_coverage,
+    get_tag_distribution as _get_tag_distribution,
+    list_category_example_turns as _list_category_example_turns,
+    list_tags as _list_tags,
+    list_tagged_conversations as _list_tagged_conversations,
 )
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 
@@ -40,12 +42,62 @@ PROJECT = "support-bot"
 WINDOW = {"start_at": "2026-09-01T00:00:00Z", "end_at": "2026-09-08T00:00:00Z"}
 
 
+def _sync_call(function, *args, **kwargs):
+    return asyncio.run(function(*args, **kwargs))
+
+
+def get_category_breakdowns(*args, **kwargs):
+    return _sync_call(_get_category_breakdowns, *args, **kwargs)
+
+
+def get_clustering_status(*args, **kwargs):
+    return _sync_call(_get_clustering_status, *args, **kwargs)
+
+
+def get_conversation_tags(*args, **kwargs):
+    return _sync_call(_get_conversation_tags, *args, **kwargs)
+
+
+def get_failure_attributions(*args, **kwargs):
+    return _sync_call(_get_failure_attributions, *args, **kwargs)
+
+
+def get_insights_coverage(*args, **kwargs):
+    return _sync_call(_get_insights_coverage, *args, **kwargs)
+
+
+def get_tag_distribution(*args, **kwargs):
+    return _sync_call(_get_tag_distribution, *args, **kwargs)
+
+
+def list_category_example_turns(*args, **kwargs):
+    return _sync_call(_list_category_example_turns, *args, **kwargs)
+
+
+def list_tags(*args, **kwargs):
+    return _sync_call(_list_tags, *args, **kwargs)
+
+
+def list_tagged_conversations(*args, **kwargs):
+    return _sync_call(_list_tagged_conversations, *args, **kwargs)
+
+
 class _FakeResponse:
-    def __init__(self, json_data, status_code=200, *, raw=None, headers=None, chunks=None):
+    def __init__(
+        self,
+        json_data,
+        status_code=200,
+        *,
+        raw=None,
+        headers=None,
+        chunks=None,
+        stream_error=None,
+    ):
         self._json = json_data
         self.status_code = status_code
         self._raw = raw if raw is not None else json.dumps(json_data).encode("utf-8")
         self._chunks = chunks
+        self._stream_error = stream_error
         self.headers = dict(headers or {})
         self.headers.setdefault(
             "Content-Length", str(sum(len(chunk) for chunk in chunks) if chunks else len(self._raw))
@@ -57,30 +109,51 @@ class _FakeResponse:
             raise json.JSONDecodeError("no json", "", 0)
         return self._json
 
-    def iter_content(self, chunk_size, decode_unicode=False):
-        del decode_unicode
+    async def aiter_raw(self, chunk_size=None):
+        if self._stream_error is not None:
+            raise self._stream_error
         if self._chunks is not None:
-            yield from self._chunks
+            for chunk in self._chunks:
+                yield chunk
             return
+        chunk_size = chunk_size or len(self._raw) or 1
         for offset in range(0, len(self._raw), chunk_size):
             yield self._raw[offset : offset + chunk_size]
 
-    def close(self):
+    async def aclose(self):
         self.closed = True
 
 
-class _FakeSession:
+class _FakeStreamContext:
+    def __init__(self, response):
+        self._response = response
+
+    async def __aenter__(self):
+        if isinstance(self._response, Exception):
+            raise self._response
+        return self._response
+
+    async def __aexit__(self, *_args):
+        await self._response.aclose()
+
+
+class _FakeAsyncClient:
     """Records requests and returns a canned response."""
 
     def __init__(self, response):
         self._response = response
         self.calls = []
+        self.timeout = None
 
-    def request(self, method, url, **kwargs):
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    def stream(self, method, url, **kwargs):
         self.calls.append({"method": method, "url": url, **kwargs})
-        if isinstance(self._response, Exception):
-            raise self._response
-        return self._response
+        return _FakeStreamContext(self._response)
 
     @property
     def last(self):
@@ -88,36 +161,22 @@ class _FakeSession:
 
 
 class _BodyPoisonResponse(_FakeResponse):
-    @property
-    def text(self):
+    async def aiter_raw(self, chunk_size=None):
+        del chunk_size
         raise AssertionError("overload classification must not read the streamed response body")
-
-
-class _BlockingResponse(_FakeResponse):
-    """A stream that releases only when the deadline closer closes it."""
-
-    def __init__(self):
-        super().__init__({})
-        self._released = threading.Event()
-
-    def iter_content(self, chunk_size, decode_unicode=False):
-        del chunk_size, decode_unicode
-        self._released.wait(timeout=2)
-        if self.closed:
-            raise requests.ConnectionError("stream closed at deadline")
-        yield self._raw
-
-    def close(self):
-        self.closed = True
-        self._released.set()
 
 
 @contextmanager
 def _mocked(response, api_key="test-key", base_url=BASE_URL):
     """Point the module at a fake session, a fake key, and a fixed origin."""
-    session = _FakeSession(response)
+    session = _FakeAsyncClient(response)
+
+    def client_factory(timeout):
+        session.timeout = timeout
+        return session
+
     with (
-        patch.object(agent_lens_mod, "get_no_retry_session", return_value=session),
+        patch.object(agent_lens_mod, "_new_agent_lens_client", side_effect=client_factory),
         patch.object(WandBApiManager, "get_api_key", staticmethod(lambda: api_key)),
         patch.object(agent_lens_mod, "resolve_agent_lens_base_url", return_value=base_url),
         patch.object(agent_lens_mod, "track_tool_execution", _noop_tracker),
@@ -135,6 +194,54 @@ def _ok(payload):
     return _FakeResponse({"data": payload})
 
 
+@contextmanager
+def _stalling_http_server(*, send_headers: bool):
+    """Serve one real HTTP connection and then stall before completion."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(2)
+    release = threading.Event()
+    accepted = threading.Event()
+
+    def serve() -> None:
+        try:
+            connection, _ = listener.accept()
+        except OSError:
+            return
+        with connection:
+            accepted.set()
+            connection.settimeout(2)
+            try:
+                connection.recv(64 * 1024)
+                if send_headers:
+                    connection.sendall(
+                        b"HTTP/1.1 200 OK\r\n"
+                        b"Content-Type: application/json\r\n"
+                        b"Content-Encoding: identity\r\n"
+                        b"Content-Length: 1000\r\n\r\n"
+                    )
+                    # Keep every socket read active while exceeding the total
+                    # request budget. An inactivity timeout alone would never
+                    # stop this response.
+                    while not release.wait(timeout=0.02):
+                        connection.sendall(b"x")
+                else:
+                    release.wait(timeout=2)
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{listener.getsockname()[1]}", accepted
+    finally:
+        release.set()
+        listener.close()
+        thread.join(timeout=2)
+
+
 # ----- request shaping -----
 
 
@@ -150,9 +257,8 @@ def test_get_requests_carry_bearer_auth_and_project_headers():
     assert call["headers"]["Accept-Encoding"] == "identity"
     assert call["headers"]["X-Wandb-Entity"] == ENTITY
     assert call["headers"]["X-Wandb-Project"] == PROJECT
-    assert call["data"] is None
-    assert call["allow_redirects"] is False
-    assert call["stream"] is True
+    assert call["content"] is None
+    assert call["follow_redirects"] is False
     assert result["data"]["latest_week"] == "2026-09-14"
 
 
@@ -223,20 +329,20 @@ def test_post_reads_send_a_json_body():
     assert call["method"] == "POST"
     assert call["url"] == f"{BASE_URL}/api/conversation-tags/query"
     assert call["headers"]["Content-Type"] == "application/json"
-    assert json.loads(call["data"]) == {"conversation_ids": ["conv-1", "conv-2"]}
+    assert json.loads(call["content"]) == {"conversation_ids": ["conv-1", "conv-2"]}
 
 
 def test_tagged_conversations_sends_the_tag_filter():
     tag_ids = ["30201f95-1221-433a-9ea5-1e513081962f"]
     with _mocked(_ok(["conv-1"])) as session:
         list_tagged_conversations(ENTITY, PROJECT, tag_ids)
-    assert json.loads(session.last["data"]) == {"tag_ids": tag_ids}
+    assert json.loads(session.last["content"]) == {"tag_ids": tag_ids}
 
 
 def test_tag_distribution_sends_epoch_bounds_and_bucket_width():
     with _mocked(_ok({"buckets": []})) as session:
         get_tag_distribution(ENTITY, PROJECT, after_ms=1000, before_ms=2000, time_bucket_seconds=3600)
-    assert json.loads(session.last["data"]) == {
+    assert json.loads(session.last["content"]) == {
         "after_ms": 1000,
         "before_ms": 2000,
         "time_bucket_seconds": 3600,
@@ -248,7 +354,7 @@ def test_tags_catalog_is_a_get_without_a_body():
         list_tags(ENTITY, PROJECT)
     assert session.last["method"] == "GET"
     assert session.last["url"] == f"{BASE_URL}/api/tags"
-    assert session.last["data"] is None
+    assert session.last["content"] is None
 
 
 def test_failure_attributions_posts_trace_ids():
@@ -256,7 +362,7 @@ def test_failure_attributions_posts_trace_ids():
         get_failure_attributions(ENTITY, PROJECT, ["trace-1", "trace-2"])
     assert session.last["method"] == "POST"
     assert session.last["url"] == f"{BASE_URL}/api/insights/failure-attributions/query"
-    assert json.loads(session.last["data"]) == {"trace_ids": ["trace-1", "trace-2"]}
+    assert json.loads(session.last["content"]) == {"trace_ids": ["trace-1", "trace-2"]}
 
 
 # ----- local argument validation -----
@@ -341,9 +447,9 @@ def test_missing_api_key_reports_auth_required_without_calling_out():
 
 
 def test_unconfigured_origin_reports_a_configuration_error():
-    session = _FakeSession(_ok([]))
+    session = _FakeAsyncClient(_ok([]))
     with (
-        patch.object(agent_lens_mod, "get_no_retry_session", return_value=session),
+        patch.object(agent_lens_mod, "_new_agent_lens_client", return_value=session),
         patch.object(WandBApiManager, "get_api_key", staticmethod(lambda: "test-key")),
         patch.object(
             agent_lens_mod,
@@ -392,8 +498,11 @@ def test_422_sanitizes_validation_detail():
 
 
 def test_422_stream_timeout_is_sanitized_and_closes_response():
-    response = _FakeResponse({}, status_code=422)
-    response.iter_content = MagicMock(side_effect=requests.Timeout("private validation timeout"))
+    response = _FakeResponse(
+        {},
+        status_code=422,
+        stream_error=httpx.ReadTimeout("private validation timeout"),
+    )
     with _mocked(response):
         result = json.loads(get_category_breakdowns(ENTITY, PROJECT, **WINDOW))
     assert result["error"] == "tool_timeout"
@@ -402,8 +511,11 @@ def test_422_stream_timeout_is_sanitized_and_closes_response():
 
 
 def test_422_stream_request_failure_is_sanitized_and_closes_response():
-    response = _FakeResponse({}, status_code=422)
-    response.iter_content = MagicMock(side_effect=requests.ConnectionError("private-host.svc disconnected"))
+    response = _FakeResponse(
+        {},
+        status_code=422,
+        stream_error=httpx.ReadError("private-host.svc disconnected"),
+    )
     with _mocked(response):
         result = json.loads(get_category_breakdowns(ENTITY, PROJECT, **WINDOW))
     assert result == {"error": "agent_lens_query_failed", "message": "The Agent Lens request failed."}
@@ -452,8 +564,7 @@ def test_non_finite_json_is_rejected_as_malformed(constant):
 
 
 def test_stream_timeout_is_sanitized_and_closes_response():
-    response = _FakeResponse({})
-    response.iter_content = MagicMock(side_effect=requests.Timeout("secret upstream timeout"))
+    response = _FakeResponse({}, stream_error=httpx.ReadTimeout("secret upstream timeout"))
     with _mocked(response):
         result = json.loads(get_insights_coverage(ENTITY, PROJECT))
     assert result["error"] == "tool_timeout"
@@ -464,14 +575,13 @@ def test_stream_timeout_is_sanitized_and_closes_response():
 @pytest.mark.parametrize(
     "error",
     [
-        requests.ConnectionError("private-host.svc disconnected"),
-        requests.exceptions.ChunkedEncodingError("credential=secret chunk failed"),
-        requests.RequestException("private request failure"),
+        httpx.ConnectError("private-host.svc disconnected"),
+        httpx.ReadError("credential=secret chunk failed"),
+        httpx.RequestError("private request failure"),
     ],
 )
 def test_stream_request_failures_are_sanitized_and_close_response(error):
-    response = _FakeResponse({})
-    response.iter_content = MagicMock(side_effect=error)
+    response = _FakeResponse({}, stream_error=error)
     with _mocked(response):
         result = json.loads(get_insights_coverage(ENTITY, PROJECT))
     assert result == {"error": "agent_lens_query_failed", "message": "The Agent Lens request failed."}
@@ -482,7 +592,7 @@ def test_redirect_is_not_followed():
     with _mocked(_FakeResponse({}, status_code=302, headers={"Location": "https://other.example"})) as session:
         result = json.loads(get_insights_coverage(ENTITY, PROJECT))
     assert len(session.calls) == 1
-    assert session.last["allow_redirects"] is False
+    assert session.last["follow_redirects"] is False
     assert result["error"] == "agent_lens_query_failed"
     assert result["status_code"] == 302
 
@@ -515,7 +625,7 @@ def test_active_tool_deadline_bounds_request_timeout():
             get_insights_coverage(ENTITY, PROJECT)
     finally:
         current_tool_deadline.reset(token)
-    assert 0 < session.last["timeout"] <= 0.5
+    assert 0 < session.timeout <= 0.5
 
 
 def test_expired_tool_deadline_stops_before_backend_request():
@@ -529,24 +639,30 @@ def test_expired_tool_deadline_stops_before_backend_request():
     assert result["error"] == "tool_timeout"
 
 
+@pytest.mark.parametrize("send_headers", [False, True], ids=["headers", "body"])
 @pytest.mark.parametrize("active_deadline_seconds", [None, 5.0])
-def test_absolute_request_cap_closes_a_blocked_stream_without_or_before_tool_deadline(
+def test_absolute_request_cap_cancels_a_real_stalled_socket_without_or_before_tool_deadline(
     monkeypatch: pytest.MonkeyPatch,
     active_deadline_seconds: float | None,
+    send_headers: bool,
 ):
-    monkeypatch.setattr(agent_lens_mod, "_REQUEST_TIMEOUT_SECONDS", 0.05)
-    response = _BlockingResponse()
+    monkeypatch.setattr(agent_lens_mod, "_REQUEST_TIMEOUT_SECONDS", 0.1)
     deadline = None if active_deadline_seconds is None else time.monotonic() + active_deadline_seconds
     token = current_tool_deadline.set(deadline)
     started = time.monotonic()
     try:
-        with _mocked(response):
-            result = json.loads(get_insights_coverage(ENTITY, PROJECT))
+        with _stalling_http_server(send_headers=send_headers) as (base_url, accepted):
+            with (
+                patch.object(WandBApiManager, "get_api_key", staticmethod(lambda: "test-key")),
+                patch.object(agent_lens_mod, "resolve_agent_lens_base_url", return_value=base_url),
+                patch.object(agent_lens_mod, "track_tool_execution", _noop_tracker),
+            ):
+                result = json.loads(get_insights_coverage(ENTITY, PROJECT))
+            assert accepted.is_set()
     finally:
         current_tool_deadline.reset(token)
     assert result["error"] == "tool_timeout"
     assert time.monotonic() - started < 1
-    assert response.closed is True
 
 
 def test_request_credentials_are_isolated_between_callers():
@@ -650,7 +766,7 @@ def _run_smoke_with_fixtures(
     calls: list[str] = []
 
     def fake(name: str):
-        def invoke(*_args, **_kwargs):
+        async def invoke(*_args, **_kwargs):
             calls.append(name)
             data = [] if name == empty_tool else responses[name]
             return json.dumps({"data": data})
@@ -660,7 +776,7 @@ def _run_smoke_with_fixtures(
     for name in responses:
         monkeypatch.setattr(agent_lens_smoke, name, fake(name))
 
-    def exact_example_turns(
+    async def exact_example_turns(
         entity_name,
         project_name,
         signature_type,
@@ -715,7 +831,7 @@ def _run_smoke_with_fixtures(
             "conv-1",
         ],
     )
-    return agent_lens_smoke.main(), calls
+    return asyncio.run(agent_lens_smoke.main()), calls
 
 
 def test_live_smoke_requires_matching_data_from_all_nine_endpoints(
