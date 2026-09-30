@@ -103,6 +103,11 @@ uv run --no-sync python scripts/public_release.py source-gate \
   --output "$CANDIDATE_GATE_EVIDENCE"
 ```
 
+If `source-gate` or the final security checks uncover a source defect after the
+release PR merges, stop before tagging or deployment. Land the repair in a new
+reviewed PR, invalidate the earlier candidate evidence, and stage the repaired
+tree again. Do not reuse evidence from the superseded tree.
+
 Tag protection must restrict who can create `v*` refs. The source-release
 workflow rechecks this gate; possession of a signing key alone is not proof of
 review. Its `public-source-release` environment must require a non-self

@@ -39,6 +39,11 @@ After the approved release PR merges, `source-gate` must bind the merge SHA to
 the reviewed head tree, required current-head checks, approval, and resolved
 conversations before anyone creates the signed tag.
 
+If that post-merge gate or a final security check finds a source defect, stop
+before tagging or deployment. Fix it in a new reviewed PR, treat all earlier
+candidate evidence as stale, and stage the repaired tree again. Never amend the
+already-reviewed history or reuse evidence from the superseded tree.
+
 Build only through `scripts/public_release.py build` into a new directory
 outside the checkout. Never reuse `dist/`. The `attest` command produces a
 deterministic predicate for the protected signer; it is not signed evidence by

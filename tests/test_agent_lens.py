@@ -9,6 +9,7 @@ github.com/wandb/agent-lens.
 
 import asyncio
 import json
+import logging
 import socket
 import sys
 import threading
@@ -672,6 +673,75 @@ def test_request_credentials_are_isolated_between_callers():
         get_insights_coverage(ENTITY, PROJECT)
     assert first.last["headers"]["Authorization"] == "Bearer actor-one-key"
     assert second.last["headers"]["Authorization"] == "Bearer actor-two-key"
+
+
+def test_agent_lens_http_logs_hide_dynamic_values_without_muting_other_requests(caplog):
+    category = "customer-secret-category"
+    cursor = "opaque-secret-cursor"
+    topic_id = "private-topic"
+
+    async def exercise():
+        lens_started = asyncio.Event()
+        release_lens = asyncio.Event()
+
+        class LensResponseBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'{"data":[],"next_cursor":null}'
+
+        async def lens_handler(_request):
+            lens_started.set()
+            await release_lens.wait()
+            return httpx.Response(
+                200,
+                headers={"Content-Length": "30", "Content-Type": "application/json"},
+                stream=LensResponseBody(),
+            )
+
+        async def unrelated_handler(_request):
+            return httpx.Response(204)
+
+        def client_factory(timeout):
+            return httpx.AsyncClient(
+                transport=httpx.MockTransport(lens_handler),
+                timeout=timeout,
+                follow_redirects=False,
+            )
+
+        with (
+            patch.object(agent_lens_mod, "_new_agent_lens_client", side_effect=client_factory),
+            patch.object(WandBApiManager, "get_api_key", staticmethod(lambda: "test-key")),
+            patch.object(agent_lens_mod, "resolve_agent_lens_base_url", return_value=BASE_URL),
+            patch.object(agent_lens_mod, "track_tool_execution", _noop_tracker),
+        ):
+            lens_task = asyncio.create_task(
+                _list_category_example_turns(
+                    ENTITY,
+                    PROJECT,
+                    "intent",
+                    category,
+                    **WINDOW,
+                    topic_ids=[topic_id],
+                    cursor=cursor,
+                )
+            )
+            await asyncio.wait_for(lens_started.wait(), timeout=1)
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(unrelated_handler)) as client:
+                unrelated = await client.get("https://unrelated.example/health")
+
+            release_lens.set()
+            result = await lens_task
+            return unrelated, result
+
+    caplog.set_level(logging.INFO, logger="httpx")
+    unrelated, result = asyncio.run(exercise())
+
+    assert unrelated.status_code == 204
+    assert json.loads(result) == {"data": [], "next_cursor": None}
+    logged = "\n".join(record.getMessage() for record in caplog.records if record.name.startswith("httpx"))
+    assert "unrelated.example" in logged
+    for private_value in (BASE_URL, category, cursor, topic_id):
+        assert private_value not in logged
 
 
 # ----- truncation -----

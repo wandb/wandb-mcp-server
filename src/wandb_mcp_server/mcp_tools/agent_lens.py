@@ -16,7 +16,9 @@ in ``internal/api/project.go`` of github.com/wandb/agent-lens.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import json
+import logging
 import math
 import time
 from datetime import datetime, timedelta, timezone
@@ -42,6 +44,27 @@ from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
+
+_agent_lens_http_active: ContextVar[bool] = ContextVar("agent_lens_http_active", default=False)
+
+
+class _SuppressAgentLensHTTPLogFilter(logging.Filter):
+    """Keep caller-derived Agent Lens URLs out of HTTP client logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _agent_lens_http_active.get()
+
+
+for _http_logger_name in (
+    "httpx",
+    "httpcore.connection",
+    "httpcore.http11",
+    "httpcore.http2",
+    "httpcore.proxy",
+):
+    _http_logger = logging.getLogger(_http_logger_name)
+    if not any(isinstance(item, _SuppressAgentLensHTTPLogFilter) for item in _http_logger.filters):
+        _http_logger.addFilter(_SuppressAgentLensHTTPLogFilter())
 
 # Read paths on the Agent Lens API, relative to AGENT_LENS_API_PREFIX. Confirmed
 # against internal/api/insights.go and internal/api/conversation_tags.go.
@@ -405,70 +428,74 @@ async def _agent_lens_request(
         try:
             request_deadline = _absolute_request_deadline()
             request_timeout = _remaining_request_timeout(request_deadline)
-            async with asyncio.timeout(request_timeout):
-                async with _new_agent_lens_client(request_timeout) as client:
-                    async with client.stream(
-                        method,
-                        url,
-                        headers=headers,
-                        params=params or None,
-                        content=data,
-                        follow_redirects=False,
-                    ) as response:
-                        _check_deadline(request_deadline)
-                        if response.status_code in {401, 403}:
-                            ctx.mark_error(f"http_{response.status_code}")
-                            return _compact_json(
-                                structured_error(
-                                    "agent_lens_forbidden",
-                                    "Agent Lens rejected the W&B credential for this project. Confirm the credential "
-                                    "has access and that Agent Lens is enabled for the project.",
-                                    status_code=response.status_code,
+            log_token = _agent_lens_http_active.set(True)
+            try:
+                async with asyncio.timeout(request_timeout):
+                    async with _new_agent_lens_client(request_timeout) as client:
+                        async with client.stream(
+                            method,
+                            url,
+                            headers=headers,
+                            params=params or None,
+                            content=data,
+                            follow_redirects=False,
+                        ) as response:
+                            _check_deadline(request_deadline)
+                            if response.status_code in {401, 403}:
+                                ctx.mark_error(f"http_{response.status_code}")
+                                return _compact_json(
+                                    structured_error(
+                                        "agent_lens_forbidden",
+                                        "Agent Lens rejected the W&B credential for this project. Confirm the "
+                                        "credential has access and that Agent Lens is enabled for the project.",
+                                        status_code=response.status_code,
+                                    )
                                 )
-                            )
-                        if response.status_code == 404:
-                            ctx.mark_error("agent_lens_unavailable")
-                            return _compact_json(
-                                structured_error(
-                                    "agent_lens_unavailable",
-                                    "The configured Agent Lens origin does not expose this endpoint (404); it may "
-                                    "predate this API or have the feature disabled.",
-                                    status_code=404,
+                            if response.status_code == 404:
+                                ctx.mark_error("agent_lens_unavailable")
+                                return _compact_json(
+                                    structured_error(
+                                        "agent_lens_unavailable",
+                                        "The configured Agent Lens origin does not expose this endpoint (404); it may "
+                                        "predate this API or have the feature disabled.",
+                                        status_code=404,
+                                    )
                                 )
-                            )
-                        if response.status_code == 422:
-                            ctx.mark_error("http_422")
-                            try:
-                                validation_payload = await _bounded_json_response(response, request_deadline)
-                                detail = _detail(validation_payload)
-                            except _ResponseBoundaryError:
-                                detail = "the request did not satisfy the API schema"
-                            return _compact_json(
-                                structured_error(
-                                    "agent_lens_invalid_request",
-                                    f"Agent Lens rejected the request arguments: {detail}",
-                                    status_code=422,
+                            if response.status_code == 422:
+                                ctx.mark_error("http_422")
+                                try:
+                                    validation_payload = await _bounded_json_response(response, request_deadline)
+                                    detail = _detail(validation_payload)
+                                except _ResponseBoundaryError:
+                                    detail = "the request did not satisfy the API schema"
+                                return _compact_json(
+                                    structured_error(
+                                        "agent_lens_invalid_request",
+                                        f"Agent Lens rejected the request arguments: {detail}",
+                                        status_code=422,
+                                    )
                                 )
-                            )
-                        if response.status_code != 200:
-                            ctx.mark_error(f"http_{response.status_code}")
-                            if response.status_code in {429, 503}:
-                                raise WandBServerBusy(
-                                    status_code=response.status_code,
-                                    retry_after_ms=_retry_after_ms(
-                                        response.headers.get("Retry-After") or response.headers.get("retry-after")
-                                    ),
+                            if response.status_code != 200:
+                                ctx.mark_error(f"http_{response.status_code}")
+                                if response.status_code in {429, 503}:
+                                    raise WandBServerBusy(
+                                        status_code=response.status_code,
+                                        retry_after_ms=_retry_after_ms(
+                                            response.headers.get("Retry-After") or response.headers.get("retry-after")
+                                        ),
+                                    )
+                                return _compact_json(
+                                    structured_error(
+                                        "agent_lens_query_failed",
+                                        f"The Agent Lens API returned HTTP {response.status_code}.",
+                                        status_code=response.status_code,
+                                    )
                                 )
-                            return _compact_json(
-                                structured_error(
-                                    "agent_lens_query_failed",
-                                    f"The Agent Lens API returned HTTP {response.status_code}.",
-                                    status_code=response.status_code,
-                                )
-                            )
 
-                        result = await _bounded_json_response(response, request_deadline)
-                        _check_deadline(request_deadline)
+                            result = await _bounded_json_response(response, request_deadline)
+                            _check_deadline(request_deadline)
+            finally:
+                _agent_lens_http_active.reset(log_token)
         except WandBServerBusy:
             raise
         except (TimeoutError, httpx.TimeoutException):
