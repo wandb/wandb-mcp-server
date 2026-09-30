@@ -15,17 +15,19 @@ in ``internal/api/project.go`` of github.com/wandb/agent-lens.
 
 from __future__ import annotations
 
+import asyncio
+from contextvars import ContextVar
 import json
+import logging
 import math
-import threading
 import time
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Literal, Optional, Sequence
 from urllib.parse import quote
 from uuid import UUID
 
-import requests
+import httpx
 
 from wandb_mcp_server.admission import current_tool_deadline
 from wandb_mcp_server.api_client import WandBApiManager, WandBServerBusy
@@ -37,11 +39,32 @@ from wandb_mcp_server.config import (
     structured_error,
 )
 from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text
-from wandb_mcp_server.mcp_tools.tools_utils import get_no_retry_session, track_tool_execution
+from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
+
+_agent_lens_http_active: ContextVar[bool] = ContextVar("agent_lens_http_active", default=False)
+
+
+class _SuppressAgentLensHTTPLogFilter(logging.Filter):
+    """Keep caller-derived Agent Lens URLs out of HTTP client logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _agent_lens_http_active.get()
+
+
+for _http_logger_name in (
+    "httpx",
+    "httpcore.connection",
+    "httpcore.http11",
+    "httpcore.http2",
+    "httpcore.proxy",
+):
+    _http_logger = logging.getLogger(_http_logger_name)
+    if not any(isinstance(item, _SuppressAgentLensHTTPLogFilter) for item in _http_logger.filters):
+        _http_logger.addFilter(_SuppressAgentLensHTTPLogFilter())
 
 # Read paths on the Agent Lens API, relative to AGENT_LENS_API_PREFIX. Confirmed
 # against internal/api/insights.go and internal/api/conversation_tags.go.
@@ -208,7 +231,7 @@ def _absolute_request_deadline() -> float:
 
 
 def _remaining_request_timeout(deadline: float) -> float:
-    """Return Requests' inactivity timeout from the captured absolute deadline."""
+    """Return the remaining time under the captured absolute deadline."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("Agent Lens tool deadline elapsed")
@@ -220,30 +243,12 @@ def _check_deadline(deadline: float) -> None:
         raise TimeoutError("Agent Lens tool deadline elapsed")
 
 
-def _arm_response_deadline(response: Any, deadline: float) -> tuple[threading.Timer | None, threading.Event]:
-    """Close a streaming response when the absolute MCP deadline expires."""
-    expired = threading.Event()
-
-    def expire() -> None:
-        expired.set()
-        close = getattr(response, "close", None)
-        if callable(close):
-            try:
-                close()
-            except Exception as error:
-                logger.warning("Agent Lens response close failed at deadline (%s)", type(error).__name__)
-
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        expire()
-        return None, expired
-    timer = threading.Timer(remaining, expire)
-    timer.daemon = True
-    timer.start()
-    return timer, expired
+def _new_agent_lens_client(timeout: float) -> httpx.AsyncClient:
+    """Build one non-redirecting client for a caller-scoped Agent Lens read."""
+    return httpx.AsyncClient(timeout=timeout, follow_redirects=False)
 
 
-def _bounded_response_bytes(response: Any, deadline: float) -> bytes:
+async def _bounded_response_bytes(response: httpx.Response, deadline: float) -> bytes:
     """Read at most the reviewed byte cap before any JSON decoding occurs."""
     byte_limit = min(MAX_AGENT_LENS_RESPONSE_BYTES, MAX_ACCUMULATED_BYTES)
     encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
@@ -264,7 +269,7 @@ def _bounded_response_bytes(response: Any, deadline: float) -> bytes:
         expected_length = int(normalized)
 
     raw = bytearray()
-    for chunk in response.iter_content(chunk_size=_READ_CHUNK_BYTES, decode_unicode=False):
+    async for chunk in response.aiter_raw(chunk_size=_READ_CHUNK_BYTES):
         _check_deadline(deadline)
         if not isinstance(chunk, (bytes, bytearray)):
             raise _ResponseBoundaryError("malformed_response", "The Agent Lens API returned an invalid response.")
@@ -279,8 +284,8 @@ def _bounded_response_bytes(response: Any, deadline: float) -> bytes:
     return bytes(raw)
 
 
-def _bounded_json_response(response: Any, deadline: float) -> Dict[str, Any]:
-    raw = _bounded_response_bytes(response, deadline)
+async def _bounded_json_response(response: httpx.Response, deadline: float) -> Dict[str, Any]:
+    raw = await _bounded_response_bytes(response, deadline)
     _check_deadline(deadline)
     try:
         payload = json.loads(raw.decode("utf-8"), parse_constant=_reject_non_finite_json)
@@ -362,7 +367,19 @@ def _bounded_uuid_list(values: Sequence[str], maximum: int, field: str) -> List[
         raise ValueError(f"{field} must contain only UUIDs") from None
 
 
-def _agent_lens_request(
+def _tool_timeout_result(ctx: Any) -> str:
+    """Return one canonical timeout envelope and telemetry classification."""
+    ctx.mark_error("tool_timeout")
+    return _compact_json(
+        structured_error(
+            "tool_timeout",
+            "The Agent Lens request exceeded the MCP tool deadline.",
+            retryable=True,
+        )
+    )
+
+
+async def _agent_lens_request(
     tool_name: str,
     method: str,
     path: str,
@@ -408,138 +425,93 @@ def _agent_lens_request(
         data = json.dumps(_drop_none(body))
 
     with track_tool_execution(tool_name, None, track_params) as ctx:
-        # Only the HTTP round-trip can raise here, so the try wraps just that;
-        # the status-code branching below is plain control flow and stays outside.
         try:
             request_deadline = _absolute_request_deadline()
             request_timeout = _remaining_request_timeout(request_deadline)
-            response = get_no_retry_session().request(
-                method,
-                url,
-                headers=headers,
-                params=params or None,
-                data=data,
-                timeout=request_timeout,
-                allow_redirects=False,
-                stream=True,
-            )
-        except (TimeoutError, requests.Timeout):
-            ctx.mark_error("tool_timeout")
-            return _compact_json(
-                structured_error(
-                    "tool_timeout", "The Agent Lens request exceeded the MCP tool deadline.", retryable=True
-                )
-            )
-        except Exception as e:
-            logger.error("Agent Lens request failed (%s)", type(e).__name__)
-            ctx.mark_error(type(e).__name__)
-            return _compact_json(structured_error("agent_lens_query_failed", "The Agent Lens request failed."))
-
-        deadline_timer, deadline_expired = _arm_response_deadline(response, request_deadline)
-        try:
-            _check_deadline(request_deadline)
-            if response.status_code in {401, 403}:
-                ctx.mark_error(f"http_{response.status_code}")
-                return _compact_json(
-                    structured_error(
-                        "agent_lens_forbidden",
-                        "Agent Lens rejected the W&B credential for this project. Confirm the credential has access "
-                        "and that Agent Lens is enabled for the project.",
-                        status_code=response.status_code,
-                    )
-                )
-            if response.status_code == 404:
-                ctx.mark_error("agent_lens_unavailable")
-                return _compact_json(
-                    structured_error(
-                        "agent_lens_unavailable",
-                        "The configured Agent Lens origin does not expose this endpoint (404); it may "
-                        "predate this API or have the feature disabled.",
-                        status_code=404,
-                    )
-                )
-            if response.status_code == 422:
-                ctx.mark_error("http_422")
-                try:
-                    validation_payload = _bounded_json_response(response, request_deadline)
-                    detail = _detail(validation_payload)
-                except _ResponseBoundaryError as error:
-                    if deadline_expired.is_set():
-                        raise TimeoutError("Agent Lens tool deadline elapsed") from error
-                    detail = "the request did not satisfy the API schema"
-                return _compact_json(
-                    structured_error(
-                        "agent_lens_invalid_request",
-                        f"Agent Lens rejected the request arguments: {detail}",
-                        status_code=422,
-                    )
-                )
-            if response.status_code != 200:
-                ctx.mark_error(f"http_{response.status_code}")
-                if response.status_code in {429, 503}:
-                    raise WandBServerBusy(
-                        status_code=response.status_code,
-                        retry_after_ms=_retry_after_ms(
-                            response.headers.get("Retry-After") or response.headers.get("retry-after")
-                        ),
-                    )
-                return _compact_json(
-                    structured_error(
-                        "agent_lens_query_failed",
-                        f"The Agent Lens API returned HTTP {response.status_code}.",
-                        status_code=response.status_code,
-                    )
-                )
-
+            log_token = _agent_lens_http_active.set(True)
             try:
-                result = _bounded_json_response(response, request_deadline)
-            except _ResponseBoundaryError as error:
-                if deadline_expired.is_set():
-                    raise TimeoutError("Agent Lens tool deadline elapsed") from error
-                ctx.mark_error(error.reason)
-                return _compact_json(
-                    structured_error("agent_lens_query_failed", sanitize_sensitive_text(error, max_chars=512))
-                )
-            if deadline_expired.is_set():
-                raise TimeoutError("Agent Lens tool deadline elapsed")
-        except (TimeoutError, requests.Timeout):
-            ctx.mark_error("tool_timeout")
+                async with asyncio.timeout(request_timeout):
+                    async with _new_agent_lens_client(request_timeout) as client:
+                        async with client.stream(
+                            method,
+                            url,
+                            headers=headers,
+                            params=params or None,
+                            content=data,
+                            follow_redirects=False,
+                        ) as response:
+                            _check_deadline(request_deadline)
+                            if response.status_code in {401, 403}:
+                                ctx.mark_error(f"http_{response.status_code}")
+                                return _compact_json(
+                                    structured_error(
+                                        "agent_lens_forbidden",
+                                        "Agent Lens rejected the W&B credential for this project. Confirm the "
+                                        "credential has access and that Agent Lens is enabled for the project.",
+                                        status_code=response.status_code,
+                                    )
+                                )
+                            if response.status_code == 404:
+                                ctx.mark_error("agent_lens_unavailable")
+                                return _compact_json(
+                                    structured_error(
+                                        "agent_lens_unavailable",
+                                        "The configured Agent Lens origin does not expose this endpoint (404); it may "
+                                        "predate this API or have the feature disabled.",
+                                        status_code=404,
+                                    )
+                                )
+                            if response.status_code == 422:
+                                ctx.mark_error("http_422")
+                                try:
+                                    validation_payload = await _bounded_json_response(response, request_deadline)
+                                    detail = _detail(validation_payload)
+                                except _ResponseBoundaryError:
+                                    detail = "the request did not satisfy the API schema"
+                                return _compact_json(
+                                    structured_error(
+                                        "agent_lens_invalid_request",
+                                        f"Agent Lens rejected the request arguments: {detail}",
+                                        status_code=422,
+                                    )
+                                )
+                            if response.status_code != 200:
+                                ctx.mark_error(f"http_{response.status_code}")
+                                if response.status_code in {429, 503}:
+                                    raise WandBServerBusy(
+                                        status_code=response.status_code,
+                                        retry_after_ms=_retry_after_ms(
+                                            response.headers.get("Retry-After") or response.headers.get("retry-after")
+                                        ),
+                                    )
+                                return _compact_json(
+                                    structured_error(
+                                        "agent_lens_query_failed",
+                                        f"The Agent Lens API returned HTTP {response.status_code}.",
+                                        status_code=response.status_code,
+                                    )
+                                )
+
+                            result = await _bounded_json_response(response, request_deadline)
+                            _check_deadline(request_deadline)
+            finally:
+                _agent_lens_http_active.reset(log_token)
+        except WandBServerBusy:
+            raise
+        except (TimeoutError, httpx.TimeoutException):
+            return _tool_timeout_result(ctx)
+        except _ResponseBoundaryError as error:
+            ctx.mark_error(error.reason)
             return _compact_json(
-                structured_error(
-                    "tool_timeout",
-                    "The Agent Lens request exceeded the MCP tool deadline.",
-                    retryable=True,
-                )
+                structured_error("agent_lens_query_failed", sanitize_sensitive_text(error, max_chars=512))
             )
-        except requests.RequestException as error:
-            if deadline_expired.is_set():
-                ctx.mark_error("tool_timeout")
-                return _compact_json(
-                    structured_error(
-                        "tool_timeout",
-                        "The Agent Lens request exceeded the MCP tool deadline.",
-                        retryable=True,
-                    )
-                )
+        except httpx.RequestError as error:
             ctx.mark_error(type(error).__name__)
             return _compact_json(structured_error("agent_lens_query_failed", "The Agent Lens request failed."))
-        except Exception:
-            if deadline_expired.is_set():
-                ctx.mark_error("tool_timeout")
-                return _compact_json(
-                    structured_error(
-                        "tool_timeout",
-                        "The Agent Lens request exceeded the MCP tool deadline.",
-                        retryable=True,
-                    )
-                )
-            raise
-        finally:
-            if deadline_timer is not None:
-                deadline_timer.cancel()
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
+        except Exception as error:
+            logger.error("Agent Lens request failed (%s)", type(error).__name__)
+            ctx.mark_error(type(error).__name__)
+            return _compact_json(structured_error("agent_lens_query_failed", "The Agent Lens request failed."))
 
     return _compact_json(_truncate_response(_project_response(tool_name, result)))
 
@@ -557,9 +529,9 @@ def _invalid_argument(message: str) -> str:
     return json.dumps(structured_error("agent_lens_invalid_request", message))
 
 
-def get_insights_coverage(entity_name: str, project_name: str) -> str:
+async def get_insights_coverage(entity_name: str, project_name: str) -> str:
     """Report the first and latest weeks that have classified Insights turns."""
-    return _agent_lens_request(
+    return await _agent_lens_request(
         "get_insights_coverage",
         "GET",
         LATEST_WEEK_PATH,
@@ -569,9 +541,9 @@ def get_insights_coverage(entity_name: str, project_name: str) -> str:
     )
 
 
-def get_clustering_status(entity_name: str, project_name: str) -> str:
+async def get_clustering_status(entity_name: str, project_name: str) -> str:
     """Report the latest successful clustering run per signature type."""
-    return _agent_lens_request(
+    return await _agent_lens_request(
         "get_clustering_status",
         "GET",
         CLUSTERING_STATUS_PATH,
@@ -581,13 +553,13 @@ def get_clustering_status(entity_name: str, project_name: str) -> str:
     )
 
 
-def get_category_breakdowns(entity_name: str, project_name: str, start_at: str, end_at: str) -> str:
+async def get_category_breakdowns(entity_name: str, project_name: str, start_at: str, end_at: str) -> str:
     """Return intent/failure category and cluster counts for a bounded range."""
     try:
         window = _validated_window(start_at, end_at)
     except ValueError as error:
         return _invalid_argument(str(error))
-    return _agent_lens_request(
+    return await _agent_lens_request(
         "get_category_breakdowns",
         "GET",
         CATEGORY_BREAKDOWNS_PATH,
@@ -598,10 +570,10 @@ def get_category_breakdowns(entity_name: str, project_name: str, start_at: str, 
     )
 
 
-def list_category_example_turns(
+async def list_category_example_turns(
     entity_name: str,
     project_name: str,
-    signature_type: str,
+    signature_type: Literal["intent", "failure"],
     category_id: str,
     start_at: str,
     end_at: str,
@@ -625,7 +597,7 @@ def list_category_example_turns(
     params["limit"] = limit
     if cursor:
         params["cursor"] = cursor
-    return _agent_lens_request(
+    return await _agent_lens_request(
         "list_category_example_turns",
         "GET",
         _category_examples_path(signature_type, category_id),
@@ -640,13 +612,13 @@ def list_category_example_turns(
     )
 
 
-def get_failure_attributions(entity_name: str, project_name: str, trace_ids: List[str]) -> str:
+async def get_failure_attributions(entity_name: str, project_name: str, trace_ids: List[str]) -> str:
     """Return Agent Lens failure attribution for the requested trace IDs."""
     try:
         ids = _bounded_list(trace_ids, MAX_TRACE_IDS, "trace_ids")
     except ValueError as error:
         return _invalid_argument(str(error))
-    return _agent_lens_request(
+    return await _agent_lens_request(
         "get_failure_attributions",
         "POST",
         FAILURE_ATTRIBUTIONS_PATH,
@@ -657,9 +629,9 @@ def get_failure_attributions(entity_name: str, project_name: str, trace_ids: Lis
     )
 
 
-def list_tags(entity_name: str, project_name: str) -> str:
+async def list_tags(entity_name: str, project_name: str) -> str:
     """List the Agent Lens tag catalog for the project."""
-    return _agent_lens_request(
+    return await _agent_lens_request(
         "list_tags",
         "GET",
         TAGS_PATH,
@@ -669,13 +641,13 @@ def list_tags(entity_name: str, project_name: str) -> str:
     )
 
 
-def get_conversation_tags(entity_name: str, project_name: str, conversation_ids: List[str]) -> str:
+async def get_conversation_tags(entity_name: str, project_name: str, conversation_ids: List[str]) -> str:
     """Return every tag applied to the given conversations, with provenance."""
     try:
         ids = _bounded_list(conversation_ids, MAX_CONVERSATION_IDS, "conversation_ids")
     except ValueError as error:
         return _invalid_argument(str(error))
-    return _agent_lens_request(
+    return await _agent_lens_request(
         "get_conversation_tags",
         "POST",
         CONVERSATION_TAGS_QUERY_PATH,
@@ -690,13 +662,13 @@ def get_conversation_tags(entity_name: str, project_name: str, conversation_ids:
     )
 
 
-def list_tagged_conversations(entity_name: str, project_name: str, tag_ids: List[str]) -> str:
+async def list_tagged_conversations(entity_name: str, project_name: str, tag_ids: List[str]) -> str:
     """List conversation IDs carrying any of the given tag IDs."""
     try:
         ids = _bounded_uuid_list(tag_ids, MAX_TAG_IDS, "tag_ids")
     except ValueError as error:
         return _invalid_argument(str(error))
-    return _agent_lens_request(
+    return await _agent_lens_request(
         "list_tagged_conversations",
         "POST",
         TAGGED_CONVERSATIONS_PATH,
@@ -707,7 +679,7 @@ def list_tagged_conversations(entity_name: str, project_name: str, tag_ids: List
     )
 
 
-def get_tag_distribution(
+async def get_tag_distribution(
     entity_name: str,
     project_name: str,
     after_ms: int,
@@ -721,7 +693,7 @@ def get_tag_distribution(
         return _invalid_argument("before_ms must be greater than after_ms")
     if not 1 <= time_bucket_seconds <= MAX_TIME_BUCKET_SECONDS:
         return _invalid_argument(f"time_bucket_seconds must be between 1 and {MAX_TIME_BUCKET_SECONDS}")
-    return _agent_lens_request(
+    return await _agent_lens_request(
         "get_tag_distribution",
         "POST",
         TAG_DISTRIBUTION_PATH,

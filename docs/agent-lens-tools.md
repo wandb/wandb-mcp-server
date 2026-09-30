@@ -97,6 +97,7 @@ request fails with an actionable message instead of a bare `422`:
 
 - MCP limits ranged Insights reads to **30 days** as a response/work safety
   policy, even though current Agent Lens accepts any nonempty range.
+- `signature_type` accepts exactly `intent` or `failure`.
 - `conversation_ids` ≤ 5000, `tag_ids` ≤ 100, `topic_ids` ≤ 20, and
   failure-attribution `trace_ids` ≤ 500.
 - `limit` 1–50 for example turns; `time_bucket_seconds` 1–86400.
@@ -110,7 +111,16 @@ Oversized responses are trimmed to the token budget and annotated with
 `_truncation`, reporting the field trimmed and the original count so a partial
 answer is never mistaken for a complete one. Each download is also capped at
 4 MiB or the lower configured accumulated-byte limit before JSON decoding.
-Requests reject redirects and share the active MCP tool deadline.
+Requests reject redirects. One absolute deadline covers connection setup,
+response headers, and the complete streamed body, so a response cannot remain
+open indefinitely by continuing to send small chunks.
+
+Within the MCP process, low-level HTTPX and HTTPCore request-line records are
+suppressed while an Agent Lens request is active. This keeps caller-derived
+category identifiers, topic identifiers, and pagination cursors out of those
+client logs without muting unrelated HTTP client activity. Application failure
+telemetry remains bounded and sanitized. Reverse-proxy and platform logging are
+separate operator concerns.
 
 ## Errors
 

@@ -200,6 +200,8 @@ deployments may select `models-weave-agents-agent-lens` with the `shared`
 workload and an operator-reviewed `AGENT_LENS_BASE_URL`. The default
 `models-weave` profile and both Dedicated profiles omit these tools, and merely
 setting the endpoint never enables them. See the [Agent Lens tool guide](docs/agent-lens-tools.md).
+The guide also documents the end-to-end request deadline and scoped logging
+protections for caller-derived identifiers.
 
 **Registry organization resolution:** Registry tools use the authenticated
 request's W&B client when `organization` is omitted. A single accessible

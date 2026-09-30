@@ -173,7 +173,7 @@ class _DirectTool:
     """
 
     name: str
-    impl: Callable[..., str]
+    impl: Callable[..., Any]
     description: str
 
 
