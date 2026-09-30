@@ -19,46 +19,30 @@ Query and analyze your Weights & Biases data using natural language through the 
 
 ---
 
-## v0.4.0 Release Highlights
+## What's new in 0.4
 
-Version 0.4.0 makes W&B reads SDK-first, bounded, and workload-aware:
+- Structured experiment queries and legacy GraphQL inputs work through the same
+  `query_wandb_tool` interface.
+- Targeted summary/config reads and sparse multi-key history make it easier to
+  work with large experiments without loading every field.
+- Explicit tool profiles, read-only mode, and bounded responses let you choose
+  the capabilities appropriate for your installation.
+- HTTP session recovery, input validation, and offline token counting are more
+  robust. Tool telemetry excludes raw arguments and API keys; see the
+  [privacy guidance](docs/OBSERVABILITY.md) before enabling verbose logging.
 
-- Run collections return lightweight metadata by default and support targeted
-  `summary_keys` and `config_keys` instead of loading every metric.
-- Explicit multi-key default-history reads use bounded outer-union semantics,
-  so metrics logged at different cadences remain visible instead of requiring
-  every key on the same history row.
-- Shared and Dedicated workload profiles bound collection, history, evaluation,
-  and schema reads. When admission is enabled, weighted in-flight work cannot
-  exceed the configured per-actor and per-process cost capacities; overload
-  returns retryable `server_busy`. Local STDIO leaves admission off by default.
-- Dedicated and Self-Managed deployments can send W&B Models/API traffic over an
-  internal Kubernetes service with `WANDB_INTERNAL_BASE_URL`, while public links
-  continue to use `WANDB_BASE_URL`.
-- `query_wandb_tool` supports both structured SDK reads and bounded legacy
-  GraphQL queries across Shared, Dedicated, and local workloads. Mutations,
-  subscriptions, multiple operations, and mixed-mode inputs are rejected.
-- Three local-only ARIA tools support bounded asynchronous submission and
-  polling when a deployment has an approved hosted W&B Agent path. Managed
-  Shared and Dedicated profiles reject the ARIA profile in v0.4.
-- Tool telemetry is bounded, excludes raw arguments and API keys, and correctly
-  attributes supported clients such as Codex, Claude Code, and Cursor.
-
-See the [v0.4.0 release notes](docs/releases/v0.4.0.md) for migration guidance,
-deployment settings, and the complete customer-visible summary.
+The current 0.4.2 candidate adds an explicit Agent Lens opt-in for W&B-hosted
+MTSaaS. It does not add Agent Lens to the default local profile or to any
+Dedicated/customer profile. See the [v0.4.2 release note](docs/releases/v0.4.2.md)
+for its current qualification state and the [release index](docs/releases/README.md)
+for earlier 0.4 versions.
 
 ### Release availability
 
-v0.4.0 is a release candidate until its signed source tag and each deployment
-artifact are independently verified. The
-[release index](docs/releases/README.md) is the source of truth for public
-source, W&B-hosted, Dedicated/Self-Managed, and customer-container availability.
-Do not infer availability from a branch, mutable tag, or version string in this
-README.
-
-The official artifacts are the verified signed source tag and GitHub Release,
-plus channel-specific immutable container digests recorded there. PyPI and
-mutable image tags such as `latest` are not supported release channels.
+Public source, W&B-hosted images, customer images, and installation artifacts
+advance independently. Use only immutable evidence recorded in the
+[release index](docs/releases/README.md); a version string or mutable container
+tag does not prove that another channel is available or qualified.
 
 ## What Can This Server Do?
 
@@ -67,9 +51,9 @@ mutable image tags such as `latest` are not supported release channels.
 
 | **Analyze Experiments** | **Debug Traces** | **Create Reports** | **Get Help** |
 |:---|:---|:---|:---|
-| Show me the top 5 runs by eval/accuracy in wandb-smle/hiring-agent-demo-public? | How did the latency of my hiring agent predict traces evolve over the last months? | Generate a wandb report comparing the decisions made by the hiring agent last month | Search the official W&B docs for how to create a leaderboard in Weave. |
+| Show me the top 5 runs by eval/accuracy in my-team/my-project. | How has my agent's latency changed this month? | Create a W&B report comparing these runs. | Search the W&B docs for how to create a leaderboard in Weave. |
 
-*"Go through the last 100 traces of my last training run in grpo-cuda/axolotl-grpo and tell me why rollout traces of my RL experiment were bad sometimes?"*
+*"Look at the last 100 traces in my project and explain the most common failures."*
 </details>
 
 <details>
@@ -134,7 +118,7 @@ Recommended deployment presets:
 
 | Deployment | Settings |
 |---|---|
-| MT SaaS | `models-weave-agents`, `shared`, `read-write` (30 tools) |
+| MT SaaS with Agent Lens | `models-weave-agents-agent-lens`, `shared`, `read-write` (39 tools) |
 | Dedicated Models-only | `models-only`, `dedicated`, `read-write` (17 tools) |
 | Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (22 tools) |
 | Local extra GraphQL tool | `models-weave-graphql-compat`, `local`; choose either access mode |
@@ -172,8 +156,8 @@ caller-supplied GraphQL, and is part of every supported managed tool profile.
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
 
 These tools are present in the explicit `models-weave-agents` and
-`models-weave-agents-aria` profiles. MT SaaS uses the former; Dedicated v0.4
-rejects both profiles.
+`models-weave-agents-aria` profiles, and are also retained in the hosted
+`models-weave-agents-agent-lens` profile. Dedicated v0.4 rejects all three.
 
 | Tool | Description | Example Query |
 |------|-------------|---------------|
@@ -210,6 +194,12 @@ absolute HTTPS origin. Endpoint presence alone never enables the tools.
 two polling tools. Shared and Dedicated managed profiles reject ARIA.
 
 **ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
+
+**Agent Lens is explicit and hosted-only in managed v0.4.2:** W&B-hosted
+deployments may select `models-weave-agents-agent-lens` with the `shared`
+workload and an operator-reviewed `AGENT_LENS_BASE_URL`. The default
+`models-weave` profile and both Dedicated profiles omit these tools, and merely
+setting the endpoint never enables them. See the [Agent Lens tool guide](docs/agent-lens-tools.md).
 
 **Registry organization resolution:** Registry tools use the authenticated
 request's W&B client when `organization` is omitted. A single accessible
@@ -604,8 +594,12 @@ single server-side `WANDB_API_KEY` and refuses non-loopback binds.
 <details>
 <summary><strong>Option 4: Dedicated / On-Prem Deployment</strong></summary>
 
-For W&B Dedicated and Self-Managed customers, the MCP server is available as an
-optional component in the `operator-wandb` Helm chart. Enable it in your
+MCP is an optional component in the `operator-wandb` Helm chart. Before upgrading,
+confirm that the selected image and chart support the same runtime configuration;
+changing only one can prevent startup. Use the compatibility and immutable
+artifact evidence in the applicable [versioned release note](docs/releases/README.md).
+
+With a compatible chart and image, enable the component in your
 `WeightsAndBiases` values:
 
 ```yaml
@@ -613,15 +607,17 @@ mcp-server:
   install: true
 ```
 
-When an MCP-capable chart release is available, the server becomes accessible
-at `https://<your-instance>/mcp`. The chart keeps this public URL for clients
+When enabled, the server becomes accessible at `https://<your-instance>/mcp`.
+The chart keeps this public URL for clients
 and user-facing links while routing server-side W&B API calls to the
 namespace-local API service.
 
 **Requirements:**
-- `weave-trace` must be installed (`weave-trace.install: true`)
-- An `operator-wandb` release whose notes explicitly include MCP support
-- The immutable MCP image digest recorded by that chart release
+
+- A chart version explicitly compatible with MCP 0.4 and a verified image digest.
+- A supported tool profile and access mode for the installation.
+- Weave installed and configured when using the `models-weave` profile.
+  The `models-only` profile does not require Weave.
 
 **Client configuration** for dedicated instances:
 
@@ -702,6 +698,7 @@ Exact tool profiles:
 | `models-weave-agents` | models, weave, agents | shared | 30 | 28 |
 | `models-weave-agents-aria` | models, weave, agents, aria | local only | 33 | 30 |
 | `models-weave-graphql-compat` | models, weave, raw-graphql | local only | 23 | 21 |
+| `models-weave-agents-agent-lens` | models, weave, agents, agent-lens | shared | 39 | 37 |
 
 Exact workload defaults:
 
@@ -719,7 +716,7 @@ Exact capacity classes:
 | `medium` | 4 | 8 | 8 | 8 |
 | `large` | 8 | 16 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:c871737fad4aa9d7b2d973d14d7063e2a17877e9f97c38608996dd49e812c5a0`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:230cce534205b7ad60afcf34909b6f9d1cd76e5ceda703cd9bca6a866cb6ef91`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line
@@ -779,7 +776,7 @@ uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server
 ### Contributing & Releasing
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** -- Development setup, testing, PR process, architecture overview
-- **[RELEASING.md](RELEASING.md)** -- Version bumping, release checklist, deployment pipeline
+- **[RELEASING.md](RELEASING.md)** -- Public source releases and artifact verification
 - **[Release index](docs/releases/README.md)** -- Availability and immutable artifacts by channel
 - **[Query capability matrix](docs/query-capabilities.md)** -- Typed reads and the opt-in compatibility path
 - **[Observability](docs/OBSERVABILITY.md)** -- Logging, telemetry privacy, and supported collection modes
@@ -817,7 +814,7 @@ resp = client.responses.create(
             "authorization": os.getenv('WANDB_API_KEY'),
         },
     ],
-    input="How many traces are in wandb-smle/hiring-agent-demo-public?",
+    input="How many traces are in my-team/my-project?",
 )
 
 print(resp.output_text)
@@ -839,13 +836,13 @@ CI runs automatically on every push and PR via GitHub Actions.
 
 #### Release artifact model
 
-The public Python source, W&B-managed deployment image, and Dedicated/Self-Managed
-chart are independently versioned artifacts. Managed builds pin this repository
-to a signed source tag, and the chart pins a verified image digest. Local
-source installs should use `@vX.Y.Z` with a version marked available in the
-[release index](docs/releases/README.md); an unqualified GitHub branch is a
-development input, not an immutable release. See [RELEASING.md](RELEASING.md)
-for the required attestation and digest handoff checks.
+Source releases, container images, and Helm charts are independently versioned.
+Use the source revision and immutable image digest recorded in the release
+notes, and check chart compatibility before upgrading. Local source examples
+use `@vX.Y.Z`; replace it only with a signed tag listed as available in the
+[release index](docs/releases/README.md). A container tag does not imply that a
+matching Git tag exists. See [RELEASING.md](RELEASING.md) for contributor-facing
+source and artifact checks.
 
 ### Support
 

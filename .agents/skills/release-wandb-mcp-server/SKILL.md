@@ -44,6 +44,20 @@ outside the checkout. Never reuse `dist/`. The `attest` command produces a
 deterministic predicate for the protected signer; it is not signed evidence by
 itself.
 
+## Keep public release documentation factual
+
+Track public source, W&B-hosted images, customer images, and installation
+qualification independently. State a channel as available only when its
+version note contains verified immutable evidence for that channel. Otherwise
+use `Pending` or `Not recorded`; never carry a digest, scan result, date, chart,
+or rollout claim forward from another version.
+
+Keep release notes useful to installers and contributors. Exclude private
+workflow links, infrastructure identifiers, approval procedures, credentials,
+customer identifiers, and raw responses. After any runtime-contract or source
+change, regenerate the generated documentation and invalidate downstream
+profile or artifact evidence from the previous tree.
+
 ## Preserve authorization boundaries
 
 This skill does not authorize merging, tag creation, publication, deployment,

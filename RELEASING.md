@@ -1,12 +1,13 @@
 # Releasing the W&B MCP Server
 
-This is the public-source release contract. Managed deployment details remain
-in the restricted deployment repository, and Dedicated/Self-Managed packaging
-remains in [`wandb/helm-charts`](https://github.com/wandb/helm-charts).
+This guide covers public source qualification, signed artifacts, and release
+notes. Deployment-specific runbooks are maintained separately.
 
-The supported artifacts are a signed source tag, its GitHub Release, and one
-immutable container digest built from that tag. PyPI and mutable container tags
-are not release channels.
+A source release has a signed source tag and a GitHub Release. A published
+container is identified by its immutable container digest and verified source
+revision; its publication status is recorded separately from the source tag.
+PyPI and mutable container tags are not release channels. Container tags are
+convenience references, not substitutes for digest verification.
 
 ## Release states
 
@@ -14,20 +15,16 @@ are not release channels.
 |---|---|
 | Candidate | Public release PR, current-head CI/security, exact installed-wheel manifests, compatibility and migration tests |
 | Source released | Approved merge to `main`, signed `vX.Y.Z` tag, draft GitHub Release, public source attestation |
-| Staged | One image built from the tag; exact-digest functional, load, privacy, and rollback validation |
-| Production ready | Exact staged digest, credential preflight, captured previous traffic/configuration state, no-traffic validation |
-| Production | Protected approval, exact-digest cutover, monitoring, verified rollback path |
-| Customer ready | Dedicated install, upgrade, and rollback validation using the exact digest |
-| Customer released | Separate publication approval, verified public-registry digest, Helm release evidence |
+| Container published | Public repository, verified digest, source provenance, signatures, and actual test/scan results |
+| Installation verified | Compatible chart/configuration plus completed installation, functional, and rollback checks |
 
 Advancing one channel does not advance another. Record each channel state in
 the versioned release note and do not announce availability before the relevant
 artifact is verified.
 
-These are the stable-release states. An explicitly approved candidate-production
-or limited customer pilot follows the separate lane below; it does not mark
-public source, stable customer publication, or broad Dedicated qualification
-complete.
+Source qualification, container publication, and installation validation are
+separate results. Do not describe an image as a signed source release or a
+qualified installation when only publication has completed.
 
 ## 1. Prepare the public release PR
 
@@ -128,11 +125,8 @@ uv run --no-sync python scripts/public_release.py \
   preflight --version "$VERSION" --gate source-released
 ```
 
-For this source-released path, production traffic cannot move before the merge
-and signed tag. A protected production identity may create a no-traffic revision
-only after source qualification. An approved candidate exception must instead
-use the hosted controller's exact-image authorization and staging evidence; it
-is not a source release.
+This completes source qualification only. It does not deploy the artifact or
+establish that a particular installation is running it.
 
 ## 4. Build once and attest
 
@@ -186,72 +180,25 @@ The GitHub Release remains a draft until downstream channel evidence supports
 the announcement. Rerunning source qualification may prove identical assets;
 it must fail instead of replacing an asset with different bytes.
 
-## 5. Stage and promote the same digest
+## 5. Record public artifacts and compatibility
 
-The restricted controller imports the signed public attestation and records a
-versioned release manifest. It builds the container once, deploys its immutable
-digest to staging, and verifies health, authentication, protocol/session
-compatibility, exact tool manifests, representative reads and isolated writes,
-telemetry privacy, load, and rollback.
+Record the exact source revision, artifact checksums, public signatures, and
+container digest in the versioned release note. Verify a copied image's
+destination digest; never replace a versioned artifact with different bytes.
 
-After staging succeeds:
+Keep release notes useful to people installing or upgrading the server:
 
-1. Validate the same digest as a no-traffic production revision.
-2. Capture the complete previous runtime configuration and traffic map.
-3. Obtain protected production approval.
-4. Assign traffic to the already-tested digest and monitor it.
-5. On any failure or cancellation, restore and independently verify the exact
-   previous configuration and traffic map.
+- Explain tool and configuration changes, supported versions, and migration steps.
+- Distinguish completed tests from planned checks and remaining limitations.
+- Report known scan findings accurately; publication is not a clean-scan claim.
+- State which chart/configuration is compatible with the image.
+- Keep private workflow links, infrastructure identifiers, approval procedures,
+  and rollout discussions out of public documentation.
 
-The managed deployment never rebuilds during promotion and never treats a
-mutable tag as evidence.
-
-## 6. Publish for customers and release Helm
-
-Stable customer publication is a separate protected action. Before it:
-
-- Validate Dedicated installation, upgrade, and rollback against the exact
-  digest.
-- Verify internal W&B API routing, public user-facing links, exact tool profiles,
-  workload limits, and the absence of internal routes or credentials in output.
-- Copy the already-tested digest to the public registry without rebuilding,
-  then verify and sign the destination digest.
-- Update the Helm PR to the verified artifact and require chart dependency,
-  render, lint, schema, snapshot, and Kubernetes-matrix checks.
-
-Do not publish `latest`, merge Helm, or deploy a customer as a side effect of
-managed production promotion.
-
-### Limited customer pilot
-
-An explicitly approved pilot may copy an already-promoted candidate image
-without waiting for the stable source release or the full live Dedicated matrix.
-Use the hosted pilot publisher with a successful **production promotion run ID**;
-it derives and verifies the production/staging evidence and exact image digest.
-Do not supply an arbitrary source SHA or digest, rebuild the image, or label the
-result as stable. A publication result must identify the verified public
-repository, pilot tag, digest, and provenance before instructions name the image.
-
-Image publication and chart selection are separate prerequisites. Use a
-compatible, exact-version chart, verify its package checksum, and preserve the
-installation's unrelated configuration. A reviewed PR preview can support a
-pilot without merging Helm. Publishing that image does not install it or
-authorize changing a customer deployment. For Helm-backed Operator v1, select
-the application chart through `spec.chart`; upgrading the controller alone does
-not select a compatible MCP chart. Orca/v2 migration is a separate operation.
-
-Record the selected pilot profile, access mode, capacity class, chart, and image.
-Authentication, session recovery, exact tools, functional results, privacy,
-routing, and a recoverable prior configuration remain mandatory checks. Pilot
-results do not establish the full 12-case Dedicated install/disable/re-enable/
-rollback qualification required for broad stable publication.
-
-When a version's approved rollout policy makes load/performance advisory,
-retain the actual measurements and threshold failures for review without
-changing the thresholds or manufacturing a pass. This does not relax
-correctness, access isolation, artifact verification, or rollback checks.
-Version-specific policy, pilot artifacts, and remaining qualification belong
-in the release note, not generic examples.
+An installation should preserve its previous chart/image configuration and
+verify readiness, authentication, exact tools, and representative operations
+before relying on the new version. Publishing an image does not perform those
+checks on a user's environment or authorize its deployment.
 
 ## Evidence and rollback rules
 
@@ -264,8 +211,6 @@ Authoritative attestations live with the immutable artifact for the supported
 release lifetime. GitHub Actions artifacts are transport copies, not the
 durable ledger.
 
-- Managed rollback restores the complete previous configuration and traffic
-  map, then verifies health and authenticated reads.
 - Dedicated rollback restores the previous chart and image digest.
 - Public source fixes forward through review; never rewrite `main` or an
   existing signed tag.
