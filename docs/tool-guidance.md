@@ -199,7 +199,9 @@ expand_columns : list of str, optional
 truncate_length : int, optional
     Maximum length for string values in weave traces. Defaults to 1000
 return_full_data : bool, optional
-    Whether to include full untruncated trace data. If True, the `truncate_length` parameter is ignored. If  `False` returns truncation_length = 0, no values for the column keys are returned. Defaults to True.
+    Whether to include untruncated trace data. If True, `truncate_length` is
+    ignored. Defaults to False. With return_full_data=False and truncate_length=0,
+    only column keys are returned, without their values.
 metadata_only : bool, optional
     Return only metadata without traces. Defaults to False
 detail_level : str, optional
