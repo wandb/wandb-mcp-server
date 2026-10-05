@@ -22,6 +22,35 @@ class TestLogAnalysis:
 
         return mock_api, mock_run
 
+    @pytest.mark.parametrize("failing_stage", [None, "run_create", "summary_update", "metadata_update"])
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
+    @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
+    def test_categorical_write_stages_are_private_and_do_not_retry(self, mock_api_manager, mock_wandb, failing_stage):
+        import wandb_mcp_server.mcp_tools.log_analysis as module
+
+        mock_api_manager.get_api_key.return_value = "credential-canary"
+        api, run = self._make_mock_api()
+        mock_wandb.Api.return_value = api
+        operations = {"run_create": api.create_run, "summary_update": run.summary.update, "metadata_update": run.update}
+        if failing_stage:
+            operations[failing_stage].side_effect = RuntimeError("sdk-body-canary")
+        with patch.object(module.logger, "debug") as debug:
+            if failing_stage:
+                with pytest.raises(RuntimeError):
+                    module.log_analysis("entity-canary", "project-canary", "name-canary", [{"query-canary": 1}])
+            else:
+                module.log_analysis("entity-canary", "project-canary", "name-canary", [{"query-canary": 1}])
+        expected = []
+        for stage, operation in operations.items():
+            expected.append({"write_stage": stage, "write_stage_complete": False})
+            operation.assert_called_once()
+            if stage == failing_stage:
+                break
+            expected.append({"write_stage": stage, "write_stage_complete": True})
+        assert [call.kwargs["extra"] for call in debug.call_args_list] == expected
+        assert all(call.args == ("MCP analysis write stage",) for call in debug.call_args_list)
+        assert "canary" not in str(debug.call_args_list)
+
     @patch("wandb_mcp_server.mcp_tools.log_analysis.wandb")
     @patch("wandb_mcp_server.mcp_tools.log_analysis.WandBApiManager")
     def test_basic_scalar_logging(self, mock_api_manager, mock_wandb):
