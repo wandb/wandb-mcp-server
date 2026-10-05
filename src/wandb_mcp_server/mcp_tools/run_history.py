@@ -47,91 +47,52 @@ logger = get_rich_logger(__name__)
 
 GET_RUN_HISTORY_TOOL_DESCRIPTION = """Retrieve bounded time-series metric data from a W&B run.
 
-Use bounded independent-series sampling for explicit multi-key default-history
-overviews and ranges, SDK scans for single-key ranges, and an exact point lookup
-for a logged x-axis value. Every successful response states the
-retrieval method, whether values are sampled or exact, rows scanned, coverage,
-and any profile or response-budget truncation.
-
 <when_to_use>
-Call this tool when the user asks about training curves, metric trends over time,
-loss plots, or any time-series data logged to a W&B run. This is the only tool
-that provides step-by-step metric history -- query_wandb_tool returns run-level
-summary metrics but not the full training history.
-
-Typical workflow:
-1. For an unfamiliar project, use probe_project_tool to discover indexed keys.
-2. Use query_wandb_tool with summary_keys/config_keys to select runs.
-3. Use get_run_history_tool with explicit keys and x_axis for targeted curves.
-4. Use create_wandb_report_tool to visualize the results.
+Use for training curves, metric trends, loss plots, and step-by-step history.
+query_wandb_tool provides summary metrics, not full history. Discover indexed
+keys with probe_project_tool, select runs with query_wandb_tool, then request
+explicit keys/x_axis here. Use create_wandb_report_tool to visualize results.
 </when_to_use>
 
-Parameters
-----------
-entity_name : str
-    The W&B entity (team or username).
-project_name : str
-    The W&B project name.
-run_id : str
-    The W&B run ID (often an 8-character generated ID such as "gtng2y4l";
-    custom run IDs are also accepted). This is not the display name.
-keys : list of str, optional
-    Specific metric keys to retrieve (e.g., ["loss", "val_loss", "accuracy"]).
-    For explicit multi-key default-history sampled and ranged collection reads,
-    keys logged on different cadences are outer-unioned by step; a row may carry
-    only the requested metrics logged at that point. target_x is an exact point
-    lookup rather than a collection join.
-    Shared hosted deployments require explicit keys up to the configured cap
-    (20 by default; the Dedicated profile defaults to 50).
-samples : int, optional
-    Total merged-row budget shared across all requested keys. Defaults to 500.
-    Use fewer samples for quick overviews, more for detailed analysis.
-min_step : int, optional
-    Inclusive non-negative minimum step to include. Defaults to None. Step
-    ranges are supported only for the default history stream.
-max_step : int, optional
-    Inclusive non-negative maximum step to include. Defaults to None. Step
-    ranges are supported only for the default history stream.
-x_axis : str, optional
-    History x-axis. Defaults to "_step". Set this to a logged monotonic metric
-    such as "validation/step" for custom-axis projection or target lookup. For
-    collection reads, the custom axis and metric must occur on the same row.
-target_x : float, optional
-    Retrieve the row where x_axis logged this exact value. If no exact value was
-    logged, returns target_not_logged. Supported only for the default stream.
-tolerance : float, optional
-    When target_x was not logged exactly, permit a bounded nearest-value
-    refinement within this absolute tolerance.
-stream : "default" or "system", optional
-    Select normal run history or system metrics. Defaults to "default".
+Inputs:
+- entity_name, project_name, run_id: required. Use the internal run ID, not the
+  display name; custom run IDs are also accepted.
+- keys: requested metrics, e.g. ["loss","val_loss"]. Shared hosted workloads
+  require explicit keys (default cap 20; Dedicated cap 50).
+- samples: total merged-row budget across keys; default 500.
+- min_step/max_step: inclusive non-negative bounds; default stream only.
+- x_axis: default "_step"; use a logged monotonic metric for custom projection.
+  Custom-axis collection reads require axis and metric on the same row.
+- target_x: exact logged x_axis value, default stream only. If absent, returns
+  target_not_logged rather than interpolating.
+- tolerance: allows bounded nearest-value refinement when target_x is not exact.
+- stream: "default" (default) or "system" metrics.
 
-Returns
--------
-JSON with:
-  - rows: list of {_step, key1, key2, ...} dicts
-  - run_id: the queried run ID
-  - run_name: the run's display name
-  - total_steps: last logged step number
-  - sampled_points: number of rows returned
-  - keys_returned: list of metric keys in the response
-  - requested_keys, optional join, matching_rows, per-key row counts, and
-    unobserved/missing/omitted keys. Unobserved means no usable finite/non-null
-    value appeared in a bounded result; missing is emitted only for exact counts.
-  - non_finite_counts for NaN/Infinity observations seen in the bounded source;
-    invalid JSON numeric values are counted rather than returned, and counts are
-    exhaustive only when key_counts_exact is true.
-  - retrieval_method, exact, sampled, rows_scanned, coverage, truncation,
-    source_truncated (source step-window/row cap reached), and
-    source_values_truncated (source rows containing an oversized value replaced
-    by a bounded sentinel)
+Explicit multi-key default-history overviews/ranges use bounded independent
+series sampling, outer-unioned by step for different logging cadences. A row may
+contain only metrics logged at that step. Single-key ranges use SDK scans.
+target_x is a point lookup, not a collection join.
 
-Examples
---------
->>> get_run_history_tool("my-team", "my-project", "gtng2y4l", keys=["loss", "val_loss"])
->>> get_run_history_tool(
-...     "my-team", "my-project", "h0fm5qp5",
-...     keys=["validation/loss"], x_axis="validation/step", target_x=1000,
-... )
+Returns JSON:
+- rows, run_id, run_name, total_steps, sampled_points, keys_returned.
+- requested_keys, optional join, matching_rows, per-key counts, and
+  unobserved/missing/omitted keys. Unobserved means no usable finite/non-null
+  value in a bounded result; missing is emitted only for exact counts.
+- non_finite_counts: NaN/Infinity observations are counted, not returned as
+  invalid JSON numbers; exhaustive only when key_counts_exact is true.
+- retrieval_method, exact, sampled, rows_scanned, coverage, truncation.
+- source_truncated: source step-window/row cap reached.
+- source_values_truncated: oversized source values replaced by bounded sentinels.
+Every successful response states sampling/exactness, coverage, and truncation;
+do not present bounded or sampled results as exhaustive.
+
+Examples:
+get_run_history_tool("team","project","run-id",keys=["loss","val_loss"])
+get_run_history_tool("team","project","run-id",keys=["validation/loss"],
+                     x_axis="validation/step",target_x=1000)
+
+Detailed sampling and coverage guidance:
+https://github.com/wandb/wandb-mcp-server/blob/main/docs/tool-guidance.md#get-run-history
 """
 
 MAX_HISTORY_ROWS = MCP_MAX_HISTORY_SAMPLES

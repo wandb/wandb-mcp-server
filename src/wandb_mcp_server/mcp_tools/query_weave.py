@@ -21,295 +21,53 @@ def get_trace_service():
     return TraceService(api_key=api_key)
 
 
-QUERY_WEAVE_TRACES_TOOL_DESCRIPTION = """
-Query Weave traces with filtering, sorting, and detail_level control.
-
-For W&B runs/metrics, use query_wandb_tool instead. This tool is for Weave traces (LLM calls, evaluations, agent traces).
+QUERY_WEAVE_TRACES_TOOL_DESCRIPTION = """Query Weave traces (LLM calls, evaluations, and classic agent traces) with filters and detail control.
+For W&B runs/metrics use query_wandb_tool.
 
 <when_to_use>
-Call for Weave trace data. Use detail_level="schema" to browse, "summary" for analysis, "full" for specific traces only.
+Use detail_level="schema" to browse, "summary" for analysis (default), and "full"
+only for specific calls. Start with infer_trace_schema_tool for unfamiliar data;
+use count_weave_traces_tool for counts without trace payloads.
 </when_to_use>
 
-<usage_tips>
-query_traces_tool can return a lot of data, below are some usage tips for this function
-in order to avoid overwhelming a LLM's context window with too much data.
+Inputs:
+- entity_name, project_name: required W&B scope.
+- filters: display_name, op_name, op_name_contains, trace_roots_only, trace_id,
+  call_ids, parent_ids, status ("success"/"error"), has_exception, time_range
+  (start/end ISO timestamps), attributes, inputs, output.
+  Prefer call_ids=["id"] for an ID from a Weave URL: a call/span ID identifies
+  one operation; trace_id groups spans. Use parent_ids for evaluation children.
+  attributes/inputs/output support dot-path fields, literal equality, $eq, $gt,
+  $gte, $lt, $lte, and $contains (substring, NOT regex). For content search on
+  large projects, narrow by time_range, op_name, or trace_roots_only first.
+- sort_by: started_at by default; sort_direction: "desc" (default) or "asc".
+  Hosted workloads reject cost sorting that requires a large scan.
+- limit: maximum results; omitted limits and caps depend on workload. Use a
+  small explicit limit, especially for full data.
+- columns: request only needed fields, e.g. ["id", "op_name", "started_at",
+  "summary"]; inputs/output can be large. expand_columns expands references.
+- include_costs, include_feedback: both true by default.
+- detail_level: "schema" gives structural fields; "summary" adds inputs/outputs
+  truncated to 200 characters and summary/usage; "full" returns untruncated data.
+- truncate_length: 1000 by default; return_full_data=true bypasses truncation.
+  Prefer detail_level for normal queries. metadata_only=true omits trace data.
 
-<managing_llm_context_window>
-
-Returning all weave trace data can possibly result in overwhelming the LLM context window
-if there are 100s or 1000s of logged weave traces (depending on how many child traces each has) as
-well as resulting in a lot of data from or calls to the weave API.
-
-So, depending on the user query, consider doing the following to return enough data to answer the user query
-but not too much data that it overwhelms the LLM context window:
-
-- return only the root traces using the `trace_roots_only` boolean filter if you only need the top-level/parent
-traces and don't need the data from all child traces. For example, if a user wants to know the number of
-successful traces in a project but doesn't need the data from all child traces. Or if a user
-wants to visualise the number of parent traces over time.
-
-- return only the truncated values of the trace data keys in order to first give a preview of the data that can then
-inform more targeted weave trace queries from the user. in the extreme you can set `truncate_length` to 0 in order to
-only return keys but not the values of the trace data.
-
-- return only the metadata for all the traces (set `metadata_only = True`) if the query doesn't need to know anything
-about the structure or content of the individual weave traces. Note that this still requires
-requesting all the raw traces data from the weave API so can still result in a lot of data and/or a
-lot of calls being made to the weave API.
-
-- return only the columns needed using the `columns` parameter. In weave, the `inputs` and `output` columns of a
-trace can contain a lot of data, so avoiding returning these columns can help. Note you have to explicitly specify
-the columns you want to return if there are certain columns you don't want to return. Its almost always a good idea to
-specficy the columns needed.
-
-<returning_metadata_only>
-
-If `metadata_only = True` this returns only metadata of the traces such as trace counts, token counts,
-trace types, time range, status counts and distribution of op names. if `metadata_only = False` the
-trace data is returned either in full or truncated to `truncate_length` characters depending if
-`return_full_data = True` or `False` respectively.
-</returning_metadata_only>
-
-<truncating_trace_data_values>
-
-If `return_full_data = False` the trace data is truncated to `truncate_length` characters,
-default 1000 characters. Otherwise the trace data is returned in full.
-</truncating_trace_data_values>
-
-Remember, LLM context window is precious, only return the minimum amount of data needed to complete an analysis.
-</managing_llm_context_window>
-
-<usage_guidance>
-
-- Exploratory queries: For generic exploratory or initial queries about a set of weave traces in a project it can
-be a good idea to start with just returning metadata or truncated data. Consider asking the
-user for clarification and warn them that returning a lot of weave traces data might
-overwhelm the LLM context window. No need to warn them multiple times, just once is enough.
-
-- Project size: Consider using the count_traces_tool to get an estimate of the number of traces in a project
-before querying for them as query_trace_tool can return a lot of data.
-
-- Partial op name matching: Use the `op_name_contains` filter if a users has only given a partial op name or if they
-are unsure of the exact op name.
-
-- Weave Evaluations: If asked about weave evaluations or evals traces:
-    - Evals are complicated to query, prompt the user with follow up questions if needed.
-    - First, always try and oritent yourself - pull a summary of the evaluation, get all of the top level column names in the eval \
-and always get a count of the total number of child traces in this eval by filtering by parent_id and using the count_traces tool.
-    - As part of orienting yourself, just pull a subset of child traces from the eval, maybe 3 to 5, to understand the column structure \
-and values.
-    - Always be explicit about the amount of data returned and limits used in your query - return to the user the count of traces \
-analysed.
-    - Always stay filterd on the evaluation id (filter by `parent_id`) unless specifically asked questions across different evaulations, e.g. \
-if a parent id (or parentId) is provided then ensure to use that filter in the query.
-    - filter for traces with `op_name_contains = "Evaluation.evaluate"` as a first step. These ops are parent traces that contain
-    aggregated stats and scores about the evaluation. The child traces of these ops are the actual evaluation results
-    for each sample in an evaluation dataset. If asked about individual rows in an evaluation then use the parent_ids
-    filter to return the child traces.
-    - for questions where both a child call name of an evaluation and an evaluation id or name are provided, always ensure \
-that you first correctly get the evaluation id, and then use it as the parent_id in the query for the child traces. Otherwise \
-there is a risk of returning traces that do not belong to the evaluation that was given.
-
-- Weave nomenclature: Note that users might refer to weave ops as "traces" or "calls" or "traces" as "ops".
-
-</usage_guidance>
-
-Parameters
-----------
-entity_name : str
-    The Weights & Biases entity name (team or username)
-project_name : str
-    The Weights & Biases project name
-filters : dict
-    Dict of filter conditions, supporting:
-
-    - display_name : str or regex pattern
-        Filter by display name seen in the Weave UI
-    - op_name : str or regex pattern
-        Filter by weave op name, a long URI starting with 'weave:///'
-    - op_name_contains : str
-        Filter for op_name containing this substring (easier than regex)
-    - trace_roots_only : bool
-        Boolean to filter for only top-level/parent traces. Useful when you don't need
-        to return the data from all child traces.
-    - trace_id : str
-        Filter by a specific `trace_id` (e.g., "01958ab9-3c67-7c72-92bf-d023fa5a0d4d").
-        A `trace_id` groups multiple calls/spans. Use if the user explicitly say they provided a "trace_id" for a group of operations.
-        Always first try to filter by `call_ids` if a user provides an ID, before trying to filter by `trace_id`.
-    - call_ids : str or list of str
-        Filter by specific `call_id`s (also known as Span IDs) (string or list of strings, e.g., ["01958ab9-3c68-7c23-8ccd-c135c7037769"]).
-        **GUIDANCE**: `call_id` (Span ID) identifies a *single* operation/span and is typically found in Weave UI URLs.
-        If a user provides an ID for a specific item they're viewing, **prefer `call_ids`**.
-        Format as a list: `{"call_ids": ["user_provided_id"]}`.
-    - parent_ids : str or list of str
-        Return traces that are children of the given parent trace ids (string or list of strings). Ensure you use this \
-if given an evaluation trace id or name.
-    - status : str
-        Filter by trace status, defined as whether or not the trace had an exception or not. Can be
-        `success` or `error`.
-        NOTE: When users ask for "failed", "wrong", or "incorrect" traces, use `status:'error'` or
-        `has_exception:True` as the filter.
-    - time_range : dict
-        Dict with "start" and "end" datetime strings. Datetime strings should be in ISO format
-        (e.g. `2024-01-01T00:00:00Z`)
-    - attributes : dict
-        Dict of the weave attributes of the trace.
-        Supports nested paths (e.g., "metadata.model_name") via dot notation.
-        Value can be:
-        *   A literal for exact equality (e.g., `"status": "success"`)
-        *   A dictionary with a comparison operator: `$gt`, `$lt`, `$eq`, `$gte`, `$lte` (e.g., `{"token_count": {"$gt": 100}}`)
-        *   A dictionary with the `$contains` operator for substring matching on string attributes (e.g., `{"model_name": {"$contains": "gpt-3"}}`)
-        **Warning:** The `$contains` operator performs simple substring matching only, full regular expression matching (e.g., via `$regex`) is **not supported** for attributes. Do not attempt to use `$regex`.
-    - inputs : dict, optional
-        Filter on trace input fields using dot-path keys. Supports `$contains` for
-        substring search and comparison operators.
-        Examples:
-        *   `"inputs": {"message": {"$contains": "search phrase"}}` -- find traces where input.message contains text
-        *   `"inputs": {"model": "gpt-4"}` -- find traces where input.model equals "gpt-4"
-        **PERFORMANCE WARNING:** Content search on inputs scans trace data server-side.
-        For projects with >10k traces, ALWAYS combine with other filters (time_range,
-        op_name, trace_roots_only) to narrow the scan.
-    - output : dict, optional
-        Filter on trace output fields. Supports the same operators as inputs.
-        Examples:
-        *   `"output": {"$contains": "error message"}` -- search the full output for a substring
-        *   `"output": {"result": {"$contains": "success"}}` -- search output.result for a substring
-        **PERFORMANCE WARNING:** Same as inputs -- combine with other filters for large projects.
-    - has_exception : bool, optional
-        Optional[bool] to filter traces by exception status:
-        - None (or key not present): Show all traces regardless of exception status
-        - True: Show only traces that have exceptions (exception field is not null)
-        - False: Show only traces without exceptions (exception field is null)
-sort_by : str, optional
-    Field to sort by (started_at, ended_at, op_name, etc.). Defaults to 'started_at'
-sort_direction : str, optional
-    Sort direction ('asc' or 'desc'). Defaults to 'desc'
-limit : int, optional
-    Maximum number of results to return. Defaults to None
-include_costs : bool, optional
-    Include tracked api cost information in the results. Defaults to True
-include_feedback : bool, optional
-    Include weave annotations (human labels/feedback). Defaults to True
-columns : list of str, optional
-    List of specific columns to include in the results. Its almost always a good idea to specficy the
-    columns needed. Defaults to None (all columns).
-    Available columns are:
-        id: <class 'str'>
-        project_id: <class 'str'>
-        op_name: <class 'str'>
-        display_name: typing.Optional[str]
-        trace_id: <class 'str'>
-        parent_id: typing.Optional[str]
-        started_at: <class 'datetime.datetime'>
-        attributes: dict[str, typing.Any]
-        inputs: dict[str, typing.Any]
-        ended_at: typing.Optional[datetime.datetime]
-        exception: typing.Optional[str]
-        output: typing.Optional[typing.Any]
-        summary: typing.Optional[SummaryMap] # Contains nested data like 'summary.weave.status' and 'summary.weave.latency_ms'
-        status: typing.Optional[str] # Synthesized from summary.weave.status if requested
-        latency_ms: typing.Optional[int] # Synthesized from summary.weave.latency_ms if requested
-        wb_user_id: typing.Optional[str]
-        wb_run_id: typing.Optional[str]
-        deleted_at: typing.Optional[datetime.datetime]
-expand_columns : list of str, optional
-    List of columns to expand in the results. Defaults to None
-truncate_length : int, optional
-    Maximum length for string values in weave traces. Defaults to 1000
-return_full_data : bool, optional
-    Whether to include full untruncated trace data. If True, the `truncate_length` parameter is ignored. If  \
-`False` returns truncation_length = 0, no values for the column keys are returned. Defaults to True.
-metadata_only : bool, optional
-    Return only metadata without traces. Defaults to False
-detail_level : str, optional
-    Controls how much data is returned per trace. Use this instead of manually tuning
-    truncate_length/return_full_data. Defaults to "summary".
-    - "schema": Structural fields only (op_name, trace_id, started_at, ended_at, status,
-      parent_id, display_name). Fastest option, ideal for browsing and filtering large sets.
-    - "summary": Schema fields plus truncated inputs/outputs (200 chars) and summary/usage
-      data. Good default for understanding what traces contain.
-    - "full": Everything untruncated. Use only when drilling into specific trace_ids, never
-      for bulk queries as it can overwhelm the context window.
-
-<root_span_resolution>
-If you find child traces and need to know which root session they belong to,
-use resolve_trace_roots_tool with the trace_ids from the results.
-This resolves all roots in a single batched call (O(1), not N separate lookups).
-
-Typical workflow:
-1. query_weave_traces_tool(filters={...}) -> find child traces
-2. resolve_trace_roots_tool(entity_name, project_name, trace_ids=[...]) -> get root context
-</root_span_resolution>
-
-Returns
--------
-str
-    JSON string containing either full trace data or metadata only, depending on parameters.
-    The response metadata includes `total_matching_count` -- the total traces matching your
-    current filters before the limit is applied. Note: this reflects whatever filters you
-    used, not the project-wide total. Use `count_weave_traces_tool` if you need a separate
-    unfiltered count.
+Returns a JSON string with traces and metadata. total_matching_count counts
+traces matching the current filters before limit, not the project-wide total.
+Use count_weave_traces_tool without filters for a project-wide count.
+For evaluations, inspect a small sample and count children using parent_ids;
+keep queries scoped to the evaluation and state how many traces were analyzed.
+After finding child calls, use resolve_trace_roots_tool with their trace_ids
+to retrieve root context in a single batched request.
 
 <examples>
-    ```python
-    # Get an overview of the traces in a project
-    query_traces_tool(
-        entity_name="my-team",
-        project_name="my-project",
-        filters={"trace_roots_only": True},
-        metadata_only=True,
-        return_full_data=False
-    )
-
-    # Get failed traces with costs and feedback
-    query_traces_tool(
-        entity_name="my-team",
-        project_name="my-project",
-        filters={"status": "error"},
-        include_costs=True,
-        include_feedback=True
-    )
-
-    # Get specific columns for traces who's op name (i.e. trace name) contains a specific substring
-    query_traces_tool(
-        entity_name="my-team",
-        project_name="my-project",
-        filters={"op_name_contains": "Evaluation.summarize"},
-        columns=["id", "op_name", "started_at", "costs"]
-    )
-
-    # Schema-first workflow: browse traces quickly, then drill into specific ones
-    # Step 1: Get structural overview
-    query_traces_tool(
-        entity_name="my-team",
-        project_name="my-project",
-        filters={"trace_roots_only": True},
-        detail_level="schema"
-    )
-    # Step 2: Drill into a specific trace with full data
-    query_traces_tool(
-        entity_name="my-team",
-        project_name="my-project",
-        filters={"call_ids": ["01958ab9-3c68-7c23-8ccd-c135c7037769"]},
-        detail_level="full"
-    )
-
-    # Content search + root resolution (two-step workflow):
-    # Step 1: Find child traces matching content
-    results = query_traces_tool(
-        entity_name="my-team",
-        project_name="my-project",
-        filters={"inputs": {"message": {"$contains": "restaurant rush"}}},
-        detail_level="schema"
-    )
-    # Step 2: Resolve root spans for the found traces
-    resolve_trace_roots_tool(
-        entity_name="my-team",
-        project_name="my-project",
-        trace_ids=["<unique trace_ids from step 1>"]
-    )
-    ```
+Browse: filters={"trace_roots_only": true}, detail_level="schema", limit=5.
+Inspect one call: filters={"call_ids": ["span-id"]}, detail_level="full", limit=1.
+Find errors: filters={"status": "error"}, columns=["id", "exception"], limit=10.
 </examples>
+
+Detailed filter, column, evaluation, and root-resolution guidance:
+https://github.com/wandb/wandb-mcp-server/blob/main/docs/tool-guidance.md#query-weave-traces
 """
 
 
