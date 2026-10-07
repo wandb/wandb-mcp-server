@@ -5,8 +5,6 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
-from wandb.apis.public.registries._utils import ensure_registry_prefix_on_names
-
 from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
 from wandb_mcp_server.registry_support import RegistryMalformedResponse
 from wandb_mcp_server.wandb_graphql import execute_graphql
@@ -30,6 +28,24 @@ query MCPFetchRegistries($organization: String!, $filters: JSONString, $cursor: 
 _PREFIX = "wandb-registry-"
 
 
+def _prefix_filter_names(value: Any, *, in_name: bool = False) -> Any:
+    """Keep registry name selection independent of private SDK utilities.
+
+    Tool-boundary filter validation already bounds depth and JSON size. Only
+    literal names are prefixed; regular expressions are passed through.
+    """
+    if isinstance(value, str):
+        return _PREFIX + value if in_name and not value.startswith(_PREFIX) else value
+    if isinstance(value, dict):
+        return {
+            key: child if key == "$regex" else _prefix_filter_names(child, in_name=in_name or key == "name")
+            for key, child in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_prefix_filter_names(child, in_name=in_name) for child in value]
+    return value
+
+
 def registry_records(api: Any, *, organization: str, filter: dict | None = None, per_page: int = 51) -> Iterator[Any]:
     """Include only registry projects; unknown visibility is explicitly unknown.
 
@@ -38,7 +54,7 @@ def registry_records(api: Any, *, organization: str, filter: dict | None = None,
     unknown access value as organization-wide or restricted permissions.
     """
     prefix = {"name": {"$regex": "^wandb-registry-"}}
-    filters = {"$and": [prefix, ensure_registry_prefix_on_names(filter)]} if filter else prefix
+    filters = {"$and": [prefix, _prefix_filter_names(filter)]} if filter else prefix
     variables = {"organization": organization, "filters": json.dumps(filters), "cursor": None, "perPage": per_page}
     seen = set()
     for _ in range(8):
