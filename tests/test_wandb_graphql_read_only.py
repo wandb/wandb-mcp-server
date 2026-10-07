@@ -127,12 +127,15 @@ def test_application_graphql_transport_is_confined_to_approved_modules():
         package_root / "wandb_graphql.py",
         package_root / "wandb_report_writer.py",
         package_root / "wandb_selective_reads.py",
+        package_root / "registry_reads.py",
+        package_root / "automation_reads.py",
         package_root / "mcp_tools" / "query_wandb_gql.py",
     }
     violations = [
         path.relative_to(package_root).as_posix()
         for path in package_root.rglob("*.py")
-        if path not in approved and "execute_graphql" in path.read_text()
+        if path not in approved
+        and any(boundary in path.read_text() for boundary in ("execute_graphql", "execute_app_graphql"))
     ]
 
     assert violations == []

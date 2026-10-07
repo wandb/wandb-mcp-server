@@ -17,7 +17,9 @@ from wandb_mcp_server.instrumented_server import run_sync_in_current_tool
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 
-DOCS_MCP_URL = "https://docs.wandb.ai/mcp"
+# The former docs.wandb.ai MCP redirects here. Use the official destination
+# directly; the bounded proxy deliberately never follows arbitrary redirects.
+DOCS_MCP_URL = "https://docs.coreweave.com/mcp"
 DOCS_SEARCH_TIMEOUT = 30
 MAX_DOCS_QUERY_BYTES = 64 * 1024
 MAX_DOCS_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -26,7 +28,7 @@ _TRUNCATION_NOTICE = "\n\n[Documentation truncated to the response limit.]"
 SEARCH_WANDB_DOCS_TOOL_DESCRIPTION = """Search official W&B documentation for API usage, code examples, and guides.
 
 <when_to_use>
-Call when you need to know HOW to use a W&B/Weave feature or API. Searches docs.wandb.ai.
+Call when you need to know HOW to use a W&B/Weave feature or API. Searches the official documentation.
 </when_to_use>
 
 Parameters
@@ -137,7 +139,7 @@ async def _request_docs(query: str, deadline: float) -> str:
             json={
                 "jsonrpc": "2.0",
                 "method": "tools/call",
-                "params": {"name": "search_weights_biases_documentation", "arguments": {"query": query}},
+                "params": {"name": "search_core_weave_docs", "arguments": {"query": query}},
                 "id": 1,
             },
             headers={
