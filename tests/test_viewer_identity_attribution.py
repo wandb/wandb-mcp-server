@@ -37,7 +37,7 @@ class FakeApi:
 
 
 def use_api(monkeypatch, api):
-    monkeypatch.setattr(WandBApiManager, "get_api", lambda key=None: api)
+    monkeypatch.setattr(WandBApiManager, "_viewer_lookup_client", lambda key: api)
     return api
 
 
@@ -85,7 +85,7 @@ def test_strict_or_disabled_analytics_never_looks_up(monkeypatch, env):
     def fail(*args, **kwargs):
         pytest.fail("lookup must not run")
 
-    monkeypatch.setattr(WandBApiManager, "get_api", fail)
+    monkeypatch.setattr(WandBApiManager, "_viewer_lookup_client", fail)
     assert asyncio.run(analytics.resolve_authenticated_viewer(KEY)) is None
 
 
@@ -114,3 +114,47 @@ def test_tool_telemetry_uses_resolved_username(monkeypatch):
         WandBApiManager.reset_context_api_key(token)
     assert events[0]["user_id"] == "synthetic-user"
     assert map_to_segment_track(analytics._prepare_event(events[0]))["userId"] == "synthetic-user"
+
+
+def test_bogus_key_misses_cannot_evict_resolved_users(monkeypatch):
+    use_api(monkeypatch, FakeApi())
+    WandBApiManager.resolve_viewer_username(KEY)
+    use_api(monkeypatch, FakeApi(error=RuntimeError("HTTP 401")))
+    monkeypatch.setattr(WandBApiManager, "_viewer_identity_max_misses", 3)
+    for index in range(10):
+        assert WandBApiManager.resolve_viewer_username(f"bogus-{index:034d}") is None
+    assert len(WandBApiManager._viewer_identity_misses) == 3
+    assert WandBApiManager.peek_viewer_username(KEY) == (True, "synthetic-user")
+
+
+def test_lookup_is_skipped_without_caching_when_slots_are_busy(monkeypatch):
+    api = use_api(monkeypatch, FakeApi())
+    monkeypatch.setattr(WandBApiManager, "_viewer_identity_slots", threading.BoundedSemaphore(1))
+    assert WandBApiManager._viewer_identity_slots.acquire(blocking=False)
+    try:
+        assert WandBApiManager.resolve_viewer_username(KEY) is None
+    finally:
+        WandBApiManager._viewer_identity_slots.release()
+    assert api.lookups == 0
+    assert WandBApiManager.peek_viewer_username(KEY) == (False, None)
+    assert WandBApiManager.resolve_viewer_username(KEY) == "synthetic-user"
+
+
+def test_lookup_client_is_not_added_to_the_functional_client_cache(monkeypatch):
+    from wandb_mcp_server import api_client
+
+    built = []
+    monkeypatch.setattr(api_client.wandb, "Api", lambda **kwargs: built.append(kwargs) or FakeApi())
+    assert WandBApiManager.resolve_viewer_username(KEY) == "synthetic-user"
+    assert len(built) == 1
+    assert not WandBApiManager._api_cache
+
+
+def test_startup_validation_seeds_attribution_without_second_lookup(monkeypatch):
+    from wandb_mcp_server import server
+
+    api = FakeApi()
+    monkeypatch.setattr(server.wandb, "Api", lambda **kwargs: api)
+    assert server.validate_api_key(KEY)
+    assert api.lookups == 1
+    assert WandBApiManager.peek_viewer_username(KEY) == (True, "synthetic-user")

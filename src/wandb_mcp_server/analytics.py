@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -230,13 +231,37 @@ def should_resolve_viewer_identity() -> bool:
         return False
 
 
+def cached_authenticated_viewer(api_key: Optional[str]) -> Optional[Dict[str, str]]:
+    """Return an already-resolved ``{"username": ...}`` without I/O, or None."""
+    if not api_key or not should_resolve_viewer_identity():
+        return None
+    try:
+        from wandb_mcp_server.api_client import WandBApiManager
+
+        _, username = WandBApiManager.peek_viewer_username(api_key)
+    except Exception:
+        return None
+    return {"username": username} if username else None
+
+
+_viewer_lookup_executor: Optional[ThreadPoolExecutor] = None
+
+
+def _get_viewer_lookup_executor() -> ThreadPoolExecutor:
+    """Isolate attribution lookups from the shared default executor."""
+    global _viewer_lookup_executor
+    if _viewer_lookup_executor is None:
+        _viewer_lookup_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="wandb-viewer-identity")
+    return _viewer_lookup_executor
+
+
 async def resolve_authenticated_viewer(api_key: Optional[str]) -> Optional[Dict[str, str]]:
     """Return ``{"username": ...}`` for an authenticated API key, or None.
 
-    The W&B lookup runs once per actor per cache TTL, off the event loop and
-    bounded by a short wait. A slow lookup keeps running for later requests
-    while this one falls back to the key fingerprint. Strict privacy and
-    disabled analytics never look up.
+    The W&B lookup runs once per actor per cache TTL on a small dedicated
+    executor, bounded by a short wait. A slow lookup keeps running for later
+    requests while this one falls back to the key fingerprint. Strict privacy
+    and disabled analytics never look up.
     """
     if not api_key or not should_resolve_viewer_identity():
         return None
@@ -245,8 +270,9 @@ async def resolve_authenticated_viewer(api_key: Optional[str]) -> Optional[Dict[
 
         hit, username = WandBApiManager.peek_viewer_username(api_key)
         if not hit:
+            loop = asyncio.get_running_loop()
             username = await asyncio.wait_for(
-                asyncio.to_thread(WandBApiManager.resolve_viewer_username, api_key),
+                loop.run_in_executor(_get_viewer_lookup_executor(), WandBApiManager.resolve_viewer_username, api_key),
                 _VIEWER_LOOKUP_TIMEOUT_SECONDS,
             )
     except Exception:

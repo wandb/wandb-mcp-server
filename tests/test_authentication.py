@@ -184,7 +184,9 @@ async def test_authentication_resolves_viewer_once_per_actor(monkeypatch):
     monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "false")
     monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "standard")
     viewer = SimpleNamespace(_attrs={"username": "synthetic-user"})
-    monkeypatch.setattr(WandBApiManager, "get_api", MagicMock(return_value=SimpleNamespace(viewer=viewer)))
+    monkeypatch.setattr(
+        WandBApiManager, "_viewer_lookup_client", MagicMock(return_value=SimpleNamespace(viewer=viewer))
+    )
     sessions = []
     tracker = MagicMock()
     tracker.track_user_session.side_effect = lambda **kwargs: sessions.append(kwargs)
@@ -214,5 +216,5 @@ async def test_authentication_resolves_viewer_once_per_actor(monkeypatch):
     finally:
         WandBApiManager._clear_api_cache()
 
-    WandBApiManager.get_api.assert_called_once_with("a" * 40)
+    WandBApiManager._viewer_lookup_client.assert_called_once_with("a" * 40)
     assert sessions and sessions[0]["viewer_info"] == {"username": "synthetic-user"}

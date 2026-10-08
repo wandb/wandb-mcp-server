@@ -173,12 +173,16 @@ runs at every level.
 ### Why the split
 
 At `off` and `standard`, the canonical event, Datadog's `usr.id`, and Segment's
-`userId` use the authenticated W&B username. HTTP authentication and STDIO
-startup resolve it with one viewer lookup per actor and endpoint, cached in
-process for six hours (failures for five minutes, single-flight per actor). The
-lookup runs off the event loop and a request waits at most three seconds for it;
-a slow lookup completes in the background for later requests. It is skipped at
-`strict` and when analytics is disabled. Until a username is resolved,
+`userId` use the authenticated W&B username. STDIO reuses the viewer fetched
+by startup key validation. HTTP authentication resolves it with one viewer
+lookup per actor and endpoint, cached in process for six hours, single-flight
+per actor. Because HTTP authentication only checks key format, failed lookups
+are cached for five minutes in a separate bounded table so well-formed bogus
+keys cannot evict resolved users, lookup clients are not added to the
+functional client cache, and at most four lookups run at once on a dedicated
+executor; excess cold lookups are skipped rather than queued. A request waits
+at most three seconds; a slow lookup completes in the background for later
+requests. The lookup is skipped at `strict` and when analytics is disabled. Until a username is resolved,
 canonical logs omit identity and Segment uses the key pseudonym. An entity,
 email address, or email domain is not a username and is never substituted for
 one.

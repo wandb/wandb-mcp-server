@@ -13,7 +13,6 @@ This server provides tools for:
 """
 
 import asyncio
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -432,8 +431,11 @@ def validate_api_key(api_key: str) -> bool:
             overrides={"base_url": WANDB_API_BASE_URL},
             timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
         )
-        api.viewer  # This will fail if the key is invalid
+        viewer = api.viewer  # This will fail if the key is invalid
         logger.info("W&B API key validated successfully")
+        from wandb_mcp_server.api_client import WandBApiManager
+
+        WandBApiManager.remember_viewer(api_key, viewer)
         return True
     except Exception as e:
         logger.error("W&B API key validation failed (%s)", type(e).__name__)
@@ -1619,16 +1621,6 @@ def cli():
         # supplies a per-request context in its wrapper instead.
         WandBApiManager.set_context_api_key(api_key)
         logger.info("API key set in context for standalone session")
-
-        from wandb_mcp_server.analytics import should_resolve_viewer_identity
-
-        if should_resolve_viewer_identity():
-            threading.Thread(
-                target=WandBApiManager.resolve_viewer_username,
-                args=(api_key,),
-                name="wandb-viewer-identity",
-                daemon=True,
-            ).start()
 
     # Initialize Weave tracing for MCP tool calls
     initialize_weave_tracing()
