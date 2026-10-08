@@ -13,6 +13,7 @@ Based on prior art by @NiWaRe (PR #2), rewritten for improved
 datetime handling, cleaner auth integration, and structured event schema.
 """
 
+import asyncio
 import hashlib
 import importlib.metadata
 import json
@@ -20,6 +21,7 @@ import logging
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -214,6 +216,68 @@ def _resolve_privacy_level() -> str:
     from wandb_mcp_server.privacy import resolve_privacy_level
 
     return resolve_privacy_level()
+
+
+_VIEWER_LOOKUP_TIMEOUT_SECONDS = 3.0
+
+
+def should_resolve_viewer_identity() -> bool:
+    """Return True when a username lookup could change emitted identity."""
+    if os.environ.get("MCP_ANALYTICS_DISABLED", "false").lower() == "true":
+        return False
+    try:
+        return _resolve_privacy_level() != "strict"
+    except Exception:
+        return False
+
+
+def cached_authenticated_viewer(api_key: Optional[str]) -> Optional[Dict[str, str]]:
+    """Return an already-resolved ``{"username": ...}`` without I/O, or None."""
+    if not api_key or not should_resolve_viewer_identity():
+        return None
+    try:
+        from wandb_mcp_server.api_client import WandBApiManager
+
+        _, username = WandBApiManager.peek_viewer_username(api_key)
+    except Exception:
+        return None
+    return {"username": username} if username else None
+
+
+_viewer_lookup_executor: Optional[ThreadPoolExecutor] = None
+
+
+def _get_viewer_lookup_executor() -> ThreadPoolExecutor:
+    """Isolate attribution lookups from the shared default executor."""
+    global _viewer_lookup_executor
+    if _viewer_lookup_executor is None:
+        _viewer_lookup_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="wandb-viewer-identity")
+    return _viewer_lookup_executor
+
+
+async def resolve_authenticated_viewer(api_key: Optional[str]) -> Optional[Dict[str, str]]:
+    """Return ``{"username": ...}`` for an authenticated API key, or None.
+
+    The W&B lookup runs once per actor per cache TTL on a small dedicated
+    executor, bounded by a short wait. A slow lookup keeps running for later
+    requests while this one falls back to the key fingerprint. Strict privacy
+    and disabled analytics never look up.
+    """
+    if not api_key or not should_resolve_viewer_identity():
+        return None
+    try:
+        from wandb_mcp_server.api_client import WandBApiManager
+
+        hit, username = WandBApiManager.peek_viewer_username(api_key)
+        if not hit:
+            loop = asyncio.get_running_loop()
+            username = await asyncio.wait_for(
+                loop.run_in_executor(_get_viewer_lookup_executor(), WandBApiManager.resolve_viewer_username, api_key),
+                _VIEWER_LOOKUP_TIMEOUT_SECONDS,
+            )
+    except Exception:
+        return None
+    return {"username": username} if username else None
 
 
 class _IdentityPseudonym(str):
