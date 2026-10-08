@@ -116,7 +116,9 @@ def log_analysis(
             overrides={"base_url": WANDB_API_BASE_URL},
             timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
         )
+        logger.debug("MCP analysis write stage", extra={"write_stage": "run_create", "write_stage_complete": False})
         run = wandb_api.create_run(entity=entity_name, project=project_name)
+        logger.debug("MCP analysis write stage", extra={"write_stage": "run_create", "write_stage_complete": True})
 
         try:
             # wandb SDK bug: create_run() returns a Run missing .group,
@@ -146,9 +148,21 @@ def log_analysis(
                     summary_data[f"{key}_median"] = sorted_vals[mid]
 
             if summary_data:
+                logger.debug(
+                    "MCP analysis write stage", extra={"write_stage": "summary_update", "write_stage_complete": False}
+                )
                 run.summary.update(summary_data)
+                logger.debug(
+                    "MCP analysis write stage", extra={"write_stage": "summary_update", "write_stage_complete": True}
+                )
 
+            logger.debug(
+                "MCP analysis write stage", extra={"write_stage": "metadata_update", "write_stage_complete": False}
+            )
             run.update()
+            logger.debug(
+                "MCP analysis write stage", extra={"write_stage": "metadata_update", "write_stage_complete": True}
+            )
 
         except Exception as e:
             raise_for_wandb_server_busy(e)
