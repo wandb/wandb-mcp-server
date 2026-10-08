@@ -210,6 +210,10 @@ organizations receive `organization_required` with a bounded candidate list.
 Collection listings intentionally return `aliases: null` and
 `aliases_loaded: false` instead of loading every collection's version aliases.
 Use `list_artifact_versions_tool` when aliases are needed.
+Broad registry discovery uses a bounded metadata projection and reports
+unrecognized or unset visibility as `unknown`, without assuming public access.
+Automation discovery reads the trigger connection directly, including ARIA
+actions and newer backend events that older SDK models cannot deserialize.
 
 </details>
 

@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import Collection, Iterator
+from datetime import datetime
 from itertools import islice
 from textwrap import dedent
 from typing import TYPE_CHECKING, Any, Final, Literal, get_args
 
-from pydantic import PositiveInt
+from pydantic import BaseModel, Field, PositiveInt, StrictBool, StrictStr, TypeAdapter
 from wandb.automations import EventType, SlackIntegration, WebhookIntegration
 
 from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
+from wandb_mcp_server.automation_reads import automation_records
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 
@@ -45,8 +47,8 @@ LIST_AUTOMATIONS_TOOL_DESCRIPTION = dedent(
     """\
     List W&B Automations the current API key can access.
 
-    Automations are user-configured rules that fire actions (Slack notification or
-    generic webhook) when events happen in W&B: a new artifact is created, an
+    Automations are user-configured rules that fire actions (notifications,
+    webhooks, or ARIA) when events happen in W&B: a new artifact is created, an
     alias is added, a model artifact is linked to a registry collection, a run
     metric crosses a threshold or changes significantly, or a run changes state.
 
@@ -70,10 +72,12 @@ LIST_AUTOMATIONS_TOOL_DESCRIPTION = dedent(
     the response sets truncated=true.
     - Each returned automation has these fields: id, name, enabled, description,
     created_at, updated_at, scope, event, action.
-    - scope is {type, id, name} where type is PROJECT or ARTIFACT_COLLECTION.
+    - scope is {type, id, name} where type is PROJECT, ENTITY, or ARTIFACT_COLLECTION.
     - event is {type, filter} where filter shape depends on the event type.
     - action is {type, ...} with extra fields per action type (NOTIFICATION for
-    Slack, GENERIC_WEBHOOK for webhooks, NO_OP for placeholders).
+    Slack, GENERIC_WEBHOOK for webhooks, ARIA, PUSH_NOTIFICATION, NO_OP for placeholders).
+    - Uses bounded trigger pagination (up to eight pages). An incomplete or
+    malformed traversal returns an error, never an exhaustive empty list.
     - The scope only includes id and name. The parent project and entity are
     not on the scope. If you need them, use the `entity` you passed to this
     tool and look up the project separately.
@@ -178,8 +182,71 @@ def _jsonify_action(action: SavedAction) -> dict[str, Any]:
             return {"type": action.action_type.value}
 
 
-def _jsonify_automation(automation: Automation) -> dict[str, Any]:
+class _ReadAutomation(BaseModel):
+    """Read projection independent of the SDK's restricted action/scope union."""
+
+    id: StrictStr
+    name: StrictStr
+    enabled: StrictBool
+    description: str | None
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: datetime | None = Field(None, alias="updatedAt")
+    scope: dict[str, Any]
+    event: dict[str, Any]
+    action: dict[str, Any]
+
+
+def _jsonify_read_automation(raw: dict[str, Any]) -> dict[str, Any]:
+    from wandb.automations.actions import SavedAction
+    from wandb.automations.events import SavedEvent
+
+    row = _ReadAutomation.model_validate(raw)
+    scope = row.scope
+    scope_type = {
+        "Project": "PROJECT",
+        "Entity": "ENTITY",
+        "ArtifactSequence": "ARTIFACT_COLLECTION",
+        "ArtifactPortfolio": "ARTIFACT_COLLECTION",
+    }.get(scope.get("__typename"))
+    if scope_type is None or any(not isinstance(scope.get(k), str) or not scope[k] for k in ("id", "name")):
+        raise ValueError("Automation scope malformed.")
+    action = row.action
+    kind = action.get("__typename")
+    if kind == "ARIATriggeredAction":
+        if not isinstance(action.get("prompt"), str):
+            raise ValueError("Automation action malformed.")
+        json_action = {"type": "ARIA", "prompt": action["prompt"]}
+    elif kind in {"PushNotificationTriggeredAction", "QueueJobTriggeredAction"}:
+        # Match the prior public contract: metadata-only types, no extra lookups.
+        json_action = {"type": "PUSH_NOTIFICATION" if kind == "PushNotificationTriggeredAction" else "QUEUE_JOB"}
+    else:
+        json_action = _jsonify_action(TypeAdapter(SavedAction).validate_python(action))
+    event_type = row.event.get("eventType")
+    if event_type in {kind.value for kind in EventType}:
+        json_event = _jsonify_event(SavedEvent.model_validate(row.event))
+    else:
+        # Read-only discovery also covers newer backend events (for example
+        # Weave metric alerts), without pretending the SDK understands them.
+        if not isinstance(event_type, str) or not event_type or len(event_type) > 128:
+            raise ValueError("Automation event malformed.")
+        event_filter = row.event.get("filter")
+        if not isinstance(event_filter, str):
+            raise ValueError("Automation event filter malformed.")
+        decoded = json.loads(event_filter)
+        if not isinstance(decoded, dict):
+            raise ValueError("Automation event filter malformed.")
+        json_event = {"type": event_type, "filter": decoded, "filter_format": "backend"}
+    return row.model_dump(mode="json", exclude={"scope", "event", "action"}) | {
+        "scope": {"type": scope_type, "id": scope["id"], "name": scope["name"]},
+        "event": json_event,
+        "action": json_action,
+    }
+
+
+def _jsonify_automation(automation: Automation | dict[str, Any]) -> dict[str, Any]:
     """Flatten an Automation pydantic object to a JSON-safe dict."""
+    if isinstance(automation, dict):
+        return _jsonify_read_automation(automation)
     jsonable = automation.model_dump(exclude={"scope", "event", "action"}, **_DUMP_KWARGS)
     jsonable_scope = _jsonify_scope(automation.scope)
     jsonable_event = _jsonify_event(automation.event)
@@ -195,12 +262,11 @@ def list_automations(
     """List W&B Automations accessible with the current API key."""
     params = locals()  # Must be first so it only picks up the function args
 
-    api = WandBApiManager.get_api()
     with track_tool_execution("list_automations", None, params) as ctx:
         max_items = _clamp(max_items, 1, MAX_ITEMS_CEIL)
 
         try:
-            iterator = api.automations(entity=entity, name=name, per_page=_clamp(max_items, 1, 100))
+            iterator = automation_records(entity=entity, name=name, per_page=_clamp(max_items, 1, 100))
             automations = list(map(_jsonify_automation, islice(iterator, max_items)))
             truncated = next(iterator, None) is not None
 

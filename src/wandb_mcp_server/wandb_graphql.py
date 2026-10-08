@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextvars import ContextVar
 import json
+import logging
 import time
 from typing import Any, Mapping
 
+import httpx
 from graphql import parse
 from graphql.language import ast as gql_ast
 from wandb.proto.wandb_api_pb2 import ApiRequest, GraphQLRequest
 
-from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS
+from wandb_mcp_server.config import MAX_ACCUMULATED_BYTES, MCP_WANDB_REQUEST_TIMEOUT_SECONDS, WANDB_API_BASE_URL
 from wandb_mcp_server.admission import ToolDeadlineExceeded, current_tool_deadline, raise_if_tool_deadline_exceeded
+from wandb_mcp_server.api_client import WandBApiManager, WandBServerBusy
 
 
 class GraphQLReadOnlyViolation(ValueError):
@@ -34,6 +38,18 @@ class GraphQLResponseTooLarge(ValueError):
 _MAX_DECODED_GRAPHQL_RESPONSE_BYTES = 16 * 1024 * 1024
 _MAX_DECODED_GRAPHQL_RESPONSE_NODES = 500_000
 _UTF8_SIZE_CHUNK_CHARACTERS = 4_096
+_app_http_active: ContextVar[bool] = ContextVar("wandb_app_graphql_http", default=False)
+
+
+class _SuppressAppHTTPLog(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _app_http_active.get()
+
+
+for _name in ("httpx", "httpcore.connection", "httpcore.http11", "httpcore.http2", "httpcore.proxy"):
+    _logger = logging.getLogger(_name)
+    if not any(isinstance(item, _SuppressAppHTTPLog) for item in _logger.filters):
+        _logger.addFilter(_SuppressAppHTTPLog())
 
 
 def _bounded_utf8_size(value: str, limit: int) -> int:
@@ -172,3 +188,69 @@ def execute_graphql(
     variables_dict = dict(variables or {})
     service_api = getattr(api, "_service_api", None)
     return _execute_bounded_graphql(service_api, query, variables_dict)
+
+
+def execute_app_graphql(query: str, variables: Mapping[str, Any]) -> dict[str, Any]:
+    """Bounded actor-authenticated transport for fixed application projections.
+
+    Automation lists deliberately use an application User-Agent. W&B filters
+    ARIA actions out of SDK requests because the SDK cannot deserialize them.
+    Never use this boundary to accept caller-supplied GraphQL or an endpoint.
+    """
+    token = _app_http_active.set(True)
+    try:
+        return _execute_app_graphql(query, variables)
+    finally:
+        _app_http_active.reset(token)
+
+
+def _execute_app_graphql(query: str, variables: Mapping[str, Any]) -> dict[str, Any]:
+    validate_read_only_graphql(query)
+    key = WandBApiManager.get_api_key()
+    if not key:
+        raise ValueError("W&B authentication is required.")
+    deadline = time.monotonic() + MCP_WANDB_REQUEST_TIMEOUT_SECONDS
+    outer = current_tool_deadline.get()
+    if outer is not None:
+        deadline = min(deadline, outer)
+    if deadline <= time.monotonic():
+        raise ToolDeadlineExceeded("MCP tool execution deadline exceeded")
+    cap = min(MAX_ACCUMULATED_BYTES, _MAX_DECODED_GRAPHQL_RESPONSE_BYTES)
+    with httpx.Client(timeout=max(0.001, deadline - time.monotonic()), follow_redirects=False) as client:
+        with client.stream(
+            "POST",
+            WANDB_API_BASE_URL.rstrip("/") + "/graphql",
+            auth=httpx.BasicAuth("api", key),
+            headers={"User-Agent": "wandb-mcp-server", "Accept-Encoding": "identity"},
+            json={"query": query, "variables": dict(variables)},
+        ) as response:
+            if response.status_code in {429, 503}:
+                raise WandBServerBusy(status_code=response.status_code, retry_after_ms=1000)
+            response.raise_for_status()  # Includes redirects; credentials never follow them.
+            if response.headers.get("Content-Encoding", "identity").strip().lower() != "identity":
+                raise ValueError("W&B returned an unsupported response encoding.")
+            length = response.headers.get("Content-Length")
+            expected = None
+            if length is not None:
+                if not length.isascii() or not length.isdecimal():
+                    raise ValueError("W&B returned an invalid response length.")
+                length = length.lstrip("0") or "0"
+                if len(length) > len(str(cap)) or int(length) > cap:
+                    raise GraphQLResponseTooLarge("W&B response exceeded its download limit.")
+                expected = int(length)
+            raw = bytearray()
+            for chunk in response.iter_raw():
+                if time.monotonic() >= deadline:
+                    raise ToolDeadlineExceeded("MCP tool execution deadline exceeded")
+                if len(raw) + len(chunk) > cap:
+                    raise GraphQLResponseTooLarge("W&B response exceeded its download limit.")
+                raw.extend(chunk)
+            if expected is not None and expected != len(raw):
+                raise ValueError("W&B returned an inconsistent response length.")
+    payload = json.loads(raw)
+    _ensure_bounded_decoded_response(payload)
+    if time.monotonic() >= deadline:
+        raise ToolDeadlineExceeded("MCP tool execution deadline exceeded")
+    if not isinstance(payload, dict) or payload.get("errors") or not isinstance(payload.get("data"), dict):
+        raise ValueError("W&B returned an unsuccessful GraphQL response.")
+    return payload["data"]

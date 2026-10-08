@@ -71,6 +71,16 @@ change only the page `limit` when continuing; mismatched reuse returns
 | Sweep agents, report run sets, or Launch resources | `query_wandb_tool(query=..., variables=...)` | Yes |
 | Backward pagination | Use a typed forward read when possible | Compatibility-only; raw tool returns one bounded `last` page |
 
+## Registry and automation discovery
+
+Registry discovery uses a fixed, query-only metadata projection limited to
+registry projects. Unset or unsupported visibility is `unknown`; other metadata
+remains readable. Automation discovery uses a fixed trigger connection with
+exact-name server filtering and at most eight pages, rather than SDK project
+pagination. ARIA actions and newer backend event types are included. Known event
+filters retain the SDK representation; newer filters carry
+`filter_format="backend"`. Neither tool creates or invokes resources it lists.
+
 ## Run history guarantees
 
 For explicit multi-key default-history sampled and ranged collection reads,

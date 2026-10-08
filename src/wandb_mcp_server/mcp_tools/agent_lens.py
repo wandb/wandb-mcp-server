@@ -70,7 +70,8 @@ for _http_logger_name in (
 # against internal/api/insights.go and internal/api/conversation_tags.go.
 LATEST_WEEK_PATH = "/insights/latest-week"
 CLUSTERING_STATUS_PATH = "/insights/clustering-status"
-CATEGORY_BREAKDOWNS_PATH = "/insights/intent-category-breakdowns"
+CATEGORY_BREAKDOWNS_PATH = "/insights/intent/breakdowns"
+FAILURE_BREAKDOWNS_PATH = "/insights/failure/breakdowns"
 FAILURE_ATTRIBUTIONS_PATH = "/insights/failure-attributions/query"
 TAGS_PATH = "/tags"
 CONVERSATION_TAGS_QUERY_PATH = "/conversation-tags/query"
@@ -554,20 +555,47 @@ async def get_clustering_status(entity_name: str, project_name: str) -> str:
 
 
 async def get_category_breakdowns(entity_name: str, project_name: str, start_at: str, end_at: str) -> str:
-    """Return intent/failure category and cluster counts for a bounded range."""
+    """Read the two current reports, without inventing joint category counts."""
     try:
         window = _validated_window(start_at, end_at)
     except ValueError as error:
         return _invalid_argument(str(error))
-    return await _agent_lens_request(
-        "get_category_breakdowns",
-        "GET",
-        CATEGORY_BREAKDOWNS_PATH,
-        entity_name,
-        project_name,
-        {"entity_name": entity_name, "project_name": project_name},
-        params=window,
-    )
+    token = current_tool_deadline.set(_absolute_request_deadline())
+    try:
+        rows = []
+        totals = {}
+        for kind, path in (("intent", CATEGORY_BREAKDOWNS_PATH), ("failure", FAILURE_BREAKDOWNS_PATH)):
+            raw = await _agent_lens_request(
+                "get_category_breakdowns",
+                "GET",
+                path,
+                entity_name,
+                project_name,
+                {"entity_name": entity_name, "project_name": project_name},
+                params=window,
+            )
+            response = json.loads(raw)
+            if response.get("error"):
+                return raw
+            report = response.get("data")
+            if (
+                not isinstance(report, dict)
+                or type(report.get("turn_count")) is not int
+                or report["turn_count"] < 0
+                or not isinstance(report.get("categories"), list)
+                or not all(isinstance(row, dict) for row in report["categories"])
+            ):
+                return json.dumps(
+                    {
+                        "error": "agent_lens_malformed_response",
+                        "message": "Agent Lens returned a malformed category report.",
+                    }
+                )
+            totals[kind] = report["turn_count"]
+            rows.extend({**row, "signature_type": kind} for row in report["categories"])
+        return _compact_json(_truncate_response({"data": rows, "turn_counts": totals}))
+    finally:
+        current_tool_deadline.reset(token)
 
 
 async def list_category_example_turns(
@@ -768,7 +796,8 @@ GET_CATEGORY_BREAKDOWNS_TOOL_DESCRIPTION = f"""Summarize Agent Lens intent and f
 This is the main aggregate view: "what are users asking for, what is failing,
 and how bad is it?". Returns per-category turn and conversation counts with
 frustration counts, average latency and average cost per turn, plus the cluster
-breakdowns beneath each category and failure-severity counts.
+breakdowns beneath each category. Reads both current intent and failure reports
+within one shared deadline (two requests).
 
 Start from get_agent_lens_insights_coverage_tool to pick a populated range. To
 see the individual turns behind any number here, follow up with
@@ -777,16 +806,12 @@ get_agent_lens_failure_attributions_tool when failure detail is needed.
 </when_to_use>
 
 <reading_the_response>
-Each entry mixes the two category families, and passing one where the other is
-expected returns zero rows rather than an error:
-
-- The top-level `category` is an INTENT category (what the user wanted), e.g.
-  "action_request". Use it as `intent_category`, or with `signature_type="intent"`.
-- `counts[].category` and `failure_breakdowns[].category` are FAILURE categories
-  (what went wrong), e.g. "requirement_violation", plus the sentinel
-  "no_failure" for turns that succeeded. Use these as `failure_category`, or
-  with `signature_type="failure"`. "no_failure" is a count, not a drillable
-  category.
+Every entry has `signature_type` (intent or failure) and `category`. Pass both
+to the example-turn tool. These are separate marginal reports, not a joint
+intent/failure breakdown: do not infer which failure belongs to which intent.
+`turn_counts` gives distinct matching turns for each report. A turn can belong
+to several categories, so category counts can sum above that total.
+`no_failure` is a count, not a drillable failure category.
 - `cluster_breakdowns[].id` is a topic identifier, not a category. Pass one or
   more of these as `topic_ids` to the example-turn tool.
 </reading_the_response>
@@ -801,8 +826,10 @@ project_name : str
 
 Returns
 -------
-JSON with {{"data": [CategoryBreakdown]}}, each holding "counts",
-"cluster_breakdowns", "failure_breakdowns" and "failure_severity_counts".
+JSON with {{"data": [CategoryBreakdown], "turn_counts": {{"intent": int, "failure": int}}}}.
+Each row includes signature_type, category, count, conversation_count,
+failed_count, frustrated_count, average_latency_ms, average_cost_per_turn_usd,
+and cluster_breakdowns. An empty report is not evidence of classification coverage.
 """
 
 

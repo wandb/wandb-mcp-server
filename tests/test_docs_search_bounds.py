@@ -69,6 +69,12 @@ async def test_json_and_single_request(upstream):
     assert len(requests) == 1
     assert requests[0].headers["Accept-Encoding"] == "identity"
     assert str(requests[0].url) == docs.DOCS_MCP_URL
+    assert docs.DOCS_MCP_URL == "https://docs.coreweave.com/mcp"
+    assert "Authorization" not in requests[0].headers
+    assert json.loads(requests[0].content)["params"] == {
+        "name": "search_core_weave_docs",
+        "arguments": {"query": "private-query-canary"},
+    }
     assert stream.closed
 
 

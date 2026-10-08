@@ -270,9 +270,35 @@ def test_clustering_status_targets_its_own_path():
 
 
 def test_category_breakdowns_sends_the_window_as_query_parameters():
-    with _mocked(_ok([{"category": "billing"}])) as session:
-        get_category_breakdowns(ENTITY, PROJECT, **WINDOW)
+    with _mocked(_ok({"turn_count": 2, "categories": [{"category": "billing", "count": 2}]})) as session:
+        result = json.loads(get_category_breakdowns(ENTITY, PROJECT, **WINDOW))
     assert session.last["params"] == WINDOW
+    assert [call["url"] for call in session.calls] == [
+        f"{BASE_URL}/api/insights/intent/breakdowns",
+        f"{BASE_URL}/api/insights/failure/breakdowns",
+    ]
+    assert result["turn_counts"] == {"intent": 2, "failure": 2}
+    assert [row["signature_type"] for row in result["data"]] == ["intent", "failure"]
+
+
+def test_category_breakdowns_rejects_legacy_or_partial_reports():
+    with _mocked(_ok([{"category": "billing"}])) as session:
+        result = json.loads(get_category_breakdowns(ENTITY, PROJECT, **WINDOW))
+    assert result["error"] == "agent_lens_malformed_response"
+    assert len(session.calls) == 1
+
+
+def test_category_reports_share_the_original_deadline(monkeypatch):
+    deadlines = []
+
+    async def report(*args, **kwargs):
+        deadlines.append(agent_lens_mod.current_tool_deadline.get())
+        return json.dumps({"data": {"turn_count": 0, "categories": []}})
+
+    monkeypatch.setattr(agent_lens_mod, "_agent_lens_request", report)
+    result = json.loads(get_category_breakdowns(ENTITY, PROJECT, **WINDOW))
+    assert result["data"] == []
+    assert len(deadlines) == 2 and deadlines[0] == deadlines[1]
 
 
 def test_example_turns_percent_encodes_the_category_in_the_path():

@@ -473,7 +473,42 @@ def test_registry_paginator_enforces_a_hard_empty_page_request_ceiling() -> None
         result = json.loads(list_registries())
 
     assert result["error"] == "malformed_response"
-    assert [operation for operation, _ in service.calls].count("registries") == 3
+    assert [operation for operation, _ in service.calls].count("registries") == 8
+
+
+@pytest.mark.parametrize(
+    "access, visibility",
+    [
+        ("PRIVATE", "organization"),
+        ("RESTRICTED", "restricted"),
+        ("USER_READ", "unknown"),
+        ("FUTURE", "unknown"),
+        ("", "unknown"),
+        (None, "unknown"),
+    ],
+)
+def test_registry_metadata_does_not_hydrate_editable_visibility_enum(access, visibility):
+    node = _registry_node()
+    node["access"] = access
+    service = FakeRegistryService(registries=[node])
+    with patch("wandb_mcp_server.mcp_tools.query_registry.WandBApiManager.get_api", return_value=_api(service)):
+        result = json.loads(list_registries(organization="Example Org", filter={"name": "models"}))
+    assert result["registries"][0]["visibility"] == visibility
+    assert result["count"] == 1
+    variables = [v for op, v in service.calls if op == "registries"][0]
+    assert json.loads(variables["filters"]) == {
+        "$and": [{"name": {"$regex": "^wandb-registry-"}}, {"name": "wandb-registry-models"}]
+    }
+
+
+def test_registry_projection_rejects_non_registry_rows_instead_of_returning_them():
+    node = _registry_node()
+    node["name"] = "ordinary-project-canary"
+    service = FakeRegistryService(registries=[node])
+    with patch("wandb_mcp_server.mcp_tools.query_registry.WandBApiManager.get_api", return_value=_api(service)):
+        result = json.loads(list_registries(organization="Example Org"))
+    assert result["error"] == "malformed_response"
+    assert "canary" not in json.dumps(result)
 
 
 def test_collection_paginator_crosses_one_empty_page_under_a_request_cap() -> None:

@@ -3,6 +3,8 @@
 import json
 from unittest.mock import MagicMock, PropertyMock, patch
 
+import pytest
+
 from wandb_mcp_server.mcp_tools.query_registry import (
     LIST_REGISTRIES_TOOL_DESCRIPTION,
     LIST_REGISTRY_COLLECTIONS_TOOL_DESCRIPTION,
@@ -45,6 +47,14 @@ def _make_registry_search(registries, collections=()):
 
 
 class TestListRegistries:
+    @pytest.fixture(autouse=True)
+    def metadata_projection(self, monkeypatch):
+        # Serializer-only mocks; real fixed-query pagination is exercised in
+        # test_registry_read_correctness.py, below the SDK service boundary.
+        monkeypatch.setattr(
+            "wandb_mcp_server.mcp_tools.query_registry.registry_records", lambda api, **kwargs: api.registries(**kwargs)
+        )
+
     @patch("wandb_mcp_server.mcp_tools.query_registry.WandBApiManager")
     def test_basic(self, mock_api_mgr):
         mock_api = MagicMock()

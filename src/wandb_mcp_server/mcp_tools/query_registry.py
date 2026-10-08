@@ -14,6 +14,7 @@ from wandb_mcp_server.admission import raise_if_tool_deadline_exceeded
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.config import MCP_MAX_WANDB_QUERY_ITEMS
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.registry_reads import registry_records
 from wandb_mcp_server.registry_support import (
     RegistryInputError,
     bounded_sdk_page,
@@ -39,6 +40,8 @@ DEFAULT_MAX_ITEMS = 50
 LIST_REGISTRIES_TOOL_DESCRIPTION = """List W&B registries for an organization.
 
 Returns registry names, descriptions, visibility, and allowed artifact types.
+Visibility is "unknown" for a server access mode not understood by this client;
+that does not imply public or organization-wide access.
 
 <when_to_use>
 Call this tool FIRST when the user asks about model registries, registered
@@ -112,7 +115,7 @@ def list_registries(
             if filter is not None:
                 kwargs["filter"] = filter
 
-            page, has_more = bounded_sdk_page(api.registries(**kwargs), max_items)
+            page, has_more = bounded_sdk_page(registry_records(api, **kwargs), max_items)
             registries: List[Dict[str, Any]] = []
             for reg in page:
                 artifact_types, artifact_types_truncated = _bounded_string_values(

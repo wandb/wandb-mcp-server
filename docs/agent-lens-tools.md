@@ -54,7 +54,7 @@ read-only — the 2 dropped are models-group writes). Agent Lens mutations
 |---|---|
 | `get_agent_lens_insights_coverage_tool` | `GET /insights/latest-week` |
 | `get_agent_lens_clustering_status_tool` | `GET /insights/clustering-status` |
-| `get_agent_lens_category_breakdowns_tool` | `GET /insights/intent-category-breakdowns` |
+| `get_agent_lens_category_breakdowns_tool` | `GET /insights/intent/breakdowns` and `GET /insights/failure/breakdowns` |
 | `list_agent_lens_category_example_turns_tool` | `GET /insights/{type}/categories/{id}/example-turns` |
 | `get_agent_lens_failure_attributions_tool` | `POST /insights/failure-attributions/query` |
 | `list_agent_lens_tags_tool` | `GET /tags` |
@@ -68,8 +68,9 @@ comes from the contract's `access` field, never from the HTTP method.
 
 ## Suggested call order
 
-Insights come from a periodic classification job, so a project can hold plenty of
-traces and no classified turns, and the usable range rarely reaches today:
+Ingested traces, classified turns, completed clustering runs, and human tags are
+distinct kinds of data. Verify each independently: populated classifications do
+not imply that a clustering run exists, and human tags do not require one.
 
 1. `get_agent_lens_insights_coverage_tool` — find a populated range.
 2. `get_agent_lens_category_breakdowns_tool` — the aggregate picture over that range.
@@ -84,6 +85,14 @@ traces and no classified turns, and the usable range rarely reaches today:
 The Insights tools return identifiers and attribution, never message bodies.
 In particular, the example-turn projection removes upstream `agent_message`
 and `message` fields before token truncation.
+
+The category tool reads two reports under one shared deadline. Its `data` list
+labels each row with `signature_type="intent"` or `"failure"`; `turn_counts`
+records each report's distinct matching-turn count. These are separate reports,
+not a joint intent/failure distribution. Category counts may sum above the turn
+count because one turn can have multiple categories. This replaces the retired
+combined endpoint's nested `counts`/`failure_breakdowns` representation; callers
+should select rows by `signature_type` before following category links.
 
 For tags, call `list_agent_lens_tags_tool` first. It returns the project tag
 catalog, including each tag's UUID and display name. Pass UUIDs—not names—to

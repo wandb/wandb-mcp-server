@@ -46,6 +46,9 @@ def mock_api(mocker) -> MagicMock:
     mgr = mocker.patch(PATCH_TARGET)
     api = MagicMock()
     mgr.get_api.return_value = api
+    # Existing serializer fixtures exercise real SDK models. Transport and raw
+    # GraphQL projections are tested separately in test_automation_reads.py.
+    mocker.patch("wandb_mcp_server.mcp_tools.automations.automation_records", api.automations)
     return api
 
 
