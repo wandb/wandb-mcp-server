@@ -431,8 +431,11 @@ def validate_api_key(api_key: str) -> bool:
             overrides={"base_url": WANDB_API_BASE_URL},
             timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
         )
-        api.viewer  # This will fail if the key is invalid
+        viewer = api.viewer  # This will fail if the key is invalid
         logger.info("W&B API key validated successfully")
+        from wandb_mcp_server.api_client import WandBApiManager
+
+        WandBApiManager.remember_viewer(api_key, viewer)
         return True
     except Exception as e:
         logger.error("W&B API key validation failed (%s)", type(e).__name__)
