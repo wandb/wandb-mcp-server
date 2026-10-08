@@ -13,6 +13,7 @@ This server provides tools for:
 """
 
 import asyncio
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -1618,6 +1619,16 @@ def cli():
         # supplies a per-request context in its wrapper instead.
         WandBApiManager.set_context_api_key(api_key)
         logger.info("API key set in context for standalone session")
+
+        from wandb_mcp_server.analytics import should_resolve_viewer_identity
+
+        if should_resolve_viewer_identity():
+            threading.Thread(
+                target=WandBApiManager.resolve_viewer_username,
+                args=(api_key,),
+                name="wandb-viewer-identity",
+                daemon=True,
+            ).start()
 
     # Initialize Weave tracing for MCP tool calls
     initialize_weave_tracing()

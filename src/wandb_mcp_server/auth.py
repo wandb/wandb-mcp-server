@@ -156,10 +156,11 @@ async def mcp_auth_middleware(request: Request, call_next):
 
     api_key_token = WandBApiManager.set_context_api_key(wandb_api_key)
 
-    # Authentication already established possession of a W&B API key. Do not
-    # add a separate viewer request solely for telemetry attribution. Tool
-    # analytics may reuse a viewer already materialized by functional work.
-    viewer = None
+    # Attribute session, request and tool telemetry to the W&B username. The
+    # lookup is cached per actor, so steady-state requests make no extra call.
+    from wandb_mcp_server.analytics import resolve_authenticated_viewer
+
+    viewer = await resolve_authenticated_viewer(wandb_api_key)
 
     # --- Session management -----------------------------------------------
     # Finalize session_id *before* setting the contextvar so that
