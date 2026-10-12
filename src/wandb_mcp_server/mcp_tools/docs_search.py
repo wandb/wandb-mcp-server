@@ -1,4 +1,4 @@
-"""Bounded proxy search against the W&B docs MCP (docs.wandb.ai or WANDB_MCP_DOCS_URL)."""
+"""Bounded proxy search against the W&B docs MCP (docs.wandb.ai or DOCS_MCP_URL)."""
 
 from __future__ import annotations
 

@@ -188,6 +188,8 @@ def resolve_agent_lens_base_url(fallback: str | None = None) -> str:
 # W&B docs MCP endpoint behind search_wandb_docs_tool. Operators may point it
 # at a self-hosted docs MCP (for example, version-matched docs for a Dedicated
 # install). No credential is forwarded, so plain HTTP is allowed for local hosts.
+# The name deliberately avoids the WANDB_/MCP_ prefixes that the operator-wandb
+# chart reserves, so in-cluster installs can set it via mcp-server.env.
 DEFAULT_DOCS_MCP_URL = "https://docs.wandb.ai/mcp"
 
 
@@ -197,24 +199,24 @@ def validate_docs_mcp_url(value: str) -> str:
     if not normalized or any(
         character.isspace() or ord(character) < 32 or ord(character) == 127 for character in normalized
     ):
-        raise ValueError("WANDB_MCP_DOCS_URL must be an absolute HTTP(S) URL")
+        raise ValueError("DOCS_MCP_URL must be an absolute HTTP(S) URL")
     try:
         parsed = urlsplit(normalized)
         parsed.port
     except ValueError as exc:
-        raise ValueError("WANDB_MCP_DOCS_URL must be an absolute HTTP(S) URL") from exc
+        raise ValueError("DOCS_MCP_URL must be an absolute HTTP(S) URL") from exc
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("WANDB_MCP_DOCS_URL must be an absolute HTTP(S) URL")
+        raise ValueError("DOCS_MCP_URL must be an absolute HTTP(S) URL")
     if parsed.username is not None or parsed.password is not None:
-        raise ValueError("WANDB_MCP_DOCS_URL must not include credentials")
+        raise ValueError("DOCS_MCP_URL must not include credentials")
     if parsed.query or parsed.fragment or "?" in normalized or "#" in normalized:
-        raise ValueError("WANDB_MCP_DOCS_URL must not include a query string or fragment")
+        raise ValueError("DOCS_MCP_URL must not include a query string or fragment")
     return normalized
 
 
 def resolve_docs_mcp_url() -> str:
     """Read and validate the effective docs MCP URL after CLI dotenv loading."""
-    return validate_docs_mcp_url(os.getenv("WANDB_MCP_DOCS_URL") or DEFAULT_DOCS_MCP_URL)
+    return validate_docs_mcp_url(os.getenv("DOCS_MCP_URL") or DEFAULT_DOCS_MCP_URL)
 
 
 # Tool selection is resolved later, immediately before registration. Workload

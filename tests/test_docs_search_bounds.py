@@ -245,7 +245,7 @@ async def test_mcp_response_budget_includes_redaction(upstream, monkeypatch, int
 @pytest.mark.asyncio
 async def test_docs_url_override_targets_configured_endpoint(upstream, monkeypatch):
     requests, _ = upstream()
-    monkeypatch.setenv("WANDB_MCP_DOCS_URL", "http://localhost:3000/mcp")
+    monkeypatch.setenv("DOCS_MCP_URL", "http://localhost:3000/mcp")
     assert await docs.search_wandb_docs("query") == "Short documentation."
     assert [str(request.url) for request in requests] == ["http://localhost:3000/mcp"]
 
@@ -265,7 +265,7 @@ async def test_docs_url_override_targets_configured_endpoint(upstream, monkeypat
 )
 async def test_invalid_docs_url_rejected_before_network(upstream, monkeypatch, value):
     requests, _ = upstream()
-    monkeypatch.setenv("WANDB_MCP_DOCS_URL", value)
+    monkeypatch.setenv("DOCS_MCP_URL", value)
     result = await docs.search_wandb_docs("query")
     assert json.loads(result)["error"] == "invalid_configuration"
     assert "secret" not in result
@@ -278,10 +278,10 @@ def test_invalid_docs_url_fails_registration(monkeypatch):
     from wandb_mcp_server.server import register_tools
 
     monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-only")
-    monkeypatch.setenv("WANDB_MCP_DOCS_URL", "ftp://docs.example.com/mcp")
+    monkeypatch.setenv("DOCS_MCP_URL", "ftp://docs.example.com/mcp")
     server = InstrumentedFastMCP("docs-url-audit")
     try:
-        with pytest.raises(ValueError, match="WANDB_MCP_DOCS_URL"):
+        with pytest.raises(ValueError, match="DOCS_MCP_URL"):
             register_tools(server, resolve_runtime_selection())
         monkeypatch.setenv("WANDB_MCP_PROXY_DOCS", "false")
         register_tools(InstrumentedFastMCP("docs-disabled-audit"), resolve_runtime_selection())
