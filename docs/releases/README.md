@@ -8,6 +8,7 @@ installation.
 
 | Version | Status | Release notes |
 |---|---|---|
+| 0.4.3 | Candidate; every release channel remains pending | [v0.4.3](v0.4.3.md) |
 | 0.4.2 | Candidate; every release channel remains pending | [v0.4.2](v0.4.2.md) |
 | 0.4.1 | Public source merged; `0.4.1.1` customer image published as an image-only revision; no signed source release | [v0.4.1](v0.4.1.md) |
 | 0.4.0 | Historical source note; current deployment-channel evidence is not recorded here | [v0.4.0](v0.4.0.md) |
