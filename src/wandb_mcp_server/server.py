@@ -33,6 +33,7 @@ from wandb_mcp_server.config import (
     MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
     WANDB_API_BASE_URL,
     resolve_aria_base_url,
+    resolve_docs_mcp_url,
 )
 from wandb_mcp_server.error_sanitizer import MAX_EXTERNAL_ERROR_CHARS, sanitize_sensitive_text, sanitize_sensitive_value
 from wandb_mcp_server.instrumented_server import (
@@ -1114,6 +1115,10 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         is_docs_proxy_enabled,
         search_wandb_docs,
     )
+
+    if is_docs_proxy_enabled():
+        # Fail startup on a bad override rather than on the first docs call.
+        resolve_docs_mcp_url()
 
     @register_tool(description=SEARCH_WANDB_DOCS_TOOL_DESCRIPTION)
     async def search_wandb_docs_tool(query: str) -> str:

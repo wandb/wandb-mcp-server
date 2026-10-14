@@ -1,4 +1,4 @@
-"""Bounded proxy search against the official W&B docs MCP."""
+"""Bounded proxy search against the W&B docs MCP (docs.wandb.ai or DOCS_MCP_URL)."""
 
 from __future__ import annotations
 
@@ -11,13 +11,19 @@ import time
 import httpx
 
 from wandb_mcp_server.admission import current_tool_deadline
-from wandb_mcp_server.config import MAX_ACCUMULATED_BYTES, MAX_RESPONSE_TOKENS, MCP_TOOL_TIMEOUT_SECONDS
+from wandb_mcp_server.config import (
+    DEFAULT_DOCS_MCP_URL,
+    MAX_ACCUMULATED_BYTES,
+    MAX_RESPONSE_TOKENS,
+    MCP_TOOL_TIMEOUT_SECONDS,
+    resolve_docs_mcp_url,
+)
 from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text
 from wandb_mcp_server.instrumented_server import run_sync_in_current_tool
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 
-DOCS_MCP_URL = "https://docs.wandb.ai/mcp"
+DOCS_MCP_URL = DEFAULT_DOCS_MCP_URL
 DOCS_SEARCH_TIMEOUT = 30
 MAX_DOCS_QUERY_BYTES = 64 * 1024
 MAX_DOCS_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -128,12 +134,12 @@ def _retry_after_ms(value: str | None) -> int:
         return 1000
 
 
-async def _request_docs(query: str, deadline: float) -> str:
+async def _request_docs(query: str, deadline: float, url: str) -> str:
     byte_limit = min(MAX_DOCS_RESPONSE_BYTES, MAX_ACCUMULATED_BYTES)
     async with httpx.AsyncClient(follow_redirects=False, timeout=max(0.001, deadline - time.monotonic())) as client:
         async with client.stream(
             "POST",
-            DOCS_MCP_URL,
+            url,
             json={
                 "jsonrpc": "2.0",
                 "method": "tools/call",
@@ -193,6 +199,10 @@ async def search_wandb_docs(query: str) -> str:
                 raise _DocsError("invalid_input", "query must contain valid UTF-8 text.") from exc
             if query_bytes > MAX_DOCS_QUERY_BYTES:
                 raise _DocsError("invalid_input", "query must be non-empty text of at most 64 KiB.")
+            try:
+                url = resolve_docs_mcp_url()
+            except ValueError as exc:
+                raise _DocsError("invalid_configuration", "The documentation endpoint is misconfigured.") from exc
             deadline = time.monotonic() + min(DOCS_SEARCH_TIMEOUT, MCP_TOOL_TIMEOUT_SECONDS)
             outer_deadline = current_tool_deadline.get()
             if outer_deadline is not None:
@@ -201,7 +211,7 @@ async def search_wandb_docs(query: str) -> str:
             if remaining <= 0:
                 raise TimeoutError
             async with asyncio.timeout(remaining):
-                return await _request_docs(query, deadline)
+                return await _request_docs(query, deadline, url)
         except _DocsError as exc:
             ctx.mark_error(exc.code)
             payload = {"error": exc.code, "message": str(exc), "retryable": exc.retry_after_ms is not None}

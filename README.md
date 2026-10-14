@@ -179,6 +179,14 @@ These tools are present in the explicit `models-weave-agents` and
 
 **Docs search:** `search_wandb_docs_tool` proxies [docs.wandb.ai](https://docs.wandb.ai) so you get data tools + documentation search from a single MCP connection. Disable with `WANDB_MCP_PROXY_DOCS=false` if you connect the docs MCP separately.
 
+To search a self-hosted copy of the docs (for example, docs matched to your
+W&B Server version), set `DOCS_MCP_URL` to its MCP endpoint, such as
+`http://localhost:3000/mcp`. The endpoint must accept a JSON-RPC `tools/call`
+for `search_weights_biases_documentation` over Streamable HTTP, as
+docs.wandb.ai/mcp does. No W&B credential is sent to it. With the
+operator-wandb Helm chart, set
+`mcp-server.env.DOCS_MCP_URL`.
+
 Docs queries accept up to 64 KiB of UTF-8 text. The proxy makes one request,
 downloads at most 4 MiB (or the lower configured accumulation limit), and fits
 returned snippets to the response token budget. Oversized snippets include a
@@ -674,6 +682,7 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_DEBUG` | Set to `"true"` to enable detailed W&B logging | No |
 | `MCP_AUTH_DISABLED` | Must be `true` to acknowledge unauthenticated loopback HTTP development | No |
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
+| `DOCS_MCP_URL` | Docs MCP endpoint used by `search_wandb_docs_tool` (default: `https://docs.wandb.ai/mcp`); HTTP(S), no credentials, query, or fragment | No |
 | `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events | No |
 | `MCP_ANALYTICS_QUEUE_CAPACITY` | Maximum outstanding events per optional Segment or Datadog forwarder (default: `256`) | No |
 | `MCP_REQUEST_SUCCESS_SAMPLE_RATE` | Deterministic sample rate for successful HTTP request telemetry (default: `0.10`; failures and requests over two seconds are always retained). | No |
