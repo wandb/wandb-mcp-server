@@ -48,101 +48,63 @@ logger = get_rich_logger(__name__)
 WandBResource = Literal["project", "run", "runs", "sweep", "sweeps", "reports"]
 WandBResponseMode = Literal["items", "count"]
 
-QUERY_WANDB_TOOL_DESCRIPTION = """Query W&B Models data through bounded W&B read APIs.
-
-Choose ONE input form. Prefer structured entity_name + project_name + resource
-for new calls. Existing GraphQL clients may instead pass query + optional
-variables, max_items (default 100), and items_per_page (default 20). GraphQL
-works on hosted, Dedicated, and local servers using the caller's W&B access.
-Do not mix the two forms, even when supplying a structured field's default.
-The legacy form preserves GraphQL response structure and accepts one bounded
-read-only query, including aliases and fragments. Mutations, subscriptions,
-multiple operations, and nested/multiple paginated connections are rejected.
-Deployment item/page limits, deadlines, and response budgets still apply.
-
-Use this read-only tool for project metadata, individual runs, filtered or sorted
-run collections, sweeps, and reports. For run history, artifacts, registries,
-automations, and integrations, prefer the dedicated MCP tools.
-
-For an unfamiliar project, call probe_project_tool first. Then pass only the
-returned summary_keys/config_keys needed for the question. This avoids loading
-every metric from wide runs and usually answers the question in one request.
-
-Prefer the existing specialized tools when they match the request:
-- entity/project discovery: list_entities_tool and query_wandb_entity_projects
-- time-series metrics: get_run_history_tool
-- artifact reads: list_artifact_versions_tool and get_artifact_details_tool
-- registry reads: list_registries_tool and list_registry_collections_tool
-- automations/integrations: list_wandb_automations_tool and list_wandb_integrations_tool
+QUERY_WANDB_TOOL_DESCRIPTION = """Query W&B Models data through bounded, read-only W&B APIs.
 
 <when_to_use>
-Use this tool for run discovery, summary-metric analysis, project metadata,
-sweep inspection, or report discovery. It is the normal W&B Models query path.
+Use for project metadata, run lookup, filtered/sorted runs, sweeps, and reports.
+For an unfamiliar project, use probe_project_tool first, then select only the
+summary_keys/config_keys needed to avoid loading wide metrics.
 </when_to_use>
 
-Parameters
-----------
-entity_name : str
-    W&B entity or team name. Required for structured calls only.
-project_name : str
-    W&B project name. Required for structured calls only.
-resource : "project" | "run" | "runs" | "sweep" | "sweeps" | "reports"
-    Resource to read through the SDK. Required for structured calls only.
-run_id : str, optional
-    Required only for resource="run". This is the short W&B run ID, not its display name.
-sweep_id : str, optional
-    Required only for resource="sweep".
-report_name : str, optional
-    Optional exact report filter for resource="reports". Accepts either the
-    internal report name or its user-visible display title.
-filters : dict, optional
-    W&B SDK Mongo-style run filters for resource="runs". Supported fields include
-    createdAt, displayName, duration, group, host, jobType, name, state, tags,
-    username, config.*, and summary_metrics.*. Operators include $and, $or, $eq,
-    $ne, $gt, $gte, $lt, $lte, $in, $nin, $exists, and $regex.
-order : str, optional
-    Run ordering for resource="runs", such as -created_at or
-    -summary_metrics.accuracy. Default: -created_at.
-limit : int, optional
-    Maximum collection items to return. Default: 50; deployment limits apply.
-include : list[str], optional
-    Additional resource details. run/runs accept summary, config, system_metrics,
-    and sweep; sweep/sweeps accept config; reports accepts spec. Individual runs
-    include summary metrics by default; run collections return metadata by default.
-summary_keys : list[str], optional
-    Specific summary metrics to include for run/runs. Supplying keys implies
-    include=["summary"] and uses a server-side field projection.
-config_keys : list[str], optional
-    Specific config values to include for run/runs. Supplying keys implies
-    include=["config"] and uses a server-side field projection.
-response_mode : "items" | "count", optional
-    "items" returns bounded resources. "count" is supported for resource="runs"
-    and returns only the exact server-side matching count.
-cursor : str, optional
-    Opaque continuation cursor returned by a previous collection response. Reuse
-    it only with the same resource, scope, filters, ordering, selector, and field
-    projection. The next page may request a different limit.
-query : str, optional
-    Legacy GraphQL document, instead of all structured fields above.
-variables : dict, optional
-    GraphQL variables. Requires query; values must be bounded finite JSON.
-max_items : int, optional
-    Legacy GraphQL total item limit. Default 100, capped by the workload.
-items_per_page : int, optional
-    Legacy GraphQL page size. Default 20, capped by the workload.
+Choose ONE input form; never mix forms, even a structured field's default:
+1. Structured: entity_name + project_name + resource (preferred for new calls).
+2. Legacy GraphQL: query + optional variables, max_items=100, items_per_page=20.
+   Works on hosted, Dedicated, and local servers with the caller's W&B access.
+   Accepts one bounded read-only query with aliases/fragments. Rejects mutations,
+   subscriptions, multiple operations, nested/multiple paginated connections.
+   Deployment limits, deadlines, and response budgets still apply.
 
-Returns
--------
-dict
-    Collection results include returned_count, total_count, has_more, limit, and
-    project_exhaustive. Single-resource results use item.
-    Legacy calls retain the query's field/alias structure and bounded pagination
-    metadata. A nonempty GraphQL errors envelope is an MCP tool failure, including
-    partial responses; do not treat partial data as a complete result.
+Structured inputs:
+- resource: "project", "run", "runs", "sweep", "sweeps", or "reports".
+- run_id: required for "run"; internal W&B run ID, not display name.
+- sweep_id: required for "sweep".
+- report_name: exact internal report name or visible title filter for "reports".
+- filters: Mongo-style run filters for "runs". Fields: createdAt, displayName,
+  duration, group, host, jobType, name, state, tags, username, config.*,
+  summary_metrics.*. Operators: $and, $or, $eq, $ne, $gt, $gte, $lt, $lte,
+  $in, $nin, $exists, $regex.
+- order: run ordering, default "-created_at"; e.g. "-summary_metrics.accuracy".
+- limit: collection size, default 50; deployment caps apply.
+- include: run/runs accept summary, config, system_metrics, sweep;
+  sweep/sweeps accept config; reports accepts spec. Individual runs include
+  summary by default; collections return metadata by default.
+- summary_keys/config_keys: targeted run projections, implying summary/config
+  inclusion with server-side field selection.
+- response_mode: "items" (default) or "count"; count is only for runs and
+  returns the exact server-side matching count.
+- cursor: opaque continuation; reuse with the same resource, scope, filters,
+  order, selector, and projection. The next page may use a different limit.
 
-For schema introspection, unmodeled fields, aliases, cross-resource nesting, or an
-exact GraphQL response shape, a local operator may select the explicit
-models-weave-graphql-compat profile and call query_wandb_graphql_tool.
+Legacy inputs: variables requires query and bounded finite JSON; max_items and
+items_per_page are capped by workload. Legacy results retain GraphQL field/alias
+structure and pagination metadata. A nonempty errors envelope is an MCP tool
+failure, including partial responses; never treat partial data as complete.
+
+Structured returns: collections include returned_count, total_count, has_more,
+limit, project_exhaustive; single resources use item.
+
+Prefer dedicated tools for:
+- discovery: list_entities_tool, query_wandb_entity_projects
+- history: get_run_history_tool
+- artifacts: list_artifact_versions_tool, get_artifact_details_tool
+- registries: list_registries_tool, list_registry_collections_tool
+- automation/integration: list_wandb_automations_tool, list_wandb_integrations_tool
+
+For introspection, unmodeled fields, aliases, cross-resource nesting, or exact
+GraphQL shape, a local operator may select models-weave-graphql-compat and use
+query_wandb_graphql_tool.
+Detailed query guidance:
+https://github.com/wandb/wandb-mcp-server/blob/main/docs/tool-guidance.md#query-wandb
 """
 
 _INCLUDE_FIELDS = {

@@ -39,205 +39,63 @@ def _get_api_from_context():
 wr_interface._get_api = _get_api_from_context
 
 
-CREATE_WANDB_REPORT_TOOL_DESCRIPTION = """Create a new Weights & Biases Report to document analysis and findings.
+CREATE_WANDB_REPORT_TOOL_DESCRIPTION = """Create a new Weights & Biases Report documenting analysis and findings.
 
-Only call this tool if the user explicitly asks to create a report or save to wandb/weights & biases.
+Only call if the user explicitly asks to create a report or save to W&B.
 Always provide the returned report link to the user.
 
 <when_to_use>
-Call this tool AFTER completing analysis to create a shareable report. Combine
-markdown text (for narrative, tables, and findings) with optional panels (for
-native charts, custom Vega charts, and W&B Table-backed charts) to produce a
-polished deliverable. If you have metric data from get_run_history_tool, use
-native panels to visualize it in the report. If chart data already exists in a
-W&B Table or summary table, use custom_chart_table.
+Call AFTER analysis to create a shareable report. Combine markdown narrative,
+tables, and findings with optional native, custom Vega, or W&B Table-backed
+panels. Use native panels for metric history and custom_chart_table for chart
+data already stored in a summary table.
 </when_to_use>
 
-<markdown_generation_guide>
-When generating the markdown_report_text parameter, structure your content using:
+Inputs:
+- entity_name, project_name, title: required.
+- description: optional brief report description.
+- markdown_report_text: report body; use headings, paragraphs, lists, tables,
+  links, code fences, and [TOC] on its own line for navigation.
+- panels: optional list of chart specs or ordered layout blocks. Omit for a
+  markdown-only report. Chart-only lists get an automatic Charts heading;
+  heading/markdown/panel_grid blocks preserve order without that heading.
+- plots_html: optional string or label-to-content dict. SVG becomes an image;
+  other nonempty content becomes a MarkdownBlock. Prefer panels for charts.
 
-**Headers**: Organize content hierarchically
-- # Main Title (H1)
-- ## Section Title (H2)
-- ### Subsection Title (H3)
-
-**Paragraphs**: Write clear, informative text separated by blank lines
-
-**Lists**: Present information clearly
-- Bullet points: Use - or *
-- Numbered lists: Use 1. 2. 3.
-
-**Formatting**:
-- **bold** for emphasis
-- *italic* for subtle emphasis
-- `inline code` for technical terms
-- Links: [link text](url)
-
-**Code blocks**: For code snippets or technical content
-```language
-code here
-```
-
-**Table of Contents**: Add [TOC] on its own line to auto-generate navigation
-
-**Best Practices**:
-- Start with a clear H1 title
-- Use [TOC] after the title for easy navigation
-- Structure content with logical sections (H2) and subsections (H3)
-- Keep paragraphs concise and focused
-- Use lists for multiple related items
-- Include code blocks for technical examples
-</markdown_generation_guide>
-
-Args:
-    entity_name: str, The W&B entity (team or username) - required
-    project_name: str, The W&B project name - required
-    title: str, Title of the W&B Report - required
-    description: str, Optional brief description of the report
-    markdown_report_text: str, Well-structured markdown content for the report body
-    panels: list of dict, optional - Chart panels or ordered layout blocks to add after the markdown content.
-        Each dict specifies a chart type and configuration:
-        - {"type": "line", "x": "_step", "y": ["loss", "val_loss"], "title": "Training Loss"}
-          Creates a LinePlot tracking metrics over steps.
-        - {"type": "bar", "metrics": ["accuracy", "f1"], "title": "Metrics"}
-          Creates a BarPlot comparing metrics across runs.
-        - {"type": "run_comparison", "metrics": ["loss", "accuracy"], "run_ids": ["abc", "def"], "title": "Compare"}
-          Creates a PanelGrid comparing specific runs on selected metrics.
-        - {"type": "custom_chart", "title": "PR Curve", "query": {"summaryTable": {"tableKey": "pr_curve_table"}},
-           "chart_name": "wandb/line/v0", "chart_fields": {"x": "recall", "y": "precision"},
-           "chart_strings": {"title": "PR Curve"}, "run_ids": ["abc123"], "hide_run_sets": true}
-          Creates a CustomChart from an explicit wandb-workspaces query.
-        - {"type": "custom_chart_table", "title": "PR Curve", "table_name": "pr_curve_table",
-           "chart_name": "wandb/line/v0", "chart_fields": {"x": "recall", "y": "precision"},
-           "chart_strings": {"title": "PR Curve"}, "hide_run_sets": true}
-          Creates a CustomChart from a W&B Table or summary table key via CustomChart.from_table().
-        - {"type": "heading", "level": 2, "text": "Average precision by class"}
-          Adds an H1/H2/H3 report heading at this position.
-        - {"type": "markdown", "text": "These charts share the same filtered runset."}
-          Adds markdown narrative at this position.
-        - {"type": "panel_grid", "run_ids": ["run_a", "run_b"], "hide_run_sets": false,
-           "panels": [{...chart panel...}, {...chart panel...}]}
-          Creates one PanelGrid whose child panels share a single Runset.
-        Use custom_chart_table for summary-table-backed charts. Use custom_chart with an explicit historyTable
-        query for PR/ROC curves or other charts logged through run history.
-        If panels only contains chart specs, the tool appends them under a Charts heading for backward compatibility.
-        If panels contains heading, markdown, or panel_grid blocks, the list is treated as an ordered layout and no
-        automatic Charts heading is added. If omitted, report is markdown-only.
-
-<custom_chart_panel_guide>
-Use native panel types for ordinary run metrics:
-- line: metric history over _step
-- bar: summary metric comparisons
-- scatter: two summary/config fields
-
-Use custom_chart_table when the source data already exists as a W&B Table saved
-in run summary. This is the preferred path for final confusion matrices,
-per-class AP tables, and other one-snapshot table-backed visualizations:
-{
-  "type": "custom_chart_table",
-  "title": "Precision-Recall Curve",
-  "table_name": "pr_curve_table",
-  "chart_name": "wandb/line/v0",
-  "chart_fields": {"x": "recall", "y": "precision"},
-  "chart_strings": {"title": "Precision-Recall Curve"},
-  "hide_run_sets": true
-}
-
-Use custom_chart only when you know the exact wandb-workspaces query shape:
-{
-  "type": "custom_chart",
-  "query": {"summaryTable": {"tableKey": "pr_curve_table"}},
-  "chart_name": "wandb/line/v0",
-  "chart_fields": {"x": "recall", "y": "precision"},
-  "chart_strings": {"title": "Precision-Recall Curve"},
-  "run_ids": ["abc123"],
-  "hide_run_sets": true
-}
-
-For PR curves, ROC curves, and other charts logged through run history, use an
-explicit historyTable query. tableKey is the key passed to run.log(), not a
-column name inside the table:
-{
-  "type": "custom_chart",
-  "query": {"historyTable": {"tableKey": "pr_curve"}},
-  "chart_name": "wandb/line/v0",
-  "chart_fields": {"x": "r", "y": "p", "color": "c"},
-  "chart_strings": {"title": "Precision-Recall Curve"},
-  "run_ids": ["abc123"],
-  "hide_run_sets": true
-}
-
-If the chart data is computed inside MCP rather than already stored as a W&B
-Table, call log_analysis_to_wandb first, then reference the logged run/table
-from this report tool.
-</custom_chart_panel_guide>
-
-<report_layout_guide>
-Use panel_grid when multiple panels should share one run selector / Runset. This is the correct structure for
-reports such as H2 / markdown / panel-grid / H2 / markdown / panel-grid:
-{
-  "type": "panel_grid",
-  "run_ids": ["run_a", "run_b"],
-  "hide_run_sets": false,
-  "panels": [
-    {"type": "custom_chart", "query": {"summaryTable": {"tableKey": "car_ap"}},
-     "chart_name": "cruise/bar_chart/v2", "chart_fields": {"x": "threshold", "y": "ap"},
-     "chart_strings": {"title": "CAR AP"}},
-    {"type": "custom_chart", "query": {"summaryTable": {"tableKey": "truck_ap"}},
-     "chart_name": "cruise/bar_chart/v2", "chart_fields": {"x": "threshold", "y": "ap"},
-     "chart_strings": {"title": "TRUCK AP"}}
-  ]
-}
+Panel examples:
+- {"type":"line","x":"_step","y":["loss","val_loss"],"title":"Loss"}
+- {"type":"bar","metrics":["accuracy","f1"],"title":"Metrics"}
+- {"type":"scatter","x":"config.learning_rate","y":"accuracy"}
+- {"type":"run_comparison","metrics":["loss"],"run_ids":["run_a","run_b"]}
+- {"type":"heading","level":2,"text":"Results"}
+- {"type":"markdown","text":"These charts share a filtered runset."}
+- {"type":"panel_grid","run_ids":["run_a"],"panels":[...chart specs...]}
+  Child charts share one Runset.
+- {"type":"custom_chart_table","table_name":"pr_curve_table",
+   "chart_name":"wandb/line/v0","chart_fields":{"x":"recall","y":"precision"},
+   "chart_strings":{"title":"PR Curve"},"hide_run_sets":true}
+  For a W&B Table saved in run summary.
+- {"type":"custom_chart","query":{"historyTable":{"tableKey":"pr_curve"}},
+   "chart_name":"wandb/line/v0","chart_fields":{"x":"r","y":"p","color":"c"},
+   "chart_strings":{"title":"PR Curve"},"run_ids":["run_a"]}
+  For a table logged through run history. tableKey is the run.log() key, not a
+  column name. Use {"summaryTable":{"tableKey":"key"}} for an explicit summary
+  table query. Only use custom_chart when the exact query shape is known.
 
 Runset scoping:
-- run_ids means W&B internal run keys (Python SDK run.id), not display names.
-- run_ids are converted to deterministic Reports v2 filters, for example name in ["run_a", "run_b"].
-- filters may be passed as a Reports v2 expression string and wins over generated run_ids filters.
-- runset_query may be passed for explicit search behavior. Do not use custom_chart query for run filtering.
-- chart_name maps to the Vega panelDefId such as wandb/line/v0 or cruise/bar_chart/v2. Put visible titles in chart_strings.
-</report_layout_guide>
+- run_ids are internal W&B run keys (SDK run.id), NOT display names.
+- run_ids are converted to deterministic Reports v2 filters.
+- filters may be passed as a Reports v2 expression string; this overrides run_ids.
+- runset_query controls explicit search. Do not use custom_chart query for filtering.
+- chart_name selects the Vega panelDefId; use chart_strings for visible titles.
+- hide_run_sets hides the run selector UI.
+If data is computed in MCP rather than already stored as a W&B Table, use
+log_analysis_to_wandb first and reference its logged run/table.
 
-<manual_validation_recipe>
-To validate a table-backed custom chart manually:
-1. Pick a run that has a logged W&B Table key, such as a summary table or PR/ROC history table.
-2. Call create_wandb_report_tool with custom_chart_table for summary tables or custom_chart with historyTable for PR/ROC curves.
-3. Open the returned report URL and confirm the custom Vega chart renders.
-4. If the chart does not render, verify the table_name and chart_fields match the table columns and UI chart config.
-</manual_validation_recipe>
-
-Returns:
-    The URL to the created report
-
-Example markdown structure:
-```markdown
-# Analysis Report Title
-
-[TOC]
-
-## Executive Summary
-Brief overview of the analysis and key findings.
-
-## Methodology
-Description of the approach used in the analysis.
-
-### Data Collection
-- Source 1: Description
-- Source 2: Description
-
-### Analysis Techniques
-Technical details about methods used.
-
-## Results
-Key findings from the analysis.
-
-### Performance Metrics
-- Accuracy: 95%
-- Precision: 92%
-- Recall: 89%
-
-## Conclusions
-Summary of insights and recommendations.
-```
+Returns the created report URL. Verify table keys and chart_fields match the
+logged columns if a custom chart does not render.
+Detailed chart and layout recipes:
+https://github.com/wandb/wandb-mcp-server/blob/main/docs/tool-guidance.md#create-wandb-report
 """
 
 

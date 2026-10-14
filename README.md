@@ -781,6 +781,7 @@ uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server
 - **[RELEASING.md](RELEASING.md)** -- Public source releases and artifact verification
 - **[Release index](docs/releases/README.md)** -- Availability and immutable artifacts by channel
 - **[Query capability matrix](docs/query-capabilities.md)** -- Typed reads and the opt-in compatibility path
+- **[Detailed tool guidance](docs/tool-guidance.md)** -- Extended query, trace, history, and report examples outside the compact MCP descriptions
 - **[Observability](docs/OBSERVABILITY.md)** -- Logging, telemetry privacy, and supported collection modes
 - **[Tool-development skill](.agents/skills/develop-wandb-mcp-tools/SKILL.md)** -- Safe implementation and validation workflow
 - **[Release skill](.agents/skills/release-wandb-mcp-server/SKILL.md)** -- Exact-candidate release validation and handoff
