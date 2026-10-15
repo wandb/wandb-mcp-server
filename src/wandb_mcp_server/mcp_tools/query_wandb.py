@@ -59,39 +59,47 @@ summary_keys/config_keys needed to avoid loading wide metrics.
 Choose ONE input form; never mix forms, even a structured field's default:
 1. Structured: entity_name + project_name + resource (preferred for new calls).
 2. Legacy GraphQL: query + optional variables, max_items=100, items_per_page=20.
-   Works on hosted, Dedicated, and local servers with the caller's W&B access.
-   Accepts one bounded read-only query with aliases/fragments. Rejects mutations,
-   subscriptions, multiple operations, nested/multiple paginated connections.
+   One bounded read-only query with aliases/fragments; mutations, subscriptions,
+   multiple operations, and nested/multiple paginated connections are rejected.
    Deployment limits, deadlines, and response budgets still apply.
 
 Structured inputs:
 - resource: "project", "run", "runs", "sweep", "sweeps", or "reports".
-- run_id: required for "run"; internal W&B run ID, not display name.
+- run_id: required for "run"; the 8-char internal run ID, not the display
+  name. Display names (words) are not unique; filter displayName to find the ID.
 - sweep_id: required for "sweep".
 - report_name: exact internal report name or visible title filter for "reports".
 - filters: Mongo-style run filters for "runs". Fields: createdAt, displayName,
-  duration, group, host, jobType, name, state, tags, username, config.*,
-  summary_metrics.*. Operators: $and, $or, $eq, $ne, $gt, $gte, $lt, $lte,
-  $in, $nin, $exists, $regex.
-- order: run ordering, default "-created_at"; e.g. "-summary_metrics.accuracy".
-- limit: collection size, default 50; deployment caps apply.
+  duration, group, host, jobType, name (= run ID), state, tags, username,
+  config.<key>, summary_metrics.<key>. Operators: $and, $or, $eq, $ne, $gt,
+  $gte, $lt, $lte, $in, $nin, $exists, $contains, $regex. Use $contains for
+  substrings (indexed); $regex scans every run and ignores ^/$ anchors.
+- order: run ordering, default "-created_at". Prefix - (desc) or + (asc) on
+  created_at, heartbeat_at, a run field above, summary_metrics.<key>, or
+  config.<key>; "summary.<key>" is not a sort field and is rejected. For the
+  best/worst run, order by the metric with limit=1 instead of fetching all
+  runs and sorting client-side.
+- limit: collection size, default 50; deployment caps apply. Full include
+  details on collections may be capped lower (local: limit<=25);
+  summary_keys/config_keys projections work at the full limit.
 - include: run/runs accept summary, config, system_metrics, sweep;
   sweep/sweeps accept config; reports accepts spec. Individual runs include
   summary by default; collections return metadata by default.
-- summary_keys/config_keys: targeted run projections, implying summary/config
-  inclusion with server-side field selection.
+- summary_keys/config_keys: targeted run projections with server-side field
+  selection; the cheap way to read metrics or hyperparameters across runs.
 - response_mode: "items" (default) or "count"; count is only for runs and
-  returns the exact server-side matching count.
+  returns the exact server-side matching count. Use it for "how many runs".
 - cursor: opaque continuation; reuse with the same resource, scope, filters,
   order, selector, and projection. The next page may use a different limit.
 
 Legacy inputs: variables requires query and bounded finite JSON; max_items and
-items_per_page are capped by workload. Legacy results retain GraphQL field/alias
-structure and pagination metadata. A nonempty errors envelope is an MCP tool
-failure, including partial responses; never treat partial data as complete.
+items_per_page are capped by workload. Legacy results keep GraphQL field/alias
+structure and pagination metadata; a nonempty errors envelope is a tool failure
+even with partial data.
 
 Structured returns: collections include returned_count, total_count, has_more,
-limit, project_exhaustive; single resources use item.
+limit, project_exhaustive; single resources use item. Summary values are final
+(or define_metric best) values; use get_run_history_tool for curves.
 
 Prefer dedicated tools for:
 - discovery: list_entities_tool, query_wandb_entity_projects
@@ -222,6 +230,54 @@ def _decode_query_cursor(cursor: Optional[str], fingerprint: str) -> Optional[_Q
 def _validate_text_bound(name: str, value: str, maximum_bytes: int) -> None:
     if len(value.encode("utf-8")) > maximum_bytes:
         raise WandBQueryValidationError(f"{name} exceeds the {maximum_bytes}-byte limit")
+
+
+_ORDER_RUN_FIELDS = frozenset(
+    {
+        "created_at",
+        "createdAt",
+        "heartbeat_at",
+        "heartbeatAt",
+        "updated_at",
+        "updatedAt",
+        "name",
+        "displayName",
+        "display_name",
+        "state",
+        "duration",
+        "runtime",
+        "group",
+        "jobType",
+        "job_type",
+        "host",
+        "username",
+        "user",
+        "tags",
+        "sweep",
+    }
+)
+_ORDER_KEY_PREFIXES = ("summary_metrics.", "config.")
+
+
+def _validate_order_field(order: str) -> None:
+    """Reject sort fields the W&B backend cannot resolve.
+
+    An unknown ``order`` field (for example ``-summary.loss`` instead of
+    ``-summary_metrics.loss``) makes the upstream runs query hang until the
+    tool deadline instead of returning an error, so the field is checked here.
+    """
+    field = order.strip()
+    if field[:1] in {"-", "+"}:
+        field = field[1:]
+    if field in _ORDER_RUN_FIELDS:
+        return
+    if any(field.startswith(prefix) and len(field) > len(prefix) for prefix in _ORDER_KEY_PREFIXES):
+        return
+    raise WandBQueryValidationError(
+        "order must be [-|+]created_at, heartbeat_at, a run field, "
+        "summary_metrics.<key>, or config.<key>; summary.<key> is not a sort field",
+        field="order",
+    )
 
 
 def _validate_filter_shape(value: Any, *, depth: int = 0) -> None:
@@ -684,6 +740,7 @@ def _validate_request(
     if not isinstance(order, str) or not order.strip():
         raise WandBQueryValidationError("order must be a non-empty string")
     _validate_text_bound("order", order, _MAX_IDENTIFIER_BYTES)
+    _validate_order_field(order)
     if not isinstance(response_mode, str) or response_mode not in {"items", "count"}:
         raise WandBQueryValidationError("response_mode must be 'items' or 'count'")
     if response_mode == "count" and resource != "runs":

@@ -92,8 +92,19 @@ Runset scoping:
 If data is computed in MCP rather than already stored as a W&B Table, use
 log_analysis_to_wandb first and reference its logged run/table.
 
-Returns the created report URL. Verify table keys and chart_fields match the
-logged columns if a custom chart does not render.
+Rules:
+- title must not contain "/" (it breaks the report URL); use " - " or ":".
+- The report publishes immediately at full width; the URL is returned once W&B
+  confirms the save. Rendering is not verified: native line/bar/scatter panels
+  are reliable, while a custom_chart whose table or fields do not resolve saves
+  fine but renders blank. Prefer native panels; verify table keys and
+  chart_fields against the logged columns if a custom chart is empty.
+- Markdown (tables, bold, links) belongs in markdown_report_text; panel titles
+  are plain text.
+- For "top N by metric" charts, get run IDs from query_wandb_tool (order +
+  limit) and pass them as run_ids.
+
+Returns the created report URL.
 Detailed chart and layout recipes:
 https://github.com/wandb/wandb-mcp-server/blob/main/docs/tool-guidance.md#create-wandb-report
 """
