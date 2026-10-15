@@ -86,6 +86,17 @@ Returns JSON:
 Every successful response states sampling/exactness, coverage, and truncation;
 do not present bounded or sampled results as exhaustive.
 
+Differences from the raw SDK:
+- Multi-key reads are outer-unioned by step; the SDK's history(keys=) is an AND
+  filter. A row carrying only some requested keys is normal, not missing data.
+- samples >= logged rows returns every row unsampled; otherwise rows are
+  server-side min/max bucketed samples. Say "sampled" when exact is false.
+- stream="system" reads GPU/CPU/memory metrics (system.gpu.0.gpu,
+  system.memory, ...). Absence from the default stream does not mean the data
+  does not exist.
+- Summary metrics from query_wandb_tool give final values without a history
+  read; use this tool for trajectories or a specific step.
+
 Examples:
 get_run_history_tool("team","project","run-id",keys=["loss","val_loss"])
 get_run_history_tool("team","project","run-id",keys=["validation/loss"],

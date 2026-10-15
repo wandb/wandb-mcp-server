@@ -60,6 +60,23 @@ keep queries scoped to the evaluation and state how many traces were analyzed.
 After finding child calls, use resolve_trace_roots_tool with their trace_ids
 to retrieve root context in a single batched request.
 
+<conventions>
+- Counting: "traces" or "calls" means all calls including children unless the
+  user says root/top-level (trace_roots_only=true). Prefer count_weave_traces_tool.
+- status values: "success", "error", "descendant_error", "running"; the status
+  filter matches one value exactly. "Error traces" normally means status error
+  OR descendant_error OR has_exception=true, so count each separately. A running
+  call is neither success nor error; "success" undercounts non-error calls.
+- op_name is the full op ref URI; match short names with op_name_contains.
+- Evaluations: Evaluation.evaluate is the root, with one
+  Evaluation.predict_and_score child per dataset row (parent_ids=[eval_call_id])
+  and an Evaluation.summarize child. Pass/error counts are in
+  summary.status_counts (or summary.weave.status_counts), token usage in
+  summary.usage per model, and the aggregate metrics are the evaluate call's
+  output. Scorer ops appear both as *_scorer wrappers and <Class>.score methods.
+  Prefer summarize_evaluation_tool for a whole evaluation.
+</conventions>
+
 <examples>
 Browse: filters={"trace_roots_only": true}, detail_level="schema", limit=5.
 Inspect one call: filters={"call_ids": ["span-id"]}, detail_level="full", limit=1.
