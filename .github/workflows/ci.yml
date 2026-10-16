@@ -37,7 +37,7 @@ jobs:
       - name: Smoke test package import
         run: |
           uv run --no-sync python -c "import wandb_mcp_server; print('ok')"
-          uv run --no-sync python -c "from importlib.metadata import version; assert version('mcp') == '1.29.0'; print('mcp', version('mcp'))"
+          uv run --no-sync python -c "from importlib.metadata import version; assert version('mcp') == '1.30.0'; print('mcp', version('mcp'))"
 
       - name: Lint with ruff
         run: |
@@ -67,7 +67,7 @@ jobs:
           uv pip check --python "$SMOKE_ENV/bin/python"
           "$SMOKE_ENV/bin/python" -c "import wandb_mcp_server; print('ok')"
           "$SMOKE_ENV/bin/python" scripts/offline_tokenizer_smoke.py
-          "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; from packaging.version import Version; resolved = Version(version('mcp')); assert Version('1.28.1') <= resolved < Version('2'); print('fresh-wheel mcp', resolved)"
+          "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; from packaging.version import Version; resolved = Version(version('mcp')); assert Version('1.30.0') <= resolved < Version('2'); print('fresh-wheel mcp', resolved)"
           "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py \
             --server-command "$SMOKE_ENV/bin/wandb_mcp_server" \
             --contract release/public-contract.json \
@@ -75,9 +75,9 @@ jobs:
             --source-sha "$GITHUB_SHA" \
             --wheel "$WHEEL" \
             --evidence-out "$ARTIFACT_DIR/profile-evidence.json"
-          uv pip install --python "$SMOKE_ENV/bin/python" "mcp[cli]==1.28.1"
+          uv pip install --python "$SMOKE_ENV/bin/python" "mcp[cli]==1.30.0"
           uv pip check --python "$SMOKE_ENV/bin/python"
-          "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; assert version('mcp') == '1.28.1'; print('minimum mcp', version('mcp'))"
+          "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; assert version('mcp') == '1.30.0'; print('minimum mcp', version('mcp'))"
           "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py \
             --server-command "$SMOKE_ENV/bin/wandb_mcp_server" \
             --contract release/public-contract.json \

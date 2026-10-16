@@ -6,8 +6,8 @@
     "3.12"
   ],
   "mcp": {
-    "minimum": "1.28.1",
-    "locked": "1.29.0",
+    "minimum": "1.30.0",
+    "locked": "1.30.0",
     "maximum_exclusive": "2"
   },
   "locked_runtime": {
