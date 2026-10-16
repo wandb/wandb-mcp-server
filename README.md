@@ -31,11 +31,12 @@ Query and analyze your Weights & Biases data using natural language through the 
   robust. Tool telemetry excludes raw arguments and API keys; see the
   [privacy guidance](docs/OBSERVABILITY.md) before enabling verbose logging.
 
-The current 0.4.2 candidate adds an explicit Agent Lens opt-in for W&B-hosted
-MTSaaS. It does not add Agent Lens to the default local profile or to any
-Dedicated/customer profile. See the [v0.4.2 release note](docs/releases/v0.4.2.md)
-for its current qualification state and the [release index](docs/releases/README.md)
-for earlier 0.4 versions.
+The current 0.4.3 candidate restores W&B username attribution in analytics,
+adds the optional `DOCS_MCP_URL` override for self-hosted docs search, keeps
+every tool description under 4,000 characters with ARIA's query and counting
+rules folded in, and requires `mcp` 1.30.0 or newer. See the
+[v0.4.3 release note](docs/releases/v0.4.3.md) for its current qualification
+state and the [release index](docs/releases/README.md) for earlier 0.4 versions.
 
 ### Release availability
 
@@ -203,7 +204,7 @@ two polling tools. Shared and Dedicated managed profiles reject ARIA.
 
 **ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
 
-**Agent Lens is explicit and hosted-only in managed v0.4.2:** W&B-hosted
+**Agent Lens is explicit and hosted-only in managed deployments (since v0.4.2):** W&B-hosted
 deployments may select `models-weave-agents-agent-lens` with the `shared`
 workload and an operator-reviewed `AGENT_LENS_BASE_URL`. The default
 `models-weave` profile and both Dedicated profiles omit these tools, and merely
