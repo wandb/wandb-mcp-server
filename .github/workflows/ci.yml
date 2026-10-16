@@ -75,9 +75,9 @@ jobs:
             --source-sha "$GITHUB_SHA" \
             --wheel "$WHEEL" \
             --evidence-out "$ARTIFACT_DIR/profile-evidence.json"
-          uv pip install --python "$SMOKE_ENV/bin/python" "mcp[cli]==1.28.1"
+          uv pip install --python "$SMOKE_ENV/bin/python" "mcp[cli]==1.30.0"
           uv pip check --python "$SMOKE_ENV/bin/python"
-          "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; assert version('mcp') == '1.28.1'; print('minimum mcp', version('mcp'))"
+          "$SMOKE_ENV/bin/python" -c "from importlib.metadata import version; assert version('mcp') == '1.30.0'; print('minimum mcp', version('mcp'))"
           "$SMOKE_ENV/bin/python" scripts/mcp_stdio_smoke.py \
             --server-command "$SMOKE_ENV/bin/wandb_mcp_server" \
             --contract release/public-contract.json \
