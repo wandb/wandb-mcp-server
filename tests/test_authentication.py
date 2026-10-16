@@ -174,32 +174,47 @@ class TestAuthMiddlewareBypass:
 
 
 @pytest.mark.asyncio
-async def test_authentication_does_not_fetch_viewer_for_telemetry(monkeypatch):
-    """A syntactically valid bearer must not trigger telemetry-only W&B I/O."""
+async def test_authentication_resolves_viewer_once_per_actor(monkeypatch):
+    """Authentication attributes telemetry to the W&B username with one cached lookup."""
+    from types import SimpleNamespace
+
     from wandb_mcp_server.api_client import WandBApiManager
 
+    WandBApiManager._clear_api_cache()
+    monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "false")
+    monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", "standard")
+    viewer = SimpleNamespace(_attrs={"username": "synthetic-user"})
     monkeypatch.setattr(
-        WandBApiManager,
-        "get_api",
-        MagicMock(side_effect=AssertionError("authentication must not create a W&B client for telemetry")),
+        WandBApiManager, "_viewer_lookup_client", MagicMock(return_value=SimpleNamespace(viewer=viewer))
     )
+    sessions = []
+    tracker = MagicMock()
+    tracker.track_user_session.side_effect = lambda **kwargs: sessions.append(kwargs)
     manager = MagicMock()
     manager.get_session.return_value = None
-    request = MagicMock()
-    request.url.path = "/mcp"
-    request.method = "POST"
-    request.headers = {"Authorization": f"Bearer {'a' * 40}"}
-    request.state = MagicMock()
     response = MagicMock(status_code=200, headers={})
 
     async def call_next(_):
         return response
 
-    with (
-        patch.dict("os.environ", {"MCP_AUTH_DISABLED": "false"}),
-        patch("wandb_mcp_server.session_manager.get_session_manager", return_value=manager),
-    ):
-        result = await mcp_auth_middleware(request, call_next)
+    def make_request():
+        request = MagicMock()
+        request.url.path = "/mcp"
+        request.method = "POST"
+        request.headers = {"Authorization": f"Bearer {'a' * 40}"}
+        request.state = MagicMock()
+        return request
 
-    assert result is response
-    WandBApiManager.get_api.assert_not_called()
+    try:
+        with (
+            patch.dict("os.environ", {"MCP_AUTH_DISABLED": "false"}),
+            patch("wandb_mcp_server.session_manager.get_session_manager", return_value=manager),
+            patch("wandb_mcp_server.analytics.get_analytics_tracker", return_value=tracker),
+        ):
+            assert await mcp_auth_middleware(make_request(), call_next) is response
+            assert await mcp_auth_middleware(make_request(), call_next) is response
+    finally:
+        WandBApiManager._clear_api_cache()
+
+    WandBApiManager._viewer_lookup_client.assert_called_once_with("a" * 40)
+    assert sessions and sessions[0]["viewer_info"] == {"username": "synthetic-user"}

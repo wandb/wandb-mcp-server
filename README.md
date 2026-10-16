@@ -31,11 +31,12 @@ Query and analyze your Weights & Biases data using natural language through the 
   robust. Tool telemetry excludes raw arguments and API keys; see the
   [privacy guidance](docs/OBSERVABILITY.md) before enabling verbose logging.
 
-The current 0.4.2 candidate adds an explicit Agent Lens opt-in for W&B-hosted
-MTSaaS. It does not add Agent Lens to the default local profile or to any
-Dedicated/customer profile. See the [v0.4.2 release note](docs/releases/v0.4.2.md)
-for its current qualification state and the [release index](docs/releases/README.md)
-for earlier 0.4 versions.
+The current 0.4.3 candidate restores W&B username attribution in analytics,
+adds the optional `DOCS_MCP_URL` override for self-hosted docs search, keeps
+every tool description under 4,000 characters with ARIA's query and counting
+rules folded in, and requires `mcp` 1.30.0 or newer. See the
+[v0.4.3 release note](docs/releases/v0.4.3.md) for its current qualification
+state and the [release index](docs/releases/README.md) for earlier 0.4 versions.
 
 ### Release availability
 
@@ -179,6 +180,14 @@ These tools are present in the explicit `models-weave-agents` and
 
 **Docs search:** `search_wandb_docs_tool` proxies [docs.wandb.ai](https://docs.wandb.ai) so you get data tools + documentation search from a single MCP connection. Disable with `WANDB_MCP_PROXY_DOCS=false` if you connect the docs MCP separately.
 
+To search a self-hosted copy of the docs (for example, docs matched to your
+W&B Server version), set `DOCS_MCP_URL` to its MCP endpoint, such as
+`http://localhost:3000/mcp`. The endpoint must accept a JSON-RPC `tools/call`
+for `search_weights_biases_documentation` over Streamable HTTP, as
+docs.wandb.ai/mcp does. No W&B credential is sent to it. With the
+operator-wandb Helm chart, set
+`mcp-server.env.DOCS_MCP_URL`.
+
 Docs queries accept up to 64 KiB of UTF-8 text. The proxy makes one request,
 downloads at most 4 MiB (or the lower configured accumulation limit), and fits
 returned snippets to the response token budget. Oversized snippets include a
@@ -195,7 +204,7 @@ two polling tools. Shared and Dedicated managed profiles reject ARIA.
 
 **ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
 
-**Agent Lens is explicit and hosted-only in managed v0.4.2:** W&B-hosted
+**Agent Lens is explicit and hosted-only in managed deployments (since v0.4.2):** W&B-hosted
 deployments may select `models-weave-agents-agent-lens` with the `shared`
 workload and an operator-reviewed `AGENT_LENS_BASE_URL`. The default
 `models-weave` profile and both Dedicated profiles omit these tools, and merely
@@ -674,6 +683,7 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_DEBUG` | Set to `"true"` to enable detailed W&B logging | No |
 | `MCP_AUTH_DISABLED` | Must be `true` to acknowledge unauthenticated loopback HTTP development | No |
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
+| `DOCS_MCP_URL` | Docs MCP endpoint used by `search_wandb_docs_tool` (default: `https://docs.wandb.ai/mcp`); HTTP(S), no credentials, query, or fragment | No |
 | `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events | No |
 | `MCP_ANALYTICS_QUEUE_CAPACITY` | Maximum outstanding events per optional Segment or Datadog forwarder (default: `256`) | No |
 | `MCP_REQUEST_SUCCESS_SAMPLE_RATE` | Deterministic sample rate for successful HTTP request telemetry (default: `0.10`; failures and requests over two seconds are always retained). | No |
@@ -781,6 +791,7 @@ uvx --from git+https://github.com/wandb/wandb-mcp-server@vX.Y.Z wandb_mcp_server
 - **[RELEASING.md](RELEASING.md)** -- Public source releases and artifact verification
 - **[Release index](docs/releases/README.md)** -- Availability and immutable artifacts by channel
 - **[Query capability matrix](docs/query-capabilities.md)** -- Typed reads and the opt-in compatibility path
+- **[Detailed tool guidance](docs/tool-guidance.md)** -- Extended query, trace, history, and report examples outside the compact MCP descriptions
 - **[Observability](docs/OBSERVABILITY.md)** -- Logging, telemetry privacy, and supported collection modes
 - **[Tool-development skill](.agents/skills/develop-wandb-mcp-tools/SKILL.md)** -- Safe implementation and validation workflow
 - **[Release skill](.agents/skills/release-wandb-mcp-server/SKILL.md)** -- Exact-candidate release validation and handoff

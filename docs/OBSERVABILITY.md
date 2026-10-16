@@ -153,8 +153,8 @@ and ignore surrounding whitespace.
 
 | Level | Product tool telemetry | Canonical log and Datadog identity | Segment identity | Verbose request-body logs |
 |---|---|---|---|---|
-| `off` (default) | compact `usage_dimensions` only | authenticated username when already available; otherwise omitted | authenticated username when already available; key pseudonym fallback | INFO |
-| `standard` | compact `usage_dimensions` only | authenticated username when already available; otherwise omitted | authenticated username when already available; key pseudonym fallback | demoted to DEBUG |
+| `off` (default) | compact `usage_dimensions` only | authenticated username once resolved; otherwise omitted | authenticated username once resolved; key pseudonym fallback | INFO |
+| `standard` | compact `usage_dimensions` only | authenticated username once resolved; otherwise omitted | authenticated username once resolved; key pseudonym fallback | demoted to DEBUG |
 | `strict` | compact `usage_dimensions` only | SHA-256 pseudonym; no plaintext username | pseudonym only | demoted to DEBUG |
 
 Sensitive key-name redaction (`api_key`, `token`, `secret`, `password`,
@@ -173,12 +173,19 @@ runs at every level.
 ### Why the split
 
 At `off` and `standard`, the canonical event, Datadog's `usr.id`, and Segment's
-`userId` use an authenticated W&B username when functional work has already
-materialized it on that actor's unexpired, endpoint-bound API client. Telemetry
-never initializes a client, fetches a viewer, or evaluates a lazy viewer
-property. Until a functional request supplies the username, canonical logs omit
-identity and Segment uses the key pseudonym. An entity, email address, or email
-domain is not a username and is never substituted for one.
+`userId` use the authenticated W&B username. STDIO reuses the viewer fetched
+by startup key validation. HTTP authentication resolves it with one viewer
+lookup per actor and endpoint, cached in process for six hours, single-flight
+per actor. Because HTTP authentication only checks key format, failed lookups
+are cached for five minutes in a separate bounded table so well-formed bogus
+keys cannot evict resolved users, lookup clients are not added to the
+functional client cache, and at most four lookups run at once on a dedicated
+executor; excess cold lookups are skipped rather than queued. A request waits
+at most three seconds; a slow lookup completes in the background for later
+requests. The lookup is skipped at `strict` and when analytics is disabled. Until a username is resolved,
+canonical logs omit identity and Segment uses the key pseudonym. An entity,
+email address, or email domain is not a username and is never substituted for
+one.
 
 At `off` and `standard`, both canonical identity fields use that authenticated
 username when it is available and otherwise omit it; no hash fallback is
@@ -201,7 +208,7 @@ tool arguments.
 
 Datadog receives the same bounded `usage_dimensions` as the canonical event and
 never receives `params`. At `off` and `standard`, `usr.id` may contain the
-cache-only authenticated username described above; at `strict`, it contains the
+authenticated username described above; at `strict`, it contains the
 API-key-derived pseudonym. Unresolved users are not counted as identified users;
 request and tool totals still include their events. Only deployment, harness, method, public tool,
 success, and error class are tags. Identity is carried only in `usr.id`;
@@ -261,7 +268,7 @@ Schema 1.1 canonical fields:
 | `client_vendor` | Vendor bucket, such as `openai`, `anthropic`, `cursor`, `google`, or `mistral`. |
 | `call_type` | Exact MCP JSON-RPC method, such as `initialize`, `tools/list`, or `tools/call`. |
 | `tool_name` | Public MCP tool name; emitted exactly once per public invocation. |
-| `actor_id` | Canonical identity: cache-only authenticated username at `off`/`standard` (omitted when unavailable), or a pseudonym at `strict`. Datadog maps identity to `usr.id` only; Segment derives `userId` from separately carried trusted provenance. |
+| `actor_id` | Canonical identity: authenticated username at `off`/`standard` (omitted when unavailable), or a pseudonym at `strict`. Datadog maps identity to `usr.id` only; Segment derives `userId` from separately carried trusted provenance. |
 | `user_id` | Same canonical identity policy as `actor_id`; retained for canonical-log compatibility, not duplicated in Datadog. |
 | `mcp_client_family` | One-release compatibility alias for the previous family field. |
 | `mcp_client_app` | One-release compatibility alias for the previous app field. Its v0.3 categories remain stable (for example, `codex_cli`, `openai_responses`, `linear_agent`, and `claude`) while `agent_harness` carries the new taxonomy. |

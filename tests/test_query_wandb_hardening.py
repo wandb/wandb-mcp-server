@@ -856,3 +856,36 @@ def test_filtered_report_cursor_is_validated_before_api_construction(monkeypatch
     assert "does not match" in missing_report_name["message"]
     assert cross_resource["error"] == "invalid_cursor"
     assert "does not match" in cross_resource["message"]
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        "-created_at",
+        "+created_at",
+        "heartbeat_at",
+        "-summary_metrics.final_accuracy",
+        "+config.learning_rate",
+        "-displayName",
+        "state",
+    ],
+)
+def test_validate_order_field_accepts_backend_sort_fields(order):
+    query_module._validate_order_field(order)
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        "-summary.final_accuracy",
+        "summary_metrics.",
+        "-config.",
+        "-nonexistent_field",
+        "accuracy",
+        "--created_at",
+    ],
+)
+def test_validate_order_field_rejects_unresolvable_sort_fields(order):
+    with pytest.raises(query_module.WandBQueryValidationError) as excinfo:
+        query_module._validate_order_field(order)
+    assert "summary_metrics.<key>" in str(excinfo.value)

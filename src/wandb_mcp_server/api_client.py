@@ -19,6 +19,7 @@ from wandb_mcp_server.utils import get_rich_logger
 logger = get_rich_logger(__name__)
 
 _DEFAULT_RETRY_AFTER_MS = 1_000
+_USERNAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _MAX_RETRY_AFTER_MS = 60_000
 _OVERLOAD_STATUS_RE = re.compile(r"\b(?:HTTP\s*)?(429|503)\b", re.IGNORECASE)
 _OVERLOAD_HINT_RE = re.compile(
@@ -191,6 +192,18 @@ class WandBApiManager:
     _api_cache_lock = threading.Lock()
     _api_cache_ttl_seconds = 300.0
     _api_cache_max_entries = 128
+    # Analytics attribution: one viewer lookup per actor and endpoint per TTL.
+    # Authentication only checks key format, so misses are bounded separately
+    # (well-formed bogus keys cannot evict real users) and concurrent lookups
+    # are capped; a lookup that finds no free slot is skipped, not queued.
+    _viewer_identity_cache: OrderedDict[str, tuple[float, str]] = OrderedDict()
+    _viewer_identity_misses: OrderedDict[str, float] = OrderedDict()
+    _viewer_identity_lookups: dict[str, Future[Optional[str]]] = {}
+    _viewer_identity_slots = threading.BoundedSemaphore(4)
+    _viewer_identity_ttl_seconds = 6 * 60 * 60.0
+    _viewer_identity_negative_ttl_seconds = 300.0
+    _viewer_identity_max_entries = 4096
+    _viewer_identity_max_misses = 1024
 
     @staticmethod
     def get_api_key() -> Optional[str]:
@@ -209,34 +222,155 @@ class WandBApiManager:
         api_key = api_key_context.get()
         return api_key
 
+    @staticmethod
+    def _actor_cache_key(api_key: str) -> str:
+        """Return an irreversible, endpoint-bound digest for one API key."""
+        return hashlib.sha256(f"{WANDB_API_BASE_URL}\0{api_key}".encode()).hexdigest()
+
+    @staticmethod
+    def _materialized_username(viewer: Any) -> Optional[str]:
+        """Read a validated username from a viewer's populated fields only."""
+        try:
+            attrs = vars(viewer).get("_attrs")
+        except TypeError:
+            return None
+        if type(attrs) is not dict:
+            return None
+        username = attrs.get("username")
+        if not isinstance(username, str) or _USERNAME_RE.fullmatch(username) is None:
+            return None
+        return username
+
     @classmethod
     def get_cached_viewer_info(cls) -> dict[str, str] | None:
         """Read an already-discovered username without creating a client or request.
 
-        W&B's ``viewer`` property performs a lookup on first access. Only inspect
-        its populated backing fields on this actor's unexpired, endpoint-bound
-        client. A cold cache or a tool that has not needed viewer data therefore
-        leaves telemetry on its key fingerprint.
+        Uses the attribution cache filled by ``resolve_viewer_username`` or,
+        failing that, a viewer already materialized on this actor's unexpired,
+        endpoint-bound client. W&B's ``viewer`` property performs a lookup on
+        first access, so only its populated backing fields are inspected.
         """
         api_key = cls.get_api_key()
         if not api_key:
             return None
-        cache_key = hashlib.sha256(f"{WANDB_API_BASE_URL}\0{api_key}".encode()).hexdigest()
+        hit, username = cls.peek_viewer_username(api_key)
+        if hit and username:
+            return {"username": username}
+        cache_key = cls._actor_cache_key(api_key)
         with cls._api_cache_lock:
             cached = cls._api_cache.get(cache_key)
             if cached is None or cached[0] <= time.monotonic():
                 return None
             try:
                 viewer = vars(cached[1]).get("_viewer")
-                attrs = vars(viewer).get("_attrs")
             except TypeError:
                 return None
-            if type(attrs) is not dict:
-                return None
-            username = attrs.get("username")
-            if not isinstance(username, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", username) is None:
-                return None
-            return {"username": username}
+            username = cls._materialized_username(viewer)
+        if username is None:
+            return None
+        cls._store_viewer_username(cache_key, username)
+        return {"username": username}
+
+    @classmethod
+    def peek_viewer_username(cls, api_key: str) -> tuple[bool, Optional[str]]:
+        """Return ``(hit, username)`` from the attribution cache without I/O."""
+        cache_key = cls._actor_cache_key(api_key)
+        with cls._api_cache_lock:
+            return cls._peek_viewer_username_locked(cache_key)
+
+    @classmethod
+    def _peek_viewer_username_locked(cls, cache_key: str) -> tuple[bool, Optional[str]]:
+        now = time.monotonic()
+        cached = cls._viewer_identity_cache.get(cache_key)
+        if cached is not None and cached[0] > now:
+            cls._viewer_identity_cache.move_to_end(cache_key)
+            return True, cached[1]
+        miss_expires_at = cls._viewer_identity_misses.get(cache_key)
+        if miss_expires_at is not None and miss_expires_at > now:
+            return True, None
+        return False, None
+
+    @classmethod
+    def resolve_viewer_username(cls, api_key: str) -> Optional[str]:
+        """Return the actor's W&B username, looking it up at most once per TTL.
+
+        Concurrent callers for one actor share a single lookup. Failures and
+        missing usernames are cached briefly so an outage cannot amplify
+        backend traffic. Never raises for lookup errors.
+        """
+        cache_key = cls._actor_cache_key(api_key)
+        with cls._api_cache_lock:
+            hit, username = cls._peek_viewer_username_locked(cache_key)
+            if hit:
+                return username
+            lookup = cls._viewer_identity_lookups.get(cache_key)
+            is_owner = lookup is None
+            if is_owner:
+                lookup = Future()
+                cls._viewer_identity_lookups[cache_key] = lookup
+        if not is_owner:
+            return lookup.result()
+
+        username = None
+        looked_up = False
+        try:
+            if cls._viewer_identity_slots.acquire(blocking=False):
+                looked_up = True
+                try:
+                    username = cls._materialized_username(cls._viewer_lookup_client(api_key).viewer)
+                except Exception as exc:
+                    logger.debug("Viewer identity lookup failed (%s)", type(exc).__name__)
+                finally:
+                    cls._viewer_identity_slots.release()
+        finally:
+            if looked_up:
+                cls._store_viewer_username(cache_key, username)
+            with cls._api_cache_lock:
+                cls._viewer_identity_lookups.pop(cache_key, None)
+            lookup.set_result(username)
+        return username
+
+    @classmethod
+    def _viewer_lookup_client(cls, api_key: str) -> wandb.Api:
+        """Reuse this actor's cached client, else build one that is not cached.
+
+        Keys reaching attribution are only format-checked; caching their
+        clients would let bogus keys evict real users' clients.
+        """
+        cache_key = cls._actor_cache_key(api_key)
+        with cls._api_cache_lock:
+            cached = cls._api_cache.get(cache_key)
+            if cached is not None and cached[0] > time.monotonic():
+                return cached[1]
+        return wandb.Api(
+            api_key=api_key,
+            overrides={"base_url": WANDB_API_BASE_URL},
+            timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+        )
+
+    @classmethod
+    def remember_viewer(cls, api_key: str, viewer: Any) -> None:
+        """Cache the username of a viewer that functional work already fetched."""
+        username = cls._materialized_username(viewer)
+        if username:
+            cls._store_viewer_username(cls._actor_cache_key(api_key), username)
+
+    @classmethod
+    def _store_viewer_username(cls, cache_key: str, username: Optional[str]) -> None:
+        """Cache a resolved username, or a short-lived miss in its own bound."""
+        now = time.monotonic()
+        with cls._api_cache_lock:
+            if username:
+                cls._viewer_identity_misses.pop(cache_key, None)
+                cls._viewer_identity_cache[cache_key] = (now + cls._viewer_identity_ttl_seconds, username)
+                cls._viewer_identity_cache.move_to_end(cache_key)
+                while len(cls._viewer_identity_cache) > cls._viewer_identity_max_entries:
+                    cls._viewer_identity_cache.popitem(last=False)
+            else:
+                cls._viewer_identity_misses[cache_key] = now + cls._viewer_identity_negative_ttl_seconds
+                cls._viewer_identity_misses.move_to_end(cache_key)
+                while len(cls._viewer_identity_misses) > cls._viewer_identity_max_misses:
+                    cls._viewer_identity_misses.popitem(last=False)
 
     @classmethod
     def get_api(cls, api_key: Optional[str] = None) -> wandb.Api:
@@ -262,7 +396,7 @@ class WandBApiManager:
                 "For STDIO: Ensure API key is set at server startup."
             )
 
-        cache_key = hashlib.sha256(f"{WANDB_API_BASE_URL}\0{api_key}".encode()).hexdigest()
+        cache_key = cls._actor_cache_key(api_key)
         now = time.monotonic()
         with cls._api_cache_lock:
             cls._evict_expired(now)
@@ -319,6 +453,9 @@ class WandBApiManager:
         with cls._api_cache_lock:
             cls._api_cache.clear()
             cls._api_initializations.clear()
+            cls._viewer_identity_cache.clear()
+            cls._viewer_identity_misses.clear()
+            cls._viewer_identity_lookups.clear()
 
     @staticmethod
     def set_context_api_key(api_key: str) -> Any:
