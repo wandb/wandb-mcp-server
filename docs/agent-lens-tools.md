@@ -1,6 +1,6 @@
 # Agent Lens tools
 
-Nine read tools over the [Agent Lens](https://github.com/wandb/agent-lens) Insights
+Nine read tools over the [Agent Lens](https://docs.coreweave.com/products/agent-lens) Insights
 and conversation-tag APIs. Agent Lens classifies agent turns into intent and
 failure categories and clusters, and carries human- and judge-applied
 conversation tags. None of that is visible to the Weave calls or Agents data
@@ -78,7 +78,7 @@ traces and no classified turns, and the usable range rarely reaches today:
    with Agent Lens topic IDs.
 4. Pass one or more returned `trace_id` values to
    `get_agent_lens_failure_attributions_tool` for bounded failure attribution,
-   or to `get_weave_agent_trace_tool` / `query_weave_traces_tool` for the trace
+   or to `get_weave_agent_trace_tool` for the agent trace
    content itself.
 
 The Insights tools return identifiers and attribution, never message bodies.

@@ -45,6 +45,28 @@ advance independently. Use only immutable evidence recorded in the
 [release index](docs/releases/README.md); a version string or mutable container
 tag does not prove that another channel is available or qualified.
 
+## Explore Agent Lens through MCP
+
+Use this server to query data already recorded in Agent Lens. To start recording
+Claude Code, Codex, another harness, or an application, first follow the
+[Agent Lens integration guide](https://docs.coreweave.com/products/agent-lens/get-started/integrations?utm_source=github&utm_medium=referral&utm_campaign=agent-lens-integrations-2026q4&utm_content=wandb-mcp-readme).
+
+Check the tools advertised by your connection. Agent span tools expose
+conversations, turns, model calls, and tools. Insights and tag tools require the
+explicit Agent Lens profile described in [Agent Lens tools](docs/agent-lens-tools.md);
+managed dedicated deployments reject that profile. Source availability does not
+establish availability in a particular release channel; check the release index above.
+
+When the corresponding tools are advertised, try:
+
+- "In my-team/my-project, find conversations mentioning refunds and show one complete conversation."
+- "Check the Insights classification coverage before summarizing the most common failure categories. Include example turn IDs and the covered time range."
+- "List the available tags, then show a bounded sample of conversations for one tag."
+
+Open recorded conversations at `https://forge.coreweave.com/agent-lens/<entity>/<project>`.
+Connecting MCP does not install a tracing plugin or enable automatic capture of
+the coding agent's own sessions.
+
 ## What Can This Server Do?
 
 <details open>
@@ -154,7 +176,7 @@ Exact `target_x` remains a point lookup rather than an outer-union read. This
 path uses a fixed application-owned query-only projection, accepts no
 caller-supplied GraphQL, and is part of every supported managed tool profile.
 
-**Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
+**Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane shown in Agent Lens **Conversations**, which is separate from the classic Weave calls above:
 
 These tools are present in the explicit `models-weave-agents` and
 `models-weave-agents-aria` profiles, and are also retained in the hosted
