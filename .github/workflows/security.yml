@@ -55,7 +55,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
-          version: "0.11.27"
+          version: "0.13.4"
 
       - name: Set up Python 3.12
         run: uv python install 3.12
