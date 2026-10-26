@@ -248,6 +248,24 @@ async def test_docs_url_override_targets_configured_endpoint(upstream, monkeypat
     monkeypatch.setenv("DOCS_MCP_URL", "http://localhost:3000/mcp")
     assert await docs.search_wandb_docs("query") == "Short documentation."
     assert [str(request.url) for request in requests] == ["http://localhost:3000/mcp"]
+    assert json.loads(requests[0].content)["params"]["name"] == "search_weights_biases_documentation"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_url", [False, True])
+async def test_default_docs_uses_current_public_search_contract(upstream, monkeypatch, explicit_url):
+    if explicit_url:
+        monkeypatch.setenv("DOCS_MCP_URL", "https://docs.coreweave.com/mcp")
+    else:
+        monkeypatch.delenv("DOCS_MCP_URL", raising=False)
+    requests, _ = upstream()
+    assert await docs.search_wandb_docs("wandb.log metrics") == "Short documentation."
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://docs.coreweave.com/mcp"
+    assert json.loads(requests[0].content)["params"] == {
+        "name": "search_core_weave_docs",
+        "arguments": {"query": "wandb.log metrics"},
+    }
 
 
 @pytest.mark.asyncio
