@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing signed vX.Y.Z tag to qualify with the workflow revision on main"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -22,10 +28,13 @@ jobs:
     timeout-minutes: 20
     outputs:
       version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -37,25 +46,45 @@ jobs:
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          TAG_OBJECT="$(git rev-parse "refs/tags/$GITHUB_REF_NAME")"
+          TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          VERSION="${TAG#v}"
+          # actions/checkout re-fetches the tagged commit into refs/tags/<tag>,
+          # which flattens the annotated tag; restore the real tag object first.
+          git fetch --force --no-tags origin "+refs/tags/$TAG:refs/tags/$TAG"
+          TAG_OBJECT="$(git rev-parse "refs/tags/$TAG")"
           test "$(git cat-file -t "$TAG_OBJECT")" = "tag"
-          test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
-          test "$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$TAG_OBJECT" --jq '.verification.verified')" = "true"
+          SOURCE_SHA="$(git rev-list -n 1 "refs/tags/$TAG")"
+          test "$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')" = "tag $TAG_OBJECT"
+          test "$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$TAG_OBJECT" --jq '.object.sha + " " + (.verification.verified | tostring)')" = "$SOURCE_SHA true"
+          if [ -n "$INPUT_TAG" ]; then
+            # Manual runs qualify an existing tag with the reviewed workflow on main.
+            test "$GITHUB_REF" = "refs/heads/main"
+          else
+            test "$SOURCE_SHA" = "$GITHUB_SHA"
+          fi
+          git checkout --quiet --detach "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           git fetch --no-tags origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "source_sha=$SOURCE_SHA"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify approved current-head release PR
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
         run: |
           set -euo pipefail
           python3 scripts/public_release.py source-gate \
             --repository "$GITHUB_REPOSITORY" \
-            --sha "$GITHUB_SHA" \
+            --sha "$SOURCE_SHA" \
             --output "$RUNNER_TEMP/candidate-pr-evidence.json"
 
       - name: Qualify source and build isolated artifacts
@@ -100,6 +129,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ needs.build.outputs.source_sha }}
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
@@ -114,6 +144,7 @@ jobs:
       - name: Verify every exact public profile
         env:
           VERSION: ${{ needs.build.outputs.version }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
           WANDB_SILENT: "True"
           WEAVE_SILENT: "True"
         run: |
@@ -131,7 +162,7 @@ jobs:
             --server-command "$TEST_ENV/bin/wandb_mcp_server" \
             --contract release/public-contract.json \
             --all-profiles \
-            --source-sha "$GITHUB_SHA" \
+            --source-sha "$SOURCE_SHA" \
             --wheel "$WHEEL" \
             --evidence-out "$RUNNER_TEMP/profile-evidence-${{ matrix.python-version }}.json"
 
@@ -158,6 +189,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ needs.build.outputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -266,6 +298,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Provenance binds the workflow revision that ran ($GITHUB_SHA/$GITHUB_REF);
+          # the qualification predicate and build manifest bind the tagged source.
           SIGNER="$GITHUB_REPOSITORY/.github/workflows/release-source.yml"
           for artifact in "$RUNNER_TEMP/evidence"/*.whl "$RUNNER_TEMP/evidence"/*.tar.gz; do
             gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" \
@@ -286,6 +320,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
+          TAG: ${{ needs.build.outputs.tag }}
         run: |
           set -euo pipefail
           ASSETS=("$RUNNER_TEMP/evidence"/*.whl "$RUNNER_TEMP/evidence"/*.tar.gz)
@@ -295,11 +330,11 @@ jobs:
           ASSETS+=("$RUNNER_TEMP/evidence/public-release-predicate.json")
           ASSETS+=("$RUNNER_TEMP/evidence/build-manifest.json")
           ASSETS+=("$RUNNER_TEMP/evidence/candidate-pr-evidence.json")
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')" = "true"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            test "$(gh release view "$TAG" --json isDraft --jq '.isDraft')" = "true"
             ASSET_DIR="$RUNNER_TEMP/existing-release-assets"
             mkdir "$ASSET_DIR"
-            gh release download "$GITHUB_REF_NAME" --dir "$ASSET_DIR"
+            gh release download "$TAG" --dir "$ASSET_DIR"
             printf '%s\n' "${ASSETS[@]##*/}" | sort > "$RUNNER_TEMP/expected-assets.txt"
             find "$ASSET_DIR" -maxdepth 1 -type f -exec basename {} \; | sort > "$RUNNER_TEMP/actual-assets.txt"
             diff -u "$RUNNER_TEMP/expected-assets.txt" "$RUNNER_TEMP/actual-assets.txt"
@@ -309,7 +344,7 @@ jobs:
               test "$(sha256sum "$asset" | cut -d' ' -f1)" = "$(sha256sum "$existing" | cut -d' ' -f1)"
             done
           else
-            gh release create "$GITHUB_REF_NAME" "${ASSETS[@]}" \
+            gh release create "$TAG" "${ASSETS[@]}" \
               --verify-tag \
               --draft \
               --title "W&B MCP Server v$VERSION" \

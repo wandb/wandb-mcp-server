@@ -321,11 +321,20 @@ def test_attestation_rejects_obsolete_profile_evidence_schema(monkeypatch, tmp_p
         )
 
 
-def test_source_release_workflow_is_tag_only_pinned_and_draft():
+def test_source_release_workflow_is_tag_bound_pinned_and_draft():
     workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "release-source.yml").read_text()
 
-    assert "workflow_dispatch" not in workflow
     assert 'tags:\n      - "v*.*.*"' in workflow
+    assert "workflow_dispatch:\n    inputs:\n      tag:" in workflow
+    assert 'git fetch --force --no-tags origin "+refs/tags/$TAG:refs/tags/$TAG"' in workflow
+    assert 'test "$(git cat-file -t "$TAG_OBJECT")" = "tag"' in workflow
+    assert '"$SOURCE_SHA true"' in workflow
+    assert 'test "$GITHUB_REF" = "refs/heads/main"' in workflow
+    assert 'git merge-base --is-ancestor "$SOURCE_SHA" origin/main' in workflow
+    assert '--sha "$SOURCE_SHA"' in workflow
+    assert '--source-sha "$SOURCE_SHA"' in workflow
+    assert workflow.count("ref: ${{ needs.build.outputs.source_sha }}") == 2
+    assert "$GITHUB_REF_NAME" not in workflow.split("- name: Verify approved current-head release PR")[1]
     assert "--tag-verification github" in workflow
     assert "--draft" in workflow
     assert "--verify-tag" in workflow

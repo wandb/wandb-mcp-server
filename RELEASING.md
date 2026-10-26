@@ -130,6 +130,15 @@ uv run --no-sync python scripts/public_release.py \
   preflight --version "$VERSION" --gate source-released
 ```
 
+A tag push runs the workflow file at the tagged commit. If that revision's
+workflow cannot complete, fix the workflow on `main` through review and run
+`Public source release` manually from `main` with the `tag` input. The manual
+run re-verifies the same signed tag, qualifies and builds the tag's tree, and
+binds its evidence to the tag commit; never move or recreate the tag. In a
+manual run the SLSA provenance `source-ref` is `main` (the workflow revision
+that ran), while the qualification predicate and build manifest bind the
+tagged commit and tree.
+
 This completes source qualification only. It does not deploy the artifact or
 establish that a particular installation is running it.
 
