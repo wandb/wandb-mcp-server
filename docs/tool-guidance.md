@@ -598,6 +598,13 @@ models-weave-graphql-compat profile and call query_wandb_graphql_tool.
 
 Retrieve bounded time-series metric data from a W&B run.
 
+Managed workloads require explicit metric keys. For a step range, provide both
+`min_step` and `max_step`; omit both for an overview. Invalid requests return
+`invalid_input` with a server-authored `message`, the public `field` when known,
+and `retryable: false`. Correct the request before retrying. Key and range limits
+are unchanged; validation messages state the configured limit. Upstream failures
+still return a generic `history_query_failed` without private exception text.
+
 Use bounded independent-series sampling for explicit multi-key default-history
 overviews and ranges, SDK scans for single-key ranges, and an exact point lookup
 for a logged x-axis value. Every successful response states the
