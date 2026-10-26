@@ -1,4 +1,4 @@
-"""Bounded proxy search against the W&B docs MCP (docs.wandb.ai or DOCS_MCP_URL)."""
+"""Bounded W&B documentation search through docs.coreweave.com or DOCS_MCP_URL."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ _TRUNCATION_NOTICE = "\n\n[Documentation truncated to the response limit.]"
 SEARCH_WANDB_DOCS_TOOL_DESCRIPTION = """Search official W&B documentation for API usage, code examples, and guides.
 
 <when_to_use>
-Call when you need to know HOW to use a W&B/Weave feature or API. Searches docs.wandb.ai.
+Call when you need to know HOW to use a W&B/Weave feature or API. Searches W&B content on docs.coreweave.com.
 </when_to_use>
 
 Parameters
@@ -136,6 +136,8 @@ def _retry_after_ms(value: str | None) -> int:
 
 async def _request_docs(query: str, deadline: float, url: str) -> str:
     byte_limit = min(MAX_DOCS_RESPONSE_BYTES, MAX_ACCUMULATED_BYTES)
+    # Keep the documented legacy tool contract for self-hosted URL overrides.
+    tool_name = "search_core_weave_docs" if url == DEFAULT_DOCS_MCP_URL else "search_weights_biases_documentation"
     async with httpx.AsyncClient(follow_redirects=False, timeout=max(0.001, deadline - time.monotonic())) as client:
         async with client.stream(
             "POST",
@@ -143,7 +145,7 @@ async def _request_docs(query: str, deadline: float, url: str) -> str:
             json={
                 "jsonrpc": "2.0",
                 "method": "tools/call",
-                "params": {"name": "search_weights_biases_documentation", "arguments": {"query": query}},
+                "params": {"name": tool_name, "arguments": {"query": query}},
                 "id": 1,
             },
             headers={
