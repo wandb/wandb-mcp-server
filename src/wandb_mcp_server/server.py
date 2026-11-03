@@ -21,12 +21,12 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Callable, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Union
 
 import wandb
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import PositiveInt, StrictInt
+from pydantic import Field, PositiveInt, StrictInt
 
 from wandb_mcp_server.config import (
     MCP_COUNT_TOOL_WORKERS,
@@ -1142,10 +1142,16 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         entity_name: str,
         project_name: str,
         run_id: str,
-        keys: Optional[List[str]] = None,
+        keys: Annotated[
+            Optional[List[str]], Field(description="Explicit metric keys; required in managed workloads.")
+        ] = None,
         samples: int = 500,
-        min_step: Optional[int] = None,
-        max_step: Optional[int] = None,
+        min_step: Annotated[
+            Optional[int], Field(description="Inclusive non-negative lower step; managed ranges require max_step too.")
+        ] = None,
+        max_step: Annotated[
+            Optional[int], Field(description="Inclusive non-negative upper step; managed ranges require min_step too.")
+        ] = None,
         x_axis: str = "_step",
         target_x: Optional[float] = None,
         tolerance: Optional[float] = None,
@@ -1168,9 +1174,20 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             )
         except Exception as e:
             from wandb_mcp_server.api_client import raise_for_wandb_server_busy
-            from wandb_mcp_server.error_diagnostics import record_exception_diagnostics
+            from wandb_mcp_server.error_diagnostics import ToolInputValidationError, record_exception_diagnostics
 
             record_exception_diagnostics(e)
+            if isinstance(e, ToolInputValidationError):
+                # History validators use server-authored messages and public
+                # field names, never argument values or upstream error text.
+                return json.dumps(
+                    {
+                        "error": "invalid_input",
+                        "message": str(e),
+                        "field": e.diagnostic_field,
+                        "retryable": False,
+                    }
+                )
             raise_for_wandb_server_busy(e)
             return json.dumps(
                 {

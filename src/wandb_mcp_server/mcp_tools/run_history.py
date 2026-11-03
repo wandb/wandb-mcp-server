@@ -61,6 +61,8 @@ Inputs:
   require explicit keys (default cap 20; Dedicated cap 50).
 - samples: total merged-row budget across keys; default 500.
 - min_step/max_step: inclusive non-negative bounds; default stream only.
+  Managed workloads require both bounds for ranges. Omit both for an overview.
+  Ranges and key counts have deployment limits; invalid_input reports the limit.
 - x_axis: default "_step"; use a logged monotonic metric for custom projection.
   Custom-axis collection reads require axis and metric on the same row.
 - target_x: exact logged x_axis value, default stream only. If absent, returns
@@ -85,6 +87,8 @@ Returns JSON:
 - source_values_truncated: oversized source values replaced by bounded sentinels.
 Every successful response states sampling/exactness, coverage, and truncation;
 do not present bounded or sampled results as exhaustive.
+Invalid inputs return invalid_input with a message and field to correct. Change
+the request before retrying; retrying the same invalid request will not help.
 
 Differences from the raw SDK:
 - Multi-key reads are outer-unioned by step; the SDK's history(keys=) is an AND
