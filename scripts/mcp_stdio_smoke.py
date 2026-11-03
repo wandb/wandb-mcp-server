@@ -81,7 +81,7 @@ _AGENT_TOOL_NAMES = {
     "get_weave_agent_trace_tool",
     "get_weave_agent_conversation_tool",
 }
-_ARIA_TOOL_NAMES = {"aria_send_message", "aria_get_turn", "aria_get_turns"}
+_ARIA_TOOL_NAMES = {"aria_send_message", "aria_get_turn", "aria_list_threads", "aria_get_thread"}
 _WHEEL_RUNTIME_CONTRACT = "wandb_mcp_server/runtime-contract.json"
 
 

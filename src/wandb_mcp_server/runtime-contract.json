@@ -331,13 +331,19 @@
       ],
       "tools": [
         {
+          "name": "aria_get_thread",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "aria-https-origin"
+        },
+        {
           "name": "aria_get_turn",
           "access": "read",
           "risk": "credential-forwarding",
           "prerequisite": "aria-https-origin"
         },
         {
-          "name": "aria_get_turns",
+          "name": "aria_list_threads",
           "access": "read",
           "risk": "credential-forwarding",
           "prerequisite": "aria-https-origin"

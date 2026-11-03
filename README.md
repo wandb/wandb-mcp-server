@@ -86,7 +86,8 @@ tag does not prove that another channel is available or qualified.
 | **list_wandb_integrations_tool** | List registered integrations for W&B automations (e.g. Slack, webhook) | *"Which Slack channels can my automations target?"* |
 | **aria_send_message** *(opt-in)* | Start or continue async work with the hosted W&B agent | *"Ask ARIA to diagnose these failed evals"* |
 | **aria_get_turn** *(opt-in)* | Poll an ARIA turn for progress or its final result | *"Check whether that ARIA analysis finished"* |
-| **aria_get_turns** *(opt-in)* | Poll up to 20 ARIA turns concurrently | *"Check all of those ARIA analyses in one bounded wait"* |
+| **aria_list_threads** *(opt-in)* | Find earlier ARIA conversations, filtered by entity/project | *"Find my ARIA conversation about the eval regressions"* |
+| **aria_get_thread** *(opt-in)* | View an ARIA thread and its turns, newest first | *"What did I ask ARIA in that thread?"* |
 
 **Read-only deployment mode:** Set `WANDB_MCP_ACCESS_MODE=read-only` to omit every tool
 classified as a write, including `create_wandb_report_tool`,
@@ -200,10 +201,10 @@ without outbound downloads or a writable tokenizer cache.
 legacy `models-weave-agents-aria` name still resolves to the same selection) and
 configure `WB_AGENT_BASE_URL` to an approved absolute HTTPS origin. Endpoint
 presence alone never enables the tools. `WANDB_MCP_ACCESS_MODE=read-only` omits
-`aria_send_message` while retaining the two polling tools. The `aria` extension
+`aria_send_message` while retaining the three read tools. The `aria` extension
 is allowed on the W&B-hosted `shared` workload (since v0.4.4); Dedicated rejects it.
 
-**ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
+**ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. To revisit an earlier conversation, `aria_list_threads` finds threads and `aria_get_thread` lists a thread's turns; read a turn's answer with `aria_get_turn` and continue with `aria_send_message(parent_turn_id=...)`. MCP-created turns are tagged with a `wandb_client` prompt part (`platform: "agent"`) and every request sends `X-Wandb-Client: wandb-mcp-server/<version>`, so ARIA can separate MCP traffic from UI usage. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
 
 **Agent Lens is explicit and hosted-only in managed deployments (since v0.4.2):** W&B-hosted
 deployments add the `agent-lens` extension to `models-weave-agents` (legacy name
@@ -714,7 +715,7 @@ Exact tool profiles:
 | Extension (`WANDB_MCP_TOOL_EXTENSIONS`) | Requires | Managed workloads | Tools |
 |---|---|---|---:|
 | `agent-lens` | weave, agents | shared | 9 |
-| `aria` | weave, agents | shared | 3 |
+| `aria` | weave, agents | shared | 4 |
 | `raw-graphql` | weave | local only | 1 |
 
 | Resolved profile | Base | Extensions | Managed workloads | Read-write | Read-only |
@@ -724,12 +725,12 @@ Exact tool profiles:
 | `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 23 | 21 |
 | `models-weave-agents` | `models-weave-agents` | none | shared | 30 | 28 |
 | `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 39 | 37 |
-| `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 33 | 30 |
+| `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 34 | 31 |
 | `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 31 | 29 |
-| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 42 | 39 |
+| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 43 | 40 |
 | `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 40 | 38 |
-| `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 34 | 31 |
-| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 43 | 40 |
+| `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 35 | 32 |
+| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 44 | 41 |
 
 Exact workload defaults:
 
@@ -747,7 +748,7 @@ Exact capacity classes:
 | `medium` | 4 | 8 | 8 | 8 |
 | `large` | 8 | 16 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:d59988fada28b405802e34f97dafcf38e087568e23e5e75eb7a97b1267855f84`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:fa8b0ba1128ccb28cd5fe885e46847a5f3f8eda7bf14db327db4356d68978867`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line
