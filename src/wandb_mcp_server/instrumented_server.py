@@ -66,7 +66,8 @@ _NON_IDEMPOTENT_WRITE_TOOLS = frozenset(
 _ARIA_TOOL_COSTS = {
     "aria_send_message": ("heavy", 4),
     "aria_get_turn": ("light", 1),
-    "aria_get_turns": ("heavy", 4),
+    "aria_list_threads": ("light", 1),
+    "aria_get_thread": ("light", 1),
 }
 _TELEMETRY_RESULT_ERROR_CODES = frozenset(
     {

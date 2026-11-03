@@ -43,8 +43,9 @@ from wandb_mcp_server.mcp_tools.agents import (
     GET_AGENT_CONVERSATION_TOOL_DESCRIPTION,
 )
 from wandb_mcp_server.mcp_tools.aria import (
+    ARIA_GET_THREAD_TOOL_DESCRIPTION,
     ARIA_GET_TURN_TOOL_DESCRIPTION,
-    ARIA_GET_TURNS_TOOL_DESCRIPTION,
+    ARIA_LIST_THREADS_TOOL_DESCRIPTION,
     ARIA_SEND_MESSAGE_TOOL_DESCRIPTION,
 )
 
@@ -74,7 +75,8 @@ ALL_DESCRIPTIONS = {
     "get_agent_conversation": GET_AGENT_CONVERSATION_TOOL_DESCRIPTION,
     "aria_send_message": ARIA_SEND_MESSAGE_TOOL_DESCRIPTION,
     "aria_get_turn": ARIA_GET_TURN_TOOL_DESCRIPTION,
-    "aria_get_turns": ARIA_GET_TURNS_TOOL_DESCRIPTION,
+    "aria_list_threads": ARIA_LIST_THREADS_TOOL_DESCRIPTION,
+    "aria_get_thread": ARIA_GET_THREAD_TOOL_DESCRIPTION,
 }
 
 DESCRIPTION_LIMIT = 4_000

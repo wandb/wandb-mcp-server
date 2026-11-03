@@ -58,11 +58,13 @@ from wandb_mcp_server.mcp_tools.automations import (
     list_integrations,
 )
 from wandb_mcp_server.mcp_tools.aria import (
+    ARIA_GET_THREAD_TOOL_DESCRIPTION,
     ARIA_GET_TURN_TOOL_DESCRIPTION,
-    ARIA_GET_TURNS_TOOL_DESCRIPTION,
+    ARIA_LIST_THREADS_TOOL_DESCRIPTION,
     ARIA_SEND_MESSAGE_TOOL_DESCRIPTION,
+    get_aria_thread,
     get_aria_turn,
-    get_aria_turns,
+    list_aria_threads,
     normalize_aria_json_value,
     send_aria_message,
 )
@@ -624,7 +626,8 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     - get_weave_agent_conversation_tool: Multi-turn chat view for a conversation
     - aria_send_message: Start or continue an asynchronous ARIA conversation
     - aria_get_turn: Poll an ARIA turn and retrieve its current result
-    - aria_get_turns: Poll several ARIA turns concurrently
+    - aria_list_threads: Find earlier ARIA conversation threads
+    - aria_get_thread: View an ARIA thread and its turns
 
     Args:
         mcp_instance: The FastMCP instance to register tools on
@@ -1457,19 +1460,24 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                 )
             )
 
-        @register_tool(description=ARIA_GET_TURNS_TOOL_DESCRIPTION)
-        async def aria_get_turns(
-            turn_ids: List[str],
-            wait_seconds: int = 0,
-            include_turn: bool = False,
+        @register_tool(description=ARIA_LIST_THREADS_TOOL_DESCRIPTION)
+        async def aria_list_threads(
+            entity: Optional[str] = None,
+            project: Optional[str] = None,
+            limit: int = 20,
+            offset: int = 0,
         ) -> Dict[str, Any]:
             return _aria_result_or_tool_error(
-                await get_aria_turns(
-                    turn_ids=turn_ids,
-                    wait_seconds=wait_seconds,
-                    include_turn=include_turn,
-                )
+                await list_aria_threads(entity=entity, project=project, limit=limit, offset=offset)
             )
+
+        @register_tool(description=ARIA_GET_THREAD_TOOL_DESCRIPTION)
+        async def aria_get_thread(
+            thread_id: str,
+            limit: int = 20,
+            offset: int = 0,
+        ) -> Dict[str, Any]:
+            return _aria_result_or_tool_error(await get_aria_thread(thread_id=thread_id, limit=limit, offset=offset))
 
     missing = selection.tools - registered_tools
     unexpected = registered_tools - selection.tools
