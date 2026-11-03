@@ -190,7 +190,7 @@ def resolve_agent_lens_base_url(fallback: str | None = None) -> str:
 # install). No credential is forwarded, so plain HTTP is allowed for local hosts.
 # The name deliberately avoids the WANDB_/MCP_ prefixes that the operator-wandb
 # chart reserves, so in-cluster installs can set it via mcp-server.env.
-DEFAULT_DOCS_MCP_URL = "https://docs.wandb.ai/mcp"
+DEFAULT_DOCS_MCP_URL = "https://docs.coreweave.com/mcp"
 
 
 def validate_docs_mcp_url(value: str) -> str:
