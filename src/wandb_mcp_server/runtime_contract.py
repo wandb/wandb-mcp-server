@@ -10,10 +10,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+from itertools import combinations
 from importlib.resources import files
 import json
 import os
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
 
@@ -68,6 +69,8 @@ class RuntimeSelection:
     tools: frozenset[str]
     groups: frozenset[str]
     runtime_contract_sha256: str
+    extensions: frozenset[str] = frozenset()
+    base_profile: str = ""
 
     @property
     def read_only(self) -> bool:
@@ -107,21 +110,120 @@ def _tool_index(contract: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     return tools
 
 
+@dataclass(frozen=True)
+class ProfileResolution:
+    """One base profile plus a validated extension set and its canonical name."""
+
+    name: str
+    base_profile: str
+    extensions: tuple[str, ...]
+    groups: tuple[str, ...]
+
+    @property
+    def managed_workloads(self) -> tuple[str, ...]:
+        return ()
+
+
+def parse_tool_extensions(raw: str | None) -> tuple[str, ...]:
+    """Parse the comma-separated extension selector into a sorted, unique tuple."""
+    if raw is None:
+        return ()
+    names = [part.strip() for part in raw.split(",")]
+    names = [name for name in names if name]
+    if len(names) != len(set(names)):
+        raise ValueError("WANDB_MCP_TOOL_EXTENSIONS repeats an extension")
+    return tuple(sorted(names))
+
+
+def _profile_name(contract: Mapping[str, Any], base_profile: str, extensions: tuple[str, ...]) -> str:
+    for alias, definition in contract.get("tool_profile_aliases", {}).items():
+        if definition["base"] == base_profile and tuple(sorted(definition["extensions"])) == extensions:
+            return alias
+    return "-".join((base_profile, *extensions)) if extensions else base_profile
+
+
+def resolve_tool_profile(
+    contract: Mapping[str, Any],
+    tool_profile: str,
+    extensions: tuple[str, ...] | str | None = (),
+) -> ProfileResolution:
+    """Resolve a base profile or alias plus extensions into one exact group set."""
+    requested = (
+        parse_tool_extensions(extensions)
+        if isinstance(extensions, str) or extensions is None
+        else tuple(sorted(extensions))
+    )
+    aliases = contract.get("tool_profile_aliases", {})
+    if tool_profile in contract["tool_profiles"]:
+        base_profile = tool_profile
+        alias_extensions: tuple[str, ...] = ()
+    elif tool_profile in aliases:
+        base_profile = aliases[tool_profile]["base"]
+        alias_extensions = tuple(sorted(aliases[tool_profile]["extensions"]))
+    else:
+        canonical = {
+            resolution.name: resolution for resolution in profile_combinations(contract) if resolution.extensions
+        }
+        if tool_profile not in canonical:
+            raise ValueError(f"Unknown WANDB_MCP_TOOL_PROFILE: {tool_profile}")
+        base_profile = canonical[tool_profile].base_profile
+        alias_extensions = canonical[tool_profile].extensions
+    extension_set = tuple(sorted(set(alias_extensions) | set(requested)))
+    groups_by_name = contract["tool_groups"]
+    for name in extension_set:
+        if name not in groups_by_name or groups_by_name[name]["kind"] != "extension":
+            raise ValueError(f"Unknown WANDB_MCP_TOOL_EXTENSIONS entry: {name}")
+    groups = list(contract["tool_profiles"][base_profile]["groups"])
+    for name in extension_set:
+        missing = [required for required in groups_by_name[name]["requires"] if required not in groups]
+        if missing:
+            raise ValueError(
+                f"Tool extension {name} requires the {', '.join(missing)} group(s); choose a base profile that includes them"
+            )
+    groups.extend(extension_set)
+    return ProfileResolution(
+        name=_profile_name(contract, base_profile, extension_set),
+        base_profile=base_profile,
+        extensions=extension_set,
+        groups=tuple(groups),
+    )
+
+
+def profile_combinations(contract: Mapping[str, Any]) -> tuple[ProfileResolution, ...]:
+    """Enumerate every reviewable base profile and valid extension subset."""
+    extensions = sorted(name for name, group in contract["tool_groups"].items() if group["kind"] == "extension")
+    results: list[ProfileResolution] = []
+    for base_profile in contract["tool_profiles"]:
+        for size in range(len(extensions) + 1):
+            for subset in combinations(extensions, size):
+                try:
+                    results.append(resolve_tool_profile(contract, base_profile, subset))
+                except ValueError:
+                    continue
+    return tuple(results)
+
+
+def managed_workloads_for(contract: Mapping[str, Any], groups: Iterable[str]) -> tuple[str, ...]:
+    """Managed workloads allowed for a group set: every group must allow it."""
+    allowed = {"shared", "dedicated"}
+    for name in groups:
+        allowed &= set(contract["tool_groups"][name]["managed_workloads"])
+    return tuple(sorted(allowed))
+
+
 def tools_for_profile(
     contract: Mapping[str, Any],
     tool_profile: str,
     access_mode: str,
+    extensions: tuple[str, ...] | str | None = (),
 ) -> frozenset[str]:
     """Resolve one exact tools/list manifest from the canonical contract."""
-    try:
-        profile = contract["tool_profiles"][tool_profile]
-    except KeyError as error:
-        raise ValueError(f"Unknown WANDB_MCP_TOOL_PROFILE: {tool_profile}") from error
+    resolution = resolve_tool_profile(contract, tool_profile, extensions)
     if access_mode not in contract["selectors"]["access_mode"]["values"]:
         raise ValueError("WANDB_MCP_ACCESS_MODE must be read-write or read-only")
 
     tools: set[str] = set()
-    for group_name in profile["groups"]:
+    for group_name in resolution.groups:
         tools.update(tool["name"] for tool in contract["tool_groups"][group_name]["tools"])
     if access_mode == "read-only":
         write_tools = {name for name, metadata in _tool_index(contract).items() if metadata["access"] == "write"}
@@ -136,12 +238,13 @@ def validate_runtime_contract(contract: Mapping[str, Any]) -> None:
     if contract.get("schema_version") != 1 or contract.get("package") != "wandb_mcp_server":
         raise ValueError("Unsupported MCP runtime contract")
     selectors = contract.get("selectors")
-    required_selectors = {"tool_profile", "access_mode", "workload_profile", "capacity_class"}
+    required_selectors = {"tool_profile", "tool_extensions", "access_mode", "workload_profile", "capacity_class"}
     if not isinstance(selectors, dict) or set(selectors) != required_selectors:
         raise ValueError("Runtime contract selectors are incomplete")
 
     expected_selector_environments = {
         "tool_profile": "WANDB_MCP_TOOL_PROFILE",
+        "tool_extensions": "WANDB_MCP_TOOL_EXTENSIONS",
         "access_mode": "WANDB_MCP_ACCESS_MODE",
         "workload_profile": "MCP_WORKLOAD_PROFILE",
         "capacity_class": "MCP_CAPACITY_CLASS",
@@ -172,10 +275,27 @@ def validate_runtime_contract(contract: Mapping[str, Any]) -> None:
     allowed_risks = {"read", "write", "credential-forwarding", "non-idempotent-credential-forwarding", "compatibility"}
     allowed_prerequisites = {"none", "wandb", "trace-backend", "aria-https-origin", "agent-lens-https-origin"}
     for group_name, group in groups.items():
+        if not isinstance(group, dict) or set(group) != {"kind", "requires", "managed_workloads", "tools"}:
+            raise ValueError(f"Runtime tool group metadata is incomplete: {group_name}")
+        if group["kind"] not in {"base", "extension"}:
+            raise ValueError(f"Runtime tool group kind is invalid: {group_name}")
+        if (
+            not isinstance(group["requires"], list)
+            or not all(name in groups and groups[name].get("kind") == "base" for name in group["requires"])
+            or (group["kind"] == "base" and group["requires"])
+        ):
+            raise ValueError(f"Runtime tool group requirements are invalid: {group_name}")
+        managed_workloads = group["managed_workloads"]
+        if (
+            not isinstance(managed_workloads, list)
+            or not all(isinstance(workload, str) for workload in managed_workloads)
+            or not set(managed_workloads) <= {"shared", "dedicated"}
+        ):
+            raise ValueError(f"Managed workload allowlist is invalid: {group_name}")
         if not isinstance(group_name, str) or not isinstance(group, dict):
             raise ValueError("Every runtime tool group must be non-empty")
         group_tools = group.get("tools")
-        if set(group) != {"tools"} or not isinstance(group_tools, list) or not group_tools:
+        if not isinstance(group_tools, list) or not group_tools:
             raise ValueError("Every runtime tool group must be non-empty")
         for tool in group_tools:
             if not isinstance(tool, dict):
@@ -199,65 +319,47 @@ def validate_runtime_contract(contract: Mapping[str, Any]) -> None:
     _tool_index(contract)
 
     access_modes = selectors["access_mode"]["values"]
-    expected_profiles = {
-        "models-only",
-        "models-weave",
-        "models-weave-agents",
-        "models-weave-agents-aria",
-        "models-weave-graphql-compat",
-        "models-weave-agents-agent-lens",
-    }
-    if set(profiles) != expected_profiles:
-        raise ValueError("Runtime contract tool profiles are incomplete")
-    expected_profile_groups = {
-        "models-only": ["models"],
-        "models-weave": ["models", "weave"],
-        "models-weave-agents": ["models", "weave", "agents"],
-        "models-weave-agents-aria": ["models", "weave", "agents", "aria"],
-        "models-weave-graphql-compat": ["models", "weave", "raw-graphql"],
-        "models-weave-agents-agent-lens": ["models", "weave", "agents", "agent-lens"],
-    }
-    expected_managed_workloads = {
-        "models-only": ["shared", "dedicated"],
-        "models-weave": ["shared", "dedicated"],
-        "models-weave-agents": ["shared"],
-        "models-weave-agents-aria": [],
-        "models-weave-graphql-compat": [],
-        "models-weave-agents-agent-lens": ["shared"],
-    }
+    base_groups = {name for name, group in groups.items() if group["kind"] == "base"}
+    if set(profiles) != {"models-only", "models-weave", "models-weave-agents"}:
+        raise ValueError("Runtime contract base profiles do not match the reviewed contract")
     for profile_name, profile in profiles.items():
-        if not isinstance(profile, dict):
-            raise ValueError(f"Tool profile metadata is incomplete: {profile_name}")
-        if set(profile) != {"groups", "managed_workloads", "expected_tools"}:
+        if not isinstance(profile, dict) or set(profile) != {"groups"}:
             raise ValueError(f"Tool profile metadata is incomplete: {profile_name}")
         profile_groups = profile.get("groups")
         if (
             not isinstance(profile_groups, list)
             or not profile_groups
             or not all(isinstance(group, str) for group in profile_groups)
-            or not set(profile_groups) <= set(groups)
+            or not set(profile_groups) <= base_groups
+            or len(profile_groups) != len(set(profile_groups))
+            or profile_groups[0] != "models"
         ):
             raise ValueError(f"Tool profile groups are invalid: {profile_name}")
-        if len(profile_groups) != len(set(profile_groups)):
-            raise ValueError(f"Tool profile repeats a group: {profile_name}")
-        if profile_groups != expected_profile_groups[profile_name]:
-            raise ValueError(f"Tool profile groups do not match the reviewed contract: {profile_name}")
-        managed = profile.get("managed_workloads")
+    aliases = contract.get("tool_profile_aliases")
+    if not isinstance(aliases, dict):
+        raise ValueError("Runtime contract profile aliases are invalid")
+    for alias, definition in aliases.items():
         if (
-            not isinstance(managed, list)
-            or not all(isinstance(workload, str) for workload in managed)
-            or not set(managed) <= {"shared", "dedicated"}
+            not isinstance(alias, str)
+            or alias in profiles
+            or not isinstance(definition, dict)
+            or set(definition) != {"base", "extensions"}
+            or definition["base"] not in profiles
+            or not isinstance(definition["extensions"], list)
+            or not definition["extensions"]
+            or not all(name in groups and groups[name]["kind"] == "extension" for name in definition["extensions"])
+            or len(definition["extensions"]) != len(set(definition["extensions"]))
         ):
-            raise ValueError(f"Managed workload allowlist is invalid: {profile_name}")
-        if managed != expected_managed_workloads[profile_name]:
-            raise ValueError(f"Managed workload allowlist does not match the reviewed contract: {profile_name}")
-        expected = profile.get("expected_tools")
-        if not isinstance(expected, dict) or set(expected) != set(access_modes):
-            raise ValueError(f"Tool profile counts are incomplete: {profile_name}")
+            raise ValueError(f"Tool profile alias is invalid: {alias}")
+    seen: dict[str, str] = {}
+    for resolution in profile_combinations(contract):
+        if resolution.name in seen:
+            raise ValueError(f"Tool profile name is ambiguous: {resolution.name}")
+        seen[resolution.name] = resolution.base_profile
         for access_mode in access_modes:
-            actual = len(tools_for_profile(contract, profile_name, access_mode))
-            if expected[access_mode] != actual:
-                raise ValueError(f"Tool profile count mismatch: {profile_name}/{access_mode}")
+            tools_for_profile(contract, resolution.base_profile, access_mode, resolution.extensions)
+    for alias in aliases:
+        resolve_tool_profile(contract, alias)
 
     legacy = contract.get("legacy_tool_environment_variables")
     if (
@@ -393,21 +495,30 @@ def resolve_runtime_selection(environment: Mapping[str, str] | None = None) -> R
             raise ValueError(f"{definition['environment']} must be one of: {allowed}")
         return value
 
-    tool_profile = selected("tool_profile")
+    requested_profile = selected("tool_profile")
     access_mode = selected("access_mode")
     workload_profile = selected("workload_profile")
     capacity_class = selected("capacity_class")
-    if tool_profile not in contract["tool_profiles"]:
-        raise ValueError(f"Unknown WANDB_MCP_TOOL_PROFILE: {tool_profile}")
+    raw_extensions = env.get(selectors["tool_extensions"]["environment"], selectors["tool_extensions"]["default"])
+    resolution = resolve_tool_profile(
+        contract, requested_profile, raw_extensions if isinstance(raw_extensions, str) else ""
+    )
+    tool_profile = resolution.name
 
     managed = contract["workload_profiles"][workload_profile]["managed"]
-    allowed = contract["tool_profiles"][tool_profile]["managed_workloads"]
+    allowed = managed_workloads_for(contract, resolution.groups)
     if managed and workload_profile not in allowed:
+        blocked = [
+            name
+            for name in resolution.groups
+            if workload_profile not in contract["tool_groups"][name]["managed_workloads"]
+        ]
         raise ValueError(
             f"WANDB_MCP_TOOL_PROFILE={tool_profile} is not allowed with managed {workload_profile} workload"
+            f" (group(s) not allowed: {', '.join(blocked)})"
         )
 
-    groups = frozenset(contract["tool_profiles"][tool_profile]["groups"])
+    groups = frozenset(resolution.groups)
     if groups & {"weave", "agents"}:
         _validate_trace_backend_prerequisite(env, workload_profile)
     if "agent-lens" in groups:
@@ -433,7 +544,7 @@ def resolve_runtime_selection(environment: Mapping[str, str] | None = None) -> R
             if response_budget_value < 64:
                 raise ValueError("MAX_RESPONSE_TOKENS must be at least 64 for the ARIA tool profile")
 
-    tools = tools_for_profile(contract, tool_profile, access_mode)
+    tools = tools_for_profile(contract, resolution.base_profile, access_mode, resolution.extensions)
     return RuntimeSelection(
         tool_profile=tool_profile,
         access_mode=access_mode,
@@ -442,6 +553,8 @@ def resolve_runtime_selection(environment: Mapping[str, str] | None = None) -> R
         tools=tools,
         groups=groups,
         runtime_contract_sha256=runtime_contract_sha256(contract),
+        extensions=frozenset(resolution.extensions),
+        base_profile=resolution.base_profile,
     )
 
 

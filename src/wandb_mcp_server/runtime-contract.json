@@ -31,6 +31,10 @@
         "medium",
         "large"
       ]
+    },
+    "tool_extensions": {
+      "environment": "WANDB_MCP_TOOL_EXTENSIONS",
+      "default": ""
     }
   },
   "legacy_tool_environment_variables": [
@@ -42,103 +46,364 @@
   ],
   "tool_groups": {
     "models": {
+      "kind": "base",
+      "requires": [],
+      "managed_workloads": [
+        "shared",
+        "dedicated"
+      ],
       "tools": [
-        {"name": "compare_artifact_versions_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "compare_runs_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "create_wandb_report_tool", "access": "write", "risk": "write", "prerequisite": "wandb"},
-        {"name": "diagnose_run_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "get_artifact_details_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "get_run_history_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "list_artifact_versions_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "list_entities_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "list_registries_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "list_registry_collections_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "list_wandb_automations_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "list_wandb_integrations_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "log_analysis_to_wandb", "access": "write", "risk": "write", "prerequisite": "wandb"},
-        {"name": "probe_project_tool", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "query_wandb_entity_projects", "access": "read", "risk": "read", "prerequisite": "wandb"},
-        {"name": "query_wandb_tool", "access": "read", "risk": "compatibility", "prerequisite": "wandb"},
-        {"name": "search_wandb_docs_tool", "access": "read", "risk": "read", "prerequisite": "none"}
+        {
+          "name": "compare_artifact_versions_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "compare_runs_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "create_wandb_report_tool",
+          "access": "write",
+          "risk": "write",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "diagnose_run_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "get_artifact_details_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "get_run_history_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "list_artifact_versions_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "list_entities_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "list_registries_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "list_registry_collections_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "list_wandb_automations_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "list_wandb_integrations_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "log_analysis_to_wandb",
+          "access": "write",
+          "risk": "write",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "probe_project_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "query_wandb_entity_projects",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "query_wandb_tool",
+          "access": "read",
+          "risk": "compatibility",
+          "prerequisite": "wandb"
+        },
+        {
+          "name": "search_wandb_docs_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "none"
+        }
       ]
     },
     "weave": {
+      "kind": "base",
+      "requires": [],
+      "managed_workloads": [
+        "shared",
+        "dedicated"
+      ],
       "tools": [
-        {"name": "count_weave_traces_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
-        {"name": "infer_trace_schema_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
-        {"name": "query_weave_traces_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
-        {"name": "resolve_trace_roots_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
-        {"name": "summarize_evaluation_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"}
+        {
+          "name": "count_weave_traces_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        },
+        {
+          "name": "infer_trace_schema_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        },
+        {
+          "name": "query_weave_traces_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        },
+        {
+          "name": "resolve_trace_roots_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        },
+        {
+          "name": "summarize_evaluation_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        }
       ]
     },
     "agents": {
+      "kind": "base",
+      "requires": [],
+      "managed_workloads": [
+        "shared"
+      ],
       "tools": [
-        {"name": "get_weave_agent_conversation_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
-        {"name": "get_weave_agent_span_stats_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
-        {"name": "get_weave_agent_trace_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
-        {"name": "list_weave_agent_custom_attributes_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
-        {"name": "list_weave_agent_versions_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
-        {"name": "list_weave_agents_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
-        {"name": "query_weave_agent_spans_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"},
-        {"name": "search_weave_agents_tool", "access": "read", "risk": "read", "prerequisite": "trace-backend"}
+        {
+          "name": "get_weave_agent_conversation_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        },
+        {
+          "name": "get_weave_agent_span_stats_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        },
+        {
+          "name": "get_weave_agent_trace_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        },
+        {
+          "name": "list_weave_agent_custom_attributes_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        },
+        {
+          "name": "list_weave_agent_versions_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        },
+        {
+          "name": "list_weave_agents_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        },
+        {
+          "name": "query_weave_agent_spans_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        },
+        {
+          "name": "search_weave_agents_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "trace-backend"
+        }
       ]
     },
     "agent-lens": {
+      "kind": "extension",
+      "requires": [
+        "weave",
+        "agents"
+      ],
+      "managed_workloads": [
+        "shared"
+      ],
       "tools": [
-        {"name": "get_agent_lens_category_breakdowns_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
-        {"name": "get_agent_lens_clustering_status_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
-        {"name": "get_agent_lens_conversation_tags_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
-        {"name": "get_agent_lens_failure_attributions_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
-        {"name": "get_agent_lens_insights_coverage_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
-        {"name": "get_agent_lens_tag_distribution_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
-        {"name": "list_agent_lens_category_example_turns_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
-        {"name": "list_agent_lens_tags_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"},
-        {"name": "list_agent_lens_tagged_conversations_tool", "access": "read", "risk": "credential-forwarding", "prerequisite": "agent-lens-https-origin"}
+        {
+          "name": "get_agent_lens_category_breakdowns_tool",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "agent-lens-https-origin"
+        },
+        {
+          "name": "get_agent_lens_clustering_status_tool",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "agent-lens-https-origin"
+        },
+        {
+          "name": "get_agent_lens_conversation_tags_tool",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "agent-lens-https-origin"
+        },
+        {
+          "name": "get_agent_lens_failure_attributions_tool",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "agent-lens-https-origin"
+        },
+        {
+          "name": "get_agent_lens_insights_coverage_tool",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "agent-lens-https-origin"
+        },
+        {
+          "name": "get_agent_lens_tag_distribution_tool",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "agent-lens-https-origin"
+        },
+        {
+          "name": "list_agent_lens_category_example_turns_tool",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "agent-lens-https-origin"
+        },
+        {
+          "name": "list_agent_lens_tags_tool",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "agent-lens-https-origin"
+        },
+        {
+          "name": "list_agent_lens_tagged_conversations_tool",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "agent-lens-https-origin"
+        }
       ]
     },
     "aria": {
+      "kind": "extension",
+      "requires": [
+        "weave",
+        "agents"
+      ],
+      "managed_workloads": [
+        "shared"
+      ],
       "tools": [
-        {"name": "aria_get_turn", "access": "read", "risk": "credential-forwarding", "prerequisite": "aria-https-origin"},
-        {"name": "aria_get_turns", "access": "read", "risk": "credential-forwarding", "prerequisite": "aria-https-origin"},
-        {"name": "aria_send_message", "access": "write", "risk": "non-idempotent-credential-forwarding", "prerequisite": "aria-https-origin"}
+        {
+          "name": "aria_get_turn",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "aria-https-origin"
+        },
+        {
+          "name": "aria_get_turns",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "aria-https-origin"
+        },
+        {
+          "name": "aria_send_message",
+          "access": "write",
+          "risk": "non-idempotent-credential-forwarding",
+          "prerequisite": "aria-https-origin"
+        }
       ]
     },
     "raw-graphql": {
+      "kind": "extension",
+      "requires": [
+        "weave"
+      ],
+      "managed_workloads": [],
       "tools": [
-        {"name": "query_wandb_graphql_tool", "access": "read", "risk": "compatibility", "prerequisite": "wandb"}
+        {
+          "name": "query_wandb_graphql_tool",
+          "access": "read",
+          "risk": "compatibility",
+          "prerequisite": "wandb"
+        }
       ]
     }
   },
   "tool_profiles": {
     "models-only": {
-      "groups": ["models"],
-      "managed_workloads": ["shared", "dedicated"],
-      "expected_tools": {"read-write": 17, "read-only": 15}
+      "groups": [
+        "models"
+      ]
     },
     "models-weave": {
-      "groups": ["models", "weave"],
-      "managed_workloads": ["shared", "dedicated"],
-      "expected_tools": {"read-write": 22, "read-only": 20}
+      "groups": [
+        "models",
+        "weave"
+      ]
     },
     "models-weave-agents": {
-      "groups": ["models", "weave", "agents"],
-      "managed_workloads": ["shared"],
-      "expected_tools": {"read-write": 30, "read-only": 28}
-    },
+      "groups": [
+        "models",
+        "weave",
+        "agents"
+      ]
+    }
+  },
+  "tool_profile_aliases": {
     "models-weave-agents-aria": {
-      "groups": ["models", "weave", "agents", "aria"],
-      "managed_workloads": [],
-      "expected_tools": {"read-write": 33, "read-only": 30}
+      "base": "models-weave-agents",
+      "extensions": [
+        "aria"
+      ]
     },
     "models-weave-graphql-compat": {
-      "groups": ["models", "weave", "raw-graphql"],
-      "managed_workloads": [],
-      "expected_tools": {"read-write": 23, "read-only": 21}
+      "base": "models-weave",
+      "extensions": [
+        "raw-graphql"
+      ]
     },
     "models-weave-agents-agent-lens": {
-      "groups": ["models", "weave", "agents", "agent-lens"],
-      "managed_workloads": ["shared"],
-      "expected_tools": {"read-write": 39, "read-only": 37}
+      "base": "models-weave-agents",
+      "extensions": [
+        "agent-lens"
+      ]
     }
   },
   "workload_profiles": {
@@ -168,7 +433,11 @@
         "SESSION_TTL_SECONDS": 3600,
         "MAX_SESSIONS_PER_KEY": 10
       },
-      "http_rate_policy": {"enabled": false, "per_key_per_minute": 0, "global_per_minute": 0}
+      "http_rate_policy": {
+        "enabled": false,
+        "per_key_per_minute": 0,
+        "global_per_minute": 0
+      }
     },
     "dedicated": {
       "managed": true,
@@ -196,7 +465,11 @@
         "SESSION_TTL_SECONDS": 3600,
         "MAX_SESSIONS_PER_KEY": 10
       },
-      "http_rate_policy": {"enabled": true, "per_key_per_minute": 60, "global_per_minute": 1000}
+      "http_rate_policy": {
+        "enabled": true,
+        "per_key_per_minute": 60,
+        "global_per_minute": 1000
+      }
     },
     "local": {
       "managed": false,
@@ -224,12 +497,31 @@
         "SESSION_TTL_SECONDS": 3600,
         "MAX_SESSIONS_PER_KEY": 10
       },
-      "http_rate_policy": {"enabled": false, "per_key_per_minute": 0, "global_per_minute": 0}
+      "http_rate_policy": {
+        "enabled": false,
+        "per_key_per_minute": 0,
+        "global_per_minute": 0
+      }
     }
   },
   "capacity_classes": {
-    "small": {"actor_capacity": 4, "process_capacity": 4, "sync_workers": 4, "count_workers": 4},
-    "medium": {"actor_capacity": 4, "process_capacity": 8, "sync_workers": 8, "count_workers": 8},
-    "large": {"actor_capacity": 8, "process_capacity": 16, "sync_workers": 16, "count_workers": 8}
+    "small": {
+      "actor_capacity": 4,
+      "process_capacity": 4,
+      "sync_workers": 4,
+      "count_workers": 4
+    },
+    "medium": {
+      "actor_capacity": 4,
+      "process_capacity": 8,
+      "sync_workers": 8,
+      "count_workers": 8
+    },
+    "large": {
+      "actor_capacity": 8,
+      "process_capacity": 16,
+      "sync_workers": 16,
+      "count_workers": 8
+    }
   }
 }

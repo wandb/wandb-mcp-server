@@ -31,6 +31,9 @@ from wandb_mcp_server.runtime_contract import (  # noqa: E402 - source checkout 
     canonical_json as canonical_runtime_json,
     tools_for_profile,
     validate_runtime_contract,
+    profile_combinations,
+    resolve_tool_profile,
+    managed_workloads_for,
 )
 
 
@@ -57,6 +60,8 @@ class Profile:
     environment: dict[str, str]
     tools: tuple[str, ...]
     runtime_contract_sha256: str
+    base_profile: str = ""
+    extensions: tuple[str, ...] = ()
 
     @property
     def read_only(self) -> bool:
@@ -70,6 +75,8 @@ class Profile:
             "environment": self.environment,
             "tools": list(self.tools),
             "runtime_contract_sha256": self.runtime_contract_sha256,
+            "base_profile": self.base_profile,
+            "extensions": list(self.extensions),
         }
 
 
@@ -193,40 +200,54 @@ def validate_contract(contract: dict[str, Any]) -> None:
     load_runtime_contract(contract)
 
 
-def _profile(contract: dict[str, Any], tool_profile: str, access_mode: str) -> Profile:
+def _profile(
+    contract: dict[str, Any],
+    tool_profile: str,
+    access_mode: str,
+    extensions: tuple[str, ...] = (),
+) -> Profile:
     runtime_contract = load_runtime_contract(contract)
-    tools = tools_for_profile(runtime_contract, tool_profile, access_mode)
+    resolution = resolve_tool_profile(runtime_contract, tool_profile, extensions)
+    tools = tools_for_profile(runtime_contract, resolution.base_profile, access_mode, resolution.extensions)
     selector = runtime_contract["selectors"]
     environment = {
-        selector["tool_profile"]["environment"]: tool_profile,
+        selector["tool_profile"]["environment"]: resolution.base_profile,
+        selector["tool_extensions"]["environment"]: ",".join(resolution.extensions),
         selector["access_mode"]["environment"]: access_mode,
         selector["workload_profile"]["environment"]: "local",
         selector["capacity_class"]["environment"]: "small",
     }
     return Profile(
-        name=f"{tool_profile}-{access_mode}",
-        tool_profile=tool_profile,
+        name=f"{resolution.name}-{access_mode}",
+        tool_profile=resolution.name,
         access_mode=access_mode,
         environment=environment,
         tools=tuple(sorted(tools)),
         runtime_contract_sha256=runtime_contract_sha256(contract),
+        base_profile=resolution.base_profile,
+        extensions=resolution.extensions,
     )
 
 
 def named_profile(contract: dict[str, Any], name: str, access_mode: str = "read-write") -> Profile:
     runtime_contract = load_runtime_contract(contract)
-    if name not in runtime_contract["tool_profiles"]:
-        raise ReleaseError(f"unknown named profile: {name}")
     if access_mode not in runtime_contract["selectors"]["access_mode"]["values"]:
         raise ReleaseError(f"unknown access mode: {access_mode}")
-    return _profile(contract, name, access_mode)
+    by_name = {resolution.name: resolution for resolution in profile_combinations(runtime_contract)}
+    if name in runtime_contract["tool_profiles"] or name in runtime_contract["tool_profile_aliases"]:
+        resolution = resolve_tool_profile(runtime_contract, name)
+    elif name in by_name:
+        resolution = by_name[name]
+    else:
+        raise ReleaseError(f"unknown named profile: {name}")
+    return _profile(contract, resolution.base_profile, access_mode, resolution.extensions)
 
 
 def exhaustive_profiles(contract: dict[str, Any]) -> tuple[Profile, ...]:
     runtime_contract = load_runtime_contract(contract)
     return tuple(
-        _profile(contract, name, access_mode)
-        for name in runtime_contract["tool_profiles"]
+        _profile(contract, resolution.base_profile, access_mode, resolution.extensions)
+        for resolution in profile_combinations(runtime_contract)
         for access_mode in runtime_contract["selectors"]["access_mode"]["values"]
     )
 
@@ -858,15 +879,37 @@ def _profiles_payload(contract_path: Path, *, all_profiles: bool, names: list[st
 
 
 def _runtime_profile_rows(runtime_contract: dict[str, Any]) -> list[str]:
+    groups = runtime_contract["tool_groups"]
     rows = [
-        "| Tool profile | Groups | Managed workloads | Read-write | Read-only |",
-        "|---|---|---|---:|---:|",
+        "| Base profile (`WANDB_MCP_TOOL_PROFILE`) | Groups |",
+        "|---|---|",
     ]
     for name, definition in runtime_contract["tool_profiles"].items():
-        managed = ", ".join(definition["managed_workloads"]) or "local only"
+        rows.append(f"| `{name}` | {', '.join(definition['groups'])} |")
+    rows += [
+        "",
+        "| Extension (`WANDB_MCP_TOOL_EXTENSIONS`) | Requires | Managed workloads | Tools |",
+        "|---|---|---|---:|",
+    ]
+    for name, group in groups.items():
+        if group["kind"] != "extension":
+            continue
+        managed = ", ".join(group["managed_workloads"]) or "local only"
+        rows.append(f"| `{name}` | {', '.join(group['requires'])} | {managed} | {len(group['tools'])} |")
+    rows += [
+        "",
+        "| Resolved profile | Base | Extensions | Managed workloads | Read-write | Read-only |",
+        "|---|---|---|---|---:|---:|",
+    ]
+    for resolution in profile_combinations(runtime_contract):
+        managed = ", ".join(managed_workloads_for(runtime_contract, resolution.groups)) or "local only"
+        counts = [
+            len(tools_for_profile(runtime_contract, resolution.base_profile, access_mode, resolution.extensions))
+            for access_mode in runtime_contract["selectors"]["access_mode"]["values"]
+        ]
+        extensions = ", ".join(resolution.extensions) or "none"
         rows.append(
-            f"| `{name}` | {', '.join(definition['groups'])} | {managed} | "
-            f"{definition['expected_tools']['read-write']} | {definition['expected_tools']['read-only']} |"
+            f"| `{resolution.name}` | `{resolution.base_profile}` | {extensions} | {managed} | {counts[0]} | {counts[1]} |"
         )
     return rows
 

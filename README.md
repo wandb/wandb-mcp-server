@@ -119,7 +119,7 @@ Recommended deployment presets:
 
 | Deployment | Settings |
 |---|---|
-| MT SaaS with Agent Lens | `models-weave-agents-agent-lens`, `shared`, `read-write` (39 tools) |
+| MT SaaS with Agent Lens and ARIA | `models-weave-agents` + `WANDB_MCP_TOOL_EXTENSIONS=agent-lens,aria`, `shared`, `read-write` (42 tools) |
 | Dedicated Models-only | `models-only`, `dedicated`, `read-write` (17 tools) |
 | Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (22 tools) |
 | Local extra GraphQL tool | `models-weave-graphql-compat`, `local`; choose either access mode |
@@ -156,9 +156,8 @@ caller-supplied GraphQL, and is part of every supported managed tool profile.
 
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
 
-These tools are present in the explicit `models-weave-agents` and
-`models-weave-agents-aria` profiles, and are also retained in the hosted
-`models-weave-agents-agent-lens` profile. Dedicated v0.4 rejects all three.
+These tools are present in the `models-weave-agents` base profile (and every
+extension composed onto it). Dedicated rejects the `agents` group.
 
 | Tool | Description | Example Query |
 |------|-------------|---------------|
@@ -196,19 +195,22 @@ truncation notice; upstream errors never echo the query.
 The package includes its token-counting vocabulary, so response budgets work
 without outbound downloads or a writable tokenizer cache.
 
-**ARIA tools are explicit and local-only in managed v0.4:** select
-`models-weave-agents-aria` and configure `WB_AGENT_BASE_URL` to an approved
-absolute HTTPS origin. Endpoint presence alone never enables the tools.
-`WANDB_MCP_ACCESS_MODE=read-only` omits `aria_send_message` while retaining the
-two polling tools. Shared and Dedicated managed profiles reject ARIA.
+**ARIA tools are an explicit extension:** add `aria` to
+`WANDB_MCP_TOOL_EXTENSIONS` on the `models-weave-agents` base profile (the
+legacy `models-weave-agents-aria` name still resolves to the same selection) and
+configure `WB_AGENT_BASE_URL` to an approved absolute HTTPS origin. Endpoint
+presence alone never enables the tools. `WANDB_MCP_ACCESS_MODE=read-only` omits
+`aria_send_message` while retaining the two polling tools. The `aria` extension
+is allowed on the W&B-hosted `shared` workload (since v0.4.4); Dedicated rejects it.
 
 **ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
 
 **Agent Lens is explicit and hosted-only in managed deployments (since v0.4.2):** W&B-hosted
-deployments may select `models-weave-agents-agent-lens` with the `shared`
-workload and an operator-reviewed `AGENT_LENS_BASE_URL`. The default
-`models-weave` profile and both Dedicated profiles omit these tools, and merely
-setting the endpoint never enables them. See the [Agent Lens tool guide](docs/agent-lens-tools.md).
+deployments add the `agent-lens` extension to `models-weave-agents` (legacy name
+`models-weave-agents-agent-lens`) with the `shared` workload and an
+operator-reviewed `AGENT_LENS_BASE_URL`. The default `models-weave` profile and
+Dedicated workloads omit these tools, and merely setting the endpoint never
+enables them. See the [Agent Lens tool guide](docs/agent-lens-tools.md).
 The guide also documents the end-to-end request deadline and scoped logging
 protections for caller-derived identifiers.
 
@@ -703,14 +705,31 @@ Release-controlled orthogonal selectors:
 
 Exact tool profiles:
 
-| Tool profile | Groups | Managed workloads | Read-write | Read-only |
-|---|---|---|---:|---:|
-| `models-only` | models | shared, dedicated | 17 | 15 |
-| `models-weave` | models, weave | shared, dedicated | 22 | 20 |
-| `models-weave-agents` | models, weave, agents | shared | 30 | 28 |
-| `models-weave-agents-aria` | models, weave, agents, aria | local only | 33 | 30 |
-| `models-weave-graphql-compat` | models, weave, raw-graphql | local only | 23 | 21 |
-| `models-weave-agents-agent-lens` | models, weave, agents, agent-lens | shared | 39 | 37 |
+| Base profile (`WANDB_MCP_TOOL_PROFILE`) | Groups |
+|---|---|
+| `models-only` | models |
+| `models-weave` | models, weave |
+| `models-weave-agents` | models, weave, agents |
+
+| Extension (`WANDB_MCP_TOOL_EXTENSIONS`) | Requires | Managed workloads | Tools |
+|---|---|---|---:|
+| `agent-lens` | weave, agents | shared | 9 |
+| `aria` | weave, agents | shared | 3 |
+| `raw-graphql` | weave | local only | 1 |
+
+| Resolved profile | Base | Extensions | Managed workloads | Read-write | Read-only |
+|---|---|---|---|---:|---:|
+| `models-only` | `models-only` | none | dedicated, shared | 17 | 15 |
+| `models-weave` | `models-weave` | none | dedicated, shared | 22 | 20 |
+| `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 23 | 21 |
+| `models-weave-agents` | `models-weave-agents` | none | shared | 30 | 28 |
+| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 39 | 37 |
+| `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 33 | 30 |
+| `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 31 | 29 |
+| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 42 | 39 |
+| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 40 | 38 |
+| `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 34 | 31 |
+| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 43 | 40 |
 
 Exact workload defaults:
 
@@ -728,7 +747,7 @@ Exact capacity classes:
 | `medium` | 4 | 8 | 8 | 8 |
 | `large` | 8 | 16 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:230cce534205b7ad60afcf34909b6f9d1cd76e5ceda703cd9bca6a866cb6ef91`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:d59988fada28b405802e34f97dafcf38e087568e23e5e75eb7a97b1267855f84`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line

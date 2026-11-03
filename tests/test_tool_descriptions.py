@@ -6,7 +6,12 @@ import re
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from wandb_mcp_server.runtime_contract import load_runtime_contract, tools_for_profile
+from wandb_mcp_server.runtime_contract import (
+    load_runtime_contract,
+    managed_workloads_for,
+    profile_combinations,
+    tools_for_profile,
+)
 from wandb_mcp_server.server import create_mcp_server
 
 from wandb_mcp_server.mcp_tools.query_weave import QUERY_WEAVE_TRACES_TOOL_DESCRIPTION
@@ -75,9 +80,9 @@ ALL_DESCRIPTIONS = {
 DESCRIPTION_LIMIT = 4_000
 RUNTIME_CONTRACT = load_runtime_contract()
 DISCOVERY_PROFILES = [
-    (profile, workload, access)
-    for profile, settings in RUNTIME_CONTRACT["tool_profiles"].items()
-    for workload in ["local", *settings["managed_workloads"]]
+    (resolution.name, workload, access)
+    for resolution in profile_combinations(RUNTIME_CONTRACT)
+    for workload in ["local", *managed_workloads_for(RUNTIME_CONTRACT, resolution.groups)]
     for access in RUNTIME_CONTRACT["selectors"]["access_mode"]["values"]
 ]
 

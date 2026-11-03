@@ -9,11 +9,14 @@ and the `*_weave_agent_*` family.
 
 ## Enabling them
 
-The tools are not enabled by default. W&B-hosted operators may select the
-shared-only profile and name the reviewed origin:
+The tools are not enabled by default. W&B-hosted operators add the
+`agent-lens` extension to the `models-weave-agents` base profile (the legacy
+`models-weave-agents-agent-lens` profile name still resolves to the same
+selection) and name the reviewed origin:
 
 ```sh
-export WANDB_MCP_TOOL_PROFILE=models-weave-agents-agent-lens
+export WANDB_MCP_TOOL_PROFILE=models-weave-agents
+export WANDB_MCP_TOOL_EXTENSIONS=agent-lens
 export MCP_WORKLOAD_PROFILE=shared
 export AGENT_LENS_BASE_URL=https://<your-agent-lens-host>
 ```

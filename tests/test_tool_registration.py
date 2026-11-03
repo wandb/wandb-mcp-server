@@ -58,6 +58,9 @@ def test_default_public_profile_is_exact_models_weave():
         ("models-weave-graphql-compat", "read-only", 21),
         ("models-weave-agents-agent-lens", "read-write", 39),
         ("models-weave-agents-agent-lens", "read-only", 37),
+        ("models-weave-agents-agent-lens-aria", "read-write", 42),
+        ("models-weave-agents-agent-lens-aria", "read-only", 39),
+        ("models-weave-agents-agent-lens-aria-raw-graphql", "read-write", 43),
     ],
 )
 def test_every_supported_profile_has_one_exact_manifest(
@@ -179,8 +182,8 @@ def test_aria_profile_requires_explicit_safe_https_origin(monkeypatch: pytest.Mo
 @pytest.mark.parametrize(
     ("workload", "profile"),
     [
-        ("shared", "models-weave-agents-aria"),
         ("shared", "models-weave-graphql-compat"),
+        ("shared", "models-weave-agents-raw-graphql"),
         ("dedicated", "models-weave-agents"),
         ("dedicated", "models-weave-agents-aria"),
         ("dedicated", "models-weave-graphql-compat"),
