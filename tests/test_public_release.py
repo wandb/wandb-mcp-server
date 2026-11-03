@@ -42,8 +42,8 @@ def test_contract_generates_every_exact_tool_profile_and_access_mode():
     profiles = public_release.exhaustive_profiles(contract)
     runtime_contract = public_release.load_runtime_contract(contract)
 
-    assert len(profiles) == 12
-    assert len({profile.name for profile in profiles}) == 12
+    assert len(profiles) == 14
+    assert len({profile.name for profile in profiles}) == 14
     assert all(profile.tools == tuple(sorted(set(profile.tools))) for profile in profiles)
     assert {profile.tool_profile for profile in profiles} == set(runtime_contract["tool_profiles"])
     assert {profile.access_mode for profile in profiles} == {"read-write", "read-only"}

@@ -206,6 +206,7 @@ def validate_runtime_contract(contract: Mapping[str, Any]) -> None:
         "models-weave-agents-aria",
         "models-weave-graphql-compat",
         "models-weave-agents-agent-lens",
+        "models-weave-agents-agent-lens-aria",
     }
     if set(profiles) != expected_profiles:
         raise ValueError("Runtime contract tool profiles are incomplete")
@@ -216,6 +217,7 @@ def validate_runtime_contract(contract: Mapping[str, Any]) -> None:
         "models-weave-agents-aria": ["models", "weave", "agents", "aria"],
         "models-weave-graphql-compat": ["models", "weave", "raw-graphql"],
         "models-weave-agents-agent-lens": ["models", "weave", "agents", "agent-lens"],
+        "models-weave-agents-agent-lens-aria": ["models", "weave", "agents", "agent-lens", "aria"],
     }
     expected_managed_workloads = {
         "models-only": ["shared", "dedicated"],
@@ -224,6 +226,7 @@ def validate_runtime_contract(contract: Mapping[str, Any]) -> None:
         "models-weave-agents-aria": [],
         "models-weave-graphql-compat": [],
         "models-weave-agents-agent-lens": ["shared"],
+        "models-weave-agents-agent-lens-aria": ["shared"],
     }
     for profile_name, profile in profiles.items():
         if not isinstance(profile, dict):

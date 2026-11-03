@@ -25,6 +25,7 @@ EXPECTED_COUNTS = {
     "models-weave-agents-aria": {"read-write": 33, "read-only": 30},
     "models-weave-graphql-compat": {"read-write": 23, "read-only": 21},
     "models-weave-agents-agent-lens": {"read-write": 39, "read-only": 37},
+    "models-weave-agents-agent-lens-aria": {"read-write": 42, "read-only": 39},
 }
 LEGACY_VARIABLES = (
     "WANDB_MCP_ENABLE_WEAVE_TOOLS",

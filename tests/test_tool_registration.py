@@ -58,6 +58,8 @@ def test_default_public_profile_is_exact_models_weave():
         ("models-weave-graphql-compat", "read-only", 21),
         ("models-weave-agents-agent-lens", "read-write", 39),
         ("models-weave-agents-agent-lens", "read-only", 37),
+        ("models-weave-agents-agent-lens-aria", "read-write", 42),
+        ("models-weave-agents-agent-lens-aria", "read-only", 39),
     ],
 )
 def test_every_supported_profile_has_one_exact_manifest(
@@ -185,6 +187,7 @@ def test_aria_profile_requires_explicit_safe_https_origin(monkeypatch: pytest.Mo
         ("dedicated", "models-weave-agents-aria"),
         ("dedicated", "models-weave-graphql-compat"),
         ("dedicated", "models-weave-agents-agent-lens"),
+        ("dedicated", "models-weave-agents-agent-lens-aria"),
     ],
 )
 def test_managed_profiles_reject_aria_raw_graphql_and_unsupported_groups(
@@ -198,6 +201,21 @@ def test_managed_profiles_reject_aria_raw_graphql_and_unsupported_groups(
     monkeypatch.setenv("AGENT_LENS_BASE_URL", "https://agent-lens.example.com")
     with pytest.raises(ValueError, match="not allowed with managed"):
         register_tools(FastMCP("test"))
+
+
+def test_shared_workload_allows_the_hosted_agent_lens_aria_profile(monkeypatch: pytest.MonkeyPatch):
+    contract = load_runtime_contract()
+    monkeypatch.setenv("MCP_WORKLOAD_PROFILE", "shared")
+    monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-weave-agents-agent-lens-aria")
+    monkeypatch.setenv("WF_TRACE_SERVER_URL", "https://trace.wandb.ai")
+    monkeypatch.setenv("WB_AGENT_BASE_URL", "https://wb-agent.wandb.ai")
+    monkeypatch.setenv("AGENT_LENS_BASE_URL", "https://agent-lens.example.com")
+
+    names = _registered_tool_names()
+
+    assert names == set(tools_for_profile(contract, "models-weave-agents-agent-lens-aria", "read-write"))
+    assert {"aria_send_message", "aria_get_turn", "aria_get_turns"} <= names
+    assert set(tools_for_profile(contract, "models-weave-agents-agent-lens", "read-write")) < names
 
 
 def test_registration_never_mutates_private_fastmcp_registry():

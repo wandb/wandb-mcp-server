@@ -139,6 +139,11 @@
       "groups": ["models", "weave", "agents", "agent-lens"],
       "managed_workloads": ["shared"],
       "expected_tools": {"read-write": 39, "read-only": 37}
+    },
+    "models-weave-agents-agent-lens-aria": {
+      "groups": ["models", "weave", "agents", "agent-lens", "aria"],
+      "managed_workloads": ["shared"],
+      "expected_tools": {"read-write": 42, "read-only": 39}
     }
   },
   "workload_profiles": {

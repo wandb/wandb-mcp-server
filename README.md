@@ -196,11 +196,12 @@ truncation notice; upstream errors never echo the query.
 The package includes its token-counting vocabulary, so response budgets work
 without outbound downloads or a writable tokenizer cache.
 
-**ARIA tools are explicit and local-only in managed v0.4:** select
-`models-weave-agents-aria` and configure `WB_AGENT_BASE_URL` to an approved
-absolute HTTPS origin. Endpoint presence alone never enables the tools.
+**ARIA tools are explicit and never enabled by an endpoint alone:** select
+`models-weave-agents-aria` (local) or, for W&B-hosted multi-tenant SaaS,
+`models-weave-agents-agent-lens-aria` with the `shared` workload, and configure
+`WB_AGENT_BASE_URL` to an approved absolute HTTPS origin.
 `WANDB_MCP_ACCESS_MODE=read-only` omits `aria_send_message` while retaining the
-two polling tools. Shared and Dedicated managed profiles reject ARIA.
+two polling tools. Dedicated rejects every ARIA profile.
 
 **ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
 
@@ -711,6 +712,7 @@ Exact tool profiles:
 | `models-weave-agents-aria` | models, weave, agents, aria | local only | 33 | 30 |
 | `models-weave-graphql-compat` | models, weave, raw-graphql | local only | 23 | 21 |
 | `models-weave-agents-agent-lens` | models, weave, agents, agent-lens | shared | 39 | 37 |
+| `models-weave-agents-agent-lens-aria` | models, weave, agents, agent-lens, aria | shared | 42 | 39 |
 
 Exact workload defaults:
 
@@ -728,7 +730,7 @@ Exact capacity classes:
 | `medium` | 4 | 8 | 8 | 8 |
 | `large` | 8 | 16 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:230cce534205b7ad60afcf34909b6f9d1cd76e5ceda703cd9bca6a866cb6ef91`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:4bcf26d8fe8854d3bc91f72991cbd6718390d9e126bc9dd9c426990a4823403b`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line
