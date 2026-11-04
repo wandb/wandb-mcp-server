@@ -111,12 +111,27 @@ for _http_logger_name in (
 ARIA_SEND_MESSAGE_TOOL_DESCRIPTION = """Start or continue an asynchronous conversation with ARIA, the hosted Weights & Biases agent (also called wb-agent).
 
 <when_to_use>
-Use ARIA to hand off W&B-native work that may take a while, manipulate or inspect
-the W&B UI more directly, or use ARIA's native W&B context, data access, and
-multi-step capabilities instead of scraping data yourself. Good tasks include
-comparing runs, diagnosing evaluations or Weave traces, inspecting W&B pages,
-and carrying out multi-step W&B workflows. Prefer narrower MCP query tools for
-simple deterministic lookups and search_wandb_docs_tool for documentation.
+ARIA is W&B's own agent: it has the caller's W&B context, runs code against the
+W&B and Weave APIs, and can read and change the W&B UI. Hand off to ARIA when no
+narrower tool here does the job, when the task spans several steps, or when it
+needs judgement rather than a lookup. ARIA can:
+- Workspaces: create or edit saved views, filters, grouping, sorting, sections,
+  panels, run colours, pinned/baseline runs; describe what a workspace shows.
+- Runs: rank, compare, diff configs, find regressions and anomalies, explain
+  runtime or metric differences, read run console logs, tag/rename/move/delete
+  runs, export run tables.
+- Sweeps: create, run and analyse sweeps and parameter importance.
+- Reports: create or edit reports and verify them; PDF export.
+- Artifacts and Registry: lineage, versions, promotion, storage cleanup.
+- Weave: query traces, debug evaluations, prompts/datasets/leaderboards,
+  monitors; Agent Lens conversations and insights.
+- Automations and alerts, Launch queues, Serverless training and inference,
+  notebooks, Sandboxes, GitHub repos when the user enabled it.
+- Investigations: open-ended "why is this slow", "what regressed", "audit this
+  project" with a written analysis.
+Keep the narrow MCP tools for a single deterministic lookup (one run's config,
+a run count, listing traces) and search_wandb_docs_tool for documentation.
+Earlier ARIA conversations are found with aria_list_threads.
 </when_to_use>
 
 This tool returns promptly by default because ARIA turns are asynchronous. Keep the returned turn_id. If state is queued or in_progress, call aria_get_turn until is_terminal is true. To continue a completed conversation, call this tool again with parent_turn_id set to the previous turn_id; omit entity and project for continuations. Set wait_seconds to wait briefly for a fast result, but the wait is always bounded.

@@ -30,7 +30,7 @@ def test_aria_tools_are_registered_with_self_guiding_descriptions(monkeypatch) -
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
 
     assert {"aria_send_message", "aria_get_turn", "aria_list_threads", "aria_get_thread"} <= tools.keys()
-    assert "hand off W&B-native work" in tools["aria_send_message"].description
+    assert "Hand off to ARIA when no" in tools["aria_send_message"].description
     assert "parent_turn_id" in tools["aria_send_message"].description
     assert "bounded interval" in tools["aria_get_turn"].description
     assert "earlier ARIA conversation" in tools["aria_list_threads"].description
