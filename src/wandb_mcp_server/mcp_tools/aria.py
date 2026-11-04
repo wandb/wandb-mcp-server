@@ -175,13 +175,17 @@ dict
     Compact current state, progress, latest response, and continuation/poll guidance, or a native MCP error containing JSON details.
 """
 
-ARIA_LIST_THREADS_TOOL_DESCRIPTION = """List the caller's ARIA conversation threads, most recently active first.
+ARIA_LIST_THREADS_TOOL_DESCRIPTION = """Find the caller's previous ARIA conversations (their chat history with ARIA, the W&B agent), most recently active first.
 
 <when_to_use>
-Use to find an earlier ARIA conversation the caller wants to revisit or continue,
-for example "what did ARIA say about my eval runs last week". Filter by W&B entity
-and project when known. Then call aria_get_thread with the chosen thread_id.
-Do not use this to poll a turn you just started; use aria_get_turn.
+This is the only source of ARIA conversation history. Call it whenever the caller
+refers to an earlier, previous, past, or most recent ARIA conversation, chat, or
+thread, or asks what ARIA said, found, or concluded before, for example "find my
+earlier ARIA conversation about project X" or "what did ARIA say about my eval runs
+last week". Do not answer that no conversation history is available without calling
+this first. Filter by W&B entity and project when known. Then call aria_get_thread
+with the chosen thread_id. Do not use this to poll a turn you just started; use
+aria_get_turn.
 </when_to_use>
 
 Each thread includes thread_id, title, a bounded preview of its first prompt,
