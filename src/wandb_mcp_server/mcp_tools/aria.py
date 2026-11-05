@@ -112,9 +112,7 @@ ARIA_SEND_MESSAGE_TOOL_DESCRIPTION = """Start or continue an asynchronous conver
 
 <when_to_use>
 ARIA is W&B's own agent: it has the caller's W&B context, runs code against the
-W&B and Weave APIs, and can read and change the W&B UI. Hand off to ARIA when no
-narrower tool here does the job, when the task spans several steps, or when it
-needs judgement rather than a lookup. ARIA can:
+W&B and Weave APIs, and can read and change the W&B UI. ARIA can:
 - Workspaces: create or edit saved views, filters, grouping, sorting, sections,
   panels, run colours, pinned/baseline runs; describe what a workspace shows.
 - Runs: rank, compare, diff configs, find regressions and anomalies, explain
