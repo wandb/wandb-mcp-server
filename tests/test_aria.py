@@ -38,14 +38,19 @@ def _client(handler: httpx.AsyncBaseTransport) -> httpx.AsyncClient:
 
 def test_send_root_turn_uses_bearer_auth_and_openapi_payload(monkeypatch) -> None:
     captured: Dict[str, Any] = {}
+    requests: list[tuple[str, bytes, Dict[str, Any]]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append((request.method, request.url.raw_path, body))
+        if request.method == "PATCH":
+            return httpx.Response(200, json={"id": "thread/1"}, request=request)
         captured["method"] = request.method
         captured["path"] = request.url.path
         captured["authorization"] = request.headers["Authorization"]
         captured["wandb_client"] = request.headers["X-Wandb-Client"]
-        captured["body"] = json.loads(request.content)
-        return httpx.Response(202, json=_turn(), request=request)
+        captured["body"] = body
+        return httpx.Response(202, json=_turn(thread_id="thread/1"), request=request)
 
     def new_client(api_key: str) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -61,6 +66,7 @@ def test_send_root_turn_uses_bearer_auth_and_openapi_payload(monkeypatch) -> Non
             "Compare the latest eval runs",
             entity="team",
             project="evals",
+            title="Eval regressions",
             api_key="user-wandb-token",
         )
     )
@@ -79,13 +85,184 @@ def test_send_root_turn_uses_bearer_auth_and_openapi_payload(monkeypatch) -> Non
             "project": "evals",
         },
     }
+    assert requests == [
+        (
+            "POST",
+            b"/api/v1/turns",
+            {
+                "user_prompt": [
+                    {"type": "text", "text": "Compare the latest eval runs"},
+                    {"type": "wandb_client", "platform": "agent"},
+                ],
+                "entity": "team",
+                "project": "evals",
+            },
+        ),
+        ("PATCH", b"/api/v1/threads/thread%2F1", {"title": "Eval regressions"}),
+    ]
     assert result["ok"] is True
     assert result["turn_id"] == "turn-1"
+    assert result["title"] == "Eval regressions"
     assert result["state"] == "queued"
     assert result["is_terminal"] is False
     assert result["poll_after_seconds"] == 2
     assert result["scope"] == {"entity": "team", "project": "project"}
     assert "turn" not in result
+
+
+@pytest.mark.parametrize("title", [None, "   "])
+def test_send_root_turn_requires_title_without_contacting_service(title) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            kwargs = {} if title is None else {"title": title}
+            return await aria.send_aria_message("Start a conversation", api_key="token", client=client, **kwargs)
+
+    result = asyncio.run(run())
+
+    assert calls == 0
+    assert result["ok"] is False
+    assert result["error"]["type"] == "invalid_request"
+    assert result["error"]["retryable"] is False
+
+
+def test_send_rejects_title_on_continuation_without_contacting_service() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.send_aria_message(
+                "Continue the conversation",
+                title="Should not be supplied",
+                parent_turn_id="turn-0",
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+
+    assert calls == 0
+    assert result["ok"] is False
+    assert result["error"]["type"] == "invalid_request"
+
+
+def test_send_rejects_title_longer_than_255_characters_without_contacting_service() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.send_aria_message(
+                "Start a conversation",
+                title="t" * 256,
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+
+    assert calls == 0
+    assert result["ok"] is False
+    assert result["error"]["type"] == "invalid_request"
+    assert "255" in result["error"]["message"]
+
+
+def test_send_title_patch_failure_keeps_durable_turn_handle() -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        if request.method == "POST":
+            return httpx.Response(202, json=_turn(), request=request)
+        return httpx.Response(500, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.send_aria_message(
+                "Start a conversation",
+                title="A useful title",
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+
+    assert calls == ["POST", "PATCH"]
+    assert result["ok"] is True
+    assert result["turn_id"] == "turn-1"
+    assert result["title_error"] == "service_unavailable"
+    assert "error" not in result
+
+
+def test_send_poll_failure_preserves_title_patch_error() -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        if request.method == "POST":
+            return httpx.Response(202, json=_turn(), request=request)
+        if request.method == "PATCH":
+            return httpx.Response(500, request=request)
+        return httpx.Response(429, json={"detail": "capacity"}, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.send_aria_message(
+                "Start a conversation",
+                title="A useful title",
+                wait_seconds=2,
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+
+    assert calls == ["POST", "PATCH", "GET"]
+    assert result["ok"] is False
+    assert result["turn_id"] == "turn-1"
+    assert result["title_error"] == "service_unavailable"
+    assert result["error"]["type"] == "rate_limited"
+
+
+def test_send_title_patch_is_skipped_when_post_omits_thread_id() -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        turn = _turn()
+        turn.pop("thread_id")
+        return httpx.Response(202, json=turn, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.send_aria_message(
+                "Start a conversation",
+                title="A useful title",
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+
+    assert calls == ["POST"]
+    assert result["ok"] is True
+    assert result["turn_id"] == "turn-1"
+    assert result["title_error"] == "missing_thread_id"
 
 
 def test_send_reuses_request_scoped_wandb_token(monkeypatch) -> None:
@@ -105,7 +282,7 @@ def test_send_reuses_request_scoped_wandb_token(monkeypatch) -> None:
     monkeypatch.setattr(aria, "_new_http_client", new_client)
     context_token = WandBApiManager.set_context_api_key("context-wandb-token-123")
     try:
-        result = asyncio.run(aria.send_aria_message("Inspect my runs"))
+        result = asyncio.run(aria.send_aria_message("Inspect my runs", title="Inspect my runs"))
     finally:
         WandBApiManager.reset_context_api_key(context_token)
 
@@ -143,6 +320,8 @@ def test_concurrent_callers_keep_request_scoped_tokens_isolated(monkeypatch) -> 
 
     def new_client(api_key: str) -> httpx.AsyncClient:
         async def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "PATCH":
+                return httpx.Response(200, json={"id": "thread-1"}, request=request)
             prompt = json.loads(request.content)["user_prompt"][0]["text"]
             await asyncio.sleep(0)
             captured[prompt] = request.headers["Authorization"]
@@ -159,7 +338,7 @@ def test_concurrent_callers_keep_request_scoped_tokens_isolated(monkeypatch) -> 
     async def call(prompt: str, token: str) -> Dict[str, Any]:
         context_token = WandBApiManager.set_context_api_key(token)
         try:
-            return await aria.send_aria_message(prompt)
+            return await aria.send_aria_message(prompt, title=f"Conversation for {prompt}")
         finally:
             WandBApiManager.reset_context_api_key(context_token)
 
@@ -220,6 +399,8 @@ def test_send_project_only_resolves_default_entity(monkeypatch) -> None:
         return "default-team"
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PATCH":
+            return httpx.Response(200, json={"id": "thread-1"}, request=request)
         captured.update(json.loads(request.content))
         return httpx.Response(
             202,
@@ -234,6 +415,7 @@ def test_send_project_only_resolves_default_entity(monkeypatch) -> None:
             return await aria.send_aria_message(
                 "Inspect this project",
                 project="evals",
+                title="Inspect this project",
                 api_key="token",
                 client=client,
             )
@@ -279,6 +461,8 @@ def test_send_preserves_confirmed_turn_handle_when_followup_poll_fails() -> None
         calls += 1
         if request.method == "POST":
             return httpx.Response(202, json=_turn(), request=request)
+        if request.method == "PATCH":
+            return httpx.Response(200, json={"id": "thread-1"}, request=request)
         return httpx.Response(
             429,
             headers={"Retry-After": "7"},
@@ -290,6 +474,7 @@ def test_send_preserves_confirmed_turn_handle_when_followup_poll_fails() -> None
         async with _client(httpx.MockTransport(handler)) as client:
             return await aria.send_aria_message(
                 "Analyze runs",
+                title="Analyze runs",
                 wait_seconds=2,
                 api_key="token",
                 client=client,
@@ -297,7 +482,7 @@ def test_send_preserves_confirmed_turn_handle_when_followup_poll_fails() -> None
 
     result = asyncio.run(run())
 
-    assert calls == 2
+    assert calls == 3
     assert result == {
         "ok": False,
         "error": {
@@ -310,6 +495,7 @@ def test_send_preserves_confirmed_turn_handle_when_followup_poll_fails() -> None
         },
         "next_action": "Retry aria_get_turn with the same turn_id; the ARIA turn remains server-side.",
         "turn_id": "turn-1",
+        "title": "Analyze runs",
     }
 
 
@@ -366,6 +552,8 @@ def test_bounded_send_wait_polls_until_completed(monkeypatch) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
+        if request.method == "PATCH":
+            return httpx.Response(200, json={"id": "thread-1"}, request=request)
         return httpx.Response(200, json=responses.pop(0), request=request)
 
     monkeypatch.setattr(aria, "POLL_INTERVAL_SECONDS", 0)
@@ -374,6 +562,7 @@ def test_bounded_send_wait_polls_until_completed(monkeypatch) -> None:
         async with _client(httpx.MockTransport(handler)) as client:
             return await aria.send_aria_message(
                 "Diagnose the regression",
+                title="Diagnose the regression",
                 wait_seconds=2,
                 api_key="token",
                 client=client,
@@ -383,6 +572,7 @@ def test_bounded_send_wait_polls_until_completed(monkeypatch) -> None:
 
     assert paths == [
         "/api/v1/turns",
+        "/api/v1/threads/thread-1",
         "/api/v1/turns/turn-1",
         "/api/v1/turns/turn-1",
     ]
@@ -634,7 +824,12 @@ def test_send_service_error_is_not_automatically_retryable() -> None:
 
     async def run() -> Dict[str, Any]:
         async with _client(httpx.MockTransport(handler)) as client:
-            return await aria.send_aria_message("Analyze runs", api_key="token", client=client)
+            return await aria.send_aria_message(
+                "Analyze runs",
+                title="Analyze runs",
+                api_key="token",
+                client=client,
+            )
 
     result = asyncio.run(run())
 
@@ -656,6 +851,7 @@ def test_auth_rejection_is_legible_and_does_not_expose_token() -> None:
         async with _client(httpx.MockTransport(handler)) as client:
             return await aria.send_aria_message(
                 "Analyze runs",
+                title="Analyze runs",
                 api_key="super-secret-token",
                 client=client,
             )
@@ -689,6 +885,7 @@ def test_validation_details_remain_structured() -> None:
                 "Analyze runs",
                 entity="team",
                 project="project",
+                title="Analyze runs",
                 api_key="token",
                 client=client,
             )
@@ -762,7 +959,12 @@ def test_send_does_not_follow_redirect_or_retry_post() -> None:
 
     async def run() -> Dict[str, Any]:
         async with _client(httpx.MockTransport(handler)) as client:
-            return await aria.send_aria_message("Analyze runs", api_key="token", client=client)
+            return await aria.send_aria_message(
+                "Analyze runs",
+                title="Analyze runs",
+                api_key="token",
+                client=client,
+            )
 
     result = asyncio.run(run())
 
@@ -782,7 +984,12 @@ def test_ambiguous_send_transport_failure_returns_outcome_unknown(exception_type
 
     async def run() -> Dict[str, Any]:
         async with _client(httpx.MockTransport(handler)) as client:
-            return await aria.send_aria_message("Analyze runs", api_key="token", client=client)
+            return await aria.send_aria_message(
+                "Analyze runs",
+                title="Analyze runs",
+                api_key="token",
+                client=client,
+            )
 
     result = asyncio.run(run())
 
@@ -798,10 +1005,10 @@ def test_ambiguous_send_transport_failure_returns_outcome_unknown(exception_type
 @pytest.mark.parametrize(
     ("kwargs", "field"),
     [
-        ({"message": "x" * (32 * 1024 + 1)}, "message"),
-        ({"message": "😀" * 8193}, "message"),
-        ({"message": "ok", "entity": "e" * 513}, "entity"),
-        ({"message": "ok", "project": "p" * 513}, "project"),
+        ({"message": "x" * (32 * 1024 + 1), "title": "A conversation"}, "message"),
+        ({"message": "😀" * 8193, "title": "A conversation"}, "message"),
+        ({"message": "ok", "entity": "e" * 513, "title": "A conversation"}, "entity"),
+        ({"message": "ok", "project": "p" * 513, "title": "A conversation"}, "project"),
         ({"message": "ok", "parent_turn_id": "t" * 513}, "parent_turn_id"),
     ],
 )
@@ -1179,7 +1386,12 @@ def test_compressed_post_response_has_unknown_outcome() -> None:
 
     async def run() -> Dict[str, Any]:
         async with _client(httpx.MockTransport(handler)) as client:
-            return await aria.send_aria_message("do work", api_key="token", client=client)
+            return await aria.send_aria_message(
+                "do work",
+                title="Do work",
+                api_key="token",
+                client=client,
+            )
 
     result = asyncio.run(run())
     assert result["ok"] is False
@@ -1198,7 +1410,12 @@ def test_http_logs_hide_internal_aria_origin_for_post_and_get(caplog) -> None:
             base_url=f"https://{internal_host}",
             transport=httpx.MockTransport(handler),
         ) as client:
-            await aria.send_aria_message("safe synthetic prompt", api_key="token", client=client)
+            await aria.send_aria_message(
+                "safe synthetic prompt",
+                title="Safe synthetic prompt",
+                api_key="token",
+                client=client,
+            )
             await aria.get_aria_turn("turn-1", api_key="token", client=client)
 
     caplog.set_level(logging.INFO, logger="httpx")
@@ -1297,6 +1514,7 @@ def test_logs_omit_prompt_scope_and_turn_identifiers(caplog) -> None:
                 prompt,
                 entity=entity,
                 project=project,
+                title="Private conversation",
                 api_key="token",
                 client=client,
             )

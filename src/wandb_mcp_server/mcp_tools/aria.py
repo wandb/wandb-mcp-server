@@ -42,6 +42,7 @@ ARIA_CLIENT_PROMPT_PART = {"type": "wandb_client", "platform": "agent"}
 MAX_MESSAGE_BYTES = 32 * 1024
 MAX_IDENTIFIER_LENGTH = 512
 MAX_SCOPE_LENGTH = 512
+MAX_THREAD_TITLE_LENGTH = 255
 MAX_UPSTREAM_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_PROGRESS_TOOL_RECORDS = 100
 MAX_PROGRESS_NODES_PER_RECORD = 200
@@ -145,6 +146,8 @@ entity : str, optional
     W&B entity for a new conversation, up to 512 characters. Omit to let ARIA use the account default. Must be omitted for continuations.
 project : str, optional
     W&B project for a new conversation, up to 512 characters. Omit to let ARIA use the default. Must be omitted for continuations.
+title : str, optional
+    Required for a new conversation (omit with parent_turn_id): a short descriptive name you write for this conversation, up to 255 characters; it is shown in aria_list_threads and the ARIA thread list in the W&B UI.
 parent_turn_id : str, optional
     Completed ARIA turn to continue, up to 512 characters. Use the exact turn_id returned by the prior call.
 wait_seconds : int
@@ -1178,6 +1181,7 @@ async def send_aria_message(
     parent_turn_id: Optional[str] = None,
     wait_seconds: int = 0,
     include_turn: bool = False,
+    title: Optional[str] = None,
     *,
     api_key: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
@@ -1219,6 +1223,18 @@ async def send_aria_message(
                     "entity and project must be omitted when parent_turn_id is set.",
                     retryable=False,
                 )
+            if title is not None:
+                raise AriaAPIError(
+                    "invalid_request",
+                    "title must be omitted when parent_turn_id is set.",
+                    retryable=False,
+                )
+        else:
+            title = _normalize_bounded_string(
+                title,
+                name="title",
+                max_length=MAX_THREAD_TITLE_LENGTH,
+            )
 
         resolved_api_key = _resolve_api_key(api_key)
         if parent_turn_id is None and project is not None and entity is None:
@@ -1248,6 +1264,24 @@ async def send_aria_message(
             wait_seconds,
         )
         turn = await _request_turn(client, "POST", "/api/v1/turns", payload=payload)
+        title_fields: Dict[str, str] = {}
+        if parent_turn_id is None:
+            thread_id = turn.get("thread_id")
+            if not isinstance(thread_id, str) or not thread_id or len(thread_id) > MAX_IDENTIFIER_LENGTH:
+                title_fields["title_error"] = "missing_thread_id"
+            else:
+                encoded_thread_id = quote(thread_id, safe="")
+                try:
+                    await _request_json(
+                        client,
+                        "PATCH",
+                        f"/api/v1/threads/{encoded_thread_id}",
+                        payload={"title": title},
+                    )
+                except AriaAPIError as exc:
+                    title_fields["title_error"] = exc.error_type
+                else:
+                    title_fields["title"] = title
         try:
             turn = await _poll_turn(client, turn, wait_seconds)
         except AriaAPIError as exc:
@@ -1255,12 +1289,16 @@ async def send_aria_message(
             # handle. A later GET failure must never erase that handle or imply
             # that the submission outcome is unknown: the caller can safely
             # resume polling the same turn instead of creating duplicate work.
+            result = exc.as_result(turn_id=str(turn["id"]), operation="get")
+            result.update(title_fields)
             return _finalize_result(
-                exc.as_result(turn_id=str(turn["id"]), operation="get"),
+                result,
                 extra_secrets=(resolved_api_key,),
             )
+        result = _turn_result(turn, include_turn=include_turn)
+        result.update(title_fields)
         return _finalize_result(
-            _turn_result(turn, include_turn=include_turn),
+            result,
             extra_secrets=(resolved_api_key,),
         )
     except AriaAPIError as exc:

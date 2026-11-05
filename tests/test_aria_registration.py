@@ -32,6 +32,7 @@ def test_aria_tools_are_registered_with_self_guiding_descriptions(monkeypatch) -
     assert {"aria_send_message", "aria_get_turn", "aria_list_threads", "aria_get_thread"} <= tools.keys()
     assert "ARIA can:" in tools["aria_send_message"].description
     assert "parent_turn_id" in tools["aria_send_message"].description
+    assert "title" in tools["aria_send_message"].description
     assert "bounded interval" in tools["aria_get_turn"].description
     assert "earlier ARIA conversation" in tools["aria_list_threads"].description
     assert "aria_get_turn" in tools["aria_get_thread"].description
@@ -39,6 +40,7 @@ def test_aria_tools_are_registered_with_self_guiding_descriptions(monkeypatch) -
         assert "<when_to_use>" in tools[name].description
     for name in ("aria_send_message", "aria_get_turn"):
         assert "include_turn" in tools[name].inputSchema["properties"]
+    assert "title" in tools["aria_send_message"].inputSchema["properties"]
     assert tools["aria_send_message"].inputSchema["required"] == ["message"]
     assert tools["aria_get_turn"].inputSchema["required"] == ["turn_id"]
     assert "required" not in tools["aria_list_threads"].inputSchema
