@@ -127,8 +127,6 @@ W&B and Weave APIs, and can read and change the W&B UI. ARIA can:
   notebooks, Sandboxes, GitHub repos when the user enabled it.
 - Investigations: open-ended "why is this slow", "what regressed", "audit this
   project" with a written analysis.
-Keep the narrow MCP tools for a single deterministic lookup (one run's config,
-a run count, listing traces) and search_wandb_docs_tool for documentation.
 Earlier ARIA conversations are found with aria_list_threads.
 </when_to_use>
 
