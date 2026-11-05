@@ -1434,12 +1434,14 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                 parent_turn_id: Optional[str] = None,
                 wait_seconds: int = 0,
                 include_turn: bool = False,
+                title: Optional[str] = None,
             ) -> Dict[str, Any]:
                 return _aria_result_or_tool_error(
                     await send_aria_message(
                         message=message,
                         entity=entity,
                         project=project,
+                        title=title,
                         parent_turn_id=parent_turn_id,
                         wait_seconds=wait_seconds,
                         include_turn=include_turn,
