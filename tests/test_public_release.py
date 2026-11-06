@@ -345,7 +345,12 @@ def test_source_release_workflow_is_tag_bound_pinned_and_draft():
     assert "--draft" in workflow
     assert "--verify-tag" in workflow
     assert "pypi" not in workflow.lower()
-    assert "group: public-source-release" in workflow
+    assert "|| 'public-source-release' }}" in workflow
+    assert "pull_request:\n    branches: [main]" in workflow
+    assert workflow.count("if: github.event_name != 'pull_request'") == 5
+    assert "source-gate --rehearsal" in workflow
+    assert 'attest "${REHEARSAL[@]}"' in workflow
+    assert "'public-source-rehearsal' || 'public-source-release'" in workflow
     assert "--clobber" not in workflow
     assert "candidate-pr-evidence.json" in workflow
     assert "only-fixed" not in workflow
@@ -627,3 +632,25 @@ def test_contract_locked_runtime_matches_uv_lock(tmp_path):
     (tmp_path / "uv.lock").write_text(stale_lock)
     with pytest.raises(public_release.ReleaseError, match="locked_runtime does not match uv.lock"):
         public_release.verify_locked_runtime(tmp_path, contract)
+
+
+def test_rehearsal_gate_evidence_is_only_accepted_in_rehearsal_mode(tmp_path):
+    evidence = public_release.rehearsal_gate_evidence(REPOSITORY_ROOT, CONTRACT_PATH)
+    path = tmp_path / "rehearsal.json"
+    path.write_bytes(public_release.canonical_json(evidence))
+
+    assert evidence["gate"] == public_release.REHEARSAL_GATE
+    assert evidence["pull_request"] is None
+    with pytest.raises(public_release.ReleaseError, match="does not qualify"):
+        public_release.validate_parent_evidence(REPOSITORY_ROOT, path, CONTRACT_PATH)
+    assert public_release.validate_parent_evidence(REPOSITORY_ROOT, path, CONTRACT_PATH, rehearsal=True) == evidence
+
+    real_shape = {
+        **evidence,
+        "gate": "candidate-pr",
+        "review_decision": "APPROVED",
+        "required_checks": {name: "SUCCESS" for name in evidence["required_checks"]},
+    }
+    path.write_bytes(public_release.canonical_json(real_shape))
+    with pytest.raises(public_release.ReleaseError, match="does not qualify"):
+        public_release.validate_parent_evidence(REPOSITORY_ROOT, path, CONTRACT_PATH, rehearsal=True)
