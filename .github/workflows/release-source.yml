@@ -225,12 +225,27 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
 
+      - name: Check out the reviewed vulnerability waiver policy from the dispatching ref
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.ref }}
+          path: release-policy
+          sparse-checkout: |
+            release/vulnerability-waivers.json
+            scripts/vulnerability_waivers.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Validate the vulnerability waiver policy
+        run: python3 release-policy/scripts/vulnerability_waivers.py check --policy release-policy/release/vulnerability-waivers.json
+
       - name: Scan the exact runtime SBOM
         id: grype
         continue-on-error: true
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           sbom: ${{ runner.temp }}/evidence/wandb_mcp_server-${{ needs.build.outputs.version }}.spdx.json
+          config: ${{ github.workspace }}/release-policy/release/vulnerability-waivers.json
           fail-build: true
           severity-cutoff: high
           output-format: json
@@ -245,6 +260,19 @@ jobs:
           set -euo pipefail
           test -s "$RUNNER_TEMP/evidence/wandb_mcp_server-${{ needs.build.outputs.version }}.vulnerabilities.json"
           test "$GRYPE_OUTCOME" = "success"
+
+      - name: Record every waived advisory against the reviewed policy
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          POLICY_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          POLICY_SHA="$(git -C release-policy rev-parse HEAD)"
+          python3 release-policy/scripts/vulnerability_waivers.py verify \
+            --policy release-policy/release/vulnerability-waivers.json \
+            --report "$RUNNER_TEMP/evidence/wandb_mcp_server-$VERSION.vulnerabilities.json" \
+            --policy-source "$POLICY_REF@$POLICY_SHA" \
+            --output "$RUNNER_TEMP/evidence/vulnerability-waivers.json"
 
       - name: Create the public qualification predicate
         env:
@@ -326,6 +354,7 @@ jobs:
           ASSETS=("$RUNNER_TEMP/evidence"/*.whl "$RUNNER_TEMP/evidence"/*.tar.gz)
           ASSETS+=("$RUNNER_TEMP/evidence/SHA256SUMS")
           ASSETS+=("$RUNNER_TEMP/evidence"/*.spdx.json "$RUNNER_TEMP/evidence"/*.vulnerabilities.json)
+          ASSETS+=("$RUNNER_TEMP/evidence/vulnerability-waivers.json")
           ASSETS+=("$RUNNER_TEMP/evidence"/profile-evidence-*.json)
           ASSETS+=("$RUNNER_TEMP/evidence/public-release-predicate.json")
           ASSETS+=("$RUNNER_TEMP/evidence/build-manifest.json")
