@@ -25,10 +25,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate the vulnerability waiver policy
+        run: python3 scripts/vulnerability_waivers.py check --policy release/vulnerability-waivers.json
+
       - name: Scan locked dependencies with Grype
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           path: "."
+          config: release/vulnerability-waivers.json
           fail-build: true
           severity-cutoff: high
           only-fixed: true
