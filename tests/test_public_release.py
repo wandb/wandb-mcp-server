@@ -617,3 +617,13 @@ def test_official_release_channels_exclude_pypi():
     assert "GitHub Release" in releasing
     assert "immutable container digest" in releasing
     assert "PyPI and mutable container tags are not release channels" in normalized
+
+
+def test_contract_locked_runtime_matches_uv_lock(tmp_path):
+    contract = _contract()
+    assert public_release.verify_locked_runtime(REPOSITORY_ROOT, contract) == contract["locked_runtime"]
+
+    stale_lock = "\n".join(f'[[package]]\nname = "{name}"\nversion = "0.0.1"\n' for name in contract["locked_runtime"])
+    (tmp_path / "uv.lock").write_text(stale_lock)
+    with pytest.raises(public_release.ReleaseError, match="locked_runtime does not match uv.lock"):
+        public_release.verify_locked_runtime(tmp_path, contract)
