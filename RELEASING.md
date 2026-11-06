@@ -71,6 +71,10 @@ uv run --no-sync bandit -q -r src -ll
 uv run --no-sync python scripts/public_release.py docs --check
 ```
 
+A dependency refresh that moves `wandb`, `wandb-workspaces`, or `weave` in `uv.lock` must
+move `locked_runtime` in `release/public-contract.json` in the same PR; `preflight` and the
+attest step reject any drift between the two.
+
 CI must also pass on Python 3.11 and 3.12, against the locked and latest
 supported W&B SDKs, and through the minimum and locked MCP SDK versions.
 Security gates include Bandit, a complete Grype report with no High/Critical
