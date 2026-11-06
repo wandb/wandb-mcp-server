@@ -11,9 +11,9 @@
     "maximum_exclusive": "2"
   },
   "locked_runtime": {
-    "wandb": "0.28.0",
-    "wandb-workspaces": "0.4.4",
-    "weave": "0.52.35"
+    "wandb": "0.31.0",
+    "wandb-workspaces": "0.4.13",
+    "weave": "0.53.13"
   },
   "build_requirements": "release/build-requirements.lock",
   "runtime_contract": "src/wandb_mcp_server/runtime-contract.json",

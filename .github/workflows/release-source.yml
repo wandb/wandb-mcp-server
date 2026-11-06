@@ -261,7 +261,7 @@ jobs:
           test -s "$RUNNER_TEMP/evidence/wandb_mcp_server-${{ needs.build.outputs.version }}.vulnerabilities.json"
           test "$GRYPE_OUTCOME" = "success"
 
-      - name: Record every waived advisory against the reviewed policy
+      - name: Record every waived advisory against the reviewed policy and drop the policy checkout
         env:
           VERSION: ${{ needs.build.outputs.version }}
           POLICY_REF: ${{ github.ref }}
@@ -273,6 +273,7 @@ jobs:
             --report "$RUNNER_TEMP/evidence/wandb_mcp_server-$VERSION.vulnerabilities.json" \
             --policy-source "$POLICY_REF@$POLICY_SHA" \
             --output "$RUNNER_TEMP/evidence/vulnerability-waivers.json"
+          rm -rf release-policy
 
       - name: Create the public qualification predicate
         env:
@@ -384,7 +385,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: public-source-release-evidence
+          name: signed-source-release-evidence
           path: ${{ runner.temp }}/evidence
           if-no-files-found: error
           retention-days: 90

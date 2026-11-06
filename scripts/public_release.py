@@ -277,6 +277,25 @@ def _read_version_facts(root: Path) -> dict[str, str]:
     }
 
 
+def verify_locked_runtime(root: Path, contract: dict[str, Any]) -> dict[str, str]:
+    """Require the contract's locked W&B runtime to match the versions pinned in uv.lock."""
+
+    lock = tomllib.loads((root / "uv.lock").read_text())
+    locked = {
+        package["name"]: package["version"]
+        for package in lock.get("package", [])
+        if package.get("name") in contract["locked_runtime"]
+    }
+    mismatched = {
+        name: {"contract": version, "uv.lock": locked.get(name)}
+        for name, version in contract["locked_runtime"].items()
+        if locked.get(name) != version
+    }
+    if mismatched:
+        raise ReleaseError(f"public release contract locked_runtime does not match uv.lock: {mismatched}")
+    return locked
+
+
 def verify_version(root: Path, version: str) -> dict[str, str]:
     if not _VERSION_PATTERN.fullmatch(version):
         raise ReleaseError(f"invalid release version: {version}")
@@ -520,6 +539,7 @@ def preflight(
 ) -> dict[str, Any]:
     contract = load_contract(contract_path)
     facts = verify_version(root, version)
+    verify_locked_runtime(root, contract)
     verify_clean_tree(root)
     identity = source_identity(root)
     result: dict[str, Any] = {
@@ -754,6 +774,7 @@ def create_attestation(
 ) -> dict[str, Any]:
     contract = load_contract(contract_path)
     verify_version(root, version)
+    verify_locked_runtime(root, contract)
     verify_clean_tree(root)
     expected_profiles = [profile.as_dict() for profile in exhaustive_profiles(contract)]
     profile_evidence_records: list[dict[str, Any]] = []
