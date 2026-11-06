@@ -125,12 +125,12 @@ def test_lockfile_pins_supported_wandb_versions():
     lock = tomllib.loads((Path(__file__).parents[1] / "uv.lock").read_text())
     locked = {package["name"]: package["version"] for package in lock["package"]}
 
-    assert locked["wandb"] == "0.28.0"
-    assert locked["wandb-workspaces"] == "0.4.4"
+    assert locked["wandb"] == "0.31.0"
+    assert locked["wandb-workspaces"] == "0.4.13"
 
 
 def test_installed_wandb_versions_meet_supported_floor():
-    assert Version(version("wandb")) >= Version("0.28.0")
+    assert Version(version("wandb")) >= Version("0.31.0")
     assert Version(version("wandb-workspaces")) >= Version("0.4.4")
 
 
