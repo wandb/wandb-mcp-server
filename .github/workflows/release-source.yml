@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v*.*.*"
+  # Pull requests into main rehearse the whole release pipeline on the merge
+  # commit: identical jobs and gates, but the approved-PR gate is stood in for,
+  # and nothing is signed, attested, or published.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       tag:
@@ -18,8 +23,8 @@ permissions:
   statuses: read
 
 concurrency:
-  group: public-source-release
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('public-source-rehearsal-{0}', github.event.pull_request.number) || 'public-source-release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -49,6 +54,17 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # Rehearsal: qualify the pull request merge commit as if it were tagged.
+            VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+            test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+            {
+              echo "version=$VERSION"
+              echo "tag=v$VERSION"
+              echo "source_sha=$GITHUB_SHA"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           VERSION="${TAG#v}"
@@ -82,10 +98,15 @@ jobs:
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
         run: |
           set -euo pipefail
-          python3 scripts/public_release.py source-gate \
-            --repository "$GITHUB_REPOSITORY" \
-            --sha "$SOURCE_SHA" \
-            --output "$RUNNER_TEMP/candidate-pr-evidence.json"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            python3 scripts/public_release.py source-gate --rehearsal \
+              --output "$RUNNER_TEMP/candidate-pr-evidence.json"
+          else
+            python3 scripts/public_release.py source-gate \
+              --repository "$GITHUB_REPOSITORY" \
+              --sha "$SOURCE_SHA" \
+              --output "$RUNNER_TEMP/candidate-pr-evidence.json"
+          fi
 
       - name: Qualify source and build isolated artifacts
         env:
@@ -95,8 +116,13 @@ jobs:
           set -euo pipefail
           uv python install 3.12
           uv sync --frozen --extra test --extra http --python 3.12
-          uv run --no-sync python scripts/public_release.py \
-            preflight --version "$VERSION" --gate source-released --tag-verification github
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            uv run --no-sync python scripts/public_release.py \
+              preflight --version "$VERSION" --gate candidate
+          else
+            uv run --no-sync python scripts/public_release.py \
+              preflight --version "$VERSION" --gate source-released --tag-verification github
+          fi
           uv lock --check
           uv run --no-sync ruff check .
           uv run --no-sync ruff format --check .
@@ -179,7 +205,7 @@ jobs:
     needs: [build, exact-profiles]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: public-source-release
+    environment: ${{ github.event_name == 'pull_request' && 'public-source-rehearsal' || 'public-source-release' }}
     permissions:
       contents: write
       id-token: write
@@ -286,7 +312,11 @@ jobs:
           VULNS="$RUNNER_TEMP/evidence/wandb_mcp_server-$VERSION.vulnerabilities.json"
           BUILD_MANIFEST="$RUNNER_TEMP/evidence/build-manifest.json"
           BUILD_CHECKSUMS="$RUNNER_TEMP/evidence/SHA256SUMS"
-          python3 scripts/public_release.py attest \
+          REHEARSAL=()
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            REHEARSAL=(--rehearsal)
+          fi
+          python3 scripts/public_release.py attest "${REHEARSAL[@]}" \
             --version "$VERSION" \
             --profile-evidence "$RUNNER_TEMP/evidence/profile-evidence-3.11.json" \
             --profile-evidence "$RUNNER_TEMP/evidence/profile-evidence-3.12.json" \
@@ -304,18 +334,21 @@ jobs:
             | sed "s#$RUNNER_TEMP/evidence/##" > "$RUNNER_TEMP/evidence/SHA256SUMS"
 
       - name: Attest source artifacts with SLSA provenance
+        if: github.event_name != 'pull_request'
         id: provenance
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-checksums: ${{ runner.temp }}/evidence/SHA256SUMS
 
       - name: Bind the runtime SBOM to the wheel
+        if: github.event_name != 'pull_request'
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-path: ${{ runner.temp }}/evidence/*.whl
           sbom-path: ${{ runner.temp }}/evidence/wandb_mcp_server-${{ needs.build.outputs.version }}.spdx.json
 
       - name: Sign the public release qualification predicate
+        if: github.event_name != 'pull_request'
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-checksums: ${{ runner.temp }}/evidence/SHA256SUMS
@@ -323,6 +356,7 @@ jobs:
           predicate-path: ${{ runner.temp }}/evidence/public-release-predicate.json
 
       - name: Verify source artifact attestations
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -346,6 +380,7 @@ jobs:
             --predicate-type https://spdx.dev/Document/v2.3
 
       - name: Create or refresh the draft GitHub Release
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
@@ -385,7 +420,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: signed-source-release-evidence
+          name: ${{ github.event_name == 'pull_request' && 'release-rehearsal-evidence' || 'signed-source-release-evidence' }}
           path: ${{ runner.temp }}/evidence
           if-no-files-found: error
           retention-days: 90

@@ -81,6 +81,16 @@ Security gates include Bandit, a complete Grype report with no High/Critical
 findings in the qualified runtime, and the repository's required Socket
 Security check. Missing external checks are blockers, not implicit passes.
 
+### Release rehearsal
+
+Every pull request into `main` runs `.github/workflows/release-source.yml` in rehearsal
+mode on its merge commit: the same build, installed-wheel profile, SBOM, Grype, waiver and
+predicate steps as a tagged release, with the approved-PR gate stood in for by
+`public_release.py source-gate --rehearsal`. Signing, attestation and the GitHub Release are
+skipped, and the predicate carries `status: rehearsal`, so it can never be mistaken for a
+qualified release. A red rehearsal means the tagged run would fail too; fix it in the PR
+before anyone signs a tag.
+
 ### Late advisories and scoped waivers
 
 Grype's database moves independently of the source tree, so an advisory

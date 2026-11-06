@@ -492,6 +492,9 @@ def verify_source_pr_gate(root: Path, contract_path: Path, repository: str, sha:
     }
 
 
+REHEARSAL_GATE = "candidate-pr-rehearsal"
+
+
 def source_identity(root: Path) -> dict[str, str]:
     return {
         "sha": _git(root, "rev-parse", "HEAD"),
@@ -729,7 +732,45 @@ def validate_release_artifacts(
     return artifact_records
 
 
-def validate_parent_evidence(root: Path, path: Path, contract_path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
+def rehearsal_gate_evidence(root: Path, contract_path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
+    """Stand in for the approved-PR gate when the release pipeline is rehearsed on unmerged source.
+
+    The evidence is only accepted by ``create_attestation(..., rehearsal=True)``, whose
+    predicate is never signed or published.
+    """
+
+    contract = load_contract(contract_path)
+    identity = source_identity(root)
+    issued_at = datetime.now(timezone.utc)
+    return {
+        "schema_version": 1,
+        "gate": REHEARSAL_GATE,
+        "status": "passed",
+        "repository": None,
+        "pull_request": None,
+        "reviewed_head_sha": identity["sha"],
+        "reviewed_tree": identity["tree"],
+        "merge_sha": identity["sha"],
+        "merge_tree": identity["tree"],
+        "review_decision": "REHEARSAL",
+        "unresolved_conversations": 0,
+        "required_checks": {name: "REHEARSAL" for name in contract["required_pr_checks"]},
+        "issued_at": issued_at.isoformat().replace("+00:00", "Z"),
+        "expires_at": (issued_at + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        "duration_ms": 0,
+    }
+
+
+def validate_parent_evidence(
+    root: Path,
+    path: Path,
+    contract_path: Path = DEFAULT_CONTRACT,
+    *,
+    rehearsal: bool = False,
+) -> dict[str, Any]:
+    expected_gate = REHEARSAL_GATE if rehearsal else "candidate-pr"
+    expected_decision = "REHEARSAL" if rehearsal else "APPROVED"
+    expected_outcome = "REHEARSAL" if rehearsal else "SUCCESS"
     evidence = _read_json_object(path, "candidate gate evidence")
     identity = source_identity(root)
     contract = load_contract(contract_path)
@@ -745,18 +786,18 @@ def validate_parent_evidence(root: Path, path: Path, contract_path: Path = DEFAU
         raise ReleaseError("candidate gate evidence validity exceeds one hour")
     if (
         evidence.get("schema_version") != 1
-        or evidence.get("gate") != "candidate-pr"
+        or evidence.get("gate") != expected_gate
         or evidence.get("status") != "passed"
         or evidence.get("merge_sha") != identity["sha"]
         or evidence.get("merge_tree") != identity["tree"]
         or evidence.get("reviewed_tree") != identity["tree"]
-        or evidence.get("review_decision") != "APPROVED"
+        or evidence.get("review_decision") != expected_decision
         or evidence.get("unresolved_conversations") != 0
         or not isinstance(evidence.get("required_checks"), dict)
         or not isinstance(evidence.get("duration_ms"), int)
         or evidence["duration_ms"] < 0
         or set(evidence["required_checks"]) != set(contract["required_pr_checks"])
-        or any(outcome != "SUCCESS" for outcome in evidence["required_checks"].values())
+        or any(outcome != expected_outcome for outcome in evidence["required_checks"].values())
     ):
         raise ReleaseError("candidate gate evidence does not qualify this source")
     return evidence
@@ -771,6 +812,8 @@ def create_attestation(
     build_manifest_path: Path,
     build_checksums_path: Path,
     parent_evidence_path: Path,
+    *,
+    rehearsal: bool = False,
 ) -> dict[str, Any]:
     contract = load_contract(contract_path)
     verify_version(root, version)
@@ -833,7 +876,7 @@ def create_attestation(
         build_manifest_path,
         build_checksums_path,
     )
-    parent_evidence = validate_parent_evidence(root, parent_evidence_path, contract_path)
+    parent_evidence = validate_parent_evidence(root, parent_evidence_path, contract_path, rehearsal=rehearsal)
 
     identity = source_identity(root)
     if any(evidence.get("source_sha") != identity["sha"] for evidence in evidence_by_python.values()):
@@ -867,8 +910,8 @@ def create_attestation(
                 for python_version in sorted(evidence_by_python)
             },
         },
-        "status": "qualified",
-        "approval_state": "source-pr-approved",
+        "status": "rehearsal" if rehearsal else "qualified",
+        "approval_state": "rehearsal-unreviewed" if rehearsal else "source-pr-approved",
         "rollback": {"strategy": "fix-forward", "mutable_artifact": False},
     }
 
@@ -1121,8 +1164,9 @@ def _parser() -> argparse.ArgumentParser:
     preflight_parser.add_argument("--output", type=Path)
 
     source_gate = subparsers.add_parser("source-gate", help="Verify the approved release PR behind a source tag")
-    source_gate.add_argument("--repository", required=True)
-    source_gate.add_argument("--sha", required=True)
+    source_gate.add_argument("--repository")
+    source_gate.add_argument("--sha")
+    source_gate.add_argument("--rehearsal", action="store_true", help="Rehearse the gate on unmerged source")
     source_gate.add_argument("--output", type=Path, required=True)
 
     build = subparsers.add_parser("build", help="Build wheel and sdist into a fresh external directory")
@@ -1136,6 +1180,7 @@ def _parser() -> argparse.ArgumentParser:
     attest.add_argument("--build-manifest", type=Path, required=True)
     attest.add_argument("--build-checksums", type=Path, required=True)
     attest.add_argument("--parent-evidence", type=Path, required=True)
+    attest.add_argument("--rehearsal", action="store_true", help="Accept rehearsal gate evidence")
     attest.add_argument("--output", type=Path, required=True)
 
     docs = subparsers.add_parser("docs", help="Generate or verify public feature documentation")
@@ -1170,10 +1215,15 @@ def main() -> None:
                 args.output,
             )
         elif args.command == "source-gate":
-            _write_json(
-                verify_source_pr_gate(args.root, args.contract, args.repository, args.sha),
-                args.output,
-            )
+            if args.rehearsal == bool(args.repository and args.sha):
+                raise ReleaseError("source-gate needs either --rehearsal or both --repository and --sha")
+            if args.rehearsal:
+                _write_json(rehearsal_gate_evidence(args.root, args.contract), args.output)
+            else:
+                _write_json(
+                    verify_source_pr_gate(args.root, args.contract, args.repository, args.sha),
+                    args.output,
+                )
         elif args.command == "build":
             _write_json(build_artifacts(args.root, args.contract, args.version, args.output_dir), None)
         elif args.command == "attest":
@@ -1186,6 +1236,7 @@ def main() -> None:
                 args.build_manifest,
                 args.build_checksums,
                 args.parent_evidence,
+                rehearsal=args.rehearsal,
             )
             _write_json(attestation, args.output)
         elif args.command == "docs":
