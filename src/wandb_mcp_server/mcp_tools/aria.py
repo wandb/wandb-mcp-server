@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from importlib.metadata import PackageNotFoundError, version as distribution_version
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
@@ -31,12 +31,18 @@ logger = get_rich_logger(__name__)
 TURN_STATES = frozenset({"queued", "in_progress", "completed", "errored", "cancelled"})
 TERMINAL_STATES = frozenset({"completed", "errored", "cancelled"})
 MAX_WAIT_SECONDS = 30
-MAX_BATCH_TURNS = 20
-MAX_BATCH_CONCURRENCY = 8
-MAX_BATCH_GET_REQUESTS = 100
+MAX_OUTBOUND_CONCURRENCY = 8
+DEFAULT_LIST_LIMIT = 20
+MAX_LIST_LIMIT = 50
+MAX_LIST_OFFSET = 10_000
+MAX_PROMPT_PREVIEW_CHARS = 500
+# Cooperative attribution in the turn body so ARIA can separate programmatic
+# MCP-driven turns from web UI and mobile usage.
+ARIA_CLIENT_PROMPT_PART = {"type": "wandb_client", "platform": "agent"}
 MAX_MESSAGE_BYTES = 32 * 1024
 MAX_IDENTIFIER_LENGTH = 512
 MAX_SCOPE_LENGTH = 512
+MAX_THREAD_TITLE_LENGTH = 255
 MAX_UPSTREAM_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_PROGRESS_TOOL_RECORDS = 100
 MAX_PROGRESS_NODES_PER_RECORD = 200
@@ -45,7 +51,6 @@ POLL_INTERVAL_SECONDS = 1.0
 POLL_DEADLINE_SAFETY_SECONDS = 0.5
 MIN_RETRY_AFTER_MS = 1_000
 MAX_RETRY_AFTER_MS = 30_000
-_OVERLOAD_ERROR_TYPES = frozenset({"rate_limited", "service_unavailable"})
 _OUTBOUND_LIMITERS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = WeakKeyDictionary()
 _OUTBOUND_LIMITERS_LOCK = threading.Lock()
 
@@ -63,7 +68,7 @@ def _outbound_limiter() -> asyncio.Semaphore:
     with _OUTBOUND_LIMITERS_LOCK:
         limiter = _OUTBOUND_LIMITERS.get(loop)
         if limiter is None:
-            limiter = asyncio.Semaphore(MAX_BATCH_CONCURRENCY)
+            limiter = asyncio.Semaphore(MAX_OUTBOUND_CONCURRENCY)
             _OUTBOUND_LIMITERS[loop] = limiter
         return limiter
 
@@ -72,14 +77,15 @@ class _SanitizeAriaHTTPLogFilter(logging.Filter):
     """Remove ARIA origins, turn identifiers, and internal hosts from HTTP logs."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        marker = "/api/v1/turns"
         if isinstance(record.args, tuple) and len(record.args) >= 2:
             rendered_url = str(record.args[1])
-            if marker in rendered_url:
-                suffix = f"{marker}/<redacted>" if f"{marker}/" in rendered_url else marker
-                args = list(record.args)
-                args[1] = f"<aria-service>{suffix}"
-                record.args = tuple(args)
+            for marker in ("/api/v1/turns", "/api/v1/threads"):
+                if marker in rendered_url:
+                    suffix = f"{marker}/<redacted>" if f"{marker}/" in rendered_url else marker
+                    args = list(record.args)
+                    args[1] = f"<aria-service>{suffix}"
+                    record.args = tuple(args)
+                    break
 
         # httpcore debug records do not always expose a URL argument. Render
         # once and run the shared infrastructure/credential sanitizer over the
@@ -106,12 +112,23 @@ for _http_logger_name in (
 ARIA_SEND_MESSAGE_TOOL_DESCRIPTION = """Start or continue an asynchronous conversation with ARIA, the hosted Weights & Biases agent (also called wb-agent).
 
 <when_to_use>
-Use ARIA to hand off W&B-native work that may take a while, manipulate or inspect
-the W&B UI more directly, or use ARIA's native W&B context, data access, and
-multi-step capabilities instead of scraping data yourself. Good tasks include
-comparing runs, diagnosing evaluations or Weave traces, inspecting W&B pages,
-and carrying out multi-step W&B workflows. Prefer narrower MCP query tools for
-simple deterministic lookups and search_wandb_docs_tool for documentation.
+ARIA is W&B's own agent: it has the caller's W&B context, runs code against the
+W&B and Weave APIs, and can read and change the W&B UI. ARIA can:
+- Workspaces: create or edit saved views, filters, grouping, sorting, sections,
+  panels, run colours, pinned/baseline runs; describe what a workspace shows.
+- Runs: rank, compare, diff configs, find regressions and anomalies, explain
+  runtime or metric differences, read run console logs, tag/rename/move/delete
+  runs, export run tables.
+- Sweeps: create, run and analyse sweeps and parameter importance.
+- Reports: create or edit reports and verify them; PDF export.
+- Artifacts and Registry: lineage, versions, promotion, storage cleanup.
+- Weave: query traces, debug evaluations, prompts/datasets/leaderboards,
+  monitors; Agent Lens conversations and insights.
+- Automations and alerts, Launch queues, Serverless training and inference,
+  notebooks, Sandboxes, GitHub repos when the user enabled it.
+- Investigations: open-ended "why is this slow", "what regressed", "audit this
+  project" with a written analysis.
+Earlier ARIA conversations are found with aria_list_threads.
 </when_to_use>
 
 This tool returns promptly by default because ARIA turns are asynchronous. Keep the returned turn_id. If state is queued or in_progress, call aria_get_turn until is_terminal is true. To continue a completed conversation, call this tool again with parent_turn_id set to the previous turn_id; omit entity and project for continuations. Set wait_seconds to wait briefly for a fast result, but the wait is always bounded.
@@ -129,6 +146,8 @@ entity : str, optional
     W&B entity for a new conversation, up to 512 characters. Omit to let ARIA use the account default. Must be omitted for continuations.
 project : str, optional
     W&B project for a new conversation, up to 512 characters. Omit to let ARIA use the default. Must be omitted for continuations.
+title : str, optional
+    Required for a new conversation (omit with parent_turn_id): a short descriptive name you write for this conversation, up to 255 characters; it is shown in aria_list_threads and the ARIA thread list in the W&B UI.
 parent_turn_id : str, optional
     Completed ARIA turn to continue, up to 512 characters. Use the exact turn_id returned by the prior call.
 wait_seconds : int
@@ -145,10 +164,10 @@ dict
 ARIA_GET_TURN_TOOL_DESCRIPTION = """Get the current state and result of an asynchronous ARIA turn.
 
 <when_to_use>
-Call after aria_send_message returns queued or in_progress and you need the state
-of one turn. For several turns, use aria_get_turns so their bounded wait happens
-concurrently in one MCP call. Always rely on is_terminal rather than the presence
-of latest_response because ARIA can emit a partial response while still working.
+Call after aria_send_message returns queued or in_progress, or to read the answer
+of a turn found with aria_get_thread. Always rely on is_terminal rather than the
+presence of latest_response because ARIA can emit a partial response while still
+working.
 </when_to_use>
 
 With wait_seconds=0 this performs one poll; with 1-30 it polls only for that bounded interval and returns early if the turn completes, errors, or is cancelled. In-progress results include a phase, meaningful status text, message/tool counts, and latest tool activity, plus a suggested poll interval. Reuse the same turn_id until is_terminal is true.
@@ -158,7 +177,7 @@ When state is completed, latest_response contains ARIA's newest assistant answer
 Parameters
 ----------
 turn_id : str
-    Exact ARIA turn_id returned by aria_send_message, up to 512 characters.
+    Exact ARIA turn_id returned by aria_send_message or aria_get_thread, up to 512 characters.
 wait_seconds : int
     Seconds to poll before returning, from 0 to 30. Default 0 performs one status request.
 include_turn : bool
@@ -170,33 +189,67 @@ dict
     Compact current state, progress, latest response, and continuation/poll guidance, or a native MCP error containing JSON details.
 """
 
-ARIA_GET_TURNS_TOOL_DESCRIPTION = """Poll several asynchronous ARIA turns concurrently in one MCP call.
+ARIA_LIST_THREADS_TOOL_DESCRIPTION = """Find the caller's previous ARIA conversations (their chat history with ARIA, the W&B agent), most recently active first.
 
 <when_to_use>
-Use after launching multiple ARIA conversations. This avoids serial client-side
-bounded polls: provide every outstanding turn_id and this tool fetches each state
-concurrently, waiting at most one shared bounded interval. For one turn, prefer
+This is the only source of ARIA conversation history. Call it whenever the caller
+refers to an earlier, previous, past, or most recent ARIA conversation, chat, or
+thread, or asks what ARIA said, found, or concluded before, for example "find my
+earlier ARIA conversation about project X" or "what did ARIA say about my eval runs
+last week". Do not answer that no conversation history is available without calling
+this first. Filter by W&B entity and project when known. Then call aria_get_thread
+with the chosen thread_id. Do not use this to poll a turn you just started; use
 aria_get_turn.
 </when_to_use>
 
-The result preserves input order and summarizes terminal, pending, and failed
-turns. Individual retryable lookup failures remain attached to their turn IDs;
-successful turns are still returned. Always rely on each result's is_terminal.
-Results are compact by default.
+Each thread includes thread_id, title, a bounded preview of its first prompt,
+entity/project scope, pinned/visibility flags, and creation and last-turn
+timestamps. Results are paginated: when
+has_more is true, call again with offset=next_offset.
 
 Parameters
 ----------
-turn_ids : list of str
-    One to 20 distinct ARIA turn IDs, each up to 512 characters.
-wait_seconds : int
-    Shared polling window from 0 to 30 seconds. Default 0 performs one concurrent status request.
-include_turn : bool
-    Include each bounded raw turn snapshot. Oversized data is truncated with metadata. Default false avoids very large responses.
+entity : str, optional
+    W&B entity filter, up to 512 characters.
+project : str, optional
+    W&B project filter, up to 512 characters.
+limit : int
+    Threads to return, from 1 to 50. Default 20.
+offset : int
+    Threads to skip for pagination, from 0 to 10000. Default 0.
 
 Returns
 -------
 dict
-    Ordered per-turn results plus terminal, pending, and error counts and retry guidance.
+    Compact thread summaries plus pagination guidance, or a native MCP error containing JSON details.
+"""
+
+ARIA_GET_THREAD_TOOL_DESCRIPTION = """Get one ARIA conversation thread and a compact list of its turns, newest first.
+
+<when_to_use>
+Use after aria_list_threads to inspect an earlier conversation: see what was asked,
+which turns finished, and which turn to continue. Call aria_get_turn with a turn_id
+to read that turn's answer. To continue the conversation, call aria_send_message
+with parent_turn_id set to the newest completed turn_id.
+</when_to_use>
+
+Each turn includes turn_id, parent_turn_id, state, is_terminal, and timestamps.
+Prompts and answers are not included; fetch them with aria_get_turn. Turns are paginated: when has_more is true, call again with
+offset=next_offset.
+
+Parameters
+----------
+thread_id : str
+    Exact thread_id from aria_list_threads or a prior ARIA result, up to 512 characters.
+limit : int
+    Turns to return, from 1 to 50. Default 20.
+offset : int
+    Turns to skip for pagination, from 0 to 10000. Default 0.
+
+Returns
+-------
+dict
+    Thread summary, compact turns, and continuation/pagination guidance, or a native MCP error containing JSON details.
 """
 
 
@@ -689,12 +742,14 @@ async def _perform_bounded_request(
     path: str,
     *,
     payload: Optional[Dict[str, Any]],
+    params: Optional[Dict[str, Any]] = None,
 ) -> httpx.Response:
     async with _outbound_limiter():
         async with client.stream(
             method,
             path,
             json=payload,
+            params=params,
             headers={
                 "Accept-Encoding": "identity",
                 # This is cooperative product attribution only. ARIA must not
@@ -786,24 +841,25 @@ def _http_error(response: httpx.Response, *, safe_to_retry: bool) -> AriaAPIErro
     )
 
 
-async def _request_turn(
+async def _request_json(
     client: httpx.AsyncClient,
     method: str,
     path: str,
     *,
     payload: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    params: Optional[Dict[str, Any]] = None,
+) -> tuple[int, Any]:
     safe_to_retry = method == "GET"
     try:
         outer_deadline = current_tool_deadline.get()
         if outer_deadline is None:
-            response = await _perform_bounded_request(client, method, path, payload=payload)
+            response = await _perform_bounded_request(client, method, path, payload=payload, params=params)
         else:
             request_seconds = outer_deadline - POLL_DEADLINE_SAFETY_SECONDS - time.monotonic()
             if request_seconds <= 0:
                 raise TimeoutError
             async with asyncio.timeout(request_seconds):
-                response = await _perform_bounded_request(client, method, path, payload=payload)
+                response = await _perform_bounded_request(client, method, path, payload=payload, params=params)
     except TimeoutError as exc:
         raise AriaAPIError(
             "request_timeout",
@@ -827,7 +883,7 @@ async def _request_turn(
         raise _http_error(response, safe_to_retry=safe_to_retry)
 
     try:
-        turn = response.json()
+        return response.status_code, response.json()
     except ValueError as exc:
         raise AriaAPIError(
             "invalid_response",
@@ -836,12 +892,22 @@ async def _request_turn(
             status_code=response.status_code,
         ) from exc
 
+
+async def _request_turn(
+    client: httpx.AsyncClient,
+    method: str,
+    path: str,
+    *,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    safe_to_retry = method == "GET"
+    status_code, turn = await _request_json(client, method, path, payload=payload)
     if not isinstance(turn, dict):
         raise AriaAPIError(
             "invalid_response",
             "ARIA returned a response without the required turn id or state.",
             retryable=safe_to_retry,
-            status_code=response.status_code,
+            status_code=status_code,
         )
     turn_id = turn.get("id")
     state = turn.get("state")
@@ -856,7 +922,7 @@ async def _request_turn(
             "invalid_response",
             "ARIA returned an invalid turn id or state.",
             retryable=safe_to_retry,
-            status_code=response.status_code,
+            status_code=status_code,
         )
     return turn
 
@@ -1115,6 +1181,7 @@ async def send_aria_message(
     parent_turn_id: Optional[str] = None,
     wait_seconds: int = 0,
     include_turn: bool = False,
+    title: Optional[str] = None,
     *,
     api_key: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
@@ -1156,6 +1223,18 @@ async def send_aria_message(
                     "entity and project must be omitted when parent_turn_id is set.",
                     retryable=False,
                 )
+            if title is not None:
+                raise AriaAPIError(
+                    "invalid_request",
+                    "title must be omitted when parent_turn_id is set.",
+                    retryable=False,
+                )
+        else:
+            title = _normalize_bounded_string(
+                title,
+                name="title",
+                max_length=MAX_THREAD_TITLE_LENGTH,
+            )
 
         resolved_api_key = _resolve_api_key(api_key)
         if parent_turn_id is None and project is not None and entity is None:
@@ -1167,7 +1246,9 @@ async def send_aria_message(
         if client is None:
             client = _new_http_client(resolved_api_key)
 
-        payload: Dict[str, Any] = {"user_prompt": message}
+        payload: Dict[str, Any] = {
+            "user_prompt": [{"type": "text", "text": message}, dict(ARIA_CLIENT_PROMPT_PART)],
+        }
         if parent_turn_id is not None:
             payload["parent_turn_id"] = parent_turn_id
         else:
@@ -1183,6 +1264,24 @@ async def send_aria_message(
             wait_seconds,
         )
         turn = await _request_turn(client, "POST", "/api/v1/turns", payload=payload)
+        title_fields: Dict[str, str] = {}
+        if parent_turn_id is None:
+            thread_id = turn.get("thread_id")
+            if not isinstance(thread_id, str) or not thread_id or len(thread_id) > MAX_IDENTIFIER_LENGTH:
+                title_fields["title_error"] = "missing_thread_id"
+            else:
+                encoded_thread_id = quote(thread_id, safe="")
+                try:
+                    await _request_json(
+                        client,
+                        "PATCH",
+                        f"/api/v1/threads/{encoded_thread_id}",
+                        payload={"title": title},
+                    )
+                except AriaAPIError as exc:
+                    title_fields["title_error"] = exc.error_type
+                else:
+                    title_fields["title"] = title
         try:
             turn = await _poll_turn(client, turn, wait_seconds)
         except AriaAPIError as exc:
@@ -1190,12 +1289,16 @@ async def send_aria_message(
             # handle. A later GET failure must never erase that handle or imply
             # that the submission outcome is unknown: the caller can safely
             # resume polling the same turn instead of creating duplicate work.
+            result = exc.as_result(turn_id=str(turn["id"]), operation="get")
+            result.update(title_fields)
             return _finalize_result(
-                exc.as_result(turn_id=str(turn["id"]), operation="get"),
+                result,
                 extra_secrets=(resolved_api_key,),
             )
+        result = _turn_result(turn, include_turn=include_turn)
+        result.update(title_fields)
         return _finalize_result(
-            _turn_result(turn, include_turn=include_turn),
+            result,
             extra_secrets=(resolved_api_key,),
         )
     except AriaAPIError as exc:
@@ -1249,206 +1352,202 @@ async def get_aria_turn(
             await client.aclose()
 
 
-async def _fetch_turn_as_result(
-    client: httpx.AsyncClient,
-    turn_id: str,
-    *,
-    include_turn: bool,
-    extra_secrets: tuple[str, ...],
-) -> Dict[str, Any]:
-    try:
-        turn = await _fetch_turn(client, turn_id)
-        return _finalize_result(
-            _turn_result(turn, include_turn=include_turn),
-            extra_secrets=extra_secrets,
-        )
-    except AriaAPIError as exc:
-        return _finalize_result(
-            exc.as_result(turn_id=turn_id, operation="get"),
-            extra_secrets=extra_secrets,
-        )
+def _validate_page(limit: int, offset: int) -> None:
+    for name, value, low, high in (
+        ("limit", limit, 1, MAX_LIST_LIMIT),
+        ("offset", offset, 0, MAX_LIST_OFFSET),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
+            raise AriaAPIError(
+                "invalid_request",
+                f"{name} must be an integer from {low} to {high}.",
+                retryable=False,
+            )
 
 
-async def _fetch_batch_wave(
-    client: httpx.AsyncClient,
-    turn_ids: List[str],
-    *,
-    include_turn: bool,
-    extra_secrets: tuple[str, ...],
-) -> List[Dict[str, Any]]:
-    async def fetch_one(turn_id: str) -> Dict[str, Any]:
-        return await _fetch_turn_as_result(
-            client,
-            turn_id,
-            include_turn=include_turn,
-            extra_secrets=extra_secrets,
-        )
-
-    return list(await asyncio.gather(*(fetch_one(turn_id) for turn_id in turn_ids)))
+def _bounded_identifier(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value and len(value) <= MAX_IDENTIFIER_LENGTH:
+        return value
+    return None
 
 
-async def get_aria_turns(
-    turn_ids: List[str],
-    wait_seconds: int = 0,
-    include_turn: bool = False,
+def _invalid_list_response(kind: str) -> AriaAPIError:
+    return AriaAPIError(
+        "invalid_response",
+        f"ARIA returned an invalid {kind} list.",
+        retryable=True,
+    )
+
+
+def _thread_summary(thread: Any) -> Dict[str, Any]:
+    if not isinstance(thread, dict) or _bounded_identifier(thread.get("id")) is None:
+        raise _invalid_list_response("thread")
+    return {
+        "thread_id": thread["id"],
+        "title": thread.get("title") or None,
+        "prompt_preview": _bounded_preview(thread.get("prompt_preview")),
+        "scope": {"entity": thread.get("wandb_entity"), "project": thread.get("wandb_project")},
+        "is_pinned": thread.get("is_pinned"),
+        "visibility": thread.get("visibility"),
+        "created_at": thread.get("created_at"),
+        "last_turn_created_at": thread.get("last_turn_created_at"),
+    }
+
+
+def _bounded_preview(text: Any) -> Optional[str]:
+    if not isinstance(text, str) or not text:
+        return None
+    if len(text) > MAX_PROMPT_PREVIEW_CHARS:
+        return text[:MAX_PROMPT_PREVIEW_CHARS] + "..."
+    return text
+
+
+def _thread_turn_summary(turn: Any) -> Dict[str, Any]:
+    if (
+        not isinstance(turn, dict)
+        or _bounded_identifier(turn.get("id")) is None
+        or turn.get("state") not in TURN_STATES
+    ):
+        raise _invalid_list_response("turn")
+    return {
+        "turn_id": turn["id"],
+        "parent_turn_id": _bounded_identifier(turn.get("parent_turn_id")),
+        "state": turn["state"],
+        "is_terminal": turn["state"] in TERMINAL_STATES,
+        "created_at": turn.get("created_at"),
+        "updated_at": turn.get("updated_at"),
+    }
+
+
+def _page_fields(count: int, limit: int, offset: int) -> Dict[str, Any]:
+    has_more = count == limit
+    return {
+        "count": count,
+        "offset": offset,
+        "has_more": has_more,
+        "next_offset": offset + count if has_more else None,
+    }
+
+
+async def list_aria_threads(
+    entity: Optional[str] = None,
+    project: Optional[str] = None,
+    limit: int = DEFAULT_LIST_LIMIT,
+    offset: int = 0,
     *,
     api_key: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
 ) -> Dict[str, Any]:
-    """Fetch and briefly poll several ARIA turns concurrently."""
+    """List the caller's ARIA threads, most recently active first."""
     owns_client = client is None
     resolved_api_key: Optional[str] = None
     try:
-        _validate_wait_seconds(wait_seconds)
-        if not isinstance(turn_ids, list) or not turn_ids:
-            raise AriaAPIError(
-                "invalid_request",
-                "turn_ids must be a non-empty list.",
-                retryable=False,
-            )
-        if len(turn_ids) > MAX_BATCH_TURNS:
-            raise AriaAPIError(
-                "invalid_request",
-                f"turn_ids may contain at most {MAX_BATCH_TURNS} turns.",
-                retryable=False,
-            )
-
-        normalized_ids: List[str] = []
-        for turn_id in turn_ids:
-            normalized_ids.append(
-                _normalize_bounded_string(
-                    turn_id,
-                    name="Every turn_id",
-                    max_length=MAX_IDENTIFIER_LENGTH,
-                )
-            )
-        if len(set(normalized_ids)) != len(normalized_ids):
-            raise AriaAPIError(
-                "invalid_request",
-                "turn_ids must not contain duplicates.",
-                retryable=False,
-            )
-
+        _validate_page(limit, offset)
+        params: Dict[str, Any] = {"limit": limit, "offset": offset, "sort_desc": "true"}
+        for name, value in (("entity", entity), ("project", project)):
+            if value is not None:
+                params[name] = _normalize_bounded_string(value, name=name, max_length=MAX_SCOPE_LENGTH)
         resolved_api_key = _resolve_api_key(api_key)
         if client is None:
             client = _new_http_client(resolved_api_key)
 
-        deadline = time.monotonic() + wait_seconds
-        outer_deadline = current_tool_deadline.get()
-        if outer_deadline is not None:
-            deadline = min(deadline, outer_deadline - POLL_DEADLINE_SAFETY_SECONDS)
-        pending_ids = list(normalized_ids)
-        results_by_id: Dict[str, Dict[str, Any]] = {}
-        get_requests_made = 0
-        request_budget_exhausted = False
-        wave_number = 0
-
-        while pending_ids:
-            if wave_number > 0 and deadline - time.monotonic() <= 0:
-                break
-            if get_requests_made + len(pending_ids) > MAX_BATCH_GET_REQUESTS:
-                request_budget_exhausted = True
-                break
-
-            fetched = await _fetch_batch_wave(
-                client,
-                pending_ids,
-                include_turn=include_turn,
-                extra_secrets=(resolved_api_key,),
-            )
-            get_requests_made += len(pending_ids)
-            wave_number += 1
-            for turn_id, result in zip(pending_ids, fetched):
-                previous = results_by_id.get(turn_id)
-                timed_out_at_outer_deadline = (
-                    previous is not None
-                    and previous.get("ok") is True
-                    and previous.get("is_terminal") is False
-                    and result.get("ok") is False
-                    and result.get("error", {}).get("type") == "request_timeout"
-                    and outer_deadline is not None
-                    and time.monotonic() >= deadline
-                )
-                if timed_out_at_outer_deadline:
-                    continue
-                results_by_id[turn_id] = result
-
-            pending_ids = [
-                turn_id
-                for turn_id in pending_ids
-                if (results_by_id[turn_id].get("ok") is True and not results_by_id[turn_id].get("is_terminal"))
-                or (
-                    results_by_id[turn_id].get("ok") is False
-                    and results_by_id[turn_id].get("error", {}).get("retryable") is True
-                    and results_by_id[turn_id].get("error", {}).get("type") not in _OVERLOAD_ERROR_TYPES
-                )
-            ]
-            remaining = deadline - time.monotonic()
-            if wait_seconds == 0 or not pending_ids or remaining <= 0:
-                break
-            await asyncio.sleep(min(POLL_INTERVAL_SECONDS, remaining))
-
-        ordered_results = [results_by_id[turn_id] for turn_id in normalized_ids]
-        error_count = sum(result.get("ok") is False for result in ordered_results)
-        terminal_count = sum(
-            result.get("ok") is True and result.get("is_terminal") is True for result in ordered_results
-        )
-        still_pending = [
-            turn_id
-            for turn_id, result in zip(normalized_ids, ordered_results)
-            if result.get("ok") is True and result.get("is_terminal") is False
-        ]
-        failed_turn_ids = [
-            turn_id for turn_id, result in zip(normalized_ids, ordered_results) if result.get("ok") is False
-        ]
-
-        if error_count == len(ordered_results):
-            retryable = all(result.get("error", {}).get("retryable") is True for result in ordered_results)
-            return _finalize_result(
-                {
-                    "ok": False,
-                    "error": {
-                        "type": "batch_lookup_failed",
-                        "message": "ARIA could not retrieve any of the requested turns.",
-                        "retryable": retryable,
-                        "details": {"results": ordered_results},
-                    },
-                    "turn_ids": normalized_ids,
-                    "get_requests_made": get_requests_made,
-                    "get_request_limit": MAX_BATCH_GET_REQUESTS,
-                    "request_budget_exhausted": request_budget_exhausted,
-                    "next_action": (
-                        "Retry aria_get_turns with the same turn_ids."
-                        if retryable
-                        else "Inspect each turn error and correct credentials or turn IDs."
-                    ),
-                },
-                extra_secrets=(resolved_api_key,),
-            )
-
+        _, threads = await _request_json(client, "GET", "/api/v1/threads", params=params)
+        if not isinstance(threads, list) or len(threads) > limit:
+            raise _invalid_list_response("thread")
+        summaries = [_thread_summary(thread) for thread in threads]
         return _finalize_result(
             {
                 "ok": True,
-                "requested_count": len(normalized_ids),
-                "terminal_count": terminal_count,
-                "pending_count": len(still_pending),
-                "error_count": error_count,
-                "pending_turn_ids": still_pending,
-                "failed_turn_ids": failed_turn_ids,
-                "get_requests_made": get_requests_made,
-                "get_request_limit": MAX_BATCH_GET_REQUESTS,
-                "request_budget_exhausted": request_budget_exhausted,
-                "results": ordered_results,
+                "threads": summaries,
+                **_page_fields(len(summaries), limit, offset),
                 "next_action": (
-                    "Call aria_get_turns again with pending_turn_ids."
-                    if still_pending
-                    else "All retrievable turns are terminal; continue completed conversations with aria_send_message."
+                    "Call aria_get_thread with a thread_id to see its turns."
+                    if summaries
+                    else "No ARIA threads matched; start one with aria_send_message."
                 ),
             },
             extra_secrets=(resolved_api_key,),
         )
     except AriaAPIError as exc:
-        logger.warning("ARIA batch get failed: %s", exc.error_type)
+        logger.warning("ARIA thread list failed: %s", exc.error_type)
+        return _finalize_result(
+            exc.as_result(operation="get"),
+            extra_secrets=(resolved_api_key,) if resolved_api_key else (),
+        )
+    finally:
+        if owns_client and client is not None:
+            await client.aclose()
+
+
+async def get_aria_thread(
+    thread_id: str,
+    limit: int = DEFAULT_LIST_LIMIT,
+    offset: int = 0,
+    *,
+    api_key: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Dict[str, Any]:
+    """Fetch one ARIA thread and a compact, newest-first page of its turns."""
+    owns_client = client is None
+    resolved_api_key: Optional[str] = None
+    try:
+        thread_id = _normalize_bounded_string(thread_id, name="thread_id", max_length=MAX_IDENTIFIER_LENGTH)
+        _validate_page(limit, offset)
+        resolved_api_key = _resolve_api_key(api_key)
+        if client is None:
+            client = _new_http_client(resolved_api_key)
+
+        encoded_thread_id = quote(thread_id, safe="")
+        _, thread = await _request_json(client, "GET", f"/api/v1/threads/{encoded_thread_id}")
+        if not isinstance(thread, dict) or thread.get("id") != thread_id:
+            raise AriaAPIError(
+                "invalid_response",
+                "ARIA returned a different thread than the one requested.",
+                retryable=False,
+            )
+        _, turns = await _request_json(
+            client,
+            "GET",
+            f"/api/v1/threads/{encoded_thread_id}/turns",
+            params={
+                "field_set": "metadata",
+                "sort_by": "created_at",
+                "sort_desc": "true",
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+        if not isinstance(turns, list) or len(turns) > limit:
+            raise _invalid_list_response("turn")
+        summaries = [_thread_turn_summary(turn) for turn in turns]
+        newest_completed = next((turn["turn_id"] for turn in summaries if turn["state"] == "completed"), None)
+        if newest_completed is not None:
+            next_action = (
+                "Call aria_get_turn with a turn_id to read its answer. To continue this "
+                f"conversation, call aria_send_message with parent_turn_id={newest_completed}."
+            )
+        else:
+            next_action = "Call aria_get_turn with a turn_id to read its state or answer."
+        return _finalize_result(
+            {
+                "ok": True,
+                "thread": _thread_summary(thread),
+                "turns": summaries,
+                "newest_completed_turn_id": newest_completed,
+                **_page_fields(len(summaries), limit, offset),
+                "next_action": next_action,
+            },
+            extra_secrets=(resolved_api_key,),
+        )
+    except AriaAPIError as exc:
+        if exc.error_type == "turn_not_found":
+            exc = AriaAPIError(
+                "thread_not_found",
+                "ARIA could not find a thread visible to the current W&B user.",
+                retryable=False,
+                status_code=exc.status_code,
+            )
+        logger.warning("ARIA thread get failed: %s", exc.error_type)
         return _finalize_result(
             exc.as_result(operation="get"),
             extra_secrets=(resolved_api_key,) if resolved_api_key else (),

@@ -21,12 +21,12 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Callable, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Union
 
 import wandb
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import PositiveInt, StrictInt
+from pydantic import Field, PositiveInt, StrictInt
 
 from wandb_mcp_server.config import (
     MCP_COUNT_TOOL_WORKERS,
@@ -58,11 +58,13 @@ from wandb_mcp_server.mcp_tools.automations import (
     list_integrations,
 )
 from wandb_mcp_server.mcp_tools.aria import (
+    ARIA_GET_THREAD_TOOL_DESCRIPTION,
     ARIA_GET_TURN_TOOL_DESCRIPTION,
-    ARIA_GET_TURNS_TOOL_DESCRIPTION,
+    ARIA_LIST_THREADS_TOOL_DESCRIPTION,
     ARIA_SEND_MESSAGE_TOOL_DESCRIPTION,
+    get_aria_thread,
     get_aria_turn,
-    get_aria_turns,
+    list_aria_threads,
     normalize_aria_json_value,
     send_aria_message,
 )
@@ -624,7 +626,8 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     - get_weave_agent_conversation_tool: Multi-turn chat view for a conversation
     - aria_send_message: Start or continue an asynchronous ARIA conversation
     - aria_get_turn: Poll an ARIA turn and retrieve its current result
-    - aria_get_turns: Poll several ARIA turns concurrently
+    - aria_list_threads: Find earlier ARIA conversation threads
+    - aria_get_thread: View an ARIA thread and its turns
 
     Args:
         mcp_instance: The FastMCP instance to register tools on
@@ -1142,10 +1145,16 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         entity_name: str,
         project_name: str,
         run_id: str,
-        keys: Optional[List[str]] = None,
+        keys: Annotated[
+            Optional[List[str]], Field(description="Explicit metric keys; required in managed workloads.")
+        ] = None,
         samples: int = 500,
-        min_step: Optional[int] = None,
-        max_step: Optional[int] = None,
+        min_step: Annotated[
+            Optional[int], Field(description="Inclusive non-negative lower step; managed ranges require max_step too.")
+        ] = None,
+        max_step: Annotated[
+            Optional[int], Field(description="Inclusive non-negative upper step; managed ranges require min_step too.")
+        ] = None,
         x_axis: str = "_step",
         target_x: Optional[float] = None,
         tolerance: Optional[float] = None,
@@ -1168,9 +1177,20 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             )
         except Exception as e:
             from wandb_mcp_server.api_client import raise_for_wandb_server_busy
-            from wandb_mcp_server.error_diagnostics import record_exception_diagnostics
+            from wandb_mcp_server.error_diagnostics import ToolInputValidationError, record_exception_diagnostics
 
             record_exception_diagnostics(e)
+            if isinstance(e, ToolInputValidationError):
+                # History validators use server-authored messages and public
+                # field names, never argument values or upstream error text.
+                return json.dumps(
+                    {
+                        "error": "invalid_input",
+                        "message": str(e),
+                        "field": e.diagnostic_field,
+                        "retryable": False,
+                    }
+                )
             raise_for_wandb_server_busy(e)
             return json.dumps(
                 {
@@ -1414,12 +1434,14 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                 parent_turn_id: Optional[str] = None,
                 wait_seconds: int = 0,
                 include_turn: bool = False,
+                title: Optional[str] = None,
             ) -> Dict[str, Any]:
                 return _aria_result_or_tool_error(
                     await send_aria_message(
                         message=message,
                         entity=entity,
                         project=project,
+                        title=title,
                         parent_turn_id=parent_turn_id,
                         wait_seconds=wait_seconds,
                         include_turn=include_turn,
@@ -1440,19 +1462,24 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                 )
             )
 
-        @register_tool(description=ARIA_GET_TURNS_TOOL_DESCRIPTION)
-        async def aria_get_turns(
-            turn_ids: List[str],
-            wait_seconds: int = 0,
-            include_turn: bool = False,
+        @register_tool(description=ARIA_LIST_THREADS_TOOL_DESCRIPTION)
+        async def aria_list_threads(
+            entity: Optional[str] = None,
+            project: Optional[str] = None,
+            limit: int = 20,
+            offset: int = 0,
         ) -> Dict[str, Any]:
             return _aria_result_or_tool_error(
-                await get_aria_turns(
-                    turn_ids=turn_ids,
-                    wait_seconds=wait_seconds,
-                    include_turn=include_turn,
-                )
+                await list_aria_threads(entity=entity, project=project, limit=limit, offset=offset)
             )
+
+        @register_tool(description=ARIA_GET_THREAD_TOOL_DESCRIPTION)
+        async def aria_get_thread(
+            thread_id: str,
+            limit: int = 20,
+            offset: int = 0,
+        ) -> Dict[str, Any]:
+            return _aria_result_or_tool_error(await get_aria_thread(thread_id=thread_id, limit=limit, offset=offset))
 
     missing = selection.tools - registered_tools
     unexpected = registered_tools - selection.tools

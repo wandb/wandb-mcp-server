@@ -1,6 +1,6 @@
 # Agent Lens tools
 
-Nine read tools over the [Agent Lens](https://github.com/wandb/agent-lens) Insights
+Nine read tools over the [Agent Lens](https://docs.coreweave.com/products/agent-lens) Insights
 and conversation-tag APIs. Agent Lens classifies agent turns into intent and
 failure categories and clusters, and carries human- and judge-applied
 conversation tags. None of that is visible to the Weave calls or Agents data
@@ -9,11 +9,14 @@ and the `*_weave_agent_*` family.
 
 ## Enabling them
 
-The tools are not enabled by default. W&B-hosted operators may select the
-shared-only profile and name the reviewed origin:
+The tools are not enabled by default. W&B-hosted operators add the
+`agent-lens` extension to the `models-weave-agents` base profile (the legacy
+`models-weave-agents-agent-lens` profile name still resolves to the same
+selection) and name the reviewed origin:
 
 ```sh
-export WANDB_MCP_TOOL_PROFILE=models-weave-agents-agent-lens
+export WANDB_MCP_TOOL_PROFILE=models-weave-agents
+export WANDB_MCP_TOOL_EXTENSIONS=agent-lens
 export MCP_WORKLOAD_PROFILE=shared
 export AGENT_LENS_BASE_URL=https://<your-agent-lens-host>
 ```
@@ -78,7 +81,7 @@ traces and no classified turns, and the usable range rarely reaches today:
    with Agent Lens topic IDs.
 4. Pass one or more returned `trace_id` values to
    `get_agent_lens_failure_attributions_tool` for bounded failure attribution,
-   or to `get_weave_agent_trace_tool` / `query_weave_traces_tool` for the trace
+   or to `get_weave_agent_trace_tool` for the agent trace
    content itself.
 
 The Insights tools return identifiers and attribution, never message bodies.

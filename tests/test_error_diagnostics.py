@@ -90,7 +90,14 @@ async def test_original_swallowed_history_cause_survives_result_mapping(boundary
 
     monkeypatch.setattr("wandb_mcp_server.mcp_tools.run_history.get_run_history", fail_history)
     register_tools(server)
-    await server.call_tool("get_run_history_tool", {"entity_name": CANARY, "project_name": CANARY, "run_id": CANARY})
+    result = await server.call_tool(
+        "get_run_history_tool", {"entity_name": CANARY, "project_name": CANARY, "run_id": CANARY}
+    )
+    content = result[0] if isinstance(result, tuple) else result
+    assert json.loads(content[0].text) == {
+        "error": "history_query_failed",
+        "message": "The W&B run-history query failed.",
+    }
     event = tracker.track_tool_call.call_args.kwargs
     assert event["error"] == "history_query_failed: tool failed"
     diagnostic = event.get("error_diagnostics")
@@ -98,6 +105,134 @@ async def test_original_swallowed_history_cause_survives_result_mapping(boundary
     assert diagnostic["category"] == "invalid_value"
     assert diagnostic["exception_type"] == "ValueError"
     assert CANARY not in json.dumps(diagnostic)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["shared", "dedicated", "local"])
+@pytest.mark.parametrize(
+    ("arguments", "field", "message"),
+    [
+        ({"samples": 0}, "samples", "samples must be a positive integer"),
+        ({"keys": [CANARY] * 3}, "keys", "keys must contain at most 2 non-empty strings"),
+        ({"min_step": -1}, "min_step", "min_step must be non-negative"),
+        ({"target_x": float("inf")}, "target_x", "target_x must be a finite number"),
+        ({"min_step": 20, "max_step": 10}, "max_step", "max_step must be greater than or equal to min_step"),
+        ({"min_step": 0, "max_step": 20}, "max_step", "history step range cannot exceed 20 steps"),
+        ({"target_x": 1, "min_step": 0}, "target_x", "target_x cannot be combined with min_step or max_step"),
+        (
+            {"stream": "system", "min_step": 0},
+            "stream",
+            "step-range scans are supported only for the default history stream",
+        ),
+        ({"keys": [CANARY * 100]}, "keys", "keys[0] exceeds the 1024-byte limit"),
+    ],
+)
+async def test_history_validation_returns_actionable_errors_without_private_values(
+    boundary, monkeypatch, profile, arguments, field, message
+):
+    from wandb_mcp_server.server import register_tools
+
+    server, tracker = boundary
+    backend = Mock(side_effect=AssertionError("invalid input must not reach W&B"))
+    monkeypatch.setattr("wandb_mcp_server.api_client.WandBApiManager.get_api", backend)
+    monkeypatch.setattr("wandb_mcp_server.mcp_tools.run_history.MCP_WORKLOAD_PROFILE", profile)
+    monkeypatch.setattr("wandb_mcp_server.mcp_tools.run_history.MCP_MAX_HISTORY_KEYS", 2)
+    monkeypatch.setattr("wandb_mcp_server.mcp_tools.run_history.MCP_MAX_HISTORY_RANGE_STEPS", 20)
+    register_tools(server)
+    result = await server.call_tool(
+        "get_run_history_tool",
+        {"entity_name": CANARY, "project_name": CANARY, "run_id": CANARY, "keys": [CANARY], **arguments},
+    )
+    content = result[0] if isinstance(result, tuple) else result
+    payload = json.loads(content[0].text)
+    assert payload == {"error": "invalid_input", "message": message, "field": field, "retryable": False}
+    backend.assert_not_called()
+    event = tracker.track_tool_call.call_args.kwargs
+    assert event["success"] is False
+    assert event["error"] == "invalid_input: tool failed"
+    assert event["error_diagnostics"]["category"] == "input_validation"
+    assert CANARY not in json.dumps(payload)
+    assert CANARY not in json.dumps(event["error_diagnostics"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["shared", "dedicated"])
+@pytest.mark.parametrize("missing", ["keys", "min_step", "max_step"])
+async def test_managed_history_missing_inputs_identify_what_to_supply(boundary, monkeypatch, profile, missing):
+    from wandb_mcp_server.server import register_tools
+
+    server, _ = boundary
+    monkeypatch.setattr("wandb_mcp_server.mcp_tools.run_history.MCP_WORKLOAD_PROFILE", profile)
+    backend = Mock(side_effect=AssertionError("invalid input must not reach W&B"))
+    monkeypatch.setattr("wandb_mcp_server.api_client.WandBApiManager.get_api", backend)
+    register_tools(server)
+    arguments = {
+        "entity_name": CANARY,
+        "project_name": CANARY,
+        "run_id": CANARY,
+        "keys": [CANARY],
+        "min_step": 0,
+        "max_step": 10,
+    }
+    arguments[missing] = None
+    result = await server.call_tool("get_run_history_tool", arguments)
+    content = result[0] if isinstance(result, tuple) else result
+    payload = json.loads(content[0].text)
+    assert payload["error"] == "invalid_input"
+    assert payload["field"] == missing
+    assert (
+        "requires explicit history keys" in payload["message"]
+        if missing == "keys"
+        else "requires both min_step and max_step" in payload["message"]
+    )
+    assert CANARY not in json.dumps(payload)
+    backend.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_history_validation_guidance_reaches_official_mcp_client(monkeypatch):
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+    from wandb_mcp_server.server import register_tools
+
+    monkeypatch.setattr("wandb_mcp_server.analytics.get_analytics_tracker", Mock)
+    monkeypatch.setattr("wandb_mcp_server.mcp_tools.run_history.MCP_WORKLOAD_PROFILE", "shared")
+    backend = Mock(side_effect=AssertionError("invalid input must not reach W&B"))
+    monkeypatch.setattr("wandb_mcp_server.api_client.WandBApiManager.get_api", backend)
+    server = InstrumentedFastMCP("history-validation-http", stateless_http=True, json_response=True)
+    server._admission_controller = None
+    register_tools(server)
+    app = server.streamable_http_app()
+    try:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+                async with streamable_http_client("http://localhost:8000/mcp", http_client=http) as (read, write, _):
+                    async with ClientSession(read, write) as client:
+                        await client.initialize()
+                        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+                        properties = tools["get_run_history_tool"].inputSchema["properties"]
+                        assert "require max_step" in properties["min_step"]["description"]
+                        assert "require min_step" in properties["max_step"]["description"]
+                        assert "required in managed" in properties["keys"]["description"]
+                        result = await client.call_tool(
+                            "get_run_history_tool",
+                            {
+                                "entity_name": CANARY,
+                                "project_name": CANARY,
+                                "run_id": CANARY,
+                                "keys": [CANARY],
+                                "min_step": 0,
+                            },
+                        )
+                        payload = json.loads(result.content[0].text)
+                        assert payload["error"] == "invalid_input"
+                        assert payload["field"] == "max_step"
+                        assert "requires both min_step and max_step" in payload["message"]
+                        assert payload["retryable"] is False
+                        assert CANARY not in json.dumps(payload)
+                        backend.assert_not_called()
+    finally:
+        server._sync_executor.shutdown(wait=True)
 
 
 @pytest.mark.asyncio

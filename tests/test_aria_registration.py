@@ -29,17 +29,23 @@ def test_aria_tools_are_registered_with_self_guiding_descriptions(monkeypatch) -
 
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
 
-    assert {"aria_send_message", "aria_get_turn", "aria_get_turns"} <= tools.keys()
-    assert "hand off W&B-native work" in tools["aria_send_message"].description
+    assert {"aria_send_message", "aria_get_turn", "aria_list_threads", "aria_get_thread"} <= tools.keys()
+    assert "ARIA can:" in tools["aria_send_message"].description
     assert "parent_turn_id" in tools["aria_send_message"].description
+    assert "title" in tools["aria_send_message"].description
     assert "bounded interval" in tools["aria_get_turn"].description
-    assert "concurrently" in tools["aria_get_turns"].description
-    for name in ("aria_send_message", "aria_get_turn", "aria_get_turns"):
+    assert "earlier ARIA conversation" in tools["aria_list_threads"].description
+    assert "aria_get_turn" in tools["aria_get_thread"].description
+    for name in ("aria_send_message", "aria_get_turn", "aria_list_threads", "aria_get_thread"):
         assert "<when_to_use>" in tools[name].description
+    for name in ("aria_send_message", "aria_get_turn"):
         assert "include_turn" in tools[name].inputSchema["properties"]
+    assert "title" in tools["aria_send_message"].inputSchema["properties"]
     assert tools["aria_send_message"].inputSchema["required"] == ["message"]
     assert tools["aria_get_turn"].inputSchema["required"] == ["turn_id"]
-    assert tools["aria_get_turns"].inputSchema["required"] == ["turn_ids"]
+    assert "required" not in tools["aria_list_threads"].inputSchema
+    assert set(tools["aria_list_threads"].inputSchema["properties"]) == {"entity", "project", "limit", "offset"}
+    assert tools["aria_get_thread"].inputSchema["required"] == ["thread_id"]
 
 
 def test_default_profile_never_registers_aria(monkeypatch) -> None:
@@ -51,7 +57,7 @@ def test_default_profile_never_registers_aria(monkeypatch) -> None:
     register_tools(mcp)
 
     names = {tool.name for tool in asyncio.run(mcp.list_tools())}
-    assert {"aria_send_message", "aria_get_turn", "aria_get_turns"}.isdisjoint(names)
+    assert {"aria_send_message", "aria_get_turn", "aria_list_threads", "aria_get_thread"}.isdisjoint(names)
 
 
 def test_enabled_aria_revalidates_late_base_url_before_registration(monkeypatch) -> None:
@@ -115,7 +121,8 @@ def test_aria_failure_sets_native_mcp_error_with_json_payload(monkeypatch) -> No
 def test_aria_dispatch_costs_are_bounded() -> None:
     assert _dispatch_tool_cost("aria_send_message", {}) == ("heavy", 4)
     assert _dispatch_tool_cost("aria_get_turn", {}) == ("light", 1)
-    assert _dispatch_tool_cost("aria_get_turns", {}) == ("heavy", 4)
+    assert _dispatch_tool_cost("aria_list_threads", {}) == ("light", 1)
+    assert _dispatch_tool_cost("aria_get_thread", {}) == ("light", 1)
     assert "aria_send_message" in _NON_IDEMPOTENT_WRITE_TOOLS
 
 
@@ -193,7 +200,7 @@ def test_oversized_aria_error_remains_bounded_parseable_and_sanitized(monkeypatc
 
     _enable_aria(monkeypatch)
     monkeypatch.setenv("WANDB_API_KEY", secret)
-    monkeypatch.setattr(server, "get_aria_turns", failed_batch)
+    monkeypatch.setattr(server, "list_aria_threads", failed_batch)
     mcp = InstrumentedFastMCP("test", stateless_http=True, json_response=True)
     register_tools(mcp)
 
@@ -210,8 +217,8 @@ def test_oversized_aria_error_remains_bounded_parseable_and_sanitized(monkeypatc
                         "id": 1,
                         "method": "tools/call",
                         "params": {
-                            "name": "aria_get_turns",
-                            "arguments": {"turn_ids": ["turn-1"]},
+                            "name": "aria_list_threads",
+                            "arguments": {},
                         },
                     },
                 )

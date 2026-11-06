@@ -45,6 +45,28 @@ advance independently. Use only immutable evidence recorded in the
 [release index](docs/releases/README.md); a version string or mutable container
 tag does not prove that another channel is available or qualified.
 
+## Explore Agent Lens through MCP
+
+Use this server to query data already recorded in Agent Lens. To start recording
+Claude Code, Codex, another harness, or an application, first follow the
+[Agent Lens integration guide](https://docs.coreweave.com/products/agent-lens/get-started/integrations?utm_source=github&utm_medium=referral&utm_campaign=agent-lens-integrations-2026q4&utm_content=wandb-mcp-readme).
+
+Check the tools advertised by your connection. Agent span tools expose
+conversations, turns, model calls, and tools. Insights and tag tools require the
+explicit Agent Lens profile described in [Agent Lens tools](docs/agent-lens-tools.md);
+managed dedicated deployments reject that profile. Source availability does not
+establish availability in a particular release channel; check the release index above.
+
+When the corresponding tools are advertised, try:
+
+- "In my-team/my-project, find conversations mentioning refunds and show one complete conversation."
+- "Check the Insights classification coverage before summarizing the most common failure categories. Include example turn IDs and the covered time range."
+- "List the available tags, then show a bounded sample of conversations for one tag."
+
+Open recorded conversations at `https://forge.coreweave.com/agent-lens/<entity>/<project>`.
+Connecting MCP does not install a tracing plugin or enable automatic capture of
+the coding agent's own sessions.
+
 ## What Can This Server Do?
 
 <details open>
@@ -86,7 +108,8 @@ tag does not prove that another channel is available or qualified.
 | **list_wandb_integrations_tool** | List registered integrations for W&B automations (e.g. Slack, webhook) | *"Which Slack channels can my automations target?"* |
 | **aria_send_message** *(opt-in)* | Start or continue async work with the hosted W&B agent | *"Ask ARIA to diagnose these failed evals"* |
 | **aria_get_turn** *(opt-in)* | Poll an ARIA turn for progress or its final result | *"Check whether that ARIA analysis finished"* |
-| **aria_get_turns** *(opt-in)* | Poll up to 20 ARIA turns concurrently | *"Check all of those ARIA analyses in one bounded wait"* |
+| **aria_list_threads** *(opt-in)* | Find earlier ARIA conversations, filtered by entity/project | *"Find my ARIA conversation about the eval regressions"* |
+| **aria_get_thread** *(opt-in)* | View an ARIA thread and its turns, newest first | *"What did I ask ARIA in that thread?"* |
 
 **Read-only deployment mode:** Set `WANDB_MCP_ACCESS_MODE=read-only` to omit every tool
 classified as a write, including `create_wandb_report_tool`,
@@ -119,7 +142,7 @@ Recommended deployment presets:
 
 | Deployment | Settings |
 |---|---|
-| MT SaaS with Agent Lens | `models-weave-agents-agent-lens`, `shared`, `read-write` (39 tools) |
+| MT SaaS with Agent Lens and ARIA | `models-weave-agents` + `WANDB_MCP_TOOL_EXTENSIONS=agent-lens,aria`, `shared`, `read-write` (42 tools) |
 | Dedicated Models-only | `models-only`, `dedicated`, `read-write` (17 tools) |
 | Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (22 tools) |
 | Local extra GraphQL tool | `models-weave-graphql-compat`, `local`; choose either access mode |
@@ -154,11 +177,10 @@ Exact `target_x` remains a point lookup rather than an outer-union read. This
 path uses a fixed application-owned query-only projection, accepts no
 caller-supplied GraphQL, and is part of every supported managed tool profile.
 
-**Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane (the **Agents** tab), which is separate from the classic Weave calls above:
+**Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane shown in Agent Lens **Conversations**, which is separate from the classic Weave calls above:
 
-These tools are present in the explicit `models-weave-agents` and
-`models-weave-agents-aria` profiles, and are also retained in the hosted
-`models-weave-agents-agent-lens` profile. Dedicated v0.4 rejects all three.
+These tools are present in the `models-weave-agents` base profile (and every
+extension composed onto it). Dedicated rejects the `agents` group.
 
 | Tool | Description | Example Query |
 |------|-------------|---------------|
@@ -178,13 +200,13 @@ These tools are present in the explicit `models-weave-agents` and
 
 **Chart panels:** `create_wandb_report_tool` accepts a `panels` parameter for LinePlots, BarPlots, run comparisons, custom Vega charts, and ordered report layouts. Use `panel_grid` when multiple charts should share one runset, and use `heading` plus `markdown` blocks to interleave narrative sections with charts.
 
-**Docs search:** `search_wandb_docs_tool` proxies [docs.wandb.ai](https://docs.wandb.ai) so you get data tools + documentation search from a single MCP connection. Disable with `WANDB_MCP_PROXY_DOCS=false` if you connect the docs MCP separately.
+**Docs search:** `search_wandb_docs_tool` searches W&B documentation on [docs.coreweave.com](https://docs.coreweave.com/forge-home) so you get data tools + documentation search from a single MCP connection. The default endpoint is `https://docs.coreweave.com/mcp`, using `search_core_weave_docs`. Disable with `WANDB_MCP_PROXY_DOCS=false` if you connect the docs MCP separately.
 
 To search a self-hosted copy of the docs (for example, docs matched to your
 W&B Server version), set `DOCS_MCP_URL` to its MCP endpoint, such as
 `http://localhost:3000/mcp`. The endpoint must accept a JSON-RPC `tools/call`
-for `search_weights_biases_documentation` over Streamable HTTP, as
-docs.wandb.ai/mcp does. No W&B credential is sent to it. With the
+for `search_weights_biases_documentation` over Streamable HTTP; overrides
+retain that legacy tool name unless they select the default endpoint. No W&B credential is sent to it. With the
 operator-wandb Helm chart, set
 `mcp-server.env.DOCS_MCP_URL`.
 
@@ -196,19 +218,22 @@ truncation notice; upstream errors never echo the query.
 The package includes its token-counting vocabulary, so response budgets work
 without outbound downloads or a writable tokenizer cache.
 
-**ARIA tools are explicit and local-only in managed v0.4:** select
-`models-weave-agents-aria` and configure `WB_AGENT_BASE_URL` to an approved
-absolute HTTPS origin. Endpoint presence alone never enables the tools.
-`WANDB_MCP_ACCESS_MODE=read-only` omits `aria_send_message` while retaining the
-two polling tools. Shared and Dedicated managed profiles reject ARIA.
+**ARIA tools are an explicit extension:** add `aria` to
+`WANDB_MCP_TOOL_EXTENSIONS` on the `models-weave-agents` base profile (the
+legacy `models-weave-agents-aria` name still resolves to the same selection) and
+configure `WB_AGENT_BASE_URL` to an approved absolute HTTPS origin. Endpoint
+presence alone never enables the tools. `WANDB_MCP_ACCESS_MODE=read-only` omits
+`aria_send_message` while retaining the three read tools. The `aria` extension
+is allowed on the W&B-hosted `shared` workload (since v0.4.4); Dedicated rejects it.
 
-**ARIA polling:** ARIA calls are asynchronous. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. Use `aria_get_turns` for several outstanding turns so they are fetched concurrently within one shared polling window. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
+**ARIA polling:** ARIA calls are asynchronous. Root turns require a caller-written title, set via `PATCH /api/v1/threads/{thread_id}` after turn creation. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. To revisit an earlier conversation, `aria_list_threads` finds threads and `aria_get_thread` lists a thread's turns; read a turn's answer with `aria_get_turn` and continue with `aria_send_message(parent_turn_id=...)`. MCP-created turns are tagged with a `wandb_client` prompt part (`platform: "agent"`) and every request sends `X-Wandb-Client: wandb-mcp-server/<version>`, so ARIA can separate MCP traffic from UI usage. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
 
 **Agent Lens is explicit and hosted-only in managed deployments (since v0.4.2):** W&B-hosted
-deployments may select `models-weave-agents-agent-lens` with the `shared`
-workload and an operator-reviewed `AGENT_LENS_BASE_URL`. The default
-`models-weave` profile and both Dedicated profiles omit these tools, and merely
-setting the endpoint never enables them. See the [Agent Lens tool guide](docs/agent-lens-tools.md).
+deployments add the `agent-lens` extension to `models-weave-agents` (legacy name
+`models-weave-agents-agent-lens`) with the `shared` workload and an
+operator-reviewed `AGENT_LENS_BASE_URL`. The default `models-weave` profile and
+Dedicated workloads omit these tools, and merely setting the endpoint never
+enables them. See the [Agent Lens tool guide](docs/agent-lens-tools.md).
 The guide also documents the end-to-end request deadline and scoped logging
 protections for caller-derived identifiers.
 
@@ -683,7 +708,7 @@ When running the server locally, you can customize its behavior with command lin
 | `WANDB_DEBUG` | Set to `"true"` to enable detailed W&B logging | No |
 | `MCP_AUTH_DISABLED` | Must be `true` to acknowledge unauthenticated loopback HTTP development | No |
 | `WANDB_MCP_PROXY_DOCS` | Enable/disable docs search proxy (default: `true`) | No |
-| `DOCS_MCP_URL` | Docs MCP endpoint used by `search_wandb_docs_tool` (default: `https://docs.wandb.ai/mcp`); HTTP(S), no credentials, query, or fragment | No |
+| `DOCS_MCP_URL` | Docs MCP endpoint used by `search_wandb_docs_tool` (default: `https://docs.coreweave.com/mcp`); HTTP(S), no credentials, query, or fragment | No |
 | `MCP_ANALYTICS_DISABLED` | Disable structured MCP analytics events | No |
 | `MCP_ANALYTICS_QUEUE_CAPACITY` | Maximum outstanding events per optional Segment or Datadog forwarder (default: `256`) | No |
 | `MCP_REQUEST_SUCCESS_SAMPLE_RATE` | Deterministic sample rate for successful HTTP request telemetry (default: `0.10`; failures and requests over two seconds are always retained). | No |
@@ -703,14 +728,31 @@ Release-controlled orthogonal selectors:
 
 Exact tool profiles:
 
-| Tool profile | Groups | Managed workloads | Read-write | Read-only |
-|---|---|---|---:|---:|
-| `models-only` | models | shared, dedicated | 17 | 15 |
-| `models-weave` | models, weave | shared, dedicated | 22 | 20 |
-| `models-weave-agents` | models, weave, agents | shared | 30 | 28 |
-| `models-weave-agents-aria` | models, weave, agents, aria | local only | 33 | 30 |
-| `models-weave-graphql-compat` | models, weave, raw-graphql | local only | 23 | 21 |
-| `models-weave-agents-agent-lens` | models, weave, agents, agent-lens | shared | 39 | 37 |
+| Base profile (`WANDB_MCP_TOOL_PROFILE`) | Groups |
+|---|---|
+| `models-only` | models |
+| `models-weave` | models, weave |
+| `models-weave-agents` | models, weave, agents |
+
+| Extension (`WANDB_MCP_TOOL_EXTENSIONS`) | Requires | Managed workloads | Tools |
+|---|---|---|---:|
+| `agent-lens` | weave, agents | shared | 9 |
+| `aria` | weave, agents | shared | 4 |
+| `raw-graphql` | weave | local only | 1 |
+
+| Resolved profile | Base | Extensions | Managed workloads | Read-write | Read-only |
+|---|---|---|---|---:|---:|
+| `models-only` | `models-only` | none | dedicated, shared | 17 | 15 |
+| `models-weave` | `models-weave` | none | dedicated, shared | 22 | 20 |
+| `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 23 | 21 |
+| `models-weave-agents` | `models-weave-agents` | none | shared | 30 | 28 |
+| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 39 | 37 |
+| `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 34 | 31 |
+| `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 31 | 29 |
+| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 43 | 40 |
+| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 40 | 38 |
+| `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 35 | 32 |
+| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 44 | 41 |
 
 Exact workload defaults:
 
@@ -728,7 +770,7 @@ Exact capacity classes:
 | `medium` | 4 | 8 | 8 | 8 |
 | `large` | 8 | 16 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:230cce534205b7ad60afcf34909b6f9d1cd76e5ceda703cd9bca6a866cb6ef91`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:fa8b0ba1128ccb28cd5fe885e46847a5f3f8eda7bf14db327db4356d68978867`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line

@@ -52,12 +52,15 @@ def test_default_public_profile_is_exact_models_weave():
         ("models-weave", "read-only", 20),
         ("models-weave-agents", "read-write", 30),
         ("models-weave-agents", "read-only", 28),
-        ("models-weave-agents-aria", "read-write", 33),
-        ("models-weave-agents-aria", "read-only", 30),
+        ("models-weave-agents-aria", "read-write", 34),
+        ("models-weave-agents-aria", "read-only", 31),
         ("models-weave-graphql-compat", "read-write", 23),
         ("models-weave-graphql-compat", "read-only", 21),
         ("models-weave-agents-agent-lens", "read-write", 39),
         ("models-weave-agents-agent-lens", "read-only", 37),
+        ("models-weave-agents-agent-lens-aria", "read-write", 43),
+        ("models-weave-agents-agent-lens-aria", "read-only", 40),
+        ("models-weave-agents-agent-lens-aria-raw-graphql", "read-write", 44),
     ],
 )
 def test_every_supported_profile_has_one_exact_manifest(
@@ -103,7 +106,9 @@ def test_malformed_access_mode_fails_startup(monkeypatch: pytest.MonkeyPatch, va
 
 def test_endpoint_presence_never_enables_aria(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("WB_AGENT_BASE_URL", "https://wb-agent.wandb.ai")
-    assert {"aria_send_message", "aria_get_turn", "aria_get_turns"}.isdisjoint(_registered_tool_names())
+    assert {"aria_send_message", "aria_get_turn", "aria_list_threads", "aria_get_thread"}.isdisjoint(
+        _registered_tool_names()
+    )
 
 
 def test_endpoint_presence_never_enables_agent_lens(monkeypatch: pytest.MonkeyPatch):
@@ -179,8 +184,8 @@ def test_aria_profile_requires_explicit_safe_https_origin(monkeypatch: pytest.Mo
 @pytest.mark.parametrize(
     ("workload", "profile"),
     [
-        ("shared", "models-weave-agents-aria"),
         ("shared", "models-weave-graphql-compat"),
+        ("shared", "models-weave-agents-raw-graphql"),
         ("dedicated", "models-weave-agents"),
         ("dedicated", "models-weave-agents-aria"),
         ("dedicated", "models-weave-graphql-compat"),

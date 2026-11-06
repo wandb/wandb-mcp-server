@@ -42,10 +42,16 @@ def test_contract_generates_every_exact_tool_profile_and_access_mode():
     profiles = public_release.exhaustive_profiles(contract)
     runtime_contract = public_release.load_runtime_contract(contract)
 
-    assert len(profiles) == 12
-    assert len({profile.name for profile in profiles}) == 12
+    assert len(profiles) == 22
+    assert len({profile.name for profile in profiles}) == 22
     assert all(profile.tools == tuple(sorted(set(profile.tools))) for profile in profiles)
-    assert {profile.tool_profile for profile in profiles} == set(runtime_contract["tool_profiles"])
+    assert {profile.base_profile for profile in profiles} == set(runtime_contract["tool_profiles"])
+    assert set(runtime_contract["tool_profile_aliases"]) < {profile.tool_profile for profile in profiles}
+    assert all(
+        profile.environment["WANDB_MCP_TOOL_PROFILE"] == profile.base_profile
+        and profile.environment["WANDB_MCP_TOOL_EXTENSIONS"] == ",".join(profile.extensions)
+        for profile in profiles
+    )
     assert {profile.access_mode for profile in profiles} == {"read-write", "read-only"}
     for profile in profiles:
         write_tools = {
@@ -130,9 +136,9 @@ def test_named_profiles_are_exact_contract_shortcuts():
     strict = public_release.named_profile(contract, "models-weave-agents-aria", "read-only")
 
     assert len(default.tools) == 22
-    assert len(full.tools) == 33
+    assert len(full.tools) == 34
     assert strict.read_only is True
-    assert len(strict.tools) == 30
+    assert len(strict.tools) == 31
 
 
 def test_release_version_validation_generalizes_to_future_versions(tmp_path):

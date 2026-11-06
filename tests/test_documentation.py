@@ -206,7 +206,11 @@ def test_dual_mode_query_has_explicit_read_only_compatibility_risk():
         "risk": "compatibility",
         "prerequisite": "wandb",
     }
-    assert contract["tool_profiles"]["models-weave-graphql-compat"]["managed_workloads"] == []
+    assert contract["tool_profile_aliases"]["models-weave-graphql-compat"] == {
+        "base": "models-weave",
+        "extensions": ["raw-graphql"],
+    }
+    assert contract["tool_groups"]["raw-graphql"]["managed_workloads"] == []
 
 
 def test_history_safety_metadata_is_documented_truthfully():
