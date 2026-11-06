@@ -4,8 +4,8 @@ version = "0.4.4"
 requires-python = ">=3.11"
 dependencies = [
     "anyio>=4.14.2",
-    "weave>=0.52.35",
-    "wandb[workspaces]>=0.28.0",
+    "weave>=0.52.35,<0.54",
+    "wandb[workspaces]>=0.31.0",
     "httpx>=0.28.1",
     "mcp[cli]>=1.30.0,<2",
     "simple-parsing>=0.1.7",

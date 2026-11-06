@@ -58,7 +58,7 @@ def mock_api(mocker) -> MagicMock:
 @fixture
 def make_project_scope() -> Callable[..., dict[str, Any]]:
     def _make(*, id: str = "scope_proj_1", name: str = "my-project") -> dict[str, Any]:
-        return {"__typename": "Project", "id": id, "name": name}
+        return {"__typename": "Project", "id": id, "name": name, "isRegistry": False}
 
     return _make
 
