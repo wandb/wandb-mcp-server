@@ -694,6 +694,9 @@ When running the server locally, you can customize its behavior with command lin
 | `--weave_entity` | string | None | The W&B entity to log traced MCP server calls to |
 | `--weave_project` | string | `weave-mcp-server` | The W&B project to log traced MCP server calls to |
 
+For hosted session signing and optional telemetry secret configuration, see
+[Secret resolution](docs/secret-resolution.md).
+
 #### Environment Variables
 
 | Variable | Description | Required |

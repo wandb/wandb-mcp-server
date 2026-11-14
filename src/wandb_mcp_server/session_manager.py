@@ -24,9 +24,10 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Set, Any
 import threading
 import logging
+import os
 
 from wandb_mcp_server.utils import get_rich_logger, get_session_prefix_from_session
-from wandb_mcp_server.secrets_resolver import get_secrets_resolver_from_env
+from wandb_mcp_server.secrets_resolver import SecretResolutionError, get_secrets_resolver_from_env
 
 logger = get_rich_logger(__name__)
 
@@ -66,6 +67,14 @@ class SessionCapacityError(ValueError):
 
 class SessionBusyError(ValueError):
     """Raised when deletion would interrupt an active session request."""
+
+
+class SessionInitializationError(RuntimeError):
+    """Required session state is unavailable; callers may retry after cooldown."""
+
+    def __init__(self, reason: str = "unavailable"):
+        self.reason = reason if reason in SecretResolutionError._REASONS else "unavailable"
+        super().__init__("Session manager unavailable")
 
 
 class SessionValidationError(ValueError):
@@ -141,10 +150,13 @@ class MultiTenantSessionManager:
             try:
                 resolver = get_secrets_resolver_from_env()
                 if resolver is None:
-                    raise RuntimeError("SecretsResolver not configured but HMAC sessions enabled")
-                key_bytes = resolver.fetch_secret("mcp-server-secret-hmac-key")
+                    raise SecretResolutionError("configuration")
+                key_bytes = resolver.fetch_secret(
+                    os.environ.get("MCP_SERVER_HMAC_SECRET_ID", "mcp-server-secret-hmac-key"),
+                    version=os.environ.get("MCP_SERVER_HMAC_SECRET_VERSION", "latest"),
+                )
                 if not key_bytes:
-                    raise RuntimeError("Fetched empty HMAC key")
+                    raise SecretResolutionError("empty")
                 self._hmac_sha256_key = key_bytes
                 logger.info("HMAC-SHA256 sessions enabled")
             except Exception as e:
@@ -579,16 +591,21 @@ class MultiTenantSessionManager:
 # Global session manager instance
 _session_manager: Optional[MultiTenantSessionManager] = None
 _session_manager_lock = threading.Lock()
+SESSION_INITIALIZATION_RETRY_SECONDS = 5.0
+_session_manager_retry_at = 0.0
+_session_manager_failure_reason = "unavailable"
 
 
 def get_session_manager() -> MultiTenantSessionManager:
     """Get or create the global session manager."""
-    global _session_manager
+    global _session_manager, _session_manager_retry_at, _session_manager_failure_reason
     if _session_manager is not None:
         return _session_manager
     with _session_manager_lock:
         if _session_manager is not None:
             return _session_manager
+        if time.monotonic() < _session_manager_retry_at:
+            raise SessionInitializationError(_session_manager_failure_reason)
         from wandb_mcp_server.config import (
             MAX_SESSIONS_PER_KEY,
             MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS,
@@ -602,14 +619,17 @@ def get_session_manager() -> MultiTenantSessionManager:
                 enable_hmac_sha256_sessions=MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS,
             )
         except Exception as e:
-            raise RuntimeError(f"Unable to initialize session manager: {e}") from e
+            reason = e.reason if isinstance(e, SecretResolutionError) else "unavailable"
+            _session_manager_failure_reason = reason
+            _session_manager_retry_at = time.monotonic() + SESSION_INITIALIZATION_RETRY_SECONDS
+            raise SessionInitializationError(reason) from None
 
     return _session_manager
 
 
 def reset_session_manager():
     """Reset the global session manager (for testing)."""
-    global _session_manager
+    global _session_manager, _session_manager_retry_at, _session_manager_failure_reason
     if _session_manager:
         # Cleanup all sessions
         with _session_manager._lock:
@@ -617,3 +637,5 @@ def reset_session_manager():
             for sid in session_ids:
                 _session_manager.cleanup_session(sid)
     _session_manager = None
+    _session_manager_retry_at = 0.0
+    _session_manager_failure_reason = "unavailable"

@@ -286,7 +286,10 @@ def _resolve_dd_api_key() -> str:
 
         resolver = get_secrets_resolver_from_env()
         if resolver is not None:
-            key_bytes = resolver.fetch_secret(_DD_SECRET_NAME)
+            key_bytes = resolver.fetch_secret(
+                os.environ.get("MCP_DATADOG_SECRET_ID", _DD_SECRET_NAME),
+                version=os.environ.get("MCP_DATADOG_SECRET_VERSION", "latest"),
+            )
             if key_bytes:
                 return key_bytes.decode("utf-8").strip()
     except Exception as exc:
