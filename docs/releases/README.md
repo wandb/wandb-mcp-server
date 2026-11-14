@@ -8,6 +8,7 @@ installation.
 
 | Version | Status | Release notes |
 |---|---|---|
+| 0.4.5 | Candidate; all channels pending | [v0.4.5](v0.4.5.md) |
 | 0.4.4 | Candidate; all channels pending | [v0.4.4](v0.4.4.md) |
 | 0.4.3 | Candidate; W&B-hosted deployed under the candidate-production exception, other channels pending | [v0.4.3](v0.4.3.md) |
 | 0.4.2 | Candidate; every release channel remains pending | [v0.4.2](v0.4.2.md) |
