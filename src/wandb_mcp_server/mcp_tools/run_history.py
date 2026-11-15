@@ -42,6 +42,7 @@ from wandb_mcp_server.wandb_selective_reads import (
     fetch_sampled_history_series,
 )
 from wandb_mcp_server.wandb_graphql import GraphQLResponseTooLarge
+from wandb_mcp_server.tool_results import ToolErrorJSON, tool_error_json
 
 logger = get_rich_logger(__name__)
 
@@ -355,7 +356,7 @@ def get_run_history(
         or len(keys) > MCP_MAX_HISTORY_KEYS
     ):
         raise ToolInputValidationError(
-            f"keys must contain at most {MCP_MAX_HISTORY_KEYS} non-empty strings",
+            f"keys must contain at most {MCP_MAX_HISTORY_KEYS} non-empty strings. Select fewer explicit metric keys.",
             field="keys",
             code="too_long" if isinstance(keys, list) and len(keys) > MCP_MAX_HISTORY_KEYS else "value_error",
         )
@@ -379,13 +380,15 @@ def get_run_history(
             )
         if max_step - min_step + 1 > MCP_MAX_HISTORY_RANGE_STEPS:
             raise ToolInputValidationError(
-                f"history step range cannot exceed {MCP_MAX_HISTORY_RANGE_STEPS} steps",
+                f"history step range cannot exceed {MCP_MAX_HISTORY_RANGE_STEPS} steps. "
+                "Split the request into smaller windows with both min_step and max_step (inclusive).",
                 field="max_step",
                 code="less_than_equal",
             )
     elif MCP_WORKLOAD_PROFILE != "local" and (min_step is not None or max_step is not None):
         raise ToolInputValidationError(
-            f"The managed {MCP_WORKLOAD_PROFILE} workload profile requires both min_step and max_step for range scans",
+            f"The managed {MCP_WORKLOAD_PROFILE} workload profile requires both min_step and max_step for range scans. "
+            "Supply both bounds, or omit both for a sampled overview.",
             field="min_step" if min_step is None else "max_step",
             code="missing",
         )
@@ -426,7 +429,7 @@ def get_run_history(
                 run_id=run_id,
             )
         except GraphQLResponseTooLarge:
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "response_too_large",
                     "message": "The bounded W&B history response was too large; request fewer keys or samples.",
@@ -460,7 +463,7 @@ def get_run_history(
                     tolerance=float(tolerance) if tolerance is not None else None,
                 )
                 if not fetched.rows:
-                    return json.dumps(
+                    return tool_error_json(
                         {
                             "error": "target_not_logged",
                             "message": f"No logged {x_axis!r} value matched target {target_x}.",
@@ -542,7 +545,7 @@ def get_run_history(
                     non_finite_counts=_non_finite_key_counts(rows, requested_keys),
                 )
         except GraphQLResponseTooLarge:
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "response_too_large",
                     "message": "The bounded W&B history response was too large; request fewer keys or samples.",
@@ -1366,14 +1369,14 @@ def _serialize_history_response(
 
     error_payload = {
         "error": "response_too_large",
-        "message": "History response metadata exceeded the configured response budget",
+        "message": "History response metadata exceeded the configured response budget. Select fewer keys or a smaller step window.",
     }
     serialized_error = serialize(error_payload)
     if count_tokens_conservative(serialized_error) <= max_tokens:
-        return serialized_error
+        return ToolErrorJSON(serialized_error)
     # MAX_RESPONSE_TOKENS can technically be configured below the size of a
     # useful structured error. Keep valid JSON and the stable error category.
-    return serialize({"error": "response_too_large"})
+    return ToolErrorJSON(serialize({"error": "response_too_large"}))
 
 
 def _numeric_x(row: Dict[str, Any], x_axis: str) -> float | None:

@@ -344,6 +344,8 @@ class HostedLimitExceeded(ValueError):
 
 def structured_error(error: str, message: str, **extra: object) -> dict[str, object]:
     """Build a standard MCP JSON error payload."""
-    payload: dict[str, object] = {"error": error, "message": message}
+    from wandb_mcp_server.tool_results import ToolErrorPayload
+
+    payload: dict[str, object] = ToolErrorPayload(error=error, message=message)
     payload.update(extra)
     return payload

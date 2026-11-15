@@ -27,6 +27,7 @@ from wandb_mcp_server.wandb_selective_reads import (
     SelectiveReadUnavailable,
     fetch_registry_artifact_versions,
 )
+from wandb_mcp_server.tool_results import tool_error_json
 
 logger = get_rich_logger(__name__)
 
@@ -156,14 +157,14 @@ def list_artifact_versions(
                 created_before=created_before,
             )
             if validation_error:
-                return json.dumps({"error": "invalid_input", "message": validation_error})
+                return tool_error_json({"error": "invalid_input", "message": validation_error})
             if source == "registry":
                 try:
                     validate_optional_identifier("collection_name", collection_name)
                     validate_optional_identifier("registry_name", registry_name)
                     validate_optional_identifier("organization", organization)
                 except ValueError as exc:
-                    return json.dumps(registry_error_result(exc))
+                    return tool_error_json(registry_error_result(exc))
 
             max_items = min(max_items, MCP_MAX_WANDB_QUERY_ITEMS)
             order_value = _normalize_order(order)
@@ -283,11 +284,11 @@ def list_artifact_versions(
             if source == "registry":
                 logger.error("Registry version listing failed (%s)", type(e).__name__)
                 ctx.mark_error(type(e).__name__)
-                return json.dumps(registry_error_result(e))
+                return tool_error_json(registry_error_result(e))
             raise_for_wandb_server_busy(e)
             logger.error("Artifact version listing failed (%s)", type(e).__name__)
             ctx.mark_error(type(e).__name__)
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "api_error",
                     "message": "The W&B artifact version query failed.",
@@ -391,7 +392,7 @@ def get_artifact_details(
             raise_for_wandb_server_busy(e)
             logger.error("Artifact detail query failed (%s)", type(e).__name__)
             ctx.mark_error(type(e).__name__)
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "api_error",
                     "message": "The W&B artifact detail query failed.",
@@ -533,7 +534,7 @@ def compare_artifact_versions(
             raise_for_wandb_server_busy(e)
             logger.error("Artifact comparison failed (%s)", type(e).__name__)
             ctx.mark_error(type(e).__name__)
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "api_error",
                     "message": "The W&B artifact comparison failed.",

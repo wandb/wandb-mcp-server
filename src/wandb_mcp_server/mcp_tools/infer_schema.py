@@ -13,6 +13,7 @@ from typing import Any, Dict
 from wandb_mcp_server.config import MCP_MAX_SCHEMA_SAMPLE_ROWS, MCP_WORKLOAD_PROFILE
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.tool_results import tool_error_json
 
 logger = get_rich_logger(__name__)
 
@@ -108,9 +109,9 @@ def infer_trace_schema(
     from wandb_mcp_server.mcp_tools.query_weave import get_trace_service
 
     if isinstance(sample_size, bool) or not isinstance(sample_size, int) or sample_size < 1:
-        return json.dumps({"error": "invalid_input", "message": "sample_size must be a positive integer"})
+        return tool_error_json({"error": "invalid_input", "message": "sample_size must be a positive integer"})
     if isinstance(top_n_values, bool) or not isinstance(top_n_values, int) or top_n_values < 1:
-        return json.dumps({"error": "invalid_input", "message": "top_n_values must be a positive integer"})
+        return tool_error_json({"error": "invalid_input", "message": "top_n_values must be a positive integer"})
     requested_sample_size = sample_size
     effective_sample_size = min(sample_size, MCP_MAX_SCHEMA_SAMPLE_ROWS)
     effective_top_n = min(top_n_values, 20)
@@ -150,7 +151,7 @@ def infer_trace_schema(
             raise_for_wandb_server_busy(e)
             logger.error("Trace schema inference failed (%s)", type(e).__name__)
             ctx.mark_error(type(e).__name__)
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "schema_query_failed",
                     "message": "The Weave trace schema query failed.",

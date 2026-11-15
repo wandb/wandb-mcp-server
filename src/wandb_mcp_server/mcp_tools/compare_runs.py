@@ -16,6 +16,7 @@ from wandb_mcp_server.wandb_selective_reads import (
     fetch_project_fields,
     fetch_projected_run,
 )
+from wandb_mcp_server.tool_results import tool_error_json
 
 logger = get_rich_logger(__name__)
 
@@ -235,7 +236,7 @@ def compare_runs(
                 summary_keys=selected_summary,
             )
             if projected_a is None or projected_b is None:
-                return json.dumps(
+                return tool_error_json(
                     {
                         "error": "run_not_found",
                         "message": "One or both requested runs were not found or are not accessible.",
@@ -248,7 +249,7 @@ def compare_runs(
                 raise
             if isinstance(selective_error, GraphQLResponseTooLarge):
                 ctx.mark_error("GraphQLResponseTooLarge: bounded selective read exceeded its safety limit")
-                return json.dumps(
+                return tool_error_json(
                     {
                         "error": "response_too_large",
                         "message": "The bounded W&B comparison response was too large; request fewer keys.",
@@ -257,7 +258,7 @@ def compare_runs(
                 )
             raise_for_wandb_server_busy(selective_error)
             ctx.mark_error(f"{type(selective_error).__name__}: selective comparison read unavailable")
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "selective_read_unavailable",
                     "message": "The W&B server could not provide the bounded fields required for this comparison.",

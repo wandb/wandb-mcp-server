@@ -6,6 +6,7 @@ from typing import List
 from wandb_mcp_server.mcp_tools.query_weave import get_trace_service
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.tool_results import tool_error_json
 
 logger = get_rich_logger(__name__)
 
@@ -105,7 +106,7 @@ def resolve_trace_roots(
 
             raise_for_wandb_server_busy(e)
             ctx.mark_error(type(e).__name__)
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "resolve_failed",
                     "message": "Trace-root resolution failed.",

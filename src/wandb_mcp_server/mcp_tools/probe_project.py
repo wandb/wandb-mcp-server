@@ -20,6 +20,7 @@ from wandb_mcp_server.wandb_selective_reads import (
     fetch_projected_runs,
 )
 from wandb_mcp_server.wandb_urls import publicize_wandb_url
+from wandb_mcp_server.tool_results import tool_error_json
 
 logger = get_rich_logger(__name__)
 
@@ -378,7 +379,7 @@ def probe_project(
         except Exception as exc:
             raise_for_wandb_server_busy(exc)
             ctx.mark_error(f"{type(exc).__name__}: {exc}")
-            return json.dumps({"error": "project_probe_failed", "message": str(exc)[:500]})
+            return tool_error_json({"error": "project_probe_failed", "message": str(exc)[:500]})
 
 
 __all__ = ["DEFAULT_SAMPLE_RUNS", "PROBE_PROJECT_TOOL_DESCRIPTION", "_safe_sample_value", "probe_project"]

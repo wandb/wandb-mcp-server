@@ -73,6 +73,16 @@ change only the page `limit` when continuing; mismatched reuse returns
 
 ## Run history guarantees
 
+The schema and descriptions expose the active deployment's existing key and
+step-window limits. Managed range reads require explicit metric keys and both
+inclusive bounds. Split large ranges into windows satisfying
+`max_step - min_step + 1 <=` the advertised limit. Omit both bounds for a sampled
+overview. Excessive keys or oversized query responses recommend fewer metric
+keys, smaller projections or smaller pages; limits are not relaxed.
+
+Server-owned errors set MCP `isError=true`; telemetry records the same failure.
+Customer data containing `error` or `result` fields remains successful data.
+
 For explicit multi-key default-history sampled and ranged collection reads,
 `get_run_history_tool` handles requested metrics as an outer union. It obtains
 one bounded series per key with a fixed, application-owned, query-only

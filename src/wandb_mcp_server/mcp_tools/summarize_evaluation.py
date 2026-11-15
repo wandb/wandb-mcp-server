@@ -14,6 +14,7 @@ from wandb_mcp_server.mcp_tools.count_traces import count_traces
 from wandb_mcp_server.mcp_tools.query_weave import get_trace_service
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.tool_results import tool_error_json
 
 logger = get_rich_logger(__name__)
 
@@ -168,7 +169,7 @@ def summarize_evaluation(
 ) -> str:
     """Summarize Weave evaluation results."""
     if isinstance(max_evals, bool) or not isinstance(max_evals, int) or max_evals < 1:
-        return json.dumps({"error": "invalid_input", "message": "max_evals must be a positive integer"})
+        return tool_error_json({"error": "invalid_input", "message": "max_evals must be a positive integer"})
     effective_max_evals = min(max_evals, MCP_MAX_WANDB_QUERY_ITEMS)
     with track_tool_execution(
         "summarize_evaluation",
@@ -289,7 +290,7 @@ def summarize_evaluation(
 
             raise_for_wandb_server_busy(e)
             ctx.mark_error(type(e).__name__)
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "evaluation_query_failed",
                     "message": "The evaluation trace query failed.",

@@ -42,6 +42,7 @@ from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.tool_results import ToolErrorPayload, tool_error_json
 
 logger = get_rich_logger(__name__)
 
@@ -117,7 +118,8 @@ class _ResponseBoundaryError(ValueError):
 
 
 def _compact_json(payload: Any) -> str:
-    return json.dumps(payload, default=str, ensure_ascii=False, separators=(",", ":"))
+    serializer = tool_error_json if isinstance(payload, ToolErrorPayload) else json.dumps
+    return serializer(payload, default=str, ensure_ascii=False, separators=(",", ":"))
 
 
 def _response_tokens(payload: Any) -> int:
@@ -164,8 +166,8 @@ def _truncate_response(payload: Any) -> Any:
             ),
         }
         if _response_tokens(cursor_error) <= MAX_RESPONSE_TOKENS:
-            return cursor_error
-        return {"error": "agent_lens_response_too_large"}
+            return ToolErrorPayload(cursor_error)
+        return ToolErrorPayload({"error": "agent_lens_response_too_large"})
     if isinstance(data, list) and data:
         container, key = payload, "data"
     elif isinstance(data, dict) and isinstance(data.get("buckets"), list) and data["buckets"]:
@@ -202,9 +204,9 @@ def _truncate_response(payload: Any) -> Any:
         "_truncation": {"applied": True, "reason": "response_token_budget"},
     }
     if _response_tokens(fallback) <= MAX_RESPONSE_TOKENS:
-        return fallback
+        return ToolErrorPayload(fallback)
     minimal = {"error": "agent_lens_response_too_large"}
-    return minimal if _response_tokens(minimal) <= MAX_RESPONSE_TOKENS else {}
+    return ToolErrorPayload(minimal) if _response_tokens(minimal) <= MAX_RESPONSE_TOKENS else ToolErrorPayload({})
 
 
 def _project_response(tool_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -404,12 +406,14 @@ async def _agent_lens_request(
     try:
         base_url = resolve_agent_lens_base_url()
     except ValueError as error:
-        return json.dumps(structured_error("agent_lens_not_configured", str(error)))
+        return tool_error_json(structured_error("agent_lens_not_configured", str(error)))
 
     api_key = WandBApiManager.get_api_key()
     if not api_key:
         logger.error("W&B API key not found in context or environment.")
-        return json.dumps(structured_error("auth_required", "A W&B API key is required to query the Agent Lens API."))
+        return tool_error_json(
+            structured_error("auth_required", "A W&B API key is required to query the Agent Lens API.")
+        )
 
     url = f"{base_url}{AGENT_LENS_API_PREFIX}{path}"
     headers = {
@@ -526,7 +530,7 @@ def _detail(payload: Dict[str, Any]) -> str:
 
 def _invalid_argument(message: str) -> str:
     """Return the standard envelope for an argument this module rejected locally."""
-    return json.dumps(structured_error("agent_lens_invalid_request", message))
+    return tool_error_json(structured_error("agent_lens_invalid_request", message))
 
 
 async def get_insights_coverage(entity_name: str, project_name: str) -> str:

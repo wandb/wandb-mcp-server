@@ -638,7 +638,7 @@ def _fit_collection_to_budget(payload: Dict[str, Any]) -> Dict[str, Any]:
     if _estimate_tokens(payload) > MAX_RESPONSE_TOKENS:
         return structured_error(
             "response_too_large",
-            "The W&B collection metadata exceeded the configured response budget",
+            "The W&B collection metadata exceeded the response budget; request a smaller limit, then follow next_cursor",
             source=payload.get("source", "wandb_sdk"),
             resource=payload.get("resource"),
         )
@@ -675,7 +675,7 @@ def _fit_single_to_budget(payload: Dict[str, Any]) -> Dict[str, Any]:
     if _estimate_tokens(payload) > MAX_RESPONSE_TOKENS:
         return structured_error(
             "response_too_large",
-            "The W&B resource metadata exceeded the configured response budget",
+            "The W&B resource metadata exceeded the response budget; request fewer summary_keys/config_keys and omit full include fields",
             source=payload.get("source", "wandb_sdk"),
             resource=payload.get("resource"),
         )
@@ -956,7 +956,7 @@ def _sdk_error_result(
     if isinstance(exc, GraphQLResponseTooLarge):
         return structured_error(
             "response_too_large",
-            "The bounded W&B response was too large; request fewer items or fields",
+            "The bounded W&B response was too large; lower limit and select fewer summary_keys/config_keys; follow next_cursor for further pages",
             **common,
         )
     if status == 401 or "unauth" in name or "invalid api key" in message or "no w&b api key" in message:
