@@ -320,6 +320,7 @@ async def _exercise_profile(
                                 },
                             )
                             invalid_payload = json.loads(_result_text(invalid_result))
+                            assert invalid_result.isError is True
                             assert invalid_payload["error"] == "invalid_request"
 
                             if "query_weave_traces_tool" in tools_by_name:
@@ -339,7 +340,7 @@ async def _exercise_profile(
                                     "list_weave_agents_tool",
                                     {"entity_name": "test-entity", "project_name": "test-project"},
                                 )
-                                assert agent_result.isError is False
+                                assert agent_result.isError is True
                                 agent_payload = json.loads(_result_text(agent_result))
                                 assert agent_payload["error"] == "agents_api_unavailable"
 
@@ -387,6 +388,16 @@ async def _exercise_profile(
     assert event["transport"] == "stdio"
     assert event["success"] is True
     assert not _contains_none(event)
+
+    if "list_weave_agents_tool" in tools_by_name:
+        agent_events = [
+            event
+            for event in _analytics_events(stderr)
+            if event.get("event_type") == "tool_call" and event.get("tool_name") == "list_weave_agents_tool"
+        ]
+        assert len(agent_events) == 1
+        assert agent_events[0]["success"] is False
+        assert agent_events[0]["error"] == "agents_api_unavailable: tool failed"
 
 
 async def _exercise_missing_credentials(server_command: str, base_url: str) -> None:
