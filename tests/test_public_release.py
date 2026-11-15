@@ -327,6 +327,31 @@ def test_attestation_rejects_obsolete_profile_evidence_schema(monkeypatch, tmp_p
         )
 
 
+def test_rehearsal_jobs_cannot_sign_or_publish():
+    import yaml
+
+    workflow = yaml.safe_load((REPOSITORY_ROOT / ".github/workflows/release-source.yml").read_text())
+    assert all(permission == "read" for permission in workflow["permissions"].values())
+    for name, job in workflow["jobs"].items():
+        if "write" in job.get("permissions", {}).values():
+            assert name == "attest"
+            assert job["if"] == "github.event_name != 'pull_request'"
+            assert job["environment"] == "public-source-release"
+            assert "qualify" in job["needs"]
+        else:
+            assert all("actions/attest@" not in step.get("uses", "") for step in job["steps"])
+    signer_steps = workflow["jobs"]["attest"]["steps"]
+    verify_index = next(
+        i for i, step in enumerate(signer_steps) if step.get("name") == "Verify qualification before signing"
+    )
+    sign_index = next(i for i, step in enumerate(signer_steps) if "actions/attest@" in step.get("uses", ""))
+    assert verify_index < sign_index
+    check = signer_steps[verify_index]["run"]
+    assert 'predicate["status"] == "qualified"' in check
+    assert 'predicate["approval_state"] == "source-pr-approved"' in check
+    assert "sha256sum --check SHA256SUMS" in check
+
+
 def test_source_release_workflow_is_tag_bound_pinned_and_draft():
     workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "release-source.yml").read_text()
 
@@ -339,13 +364,18 @@ def test_source_release_workflow_is_tag_bound_pinned_and_draft():
     assert 'git merge-base --is-ancestor "$SOURCE_SHA" origin/main' in workflow
     assert '--sha "$SOURCE_SHA"' in workflow
     assert '--source-sha "$SOURCE_SHA"' in workflow
-    assert workflow.count("ref: ${{ needs.build.outputs.source_sha }}") == 2
+    assert workflow.count("ref: ${{ needs.build.outputs.source_sha }}") == 3
     assert "$GITHUB_REF_NAME" not in workflow.split("- name: Verify approved current-head release PR")[1]
     assert "--tag-verification github" in workflow
     assert "--draft" in workflow
     assert "--verify-tag" in workflow
     assert "pypi" not in workflow.lower()
-    assert "group: public-source-release" in workflow
+    assert "|| 'public-source-release' }}" in workflow
+    assert "pull_request:\n    branches: [main]" in workflow
+    assert workflow.count("if: github.event_name != 'pull_request'") == 6
+    assert "source-gate --rehearsal" in workflow
+    assert 'attest "${REHEARSAL[@]}"' in workflow
+    assert "environment: public-source-release" in workflow
     assert "--clobber" not in workflow
     assert "candidate-pr-evidence.json" in workflow
     assert "only-fixed" not in workflow
@@ -627,3 +657,25 @@ def test_contract_locked_runtime_matches_uv_lock(tmp_path):
     (tmp_path / "uv.lock").write_text(stale_lock)
     with pytest.raises(public_release.ReleaseError, match="locked_runtime does not match uv.lock"):
         public_release.verify_locked_runtime(tmp_path, contract)
+
+
+def test_rehearsal_gate_evidence_is_only_accepted_in_rehearsal_mode(tmp_path):
+    evidence = public_release.rehearsal_gate_evidence(REPOSITORY_ROOT, CONTRACT_PATH)
+    path = tmp_path / "rehearsal.json"
+    path.write_bytes(public_release.canonical_json(evidence))
+
+    assert evidence["gate"] == public_release.REHEARSAL_GATE
+    assert evidence["pull_request"] is None
+    with pytest.raises(public_release.ReleaseError, match="does not qualify"):
+        public_release.validate_parent_evidence(REPOSITORY_ROOT, path, CONTRACT_PATH)
+    assert public_release.validate_parent_evidence(REPOSITORY_ROOT, path, CONTRACT_PATH, rehearsal=True) == evidence
+
+    real_shape = {
+        **evidence,
+        "gate": "candidate-pr",
+        "review_decision": "APPROVED",
+        "required_checks": {name: "SUCCESS" for name in evidence["required_checks"]},
+    }
+    path.write_bytes(public_release.canonical_json(real_shape))
+    with pytest.raises(public_release.ReleaseError, match="does not qualify"):
+        public_release.validate_parent_evidence(REPOSITORY_ROOT, path, CONTRACT_PATH, rehearsal=True)
