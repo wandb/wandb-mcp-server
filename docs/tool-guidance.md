@@ -9,6 +9,42 @@ links when more detail is needed. No additional tool or resource call is require
 Deployment limits take precedence over example sizes. The tool input schema is
 the authoritative source for defaults and accepted types.
 
+## Render W&B line plot
+
+`render_wandb_line_plot_tool` renders read-only run metrics in MCP Apps hosts.
+It accepts `entity_name`, `project_name`, 1–10 unique `run_ids`, 1–5 unique
+numeric metric `keys`, optional `title`, and `x_axis` (default `_step`).
+`samples` defaults to 500 merged rows per run and is clamped to the workload's
+history limit. Reads are sequential, with a deadline check before each run.
+Run failures are listed individually; the MCP error flag is set if all fail.
+
+The text result includes point counts and first/last/min/max values for each
+run/metric, plus run and workspace links. The separate `structuredContent`
+contains compact `[x,y]` series for the chart, canonical requery arguments,
+sampling/truncation flags, and the active range cap. Statistics describe only
+returned finite numeric points, not the entire history. Response-budget
+downsampling may further reduce points. Empty metrics remain visible as empty
+series. Custom x-axis values must be numeric and logged on the metric's row.
+
+The self-contained uPlot chart has legend toggles, hover values, drag zoom,
+double-click reset, host theme support, and **Open in W&B**. Step-axis zoom
+requeries the same tool with inclusive `min_step`/`max_step` when the window fits
+the range cap and the host permits server tool calls. Managed range requests
+require both bounds. Larger windows and non-step axes zoom locally. Reset
+restores the original overview; stale requery responses cannot override it.
+
+No UI network access or report creation is required. Resource metadata uses
+`ui://wandb/line-plot.html` and `text/html;profile=mcp-app`. Hosts without MCP
+Apps still receive the useful text result. Operators hosting on Claude may set
+`WANDB_MCP_APP_DOMAIN` as described in the README; CSP allowlists are empty.
+
+```python
+render_wandb_line_plot_tool(
+    entity_name="my-team", project_name="training", run_ids=["abc123", "def456"],
+    keys=["loss"], title="Training loss",
+)
+```
+
 ## Query Weave traces
 
 Query Weave traces with filtering, sorting, and detail_level control.

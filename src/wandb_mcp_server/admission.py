@@ -150,6 +150,7 @@ EXPENSIVE_TOOLS = frozenset(
 
 HEAVY_TOOLS = frozenset(
     {
+        "render_wandb_line_plot_tool",
         "probe_project_tool",
         "compare_runs_tool",
         "diagnose_run_tool",

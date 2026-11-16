@@ -91,6 +91,7 @@ the coding agent's own sessions.
 | **query_wandb_tool** | Use structured W&B reads or a bounded, query-only GraphQL document | *"Show me runs with loss < 0.1"* |
 | **probe_project_tool** | Discover useful project fields and bounded samples | *"What metrics and config fields are available?"* |
 | **get_run_history_tool** | Bounded time-series data with sparse, multi-key outer-union sampling | *"Show loss and validation-loss curves for run abc123"* |
+| **render_wandb_line_plot_tool** | Interactive inline metric charts in MCP Apps hosts, with text summaries elsewhere | *"Plot loss for these runs"* |
 | **compare_runs_tool** | Compare selected metrics and configuration across runs | *"Compare these three training runs"* |
 | **diagnose_run_tool** | Diagnose a run using bounded metadata and history reads | *"Why did this run diverge?"* |
 | **summarize_evaluation_tool** | Summarize bounded evaluation results with coverage metadata | *"Summarize this evaluation"* |
@@ -142,9 +143,9 @@ Recommended deployment presets:
 
 | Deployment | Settings |
 |---|---|
-| MT SaaS with Agent Lens and ARIA | `models-weave-agents` + `WANDB_MCP_TOOL_EXTENSIONS=agent-lens,aria`, `shared`, `read-write` (42 tools) |
-| Dedicated Models-only | `models-only`, `dedicated`, `read-write` (17 tools) |
-| Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (22 tools) |
+| MT SaaS with Agent Lens and ARIA | `models-weave-agents` + `WANDB_MCP_TOOL_EXTENSIONS=agent-lens,aria`, `shared`, `read-write` (44 tools) |
+| Dedicated Models-only | `models-only`, `dedicated`, `read-write` (18 tools) |
+| Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (23 tools) |
 | Local extra GraphQL tool | `models-weave-graphql-compat`, `local`; choose either access mode |
 
 **Compatibility with v0.3.7:** Existing query-only `query_wandb_tool` calls can
@@ -156,6 +157,21 @@ read safeguards apply to both modes; tool names and profile counts are unchanged
 **Tool errors:** server-authored failures set MCP `isError=true` and retain
 sanitized error codes and corrective messages. Check that flag before using a
 result. Successful customer data can contain fields named `error` or `result`.
+
+**Inline line plots:** `render_wandb_line_plot_tool` reads up to 10 runs and 5
+metric keys without creating a report or writing data. MCP Apps hosts display
+an offline, interactive chart with legend toggles, hover values, drag zoom,
+double-click reset, and an **Open in W&B** link. Other clients receive compact
+metric statistics and links. Step-axis zoom requeries windows within the active
+history range cap; other zooms stay local. Host support and tool-call permissions
+govern requery availability.
+
+For Claude hosting, optionally set `WANDB_MCP_APP_DOMAIN` to the first 32 hex
+characters of SHA-256 of the public MCP server URL, followed by
+`.claudemcpcontent.com`, as required by
+[Claude's MCP Apps documentation](https://claude.com/docs/connectors/building/mcp-apps/).
+Other hosts may require a different domain format; leave it unset unless needed.
+The resource declares empty CSP network allowlists and embeds all JS/CSS.
 
 **History limits:** the tool schema exposes the active key and step-window caps.
 Use explicit metric keys and paired inclusive `min_step`/`max_step` bounds for
@@ -754,17 +770,17 @@ Exact tool profiles:
 
 | Resolved profile | Base | Extensions | Managed workloads | Read-write | Read-only |
 |---|---|---|---|---:|---:|
-| `models-only` | `models-only` | none | dedicated, shared | 17 | 15 |
-| `models-weave` | `models-weave` | none | dedicated, shared | 22 | 20 |
-| `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 23 | 21 |
-| `models-weave-agents` | `models-weave-agents` | none | shared | 30 | 28 |
-| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 39 | 37 |
-| `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 34 | 31 |
-| `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 31 | 29 |
-| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 43 | 40 |
-| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 40 | 38 |
-| `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 35 | 32 |
-| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 44 | 41 |
+| `models-only` | `models-only` | none | dedicated, shared | 18 | 16 |
+| `models-weave` | `models-weave` | none | dedicated, shared | 23 | 21 |
+| `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 24 | 22 |
+| `models-weave-agents` | `models-weave-agents` | none | shared | 31 | 29 |
+| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 40 | 38 |
+| `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 35 | 32 |
+| `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 32 | 30 |
+| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 44 | 41 |
+| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 41 | 39 |
+| `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 36 | 33 |
+| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 45 | 42 |
 
 Exact workload defaults:
 
@@ -782,7 +798,7 @@ Exact capacity classes:
 | `medium` | 4 | 8 | 8 | 8 |
 | `large` | 8 | 16 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:fa8b0ba1128ccb28cd5fe885e46847a5f3f8eda7bf14db327db4356d68978867`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:e2f39a85771b0dca637f57a9d775254019bedf22d75c8e42ea6ca2c42f932e93`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line
