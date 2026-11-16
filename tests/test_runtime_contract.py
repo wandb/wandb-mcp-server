@@ -21,17 +21,17 @@ from wandb_mcp_server.runtime_contract import (
 
 
 EXPECTED_COUNTS = {
-    "models-only": {"read-write": 17, "read-only": 15},
-    "models-weave": {"read-write": 22, "read-only": 20},
-    "models-weave-graphql-compat": {"read-write": 23, "read-only": 21},
-    "models-weave-agents": {"read-write": 30, "read-only": 28},
-    "models-weave-agents-agent-lens": {"read-write": 39, "read-only": 37},
-    "models-weave-agents-aria": {"read-write": 34, "read-only": 31},
-    "models-weave-agents-raw-graphql": {"read-write": 31, "read-only": 29},
-    "models-weave-agents-agent-lens-aria": {"read-write": 43, "read-only": 40},
-    "models-weave-agents-agent-lens-raw-graphql": {"read-write": 40, "read-only": 38},
-    "models-weave-agents-aria-raw-graphql": {"read-write": 35, "read-only": 32},
-    "models-weave-agents-agent-lens-aria-raw-graphql": {"read-write": 44, "read-only": 41},
+    "models-only": {"read-write": 18, "read-only": 16},
+    "models-weave": {"read-write": 23, "read-only": 21},
+    "models-weave-graphql-compat": {"read-write": 24, "read-only": 22},
+    "models-weave-agents": {"read-write": 31, "read-only": 29},
+    "models-weave-agents-agent-lens": {"read-write": 40, "read-only": 38},
+    "models-weave-agents-aria": {"read-write": 35, "read-only": 32},
+    "models-weave-agents-raw-graphql": {"read-write": 32, "read-only": 30},
+    "models-weave-agents-agent-lens-aria": {"read-write": 44, "read-only": 41},
+    "models-weave-agents-agent-lens-raw-graphql": {"read-write": 41, "read-only": 39},
+    "models-weave-agents-aria-raw-graphql": {"read-write": 36, "read-only": 33},
+    "models-weave-agents-agent-lens-aria-raw-graphql": {"read-write": 45, "read-only": 42},
 }
 EXPECTED_MANAGED = {
     "models-only": ("dedicated", "shared"),
@@ -69,7 +69,7 @@ def test_packaged_contract_has_exact_profiles_and_complete_tool_metadata():
         for tool in group["tools"]:
             assert set(tool) == {"name", "access", "risk", "prerequisite"}
             names.append(tool["name"])
-    assert len(names) == len(set(names)) == 44
+    assert len(names) == len(set(names)) == 45
 
     for profile, access_counts in EXPECTED_COUNTS.items():
         resolution = combinations[profile]
@@ -181,7 +181,7 @@ def test_default_selection_is_public_models_weave(monkeypatch: pytest.MonkeyPatc
     assert selection.access_mode == "read-write"
     assert selection.workload_profile == "local"
     assert selection.capacity_class == "small"
-    assert len(selection.tools) == 22
+    assert len(selection.tools) == 23
     assert selection.runtime_contract_sha256.startswith("sha256:")
 
 
@@ -340,7 +340,7 @@ def test_extensions_compose_onto_a_base_profile_regardless_of_order():
     assert first.base_profile == "models-weave-agents"
     assert first.extensions == frozenset({"agent-lens", "aria"})
     assert first.groups == frozenset({"models", "weave", "agents", "agent-lens", "aria"})
-    assert len(first.tools) == 43
+    assert len(first.tools) == 44
     assert first.tools == tools_for_profile(contract, "models-weave-agents", "read-write", ("agent-lens", "aria"))
 
     plain = resolve_runtime_selection(_shared_environment(WANDB_MCP_TOOL_PROFILE="models-weave-agents"))

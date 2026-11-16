@@ -150,6 +150,12 @@
           "prerequisite": "wandb"
         },
         {
+          "name": "render_wandb_line_plot_tool",
+          "access": "read",
+          "risk": "read",
+          "prerequisite": "wandb"
+        },
+        {
           "name": "search_wandb_docs_tool",
           "access": "read",
           "risk": "read",

@@ -26,6 +26,7 @@ from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Unio
 import wandb
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import CallToolResult
 from pydantic import Field, PositiveInt, StrictInt
 
 from wandb_mcp_server.config import (
@@ -646,6 +647,31 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     # mutate the public MCP surface.
     selection = selection or resolve_runtime_selection()
     register_tool, registered_tools = _selected_tool_registrar(mcp_instance, selection)
+    from wandb_mcp_server.mcp_tools.line_plot import (
+        LINE_PLOT_DESCRIPTION,
+        RESOURCE_URI,
+        TOOL_NAME,
+        register_line_plot_resource,
+        render_line_plot,
+    )
+
+    @register_tool(
+        description=LINE_PLOT_DESCRIPTION, meta={"ui": {"resourceUri": RESOURCE_URI}, "ui/resourceUri": RESOURCE_URI}
+    )
+    def render_wandb_line_plot_tool(
+        entity_name: str,
+        project_name: str,
+        run_ids: Annotated[List[str], Field(min_length=1, max_length=10)],
+        config: Dict[str, Any],
+        samples: Annotated[StrictInt, Field(ge=1)] = 500,
+        min_step: Optional[StrictInt] = None,
+        max_step: Optional[StrictInt] = None,
+    ) -> CallToolResult:
+        return render_line_plot(entity_name, project_name, run_ids, config, samples, min_step, max_step)
+
+    if TOOL_NAME in registered_tools:
+        register_line_plot_resource(mcp_instance)
+
     read_only = selection.read_only
     raw_graphql_enabled = "raw-graphql" in selection.groups
 
