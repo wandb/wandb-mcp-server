@@ -164,7 +164,14 @@ an offline, interactive chart with legend toggles, hover values, drag zoom,
 double-click reset, and an **Open in W&B** link. Other clients receive compact
 metric statistics and links. Step-axis zoom requeries windows within the active
 history range cap; other zooms stay local. Host support and tool-call permissions
-govern requery availability.
+govern requery availability. Pass native camelCase panel `config`, for example
+`{"metrics":["loss"],"smoothingWeight":0.8,"yLogScale":true}`. A report panel's
+`config` can be obtained via `query_wandb_tool` with `include=["spec"]`.
+The payload uses `wandb.graph/v1` series plus style/metadata maps, not raw history.
+Supports sampled smoothing, config/run-group aggregation and uncertainty bands;
+unsupported data-changing panel options return `unsupported_config` rather than
+silently changing the chart. See [tool guidance](docs/tool-guidance.md#render-wb-line-plot)
+for supported options and sampled grouping semantics.
 
 For Claude hosting, optionally set `WANDB_MCP_APP_DOMAIN` to the first 32 hex
 characters of SHA-256 of the public MCP server URL, followed by

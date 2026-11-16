@@ -12,7 +12,6 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.fastmcp import FastMCP
-from mcp.types import CallToolResult
 import pytest
 
 from wandb_mcp_server.admission import current_tool_deadline, tool_cost
@@ -43,12 +42,7 @@ def history(monkeypatch):
             {
                 "run_name": "gentle-sweep",
                 "sampled": True,
-                "truncated": False,
-                "rows": [
-                    {"_step": 2, "loss": 0.3, "accuracy": 0.8},
-                    {"_step": 0, "loss": 0.9},
-                    {"_step": 1, "loss": 0.5, "accuracy": 0.6},
-                ],
+                "rows": [{"_step": 0, "loss": 1}, {"_step": 1, "loss": 3}, {"_step": 2, "loss": 5}],
             }
         )
 
@@ -56,175 +50,354 @@ def history(monkeypatch):
     return calls
 
 
-def render(**kwargs):
+def render(config=None, **kwargs):
     return line_plot.render_line_plot(
         **{
             "entity_name": "team",
             "project_name": "project",
             "run_ids": ["a"],
-            "keys": ["loss"],
+            "config": {"metrics": ["loss"], **(config or {})},
             **kwargs,
         }
     )
 
 
-def test_happy_path_compact_series_and_text_fallback(history):
-    result = render(run_ids=["a", "b"], keys=["loss", "accuracy"], title="Learning curves")
-    assert isinstance(result, CallToolResult)
-    assert not result.isError
+def test_happy_path_shape_and_text(history):
+    result = render({"chartTitle": "Loss"}, run_ids=["a", "b"])
     data = result.structuredContent
-    assert data["title"] == "Learning curves"
-    assert data["url"].endswith("/team/project")
-    assert [call["run_id"] for call in history] == ["a", "b"]
-    assert data["runs"][0]["name"] == "gentle-sweep"
-    assert data["runs"][0]["url"].endswith("/team/project/runs/a")
-    assert data["runs"][0]["series"] == {"loss": [[0, 0.9], [1, 0.5], [2, 0.3]], "accuracy": [[1, 0.6], [2, 0.8]]}
-    text = result.content[0].text
-    assert "loss: 3 points; first=0.9, last=0.3, min=0.3, max=0.9" in text
-    assert "accuracy: 2 points" in text
-    assert "Open in W&B:" in text
-    assert "[[" not in text
-    assert len(line_plot.LINE_PLOT_DESCRIPTION) < 4000
+    assert not result.isError
+    assert data["schema"] == "wandb.graph/v1"
+    assert [c["run_id"] for c in history] == ["a", "b"]
+    assert data["series"][0]["historySeries"] == [{"x": 0, "y": 1}, {"x": 1, "y": 3}, {"x": 2, "y": 5}]
+    s = data["series"][0]
+    assert data["seriesMetadataById"][s["metadataId"]]["legendHref"].endswith("/runs/a")
+    assert data["seriesStylesById"][s["seriesId"]]["color"] == line_plot.PALETTE[0]
+    assert data["effectiveConfig"]["groupAgg"] == "mean"
+    assert "first=1, last=5, min=1, max=5" in result.content[0].text
+    assert "[{" not in result.content[0].text
+    assert len(line_plot.LINE_PLOT_DESCRIPTION) <= 4000
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    "cfg",
     [
-        {"run_ids": []},
-        {"run_ids": ["a"] * 11},
-        {"run_ids": ["a", "a"]},
-        {"run_ids": None},
-        {"keys": []},
-        {"keys": [str(i) for i in range(6)]},
-        {"keys": ["loss", "loss"]},
-        {"keys": [None]},
-        {"keys": [" "]},
-        {"entity_name": ""},
-        {"project_name": None},
-        {"x_axis": ""},
-        {"samples": 0},
-        {"samples": True},
-        {"samples": float("nan")},
-        {"samples": None},
-        {"min_step": -1},
-        {"max_step": True},
-        {"max_step": float("inf")},
-        {"min_step": 10, "max_step": 2},
-        {"max_step": line_plot.MAX_SAFE_HISTORY_STEP + 1},
-        {"min_step": 0, "max_step": line_plot.MCP_MAX_HISTORY_RANGE_STEPS},
-        {"title": "x" * 201},
-        {"keys": ["x" * 513]},
-        {"entity_name": "\ud800"},
+        {"metrics": []},
+        {"metrics": ["x"] * 6},
+        {"metrics": ["x", "x"]},
+        {"metrics": None},
+        {"metrics": [True]},
+        {"xAxis": ""},
+        {"surprise": 1},
+        {"x_axis": "_step"},
+        {"xAxisMin": float("nan")},
+        {"yAxisMax": True},
+        {"xAxisMin": 2, "xAxisMax": 1},
+        {"yLogScale": True, "yAxisMin": 0},
+        {"showLegend": "yes"},
+        {"limit": 11},
+        {"limit": True},
+        {"smoothingWeight": -1},
+        {"smoothingWeight": float("inf")},
+        {"smoothingType": "bad"},
+        {"smoothingType": "gaussian", "smoothingWeight": 101},
+        {"overrideMarks": {"a:loss": "bad"}},
+        {"overrideLineWidths": {"a:loss": -1}},
+        {"overrideColors": {"a:loss": "red"}},
+        {"chartTitle": "x" * 201},
     ],
 )
-def test_invalid_input_does_not_read_history(history, arguments):
-    result = render(**arguments)
+def test_invalid_config(history, cfg):
+    result = render(cfg)
     assert result.isError
     assert result.structuredContent["error"] == "invalid_input"
-    assert history == []
+    assert not history
 
 
-def test_range_profile_validation_and_sample_clamp(history, monkeypatch):
-    monkeypatch.setattr(line_plot, "MCP_WORKLOAD_PROFILE", "shared")
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"run_ids": []},
+        {"run_ids": ["a", "a"]},
+        {"run_ids": ["a"] * 11},
+        {"samples": True},
+        {"samples": 0},
+        {"min_step": -1},
+        {"max_step": True},
+        {"max_step": line_plot.MAX_SAFE_HISTORY_STEP + 1},
+        {"min_step": 10, "max_step": 2},
+        {"entity_name": "\ud800"},
+        {"config": None},
+        {"config": []},
+    ],
+)
+def test_invalid_execution(history, args):
+    result = line_plot.render_line_plot(
+        **{"entity_name": "team", "project_name": "project", "run_ids": ["a"], "config": {"metrics": ["loss"]}, **args}
+    )
+    assert result.isError
+    assert not history
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("expressions", []),
+        ("metricRegex", "loss"),
+        ("useMetricRegex", False),
+        ("xExpression", ""),
+        ("fullFidelityMode", "standard"),
+        ("groupedFullFidelityMode", "standard"),
+        ("pointVisualizationMethod", "bucketing-gorilla"),
+        ("plotType", "bar"),
+        ("groupAgg", "last"),
+        ("groupAgg", "samples"),
+        ("groupArea", "samples"),
+        ("groupBy", "state"),
+        ("xAxis", "_absolute_runtime"),
+    ],
+)
+def test_unsupported(history, field, value):
+    result = render({field: value})
+    assert result.structuredContent["error"] == "unsupported_config"
+    assert result.structuredContent["fields"] == [field]
+    assert not history
+
+
+def test_limits_ignored_and_domains(history, monkeypatch):
     monkeypatch.setattr(line_plot, "MCP_MAX_HISTORY_SAMPLES", 25)
+    monkeypatch.setattr(line_plot, "MCP_WORKLOAD_PROFILE", "shared")
     assert render(min_step=1).isError
-    assert history == []
-    result = render(samples=10000, min_step=5, max_step=10)
-    assert not result.isError
+    result = render(
+        {
+            "fontSize": "large",
+            "tooltipNumberOfRuns": "all_runs",
+            "legendPosition": "west",
+            "pointVisualizationMethod": "sampling",
+            "xAxisMin": 1,
+            "xAxisMax": 9,
+            "yAxisMin": None,
+            "limit": 1,
+        },
+        samples=5000,
+        min_step=0,
+        max_step=20,
+        run_ids=["a", "b"],
+    )
+    p = result.structuredContent
     assert history[0]["samples"] == 25
-    assert (history[0]["min_step"], history[0]["max_step"]) == (5, 10)
-    assert result.structuredContent["arguments"]["samples"] == 25
+    assert p["arguments"]["config"]["fontSize"] == "large"
+    assert p["coverage"]["ignoredConfig"] == ["fontSize", "tooltipNumberOfRuns"]
+    assert p["coverage"]["truncated"]
+    assert len(p["series"]) == 1
+    assert p["xDomain"] == [1, 9]
+    assert p["legend"]["position"] == "west"
+    assert render(min_step=0, max_step=line_plot.MCP_MAX_HISTORY_RANGE_STEPS).isError
 
 
-def test_partial_failure_preserves_success_and_hides_upstream_details(history, monkeypatch):
+@pytest.mark.parametrize("response", ["null", "[]", "bad json", '{"error":"auth_required"}', '{"rows":null}'])
+def test_all_failures(history, monkeypatch, response):
+    monkeypatch.setattr(line_plot, "get_run_history", lambda **kw: response)
+    result = render()
+    assert result.isError
+    assert result.structuredContent["coverage"]["perRunErrors"][0]["error"] == "history_fetch_failed"
+
+
+def test_partial_errors_and_deadline(history, monkeypatch):
     fetch = line_plot.get_run_history
 
-    def sometimes(**kwargs):
-        if kwargs["run_id"] == "bad":
-            raise PermissionError("Bearer secret-private-content")
-        return fetch(**kwargs)
+    def some(**kw):
+        if kw["run_id"] == "bad":
+            raise PermissionError("secret-upstream-canary")
+        return fetch(**kw)
 
-    monkeypatch.setattr(line_plot, "get_run_history", sometimes)
+    monkeypatch.setattr(line_plot, "get_run_history", some)
     result = render(run_ids=["bad", "a"])
     assert not result.isError
-    assert result.structuredContent["runs"][0]["error"] == "history_fetch_failed"
-    assert result.structuredContent["runs"][1]["series"]["loss"]
-    assert "secret-private-content" not in result.model_dump_json()
-
-
-@pytest.mark.parametrize("response", ["null", "[]", "not json", '{"error":"auth_required"}', '{"rows":null}'])
-def test_all_run_failures_are_tool_errors(monkeypatch, response):
-    monkeypatch.setattr(line_plot, "get_run_history", lambda **_: response)
-    result = render()
-    assert result.isError
-    assert "history_fetch_failed" in result.content[0].text
-
-
-def test_deadline_prevents_backend_work(history):
+    assert len(result.structuredContent["series"]) == 1
+    assert "secret-upstream-canary" not in result.model_dump_json()
     token = current_tool_deadline.set(0)
     try:
-        result = render(run_ids=["a", "b"])
+        before = len(history)
+        assert render().isError
+        assert len(history) == before
     finally:
         current_tool_deadline.reset(token)
-    assert history == []
-    assert result.isError
 
 
-@pytest.mark.parametrize("axis", ["_timestamp", "epoch"])
-def test_custom_axis_empty_and_non_finite_values(monkeypatch, axis):
+@pytest.mark.parametrize("axis,multiplier", [("_timestamp", 1000), ("_runtime", 1), ("epoch", 1)])
+def test_axes_and_empty(history, monkeypatch, axis, multiplier):
     monkeypatch.setattr(
         line_plot,
         "get_run_history",
-        lambda **_: json.dumps(
-            {
-                "rows": [
-                    {axis: 2, "loss": 0.3},
-                    {axis: 1, "loss": float("nan")},
-                    {axis: float("inf"), "loss": 1},
-                    {axis: 3, "loss": True},
-                    {axis: 4, "loss": "text"},
-                    {"_step": 5, "loss": 1},
-                ]
-            }
+        lambda **kw: json.dumps(
+            {"rows": [{axis: 2, "loss": 3}, {axis: 3, "loss": float("nan")}, {axis: 4, "loss": True}]}
         ),
     )
-    result = render(x_axis=axis, keys=["loss", "missing"])
-    assert not result.isError
-    assert result.structuredContent["runs"][0]["series"] == {"loss": [[2, 0.3]], "missing": []}
-    assert "missing: 0 points; no finite numeric points" in result.content[0].text
-    json.dumps(result.model_dump(), allow_nan=False)
+    p = render({"xAxis": axis, "metrics": ["loss", "missing"]}).structuredContent
+    assert p["series"][0]["historySeries"] == [{"x": 2 * multiplier, "y": 3}]
+    assert p["series"][1]["historySeries"] == []
+    assert p["axis"]["xIsDatetime"] == (axis == "_timestamp")
 
 
-def test_response_budget_and_source_truncation(monkeypatch):
-    monkeypatch.setattr(line_plot, "MAX_RESPONSE_TOKENS", 1800)
+@pytest.mark.parametrize(
+    "kind,weight,expected",
+    [
+        ("none", 0.25, [1, 3, 5]),
+        ("exponential", 0.25, [1, 7 / 3, 27 / 7]),
+        ("average", 2, [1, 2, 4]),
+    ],
+)
+def test_smoothing_numeric(history, kind, weight, expected):
+    p = render({"smoothingType": kind, "smoothingWeight": weight, "showOriginalAfterSmoothing": True}).structuredContent
+    assert [v["y"] for v in p["series"][0]["historySeries"]] == pytest.approx(expected)
+    assert len(p["series"]) == (1 if kind == "none" else 2)
+    if kind != "none":
+        assert p["series"][1]["role"] == "original"
+        assert [v["y"] for v in p["series"][1]["historySeries"]] == [1, 3, 5]
+
+
+def test_time_weighted_smoothing(history, monkeypatch):
     monkeypatch.setattr(
         line_plot,
         "get_run_history",
-        lambda **_: json.dumps(
+        lambda **kw: json.dumps(
+            {"rows": [{"_step": 0, "loss": 1}, {"_step": 1, "loss": 3}, {"_step": 1500, "loss": 5}]}
+        ),
+    )
+    alpha = (0.25 * 0.999) ** 0.5
+    a = alpha ** (1 / 1500 * 1500)
+    b = alpha ** (1499 / 1500 * 1500)
+    expected = [1, (a + 3) / (a + 1), ((a + 3) * b + 5) / ((a + 1) * b + 1)]
+    p = render({"smoothingType": "exponentialTimeWeighted", "smoothingWeight": 0.25}).structuredContent
+    assert [v["y"] for v in p["series"][0]["historySeries"]] == pytest.approx(expected)
+
+
+def test_gaussian_reflect_numeric(history):
+    import math
+
+    sigma = 0.25
+    # radius ceil(4*sigma+.5)=2; reflected [3,1,1,3,5] at the first sample.
+    a, b = math.exp(-1 / (2 * sigma * sigma)), math.exp(-4 / (2 * sigma * sigma))
+    first = (b * 3 + a * 1 + 1 + a * 3 + b * 5) / (1 + 2 * a + 2 * b)
+    p = render({"smoothingType": "gaussian", "smoothingWeight": sigma}).structuredContent
+    assert [v["y"] for v in p["series"][0]["historySeries"]] == pytest.approx([first, 3, 6 - first])
+
+
+@pytest.mark.parametrize("kind", ["none", "exponential", "exponentialTimeWeighted", "gaussian", "average"])
+def test_smoothing_empty_and_singleton(kind):
+    from wandb_mcp_server.mcp_tools.line_plot_smoothing import smooth
+
+    assert smooth([], 0.25, kind) == []
+    assert smooth([{"x": 0, "y": 4}], 0.25, kind) == [{"x": 0, "y": 4}]
+
+
+def test_invalid_json_config(history):
+    cycle = []
+    cycle.append(cycle)
+    assert render({"legendFields": cycle}).structuredContent["error"] == "invalid_input"
+    assert render({"legendTemplate": "x" * 33000}).isError
+
+
+def test_overflow_does_not_emit_nonfinite_json(grouping, monkeypatch):
+    monkeypatch.setattr(line_plot, "get_run_history", lambda **kw: json.dumps({"rows": [{"_step": 0, "loss": 1e308}]}))
+    p = render({"aggregate": True, "groupAgg": "sum"}, run_ids=["a", "b"]).structuredContent
+    assert p["coverage"]["truncated"]
+    assert p["series"][0]["historySeries"] == []
+    json.dumps(p, allow_nan=False)
+
+
+@pytest.fixture
+def grouping(history, monkeypatch):
+    calls = []
+    monkeypatch.setattr(line_plot.WandBApiManager, "get_api", staticmethod(lambda: object()))
+
+    def snapshot(api, **kw):
+        calls.append(kw)
+        return {"group": "train", "config": {k: "train" for k in kw["config_keys"]}}
+
+    monkeypatch.setattr(line_plot, "fetch_projected_run", snapshot)
+    monkeypatch.setattr(
+        line_plot,
+        "get_run_history",
+        lambda **kw: json.dumps(
             {
-                "source_truncated": True,
-                "rows": [{"_step": i, "loss": i / 9} for i in range(500)],
+                "rows": [{"_step": 0, "loss": 1}, {"_step": 1, "loss": 3}]
+                if kw["run_id"] == "a"
+                else [{"_step": 0, "loss": 5}, {"_step": 2, "loss": 7}]
             }
         ),
     )
-    result = render(run_ids=["a", "b"])
-    data = result.structuredContent
-    assert data["truncated"]
-    assert data["runs"][0]["truncated"]
-    assert 0 < len(data["runs"][0]["series"]["loss"]) < 500
+    return calls
+
+
+@pytest.mark.parametrize("agg,value", [("mean", 3), ("median", 3), ("min", 1), ("max", 5), ("sum", 6)])
+@pytest.mark.parametrize("area", ["minmax", "stddev", "stderr", "none"])
+def test_grouping(grouping, agg, value, area):
+    p = render({"groupBy": "optimizer.value", "groupAgg": agg, "groupArea": area}, run_ids=["a", "b"]).structuredContent
+    assert grouping[0]["config_keys"] == ["optimizer"]
+    assert p["coverage"]["groupingAlignment"] == "exact-match-union"
+    assert p["series"][0]["historySeries"] == [{"x": 0, "y": value}, {"x": 1, "y": 3}, {"x": 2, "y": 7}]
+    if area == "none":
+        assert len(p["series"]) == 1
+    else:
+        band = p["series"][1]
+        delta = {"minmax": 2, "stddev": 8**0.5, "stderr": 2}[area]
+        assert band["kind"] == "area"
+        assert band["historySeries"][0] == pytest.approx({"x": 0, "y": 3 + delta, "y0": 3 - delta})
+        assert band["historySeries"][1] == {"x": 1, "y": 3, "y0": 3}
+
+
+@pytest.mark.parametrize("key,expected", [("group", []), ("config.optimizer", ["optimizer"]), ("a.value.b", ["a.b"])])
+def test_group_paths(grouping, key, expected):
+    assert not render({"groupBy": key}).isError
+    assert grouping[0]["config_keys"] == expected
+
+
+def test_overrides(history):
+    p = render(
+        {
+            "overrideColors": {"a:loss": {"color": "#123456", "transparentColor": "#12345633"}},
+            "overrideSeriesTitles": {"a:loss": "Custom"},
+            "overrideLineWidths": {"a:loss": 3},
+            "overrideMarks": {"a:loss": "dashed"},
+            "yLogScale": True,
+            "xAxisTitle": "Steps",
+            "showLegend": False,
+        }
+    ).structuredContent
+    s = p["series"][0]
+    assert p["seriesStylesById"][s["seriesId"]] == {
+        "color": "#123456",
+        "colorKey": "a:loss",
+        "lineWidth": 3,
+        "mark": "dashed",
+    }
+    assert p["seriesMetadataById"][s["metadataId"]]["title"] == "Custom"
+    assert p["axis"]["yScale"] == "log"
+    assert not p["legend"]["show"]
+
+
+def test_response_budget(history, monkeypatch):
+    monkeypatch.setattr(line_plot, "MAX_RESPONSE_TOKENS", 2500)
+    monkeypatch.setattr(
+        line_plot,
+        "get_run_history",
+        lambda **kw: json.dumps({"source_truncated": True, "rows": [{"_step": i, "loss": i / 9} for i in range(500)]}),
+    )
+    result = render()
+    assert result.structuredContent["coverage"]["truncated"]
+    assert len(result.structuredContent["series"][0]["historySeries"]) < 500
     assert (
         count_tokens_conservative(
-            json.dumps({"content": result.content[0].text, "structuredContent": data}, separators=(",", ":"))
+            json.dumps(
+                {"content": result.content[0].text, "structuredContent": result.structuredContent},
+                separators=(",", ":"),
+            )
         )
-        <= 1800
+        <= 2500
     )
-
-
-def test_tiny_budget_fails_closed(history, monkeypatch):
     monkeypatch.setattr(line_plot, "MAX_RESPONSE_TOKENS", 1)
-    result = render()
-    assert result.isError
-    assert result.structuredContent == {"error": "response_too_large"}
+    assert render().structuredContent["error"] == "response_too_large"
 
 
 def test_resource_is_only_registered_with_selected_tool(monkeypatch):
@@ -268,15 +441,29 @@ async def test_official_client_preserves_metadata_content_and_structured_result(
                         assert "new uPlot" in content.text
                         result = await client.call_tool(
                             line_plot.TOOL_NAME,
-                            {"entity_name": "team", "project_name": "project", "run_ids": ["a"], "keys": ["loss"]},
+                            {
+                                "entity_name": "team",
+                                "project_name": "project",
+                                "run_ids": ["a"],
+                                "config": {"metrics": ["loss"]},
+                            },
                         )
                         assert not result.isError
-                        assert result.structuredContent["runs"][0]["series"]["loss"] == [[0, 0.9], [1, 0.5], [2, 0.3]]
+                        assert result.structuredContent["series"][0]["historySeries"] == [
+                            {"x": 0, "y": 1},
+                            {"x": 1, "y": 3},
+                            {"x": 2, "y": 5},
+                        ]
                         assert result.content[0].text.startswith("loss\nOpen in W&B:")
                         assert "[[" not in result.content[0].text
                         invalid = await client.call_tool(
                             line_plot.TOOL_NAME,
-                            {"entity_name": "team", "project_name": "project", "run_ids": [], "keys": ["loss"]},
+                            {
+                                "entity_name": "team",
+                                "project_name": "project",
+                                "run_ids": [],
+                                "config": {"metrics": ["loss"]},
+                            },
                         )
                         assert invalid.isError
     finally:

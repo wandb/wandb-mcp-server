@@ -63,7 +63,7 @@ change only the page `limit` when continuing; mismatched reuse returns
 | Sweep lookup/list/config | `query_wandb_tool(resource="sweep"|"sweeps")` | No |
 | Report lookup/list/spec | `query_wandb_tool(resource="reports", report_name=...)`; `report_name` accepts an exact internal name or display title | No |
 | Run metric history, including sparse keys logged at different cadences | `get_run_history_tool` | No |
-| Interactive inline run-metric line plots, with text fallback | `render_wandb_line_plot_tool` | No |
+| Native line-plot config; Graph-shaped sampled series, smoothing, grouping/bands and inline chart with text fallback | `render_wandb_line_plot_tool` | No |
 | Artifacts and registries | `list_artifact_versions_tool`, `get_artifact_details_tool`, `list_registries_tool`, and `list_registry_collections_tool` | No |
 | Automations and integrations | `list_wandb_automations_tool` and `list_wandb_integrations_tool` | No |
 | Schema introspection or unmodeled/custom fields | `query_wandb_tool(query=..., variables=...)` | Yes |

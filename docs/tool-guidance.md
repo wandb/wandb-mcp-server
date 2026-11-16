@@ -13,18 +13,57 @@ the authoritative source for defaults and accepted types.
 
 `render_wandb_line_plot_tool` renders read-only run metrics in MCP Apps hosts.
 It accepts `entity_name`, `project_name`, 1–10 unique `run_ids`, 1–5 unique
-numeric metric `keys`, optional `title`, and `x_axis` (default `_step`).
+numeric `config.metrics` and a native camelCase W&B `config` object.
+`config.xAxis` defaults to `_step`; `_timestamp`, `_runtime` and numeric custom
+axes are supported. Use a report spec panel's `config` from `query_wandb_tool`
+with `include=["spec"]`, not the whole enclosing panel or Python `wr.LinePlot` names.
 `samples` defaults to 500 merged rows per run and is clamped to the workload's
 history limit. Reads are sequential, with a deadline check before each run.
 Run failures are listed individually; the MCP error flag is set if all fail.
 
 The text result includes point counts and first/last/min/max values for each
 run/metric, plus run and workspace links. The separate `structuredContent`
-contains compact `[x,y]` series for the chart, canonical requery arguments,
+uses schema `wandb.graph/v1`: `series` with `historySeries:[{x,y,y0?}]`,
+`seriesStylesById`, `seriesMetadataById`, `axis`, `xDomain`/`yDomain`, `legend`,
+`effectiveConfig`, `coverage`, project URL, canonical requery arguments,
 sampling/truncation flags, and the active range cap. Statistics describe only
 returned finite numeric points, not the entire history. Response-budget
 downsampling may further reduce points. Empty metrics remain visible as empty
 series. Custom x-axis values must be numeric and logged on the metric's row.
+Datetime coordinates and display domains are milliseconds. Log axes omit
+nonpositive values from rendering without changing the returned numeric series.
+
+Supported native options: `chartTitle`, `metrics`, `xAxis`, `xAxisMin/Max`,
+`yAxisMin/Max` (display-only domains), `xLogScale`, `yLogScale`, `xAxisTitle`,
+`yAxisTitle`, `smoothingWeight`, `smoothingType`, `showOriginalAfterSmoothing`,
+`groupBy`, `aggregate`, `groupAgg`, `groupArea`, `legendPosition`, `showLegend`,
+`limit`, `overrideColors`, `overrideSeriesTitles`, `overrideLineWidths`,
+`overrideMarks`, and `plotType="line"`. Overrides use `runId:metricName`, or
+`groupKey:metricName` for groups. Colors have native `{color,transparentColor}`
+entries. Marks include solid, dashed, dotted, dotdash, dotdotdash and points.
+
+Smoothing ports Core's frontend EMA (zero-debiased), time-weighted EMA,
+reflected Gaussian and centered running average. Defaults are exponential and
+weight zero; `none` is identity. EMA weights are 0–1, Gaussian sigma 0–100 and
+average window 0–10000. Original curves optionally have role `original`.
+Grouping supports `group` (run group), `config.key` and persisted `key.value`
+paths (including `a.value.b`). Reads reuse bounded projected-run metadata.
+`aggregate=true` without `groupBy` aggregates all selected runs. Each metric
+aligns **exactly matching samples on the union of x values**, without interpolation
+or forward-fill, matching Core's non-bucketed aggregate path. Missing scalar
+group values share a `(missing)` group. Defaults: `groupAgg=mean`,
+`groupArea=minmax`. Reducers: mean/min/max/median/sum. Bands: minmax, sample
+standard deviation, standard error, or none; singleton deviation is zero.
+Bands describe the unsmoothed samples; smoothing affects the aggregate line.
+`limit` (1–10) limits output runs/groups and marks coverage truncated.
+
+Expressions, regex selection, x expressions, full-fidelity modes, non-sampling
+point strategies, non-line plots, `groupAgg=last|samples`, `groupArea=samples`
+and other unsupported native data-changing fields return `unsupported_config`
+with the fields listed. Native cosmetic options such as font size or legend
+template can be ignored and appear in `coverage.ignoredConfig`. Unknown
+non-native fields return `invalid_input`. Unsupported config is not silently
+approximated with sampled rendering. Config is bounded to 32 KiB.
 
 The self-contained uPlot chart has legend toggles, hover values, drag zoom,
 double-click reset, host theme support, and **Open in W&B**. Step-axis zoom
@@ -41,7 +80,8 @@ Apps still receive the useful text result. Operators hosting on Claude may set
 ```python
 render_wandb_line_plot_tool(
     entity_name="my-team", project_name="training", run_ids=["abc123", "def456"],
-    keys=["loss"], title="Training loss",
+    config={"metrics": ["loss"], "chartTitle": "Training loss",
+            "smoothingWeight": 0.8, "yLogScale": True},
 )
 ```
 

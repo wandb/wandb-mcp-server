@@ -662,14 +662,12 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         entity_name: str,
         project_name: str,
         run_ids: Annotated[List[str], Field(min_length=1, max_length=10)],
-        keys: Annotated[List[str], Field(min_length=1, max_length=5)],
-        x_axis: str = "_step",
+        config: Dict[str, Any],
         samples: Annotated[StrictInt, Field(ge=1)] = 500,
         min_step: Optional[StrictInt] = None,
         max_step: Optional[StrictInt] = None,
-        title: Optional[str] = None,
     ) -> CallToolResult:
-        return render_line_plot(entity_name, project_name, run_ids, keys, x_axis, samples, min_step, max_step, title)
+        return render_line_plot(entity_name, project_name, run_ids, config, samples, min_step, max_step)
 
     if TOOL_NAME in registered_tools:
         register_line_plot_resource(mcp_instance)
