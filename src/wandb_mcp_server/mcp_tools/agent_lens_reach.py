@@ -38,9 +38,9 @@ REACH_CHECKS = (
 )
 
 
-async def no_spans_report(scope: DoctorScope, *, has_agent_spans: bool = False) -> str:
+async def no_spans_report(scope: DoctorScope, *, has_agent_spans: bool | None = None) -> str:
     """Explain an empty check using agent span presence or Weave calls in range."""
-    if not has_agent_spans:
+    if has_agent_spans is None:
         any_span = await newest_agent_span(scope)
         if isinstance(any_span, ToolErrorJSON):
             return any_span
@@ -104,7 +104,7 @@ def _filter_diagnosis(scope: DoctorScope) -> str:
     return (
         "This project has agent spans in this window, but no eligible span matches this conversation_id or "
         "trace_id, so spans are reaching Agent Lens. Check that id, pass start_at and end_at covering when it "
-        'ran, or pass conversation_id="latest". Evaluation traces and Weave Signals spans are excluded.'
+        'ran, or pass conversation_id="latest" and omit trace_id. Evaluation traces and Weave Signals spans are excluded.'
     )
 
 

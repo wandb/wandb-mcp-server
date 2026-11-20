@@ -98,8 +98,10 @@ async def diagnose_instrumentation(
     include_failing_spans: bool = False,
 ) -> str:
     """Rank the Agent Lens instrumentation rules a project's agent spans fail."""
-    conversation_id = conversation_id if (conversation_id or "").strip() else None
-    trace_id = trace_id if (trace_id or "").strip() else None
+    for name, value in (("conversation_id", conversation_id), ("trace_id", trace_id)):
+        if value is not None and not value.strip():
+            error = structured_error("agent_lens_invalid_request", f"{name} must not be blank.")
+            return tool_error_json(error)
 
     if conversation_id == LATEST_CONVERSATION and trace_id is not None:
         error = structured_error("agent_lens_invalid_request", 'Omit trace_id when using conversation_id="latest".')
@@ -116,7 +118,7 @@ async def diagnose_instrumentation(
         if isinstance(newest, ToolErrorJSON):
             return newest
         if newest is None:
-            return await no_spans_report(scope)
+            return await no_spans_report(scope, has_agent_spans=False)
         if not newest.conversation_id:
             return await no_spans_report(scope, has_agent_spans=True)
         scope = replace(scope, conversation_id=newest.conversation_id)

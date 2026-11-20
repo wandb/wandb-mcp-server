@@ -147,7 +147,16 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
         (404, {"trace_id": "t1"}, ([],), 0, "Nothing reached", True, True),
         # A filter miss on a project that has agent spans is never blamed on the exporter, even with calls present.
         (404, {"conversation_id": "c1"}, ([{"trace_id": "x"}],), 12, "Check that id", False, False),
-        (404, {"trace_id": "t1"}, ([{"trace_id": "x"}],), 12, 'conversation_id="latest"', False, False),
+        (
+            404,
+            {"trace_id": "t1"},
+            ([{"trace_id": "x"}],),
+            12,
+            'pass conversation_id="latest" and omit trace_id',
+            False,
+            False,
+        ),
+        (200, {"conversation_id": "latest"}, ([], [{"trace_id": "x"}]), 0, "Nothing reached", True, True),
         (
             200,
             {"conversation_id": "latest"},
@@ -241,14 +250,15 @@ def test_doctor_sends_default_window(selectors: dict[str, str], expected_params:
     ("conversation_id", "trace_id", "expected_filters"),
     [
         ("latest", "trace-1", None),
-        ("", " \t", {}),
-        (" \t", "", {}),
-        ("latest", " \t", {"conversation_id": "conv-1"}),
+        (" \t", None, None),
+        (None, "", None),
+        ("latest", " \t", None),
+        ("latest", None, {"conversation_id": "conv-1"}),
         ("conv-1", "trace-1", {"conversation_id": "conv-1", "trace_id": "trace-1"}),
     ],
 )
 def test_doctor_validates_and_normalizes_selectors(
-    conversation_id: str, trace_id: str, expected_filters: dict[str, str] | None
+    conversation_id: str | None, trace_id: str | None, expected_filters: dict[str, str] | None
 ) -> None:
     newest = [{"conversation_id": "conv-1"}]
     with (
@@ -268,8 +278,7 @@ def test_doctor_validates_and_normalizes_selectors(
         query.assert_not_called()
         return
 
-    window = WINDOW if expected_filters else {**WINDOW, "start_at": "2026-09-07T00:00:00Z"}
-    expected_params = {**window, **expected_filters}
+    expected_params = {**WINDOW, **expected_filters}
     assert session.last["params"] == expected_params
     assert result["scope"] == {"entity_name": ENTITY, "project_name": PROJECT, **expected_params}
     assert result["verdict"] == "clean"
