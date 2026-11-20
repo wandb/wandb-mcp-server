@@ -972,20 +972,32 @@ def _trace_server(*pages, calls=0):
         yield query, count
 
 
-@pytest.mark.parametrize(("unsettled", "verdict"), [(0, "clean"), (3, "settling")])
-def test_doctor_reports_clean_only_once_every_trace_has_settled(unsettled, verdict):
+@pytest.mark.parametrize(
+    ("unsettled", "verdict", "window"),
+    [
+        (0, "clean", WINDOW),
+        (3, "settling", WINDOW),
+        pytest.param(
+            0,
+            "clean",
+            {"start_at": "2026-11-20T12:00:00.100123Z", "end_at": "2026-11-20T12:00:00.900456Z"},
+            id="subsecond-window",
+        ),
+    ],
+)
+def test_doctor_reports_clean_only_once_every_trace_has_settled(unsettled, verdict, window):
     passing = [_rule("span_no_operation_name", "must", 0, 40), _rule("trace_no_root", "should", 0, 4)]
     with _mocked(_health(passing, unsettled=unsettled)) as session, _trace_server() as (query, count):
-        result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **WINDOW))
+        result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **window))
 
     assert session.last["method"] == "GET"
     assert session.last["url"] == f"{BASE_URL}/api/instrumentation/health"
-    assert session.last["params"] == WINDOW
+    assert session.last["params"] == window
     assert result["verdict"] == verdict
     assert result["issues"] == []
     assert result["failing_rule_counts"] == {"must": 0, "should": 0}
     assert result["passing_rule_count"] == 2
-    assert result["scope"] == {"entity_name": ENTITY, "project_name": PROJECT, **WINDOW}
+    assert result["scope"] == {"entity_name": ENTITY, "project_name": PROJECT, **window}
     assert ("note" in result) is bool(unsettled)
     query.assert_not_called()
     count.assert_not_called()

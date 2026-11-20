@@ -223,4 +223,4 @@ def _health_window(start_at: Optional[str], end_at: Optional[str], *, filtered: 
 
 def _iso(moment: datetime) -> str:
     """Format `moment` as RFC 3339 UTC with a Z suffix."""
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
