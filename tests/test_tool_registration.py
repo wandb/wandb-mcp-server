@@ -113,7 +113,7 @@ def test_endpoint_presence_never_enables_aria(monkeypatch: pytest.MonkeyPatch):
 
 def test_endpoint_presence_never_enables_agent_lens(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("AGENT_LENS_BASE_URL", "https://agent-lens.example.com")
-    assert not any(name.startswith(("get_agent_lens_", "list_agent_lens_")) for name in _registered_tool_names())
+    assert not any("agent_lens" in name for name in _registered_tool_names())
 
 
 def test_agent_lens_profile_requires_explicit_safe_https_origin(monkeypatch: pytest.MonkeyPatch):

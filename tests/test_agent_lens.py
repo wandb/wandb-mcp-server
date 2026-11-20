@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -44,6 +45,13 @@ BASE_URL = "https://agent-lens.example.com"
 ENTITY = "acme"
 PROJECT = "support-bot"
 WINDOW = {"start_at": "2026-09-01T00:00:00Z", "end_at": "2026-09-08T00:00:00Z"}
+SPAN_PROBE_KWARGS = {
+    "started_after": WINDOW["start_at"],
+    "started_before": WINDOW["end_at"],
+    "sort_by": "started_at",
+    "sort_direction": "desc",
+    "limit": 1,
+}
 
 
 def _sync_call(function, *args, **kwargs):
@@ -1006,10 +1014,10 @@ def test_doctor_reports_clean_only_once_every_trace_has_settled(unsettled, verdi
 def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conversation():
     issues = [
         _rule("should_half", "should", 5, 10, groups=1),
-        _rule("must_tenth", "must", 1, 10, groups=5, spans=30),
+        _rule("must_tenth", "must", 2, 20, groups=5, spans=30),
         _rule("passing", "must", 0, 10),
         _rule("inapplicable", "should", 0, 0, rule_type="trace"),
-        _rule("must_all", "must", 4, 4, groups=2, rule_type="trace"),
+        _rule("must_all", "must", 1, 1, groups=2, rule_type="trace"),
     ]
     newest = [{"conversation_id": "conv-9", "trace_id": "t9"}]
     latest = {"project_name": PROJECT, "conversation_id": "latest", **WINDOW}
@@ -1018,9 +1026,7 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
     with _mocked(_health(issues)), _trace_server(newest):
         detailed = json.loads(diagnose_instrumentation(ENTITY, include_failing_spans=True, **latest))
 
-    assert query.call_args.kwargs["sort_by"] == "started_at"
-    assert query.call_args.kwargs["limit"] == 1
-    assert query.call_args.kwargs["started_after"] == WINDOW["start_at"]
+    query.assert_called_once_with(ENTITY, PROJECT, **SPAN_PROBE_KWARGS)
     assert session.last["params"] == {**WINDOW, "conversation_id": "conv-9"}
     assert result["scope"]["conversation_id"] == "conv-9"
     assert result["verdict"] == "failing"
@@ -1029,9 +1035,12 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
     assert result["passing_rule_count"] == 1
     second = result["issues"][1]
     assert second["fix"] == "must_tenth fix"
-    assert (second["failing_count"], second["applicable_count"], second["group_type"]) == (1, 10, "span")
+    assert (second["failing_count"], second["applicable_count"], second["group_type"]) == (2, 20, "span")
     assert [group["name"] for group in second["top_failing_groups"]] == ["g0", "g1", "g2"]
-    assert second["examples"] == [{"trace_id": "must_tenth-t0", "conversation_id": "must_tenth-c0"}]
+    assert second["examples"] == [
+        {"trace_id": "must_tenth-t0", "conversation_id": "must_tenth-c0"},
+        {"trace_id": "must_tenth-t1", "conversation_id": "must_tenth-c1"},
+    ]
     assert "failing_spans" not in second
     assert len(detailed["issues"][1]["failing_spans"]) == 20
     count.assert_not_called()
@@ -1069,9 +1078,10 @@ def test_doctor_never_reports_zero_spans_as_healthy(
     status, kwargs, pages, calls, expected, checks_listed, reach_checked
 ):
     response = _health([], spans=0, traces=0) if status == 200 else _FakeResponse({"detail": "no spans"}, 404)
-    with _mocked(response), _trace_server(*pages, calls=calls) as (_query, count):
+    with _mocked(response), _trace_server(*pages, calls=calls) as (query, count):
         result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **kwargs, **WINDOW))
 
+    query.assert_called_once_with(ENTITY, PROJECT, **SPAN_PROBE_KWARGS)
     assert result["verdict"] == "no_spans"
     assert result["span_count"] == 0
     assert expected in result["diagnosis"]
@@ -1082,6 +1092,22 @@ def test_doctor_never_reports_zero_spans_as_healthy(
     if reach_checked:
         assert count.call_args.args[2] == {"time_range": {"start": WINDOW["start_at"], "end": WINDOW["end_at"]}}
         assert result["calls_in_window"] == calls
+
+
+@pytest.mark.parametrize(
+    ("selectors", "expected_params"),
+    [
+        ({}, {**WINDOW, "start_at": "2026-09-07T00:00:00Z"}),
+        ({"trace_id": "t1"}, {**WINDOW, "trace_id": "t1"}),
+    ],
+    ids=["project", "filtered"],
+)
+def test_doctor_sends_default_window(selectors: dict[str, str], expected_params: dict[str, str]):
+    with _mocked(_health([])) as session, patch.object(doctor_mod, "datetime", wraps=datetime) as clock:
+        clock.now.return_value = datetime.fromisoformat(WINDOW["end_at"])
+        diagnose_instrumentation(ENTITY, project_name=PROJECT, **selectors)
+
+    assert session.last["params"] == expected_params
 
 
 def test_doctor_latest_never_checks_an_older_conversation():
