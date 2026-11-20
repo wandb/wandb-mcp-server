@@ -14,6 +14,7 @@ from uvicorn.logging import AccessFormatter
 
 from wandb_mcp_server.analytics import _prepare_event
 from wandb_mcp_server.api_client import WandBApiManager
+from wandb_mcp_server.tool_results import ToolErrorPayload
 from wandb_mcp_server.error_sanitizer import (
     MAX_EXTERNAL_ERROR_CHARS,
     sanitize_sensitive_text,
@@ -281,10 +282,12 @@ async def test_oversized_structured_tool_error_is_bounded(monkeypatch) -> None:
 
     @server.tool(name="list_entities_tool")
     def oversized_error() -> dict[str, str]:
-        return {
-            "error": "upstream_error",
-            "message": f"{SECRET}{'x' * (MAX_EXTERNAL_ERROR_CHARS * 3)}",
-        }
+        return ToolErrorPayload(
+            {
+                "error": "upstream_error",
+                "message": f"{SECRET}{'x' * (MAX_EXTERNAL_ERROR_CHARS * 3)}",
+            }
+        )
 
     result = await server.call_tool("list_entities_tool", {})
 

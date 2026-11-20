@@ -30,6 +30,9 @@ from pydantic import Field, PositiveInt, StrictInt
 
 from wandb_mcp_server.config import (
     MCP_COUNT_TOOL_WORKERS,
+    MCP_MAX_HISTORY_KEYS,
+    MCP_MAX_HISTORY_RANGE_STEPS,
+    MCP_WORKLOAD_PROFILE,
     MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
     WANDB_API_BASE_URL,
     resolve_aria_base_url,
@@ -160,6 +163,7 @@ __all__ = [
     "cli",
 ]
 from wandb_mcp_server.weave_api.models import QueryResult
+from wandb_mcp_server.tool_results import tool_error_json
 
 # Configure logging (no side effects beyond logger setup)
 logging.basicConfig(level=logging.INFO)
@@ -687,7 +691,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         profile_limit = MCP_MAX_FULL_TRACE_LIMIT if return_full_data else MCP_MAX_QUERY_LIMIT
         effective_limit = profile_limit if managed_workload and limit is None else (1000 if limit is None else limit)
         if managed_workload and effective_limit > profile_limit:
-            return json.dumps(
+            return tool_error_json(
                 structured_error(
                     "quota_exceeded",
                     f"The {MCP_WORKLOAD_PROFILE} workload profile limits trace queries to "
@@ -703,7 +707,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                 )
             )
         if managed_workload and sort_by in COST_SORT_FIELDS:
-            return json.dumps(
+            return tool_error_json(
                 structured_error(
                     "quota_exceeded",
                     f"The {MCP_WORKLOAD_PROFILE} workload profile does not support sort_by='{sort_by}' "
@@ -749,7 +753,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                     count_deadline,
                 )
                 if pre_count and pre_count > 500:
-                    return json.dumps(
+                    return tool_error_json(
                         {
                             "error": "query_too_large",
                             "message": f"Found {pre_count} matching traces. Queries over 500 traces "
@@ -839,7 +843,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             return response_json
         except MemoryError:
             logger.error("Memory limit reached in Weave trace query")
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "out_of_memory",
                     "message": "This query exceeded server memory limits. "
@@ -850,12 +854,12 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             from wandb_mcp_server.config import HostedLimitExceeded
 
             if isinstance(e, HostedLimitExceeded):
-                return json.dumps(structured_error(e.error, str(e), **e.details))
+                return tool_error_json(structured_error(e.error, str(e), **e.details))
             from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 
             raise_for_wandb_server_busy(e)
             logger.error("Weave trace query failed (%s)", type(e).__name__)
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "query_failed",
                     "message": "The Weave trace query failed.",
@@ -902,7 +906,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             return json.dumps({"total_count": total_count, "root_traces_count": root_traces_count})
         except asyncio.TimeoutError:
             logger.error("Timed out in count_weave_traces_tool")
-            return json.dumps(
+            return tool_error_json(
                 structured_error(
                     "timeout",
                     f"Counting traces exceeded the {MCP_TOOL_TIMEOUT_SECONDS}s tool deadline.",
@@ -914,7 +918,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
 
             raise_for_wandb_server_busy(e)
             logger.error("Weave trace count failed (%s)", type(e).__name__)
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "count_failed",
                     "message": "The Weave trace count failed.",
@@ -1055,7 +1059,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                     "W&B analysis logging failed (error_type=%s)",
                     type(e).__name__[:64],
                 )
-                return json.dumps(
+                return tool_error_json(
                     {
                         "error": "log_failed",
                         "message": "The W&B analysis run could not be logged.",
@@ -1127,7 +1131,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     async def search_wandb_docs_tool(query: str) -> str:
         """Search the official W&B documentation."""
         if not is_docs_proxy_enabled():
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "docs_proxy_disabled",
                     "message": "The W&B documentation proxy is disabled for this deployment.",
@@ -1140,20 +1144,41 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         get_run_history,
     )
 
-    @register_tool(description=GET_RUN_HISTORY_TOOL_DESCRIPTION)
+    history_limits = (
+        f"Effective {MCP_WORKLOAD_PROFILE} limits: at most {MCP_MAX_HISTORY_KEYS} metric keys; "
+        f"inclusive step windows span at most {MCP_MAX_HISTORY_RANGE_STEPS} steps. "
+        "For a larger range, request consecutive bounded windows."
+    )
+
+    @register_tool(description=GET_RUN_HISTORY_TOOL_DESCRIPTION + "\n" + history_limits)
     def get_run_history_tool(
         entity_name: str,
         project_name: str,
         run_id: str,
         keys: Annotated[
-            Optional[List[str]], Field(description="Explicit metric keys; required in managed workloads.")
+            Optional[List[str]],
+            Field(
+                description=f"Explicit metric keys; required in managed workloads; at most {MCP_MAX_HISTORY_KEYS}.",
+                json_schema_extra={"maxItems": MCP_MAX_HISTORY_KEYS},
+            ),
         ] = None,
         samples: int = 500,
         min_step: Annotated[
-            Optional[int], Field(description="Inclusive non-negative lower step; managed ranges require max_step too.")
+            Optional[int],
+            Field(
+                description="Inclusive non-negative lower step; managed ranges require max_step too.",
+                json_schema_extra={"minimum": 0},
+            ),
         ] = None,
         max_step: Annotated[
-            Optional[int], Field(description="Inclusive non-negative upper step; managed ranges require min_step too.")
+            Optional[int],
+            Field(
+                description=(
+                    "Inclusive non-negative upper step; managed ranges require min_step too. "
+                    f"max_step - min_step + 1 must be <= {MCP_MAX_HISTORY_RANGE_STEPS}; split larger ranges."
+                ),
+                json_schema_extra={"minimum": 0},
+            ),
         ] = None,
         x_axis: str = "_step",
         target_x: Optional[float] = None,
@@ -1183,7 +1208,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             if isinstance(e, ToolInputValidationError):
                 # History validators use server-authored messages and public
                 # field names, never argument values or upstream error text.
-                return json.dumps(
+                return tool_error_json(
                     {
                         "error": "invalid_input",
                         "message": str(e),
@@ -1192,7 +1217,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                     }
                 )
             raise_for_wandb_server_busy(e)
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "history_query_failed",
                     "message": "The W&B run-history query failed.",

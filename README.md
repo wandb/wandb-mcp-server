@@ -153,6 +153,15 @@ are an additional mode, not a mandatory migration. Use one mode per call and
 refresh the client's tool definitions when upgrading. Authorization and bounded
 read safeguards apply to both modes; tool names and profile counts are unchanged.
 
+**Tool errors:** server-authored failures set MCP `isError=true` and retain
+sanitized error codes and corrective messages. Check that flag before using a
+result. Successful customer data can contain fields named `error` or `result`.
+
+**History limits:** the tool schema exposes the active key and step-window caps.
+Use explicit metric keys and paired inclusive `min_step`/`max_step` bounds for
+managed range reads. Split larger ranges into smaller windows; omit both bounds
+for a sampled overview. Limits and successful response shapes are unchanged.
+
 **Run history semantics:** for explicit multi-key default-history sampled and
 ranged collection reads, `get_run_history_tool` outer-joins requested metric
 series by `_step`, falling back to the selected x-axis when `_step` is absent,
@@ -693,6 +702,9 @@ When running the server locally, you can customize its behavior with command lin
 | `--wandb_api_key` | string | None | Compatibility-only API key input; prefer `WANDB_API_KEY` so the key is not exposed in process arguments |
 | `--weave_entity` | string | None | The W&B entity to log traced MCP server calls to |
 | `--weave_project` | string | `weave-mcp-server` | The W&B project to log traced MCP server calls to |
+
+For hosted session signing and optional telemetry secret configuration, see
+[Secret resolution](docs/secret-resolution.md).
 
 #### Environment Variables
 

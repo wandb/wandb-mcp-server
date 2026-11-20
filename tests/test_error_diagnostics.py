@@ -93,7 +93,7 @@ async def test_original_swallowed_history_cause_survives_result_mapping(boundary
     result = await server.call_tool(
         "get_run_history_tool", {"entity_name": CANARY, "project_name": CANARY, "run_id": CANARY}
     )
-    content = result[0] if isinstance(result, tuple) else result
+    content = result[0] if isinstance(result, tuple) else getattr(result, "content", result)
     assert json.loads(content[0].text) == {
         "error": "history_query_failed",
         "message": "The W&B run-history query failed.",
@@ -113,11 +113,19 @@ async def test_original_swallowed_history_cause_survives_result_mapping(boundary
     ("arguments", "field", "message"),
     [
         ({"samples": 0}, "samples", "samples must be a positive integer"),
-        ({"keys": [CANARY] * 3}, "keys", "keys must contain at most 2 non-empty strings"),
+        (
+            {"keys": [CANARY] * 3},
+            "keys",
+            "keys must contain at most 2 non-empty strings. Select fewer explicit metric keys.",
+        ),
         ({"min_step": -1}, "min_step", "min_step must be non-negative"),
         ({"target_x": float("inf")}, "target_x", "target_x must be a finite number"),
         ({"min_step": 20, "max_step": 10}, "max_step", "max_step must be greater than or equal to min_step"),
-        ({"min_step": 0, "max_step": 20}, "max_step", "history step range cannot exceed 20 steps"),
+        (
+            {"min_step": 0, "max_step": 20},
+            "max_step",
+            "history step range cannot exceed 20 steps. Split the request into smaller windows with both min_step and max_step (inclusive).",
+        ),
         ({"target_x": 1, "min_step": 0}, "target_x", "target_x cannot be combined with min_step or max_step"),
         (
             {"stream": "system", "min_step": 0},
@@ -143,7 +151,7 @@ async def test_history_validation_returns_actionable_errors_without_private_valu
         "get_run_history_tool",
         {"entity_name": CANARY, "project_name": CANARY, "run_id": CANARY, "keys": [CANARY], **arguments},
     )
-    content = result[0] if isinstance(result, tuple) else result
+    content = result[0] if isinstance(result, tuple) else getattr(result, "content", result)
     payload = json.loads(content[0].text)
     assert payload == {"error": "invalid_input", "message": message, "field": field, "retryable": False}
     backend.assert_not_called()
@@ -176,7 +184,7 @@ async def test_managed_history_missing_inputs_identify_what_to_supply(boundary, 
     }
     arguments[missing] = None
     result = await server.call_tool("get_run_history_tool", arguments)
-    content = result[0] if isinstance(result, tuple) else result
+    content = result[0] if isinstance(result, tuple) else getattr(result, "content", result)
     payload = json.loads(content[0].text)
     assert payload["error"] == "invalid_input"
     assert payload["field"] == missing

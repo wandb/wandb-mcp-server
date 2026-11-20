@@ -53,6 +53,7 @@ from wandb_mcp_server.harness import (
     context_from_sdk_request,
     current_harness_context,
 )
+from wandb_mcp_server.tool_results import ToolErrorJSON, ToolErrorPayload
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -182,46 +183,13 @@ def _error_from_mapping(value: dict[str, Any]) -> str | None:
 
 
 def structured_result_error(result: Any) -> str | None:
-    """Return a bounded error for a tool result with a top-level error marker."""
+    """Recognize owned failures, never infer failure from customer data keys."""
     if getattr(result, "isError", False) or getattr(result, "is_error", False):
         return "ToolError: MCP result marked as an error"
-    if isinstance(result, dict):
-        error = _error_from_mapping(result)
-        if error:
-            return error
-        if "result" in result:
-            return structured_result_error(result["result"])
-        return None
-    if isinstance(result, str):
-        try:
-            decoded = json.loads(result)
-        except (TypeError, ValueError):
-            return None
-        return _error_from_mapping(decoded) if isinstance(decoded, dict) else None
-    content = getattr(result, "content", None)
-    if content is not None and content is not result:
-        error = structured_result_error(content)
-        if error:
-            return error
-    structured_content = getattr(result, "structuredContent", None)
-    if structured_content is None:
-        structured_content = getattr(result, "structured_content", None)
-    if structured_content is not None and structured_content is not result:
-        error = structured_result_error(structured_content)
-        if error:
-            return error
-    if isinstance(result, Sequence) and not isinstance(result, (str, bytes, bytearray)):
-        for block in result:
-            if getattr(block, "isError", False) or getattr(block, "is_error", False):
-                return "ToolError: MCP result marked as an error"
-            text = getattr(block, "text", None)
-            if isinstance(text, str):
-                error = structured_result_error(text)
-                if error:
-                    return error
-            error = structured_result_error(block)
-            if error:
-                return error
+    if isinstance(result, ToolErrorPayload):
+        return _error_from_mapping(result) or "ToolError: tool failed"
+    if isinstance(result, ToolErrorJSON):
+        return _error_from_mapping(json.loads(result)) or "ToolError: tool failed"
     return None
 
 
@@ -250,8 +218,6 @@ def _exception_error_category(exc: BaseException) -> str:
 
 def _structured_result_error_category(result: Any) -> str | None:
     """Classify a structured MCP failure for telemetry without its message."""
-    if getattr(result, "isError", False) or getattr(result, "is_error", False):
-        return "mcp_error"
     if isinstance(result, dict):
         category = _error_category_from_mapping(result)
         if category:
@@ -437,6 +403,22 @@ def _graphql_failure_result(result: Any) -> tuple[CallToolResult, str] | None:
     )
 
 
+@dataclass
+class _OwnedResultState:
+    failed: bool = False
+
+
+_current_owned_result: ContextVar[_OwnedResultState | None] = ContextVar("owned_tool_result", default=None)
+
+
+def _record_owned_result(result: Any) -> Any:
+    """Retain provenance across FastMCP serialization, including worker threads."""
+    state = _current_owned_result.get()
+    if state is not None and isinstance(result, (ToolErrorPayload, ToolErrorJSON)):
+        state.failed = True
+    return result
+
+
 class InstrumentedFastMCP(FastMCP):
     """FastMCP server with bounded dispatch and one event per public tool call."""
 
@@ -485,9 +467,16 @@ class InstrumentedFastMCP(FastMCP):
                 register_current_sync_future(future)
                 # The executor future must survive a protocol timeout. Its
                 # admission lease is released only when physical work ends.
-                return await asyncio.shield(future)
+                return _record_owned_result(await asyncio.shield(future))
 
             registered_fn = _threaded_tool
+        else:
+
+            @functools.wraps(fn)
+            async def _async_tool(*fn_args: Any, **fn_kwargs: Any) -> Any:
+                return _record_owned_result(await fn(*fn_args, **fn_kwargs))
+
+            registered_fn = _async_tool
         super().add_tool(registered_fn, *args, **kwargs)
 
     def _tool_harness_context(self) -> HarnessContext:
@@ -512,6 +501,8 @@ class InstrumentedFastMCP(FastMCP):
         sync_state = _SyncCallState()
         sync_state_token = _current_sync_call_state.set(sync_state)
         sync_executor_token = _current_sync_executor.set(self._sync_executor)
+        owned_result = _OwnedResultState()
+        owned_result_token = _current_owned_result.set(owned_result)
         diagnostics = ToolErrorDiagnostics(frozenset())
         diagnostics_token = current_error_diagnostics.set(diagnostics)
         started = time.monotonic()
@@ -729,15 +720,25 @@ class InstrumentedFastMCP(FastMCP):
                     error = _telemetry_error("response_too_large")
                     diagnostics.value = {"category": "response_too_large"}
                 return result
-            structured_error = structured_result_error(result)
+            structured_error = "owned_tool_error" if owned_result.failed else structured_result_error(result)
             result = sanitize_sensitive_value(
                 result,
                 _error_context=structured_error is not None,
             )
             if structured_error:
+                category = _structured_result_error_category(result) or "tool_error"
                 result = _bounded_error_result(result)
+                if not isinstance(result, CallToolResult):
+                    if isinstance(result, tuple):
+                        content, payload = result
+                    elif isinstance(result, list):
+                        content, payload = result, None
+                    else:
+                        payload = json.loads(result) if isinstance(result, str) else result
+                        content = [TextContent(type="text", text=json.dumps(payload, separators=(",", ":")))]
+                    result = CallToolResult(content=content, structuredContent=payload, isError=True)
                 success = False
-                error = _telemetry_error(_structured_result_error_category(result) or "tool_error")
+                error = _telemetry_error(category)
             return result
         except BaseException as exc:
             record_exception_diagnostics(exc)
@@ -746,6 +747,7 @@ class InstrumentedFastMCP(FastMCP):
                 error = _telemetry_error(_exception_error_category(exc))
             raise
         finally:
+            _current_owned_result.reset(owned_result_token)
             diagnostics.active = False
             current_error_diagnostics.reset(diagnostics_token)
             if graphql_state is not None and graphql_token is not None:

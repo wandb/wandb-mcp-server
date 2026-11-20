@@ -26,6 +26,7 @@ from wandb_mcp_server.instrumented_server import (
     structured_result_error,
 )
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
+from wandb_mcp_server.tool_results import tool_error_json
 
 
 @pytest.fixture(autouse=True)
@@ -83,7 +84,7 @@ def _server() -> InstrumentedFastMCP:
 
     @server.tool(name="structured_error_tool")
     async def structured_error_tool() -> str:
-        return json.dumps(
+        return tool_error_json(
             {
                 "error": "permission_denied",
                 "message": "access denied for private-organization-canary",
@@ -92,7 +93,7 @@ def _server() -> InstrumentedFastMCP:
 
     @server.tool(name="untrusted_error_tool")
     async def untrusted_error_tool() -> str:
-        return json.dumps({"error": "private-organization-canary"})
+        return tool_error_json({"error": "private-organization-canary"})
 
     @server.tool(name="exception_tool")
     async def exception_tool() -> str:

@@ -23,6 +23,7 @@ from wandb_mcp_server.config import MAX_RESPONSE_TOKENS, WF_TRACE_SERVER_URL, st
 from wandb_mcp_server.mcp_tools.tools_utils import get_no_retry_session, track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.weave_api.processors import TraceProcessor
+from wandb_mcp_server.tool_results import tool_error_json
 
 logger = get_rich_logger(__name__)
 
@@ -131,7 +132,7 @@ def _agents_request(tool_name: str, path: str, body: Dict[str, Any], track_param
     api_key = WandBApiManager.get_api_key()
     if not api_key:
         logger.error("W&B API key not found in context or environment.")
-        return json.dumps(structured_error("auth_required", "A W&B API key is required to query the Agents API."))
+        return tool_error_json(structured_error("auth_required", "A W&B API key is required to query the Agents API."))
 
     url = f"{WF_TRACE_SERVER_URL}{path}"
     auth_token = base64.b64encode(f":{api_key}".encode()).decode()
@@ -155,7 +156,7 @@ def _agents_request(tool_name: str, path: str, body: Dict[str, Any], track_param
         except Exception as e:
             logger.error("Agents API request failed (%s)", type(e).__name__)
             ctx.mark_error(type(e).__name__)
-            return json.dumps(
+            return tool_error_json(
                 structured_error(
                     "agents_query_failed",
                     "The Agents API request failed.",
@@ -164,7 +165,7 @@ def _agents_request(tool_name: str, path: str, body: Dict[str, Any], track_param
 
         if response.status_code == 404:
             ctx.mark_error("agents_api_unavailable")
-            return json.dumps(
+            return tool_error_json(
                 structured_error(
                     "agents_api_unavailable",
                     "The configured trace server does not expose this Agents API endpoint (404); "
@@ -180,7 +181,7 @@ def _agents_request(tool_name: str, path: str, body: Dict[str, Any], track_param
                     response=response,
                 )
                 raise_for_wandb_server_busy(overload)
-            return json.dumps(
+            return tool_error_json(
                 structured_error(
                     "agents_query_failed",
                     f"The Agents API returned HTTP {response.status_code}.",
@@ -194,7 +195,7 @@ def _agents_request(tool_name: str, path: str, body: Dict[str, Any], track_param
         except Exception as e:
             logger.error("Agents API response was not valid JSON")
             ctx.mark_error(type(e).__name__)
-            return json.dumps(
+            return tool_error_json(
                 structured_error(
                     "agents_query_failed",
                     "The Agents API returned an invalid response.",

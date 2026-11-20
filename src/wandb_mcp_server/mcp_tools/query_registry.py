@@ -6,6 +6,8 @@ collections via the ``wandb.Api`` public interface.
 
 from __future__ import annotations
 
+from wandb_mcp_server.tool_results import ToolErrorPayload, tool_error_json
+
 import json
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional
@@ -148,12 +150,13 @@ def list_registries(
                 },
                 aliases=("registries",),
             )
-            return json.dumps(result, allow_nan=False)
+            serialize = tool_error_json if isinstance(result, ToolErrorPayload) else json.dumps
+            return serialize(result, allow_nan=False)
 
         except Exception as e:
             logger.error("Registry listing failed (%s)", type(e).__name__)
             ctx.mark_error(type(e).__name__)
-            return json.dumps(registry_error_result(e))
+            return tool_error_json(registry_error_result(e))
 
 
 # ---------------------------------------------------------------------------
@@ -276,12 +279,13 @@ def list_registry_collections(
                 },
                 aliases=("collections",),
             )
-            return json.dumps(result, allow_nan=False)
+            serialize = tool_error_json if isinstance(result, ToolErrorPayload) else json.dumps
+            return serialize(result, allow_nan=False)
 
         except Exception as e:
             logger.error("Registry collection listing failed (%s)", type(e).__name__)
             ctx.mark_error(type(e).__name__)
-            return json.dumps(registry_error_result(e))
+            return tool_error_json(registry_error_result(e))
 
 
 def _validate_request(

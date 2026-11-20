@@ -60,6 +60,8 @@ Required environment variables:
 | `DD_SERVICE`, `DD_ENV`, `DD_VERSION` | Unified Service Tagging on every forwarded event. |
 | `MCP_SERVER_SECRETS_PROVIDER=gcp` | Optional: resolve `DD_API_KEY` from the configured secret provider instead of plain environment configuration. |
 | `MCP_SERVER_SECRETS_PROJECT` | Required when `MCP_SERVER_SECRETS_PROVIDER=gcp`. |
+| `MCP_DATADOG_SECRET_ID` | Optional secret ID; defaults to the existing built-in Datadog secret. |
+| `MCP_DATADOG_SECRET_VERSION` | Numeric secret version or `latest` (default). Restart workers after changing it. |
 
 If `MCP_DATADOG_FORWARD=true` but `DD_API_KEY` resolves empty, the forwarder disables
 itself. When `DD_AGENT_HOST` is also set (agent mode is active) this is logged at

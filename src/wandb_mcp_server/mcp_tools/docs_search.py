@@ -22,6 +22,7 @@ from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text
 from wandb_mcp_server.instrumented_server import run_sync_in_current_tool
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.trace_utils import count_tokens_conservative
+from wandb_mcp_server.tool_results import tool_error_json
 
 DOCS_MCP_URL = DEFAULT_DOCS_MCP_URL
 DOCS_SEARCH_TIMEOUT = 30
@@ -219,14 +220,14 @@ async def search_wandb_docs(query: str) -> str:
             payload = {"error": exc.code, "message": str(exc), "retryable": exc.retry_after_ms is not None}
             if exc.retry_after_ms is not None:
                 payload["retry_after_ms"] = exc.retry_after_ms
-            return json.dumps(payload)
+            return tool_error_json(payload)
         except (TimeoutError, httpx.TimeoutException):
             ctx.mark_error("tool_timeout")
-            return json.dumps(
+            return tool_error_json(
                 {"error": "tool_timeout", "message": "Documentation search timed out.", "retryable": True}
             )
         except Exception:
             ctx.mark_error("upstream_error")
-            return json.dumps(
+            return tool_error_json(
                 {"error": "upstream_error", "message": "Documentation search failed.", "retryable": False}
             )

@@ -16,6 +16,7 @@ from wandb_mcp_server.wandb_selective_reads import (
     fetch_project_fields,
     fetch_projected_run,
 )
+from wandb_mcp_server.tool_results import tool_error_json
 
 logger = get_rich_logger(__name__)
 
@@ -248,7 +249,7 @@ def diagnose_run(
                 summary_keys=selected_summary,
             )
             if projected is None:
-                return json.dumps(
+                return tool_error_json(
                     {
                         "error": "run_not_found",
                         "message": "The requested run was not found or is not accessible.",
@@ -260,7 +261,7 @@ def diagnose_run(
                 raise
             if isinstance(e, GraphQLResponseTooLarge):
                 ctx.mark_error("GraphQLResponseTooLarge: bounded selective read exceeded its safety limit")
-                return json.dumps(
+                return tool_error_json(
                     {
                         "error": "response_too_large",
                         "message": "The bounded W&B diagnosis response was too large; request fewer keys.",
@@ -269,7 +270,7 @@ def diagnose_run(
                 )
             raise_for_wandb_server_busy(e)
             ctx.mark_error(f"{type(e).__name__}: selective diagnosis read unavailable")
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "selective_read_unavailable",
                     "message": "The W&B server could not provide the bounded fields required for this diagnosis.",
@@ -323,7 +324,7 @@ def diagnose_run(
                 if error == "response_too_large":
                     return json.dumps(history_result)
                 ctx.mark_error(f"history query returned {error}")
-                return json.dumps(
+                return tool_error_json(
                     {
                         "error": "history_fetch_failed",
                         "message": "The bounded W&B history required for this diagnosis was unavailable.",
@@ -337,7 +338,7 @@ def diagnose_run(
                 raise
             raise_for_wandb_server_busy(e)
             ctx.mark_error(f"{type(e).__name__}: bounded history query failed")
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "history_fetch_failed",
                     "message": "The bounded W&B history required for this diagnosis was unavailable.",

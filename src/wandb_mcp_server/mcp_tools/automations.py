@@ -19,6 +19,7 @@ from wandb.automations import EventType, SlackIntegration, WebhookIntegration
 from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.tool_results import tool_error_json
 
 if TYPE_CHECKING:
     from wandb.automations import ArtifactCollectionScope, Automation, Integration, ProjectScope
@@ -216,7 +217,7 @@ def list_automations(
             raise_for_wandb_server_busy(e)
             logger.error("Automation listing failed (%s)", type(e).__name__)
             ctx.mark_error(type(e).__name__)
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "api_error",
                     "message": "The W&B automation query failed.",
@@ -312,7 +313,7 @@ def list_integrations(
             ctx.mark_error(f"invalid kind: {kind!r}")
 
             msg = f"kind must be one of {sorted(_VALID_INTEGRATION_KINDS)} or null, got {kind!r}"
-            return json.dumps({"error": "invalid_input", "message": msg})
+            return tool_error_json({"error": "invalid_input", "message": msg})
 
         try:
             iterator: Iterator[Integration]
@@ -340,7 +341,7 @@ def list_integrations(
             raise_for_wandb_server_busy(e)
             logger.error("Integration listing failed (%s)", type(e).__name__)
             ctx.mark_error(type(e).__name__)
-            return json.dumps(
+            return tool_error_json(
                 {
                     "error": "api_error",
                     "message": "The W&B integration query failed.",
