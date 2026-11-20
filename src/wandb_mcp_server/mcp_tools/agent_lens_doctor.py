@@ -64,8 +64,8 @@ entity_name : str
 project_name : str
     The W&B project name.
 conversation_id : str, optional
-    Check one conversation's traces. Pass "latest" for the newest conversation
-    with agent spans in range.
+    Check one conversation's traces. Pass "latest" to use the conversation id
+    from the newest agent span in range.
 trace_id : str, optional
     Check one trace.
 start_at, end_at : str, optional
@@ -104,11 +104,13 @@ async def diagnose_instrumentation(
 
     scope = DoctorScope(entity_name, project_name, _iso(start), _iso(end), conversation_id, trace_id)
     if conversation_id == LATEST_CONVERSATION:
-        newest = await newest_agent_span(scope, with_conversation=True)
+        newest = await newest_agent_span(scope)
         if isinstance(newest, ToolErrorJSON):
             return newest
         if newest is None:
             return await no_spans_report(scope)
+        if not newest.conversation_id:
+            return await no_spans_report(scope, has_agent_spans=True)
         scope = replace(scope, conversation_id=newest.conversation_id)
 
     payload = await fetch_agent_lens_json(

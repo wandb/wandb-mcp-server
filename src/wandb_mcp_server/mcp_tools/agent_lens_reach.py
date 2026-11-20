@@ -22,7 +22,6 @@ logger = get_rich_logger(__name__)
 
 LATEST_CONVERSATION = "latest"
 AGENTS_OTLP_ENDPOINT = f"{WF_TRACE_SERVER_URL.rstrip('/')}/agents/otel/v1/traces"
-HAS_CONVERSATION_QUERY = {"$expr": {"$not": [{"$eq": [{"$getField": "conversation_id"}, {"$literal": ""}]}]}}
 REACH_CHECKS = (
     f"OTLP exporter endpoint is {AGENTS_OTLP_ENDPOINT}.",
     "Exporter sends a W&B API key in a wandb-api-key header.",
@@ -31,13 +30,17 @@ REACH_CHECKS = (
 )
 
 
-async def no_spans_report(scope: DoctorScope) -> str:
-    """Explain an empty check by testing whether agent spans or Weave calls reached this project."""
+async def no_spans_report(scope: DoctorScope, *, has_agent_spans: bool = False) -> str:
+    """Explain an empty check using agent span presence or Weave calls in range."""
     if scope.filtered:
-        any_span = await newest_agent_span(scope, with_conversation=False)
-        if isinstance(any_span, ToolErrorJSON):
-            return any_span
-        if any_span is not None:
+        if not has_agent_spans:
+            any_span = await newest_agent_span(scope)
+            if isinstance(any_span, ToolErrorJSON):
+                return any_span
+
+            has_agent_spans = any_span is not None
+
+        if has_agent_spans:
             report = NoSpansReport(
                 verdict="no_spans", scope=scope.as_dict(), span_count=0, diagnosis=_filter_diagnosis(scope)
             )
@@ -57,13 +60,12 @@ async def no_spans_report(scope: DoctorScope) -> str:
     return json.dumps(report)
 
 
-async def newest_agent_span(scope: DoctorScope, *, with_conversation: bool) -> Optional[AgentSpan] | ToolErrorJSON:
-    """Return the newest agent span in `scope`'s range, optionally requiring a conversation id."""
+async def newest_agent_span(scope: DoctorScope) -> Optional[AgentSpan] | ToolErrorJSON:
+    """Return the newest agent span in `scope`'s range."""
     response = await asyncio.to_thread(
         query_agent_spans,
         scope.entity_name,
         scope.project_name,
-        query=HAS_CONVERSATION_QUERY if with_conversation else None,
         started_after=scope.start_at,
         started_before=scope.end_at,
         sort_by="started_at",
@@ -82,8 +84,9 @@ def _filter_diagnosis(scope: DoctorScope) -> str:
     """Explain agent spans that exist in range but miss `scope`'s conversation or trace filter."""
     if scope.conversation_id == LATEST_CONVERSATION:
         return (
-            "Agent spans arrived in this window, but none carries a conversation id. Set gen_ai.conversation.id "
-            "on each turn's root span, or call without conversation_id to check the whole project."
+            "Agent spans arrived in this window, but the newest agent span carries no conversation id. "
+            "Set gen_ai.conversation.id on each turn's root span, or call without conversation_id to check "
+            "the whole project."
         )
 
     return (

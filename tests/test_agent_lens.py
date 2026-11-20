@@ -1034,9 +1034,9 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
         (
             200,
             {"conversation_id": "latest"},
-            ([], [{"trace_id": "x"}]),
+            ([{"trace_id": "x"}],),
             0,
-            "none carries a conversation id",
+            "the newest agent span carries no conversation id",
             False,
             False,
         ),
@@ -1059,3 +1059,19 @@ def test_doctor_never_reports_zero_spans_as_healthy(
     if reach_checked:
         assert count.call_args.args[2] == {"time_range": {"start": WINDOW["start_at"], "end": WINDOW["end_at"]}}
         assert result["calls_in_window"] == calls
+
+
+def test_doctor_latest_never_checks_an_older_conversation():
+    spans = [{"conversation_id": ""}, {"conversation_id": "older"}]
+
+    def query_agent_spans(*_args: str, query: object = None, limit: int = 1, **_kwargs: object) -> str:
+        matching_spans = spans if query is None else [span for span in spans if span["conversation_id"]]
+        response = json.dumps({"spans": matching_spans[:limit]})
+
+        return response
+
+    with _mocked(_health([])) as session, patch.object(reach_mod, "query_agent_spans", query_agent_spans):
+        result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, conversation_id="latest", **WINDOW))
+
+    assert result["verdict"] == "no_spans"
+    assert session.calls == []
