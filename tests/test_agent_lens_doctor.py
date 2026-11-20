@@ -135,11 +135,11 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
 
 
 @pytest.mark.parametrize(
-    ("status", "kwargs", "pages", "calls", "expected", "checks_listed", "reach_checked"),
+    ("span_count", "kwargs", "pages", "calls", "expected", "checks_listed", "reach_checked"),
     [
-        (200, {}, ([],), 12, "/agents/otel/v1/traces", False, True),
+        (0, {}, ([],), 12, "/agents/otel/v1/traces", False, True),
         (
-            200,
+            0,
             {},
             ([{"trace_id": "x"}],),
             12,
@@ -147,11 +147,14 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
             False,
             False,
         ),
-        (404, {"trace_id": "t1"}, ([],), 0, "Nothing reached", True, True),
+        pytest.param(
+            40, {}, (), 0, "none is eligible for instrumentation checks", False, False, id="no-applicable-rules"
+        ),
+        (None, {"trace_id": "t1"}, ([],), 0, "Nothing reached", True, True),
         # A filter miss on a project that has agent spans is never blamed on the exporter, even with calls present.
-        (404, {"conversation_id": "c1"}, ([{"trace_id": "x"}],), 12, "Check that id", False, False),
+        (None, {"conversation_id": "c1"}, ([{"trace_id": "x"}],), 12, "Check that id", False, False),
         (
-            404,
+            None,
             {"trace_id": "t1"},
             ([{"trace_id": "x"}],),
             12,
@@ -159,9 +162,9 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
             False,
             False,
         ),
-        (200, {"conversation_id": "latest"}, ([], [{"trace_id": "x"}]), 0, "Nothing reached", True, True),
+        (0, {"conversation_id": "latest"}, ([], [{"trace_id": "x"}]), 0, "Nothing reached", True, True),
         (
-            200,
+            0,
             {"conversation_id": "latest"},
             ([{"trace_id": "x"}],),
             0,
@@ -172,9 +175,14 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
     ],
 )
 def test_doctor_never_reports_zero_spans_as_healthy(
-    status, kwargs, pages, calls, expected, checks_listed, reach_checked
+    span_count, kwargs, pages, calls, expected, checks_listed, reach_checked
 ):
-    response = _health([], spans=0, traces=0) if status == 200 else _FakeResponse({"detail": "no spans"}, 404)
+    if span_count is None:
+        response = _FakeResponse({"detail": "no spans"}, 404)
+    else:
+        issues = [_rule("span_no_operation_name", "must", 0, 0)] if span_count else []
+        response = _health(issues, spans=span_count, traces=int(bool(span_count)))
+
     with _mocked(response) as session, _trace_server(*pages, calls=calls) as (query, count):
         result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **kwargs, **WINDOW))
 
@@ -186,9 +194,14 @@ def test_doctor_never_reports_zero_spans_as_healthy(
         assert session.last["headers"]["X-Wandb-Project"] == PROJECT
         assert session.last["params"] == {**WINDOW, **kwargs}
 
-    query.assert_called_once_with(ENTITY, PROJECT, **SPAN_PROBE_KWARGS)
     assert result["verdict"] == "no_spans"
-    assert result["span_count"] == 0
+    assert result["span_count"] == (span_count or 0)
+    if span_count:
+        assert result["passing_rule_count"] == 0
+        query.assert_not_called()
+    else:
+        query.assert_called_once_with(ENTITY, PROJECT, **SPAN_PROBE_KWARGS)
+
     assert expected in result["diagnosis"]
     assert "issues" not in result
     assert ("checks" in result) is checks_listed
@@ -253,7 +266,8 @@ async def test_cancelled_doctor_keeps_admission_until_reach_probe_finishes(
     ids=["project", "filtered"],
 )
 def test_doctor_sends_default_window(selectors: dict[str, str], expected_params: dict[str, str]):
-    with _mocked(_health([])) as session, patch.object(doctor_mod, "datetime", wraps=datetime) as clock:
+    passing = [_rule("span_no_operation_name", "must", 0, 40)]
+    with _mocked(_health(passing)) as session, patch.object(doctor_mod, "datetime", wraps=datetime) as clock:
         clock.now.return_value = datetime.fromisoformat(WINDOW["end_at"])
         diagnose_instrumentation(ENTITY, project_name=PROJECT, **selectors)
 
@@ -320,8 +334,9 @@ def test_doctor_validates_and_normalizes_selectors(
     conversation_id: str | None, trace_id: str | None, expected_filters: dict[str, str] | None
 ) -> None:
     newest = [{"conversation_id": "conv-1"}]
+    passing = [_rule("span_no_operation_name", "must", 0, 40)]
     with (
-        _mocked(_health([])) as session,
+        _mocked(_health(passing)) as session,
         _trace_server(newest) as (query, count),
         patch.object(doctor_mod, "datetime", wraps=datetime) as clock,
     ):

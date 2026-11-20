@@ -38,18 +38,21 @@ REACH_CHECKS = (
 )
 
 
-async def no_spans_report(scope: DoctorScope, *, has_agent_spans: bool | None = None) -> str:
+async def no_spans_report(scope: DoctorScope, *, has_agent_spans: bool | None = None, span_count: int = 0) -> str:
     """Explain an empty check using agent span presence or Weave calls in range."""
-    if has_agent_spans is None:
+    if has_agent_spans is None and span_count == 0:
         any_span = await newest_agent_span(scope)
         if isinstance(any_span, ToolErrorJSON):
             return any_span
 
         has_agent_spans = any_span is not None
 
-    if has_agent_spans:
+    if has_agent_spans or span_count > 0:
         diagnosis = _filter_diagnosis(scope) if scope.filtered else INELIGIBLE_SPANS_DIAGNOSIS
-        report = NoSpansReport(verdict="no_spans", scope=scope.as_dict(), span_count=0, diagnosis=diagnosis)
+        report = NoSpansReport(verdict="no_spans", scope=scope.as_dict(), span_count=span_count, diagnosis=diagnosis)
+        if span_count > 0:
+            report["passing_rule_count"] = 0
+
         return json.dumps(report)
 
     calls = await _count_calls(scope)

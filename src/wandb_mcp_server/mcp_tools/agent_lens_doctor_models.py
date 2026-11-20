@@ -99,6 +99,7 @@ class NoSpansReport(TypedDict):
     scope: Dict[str, str]
     span_count: int
     diagnosis: str
+    passing_rule_count: NotRequired[int]
     calls_in_window: NotRequired[Optional[int]]
     checks: NotRequired[List[str]]
 

@@ -147,6 +147,9 @@ async def diagnose_instrumentation(
     if report.span_count == 0:
         return await no_spans_report(scope)
 
+    if not any(issue.applicable_count > 0 for issue in report.issues):
+        return await no_spans_report(scope, span_count=report.span_count)
+
     summary = _summarize(report, scope, include_failing_spans=include_failing_spans)
 
     return json.dumps(summary)
