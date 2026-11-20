@@ -11,12 +11,14 @@ import asyncio
 import json
 from typing import Optional
 
+from pydantic import ValidationError
+
 from wandb_mcp_server.api_client import raise_for_wandb_server_busy
-from wandb_mcp_server.config import WF_TRACE_SERVER_URL
+from wandb_mcp_server.config import WF_TRACE_SERVER_URL, structured_error
 from wandb_mcp_server.mcp_tools.agent_lens_doctor_models import AgentSpan, AgentSpanPage, DoctorScope, NoSpansReport
 from wandb_mcp_server.mcp_tools.agents import query_agent_spans
 from wandb_mcp_server.mcp_tools.count_traces import count_traces
-from wandb_mcp_server.tool_results import ToolErrorJSON
+from wandb_mcp_server.tool_results import ToolErrorJSON, tool_error_json
 from wandb_mcp_server.utils import get_rich_logger
 
 logger = get_rich_logger(__name__)
@@ -78,7 +80,11 @@ async def newest_agent_span(scope: DoctorScope) -> Optional[AgentSpan] | ToolErr
     if isinstance(response, ToolErrorJSON):
         return response
 
-    page = AgentSpanPage.model_validate_json(response)
+    try:
+        page = AgentSpanPage.model_validate_json(response)
+    except ValidationError:
+        error = structured_error("agents_query_failed", "The Agents API returned an unexpected span response.")
+        return tool_error_json(error)
 
     return page.spans[0] if page.spans else None
 

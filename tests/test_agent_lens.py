@@ -1087,6 +1087,19 @@ def test_doctor_latest_never_checks_an_older_conversation():
     assert session.calls == []
 
 
+@pytest.mark.parametrize("spans", [None, [{"conversation_id": None}]])
+def test_doctor_reports_invalid_latest_span_data(spans: list[dict[str, str | None]] | None):
+    with _mocked(_health([])) as session, _trace_server(spans) as (_query, count):
+        result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, conversation_id="latest", **WINDOW))
+
+    assert result == {
+        "error": "agents_query_failed",
+        "message": "The Agents API returned an unexpected span response.",
+    }
+    assert session.calls == []
+    count.assert_not_called()
+
+
 @pytest.mark.parametrize("status_code", [429, 503])
 def test_doctor_count_probe_surfaces_the_same_overload_as_the_span_probe(status_code: int):
     busy_response = requests.Response()
