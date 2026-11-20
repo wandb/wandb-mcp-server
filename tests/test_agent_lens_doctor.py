@@ -237,6 +237,44 @@ def test_doctor_sends_default_window(selectors: dict[str, str], expected_params:
     assert session.last["params"] == expected_params
 
 
+@pytest.mark.parametrize(
+    ("conversation_id", "trace_id", "expected_filters"),
+    [
+        ("latest", "trace-1", None),
+        ("", " \t", {}),
+        (" \t", "", {}),
+        ("latest", " \t", {"conversation_id": "conv-1"}),
+        ("conv-1", "trace-1", {"conversation_id": "conv-1", "trace_id": "trace-1"}),
+    ],
+)
+def test_doctor_validates_and_normalizes_selectors(
+    conversation_id: str, trace_id: str, expected_filters: dict[str, str] | None
+) -> None:
+    newest = [{"conversation_id": "conv-1"}]
+    with (
+        _mocked(_health([])) as session,
+        _trace_server(newest) as (query, count),
+        patch.object(doctor_mod, "datetime", wraps=datetime) as clock,
+    ):
+        clock.now.return_value = datetime.fromisoformat(WINDOW["end_at"])
+        result = json.loads(
+            diagnose_instrumentation(ENTITY, project_name=PROJECT, conversation_id=conversation_id, trace_id=trace_id)
+        )
+
+    count.assert_not_called()
+    if expected_filters is None:
+        assert result["error"] == "agent_lens_invalid_request"
+        assert session.calls == []
+        query.assert_not_called()
+        return
+
+    window = WINDOW if expected_filters else {**WINDOW, "start_at": "2026-09-07T00:00:00Z"}
+    expected_params = {**window, **expected_filters}
+    assert session.last["params"] == expected_params
+    assert result["scope"] == {"entity_name": ENTITY, "project_name": PROJECT, **expected_params}
+    assert result["verdict"] == "clean"
+
+
 def test_doctor_latest_never_checks_an_older_conversation():
     spans = [{"conversation_id": ""}, {"conversation_id": "older"}]
 

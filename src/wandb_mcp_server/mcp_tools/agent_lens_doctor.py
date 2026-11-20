@@ -67,7 +67,7 @@ conversation_id : str, optional
     Check one conversation's traces. Pass "latest" to use the conversation id
     from the newest agent span in range.
 trace_id : str, optional
-    Check one trace.
+    Check one trace. Omit this field when using conversation_id="latest".
 start_at, end_at : str, optional
     RFC 3339 bounds, supplied together, at most 7 days apart. Default: last
     7 days with a conversation or trace filter, else last 24 hours.
@@ -97,6 +97,13 @@ async def diagnose_instrumentation(
     include_failing_spans: bool = False,
 ) -> str:
     """Rank the Agent Lens instrumentation rules a project's agent spans fail."""
+    conversation_id = conversation_id if (conversation_id or "").strip() else None
+    trace_id = trace_id if (trace_id or "").strip() else None
+
+    if conversation_id == LATEST_CONVERSATION and trace_id is not None:
+        error = structured_error("agent_lens_invalid_request", 'Omit trace_id when using conversation_id="latest".')
+        return tool_error_json(error)
+
     try:
         start, end = _health_window(start_at, end_at, filtered=bool(conversation_id or trace_id))
     except ValueError as error:
