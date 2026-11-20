@@ -339,7 +339,7 @@ def parse_timestamp(value: str, field: str) -> datetime:
     return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _validated_window(start_at: str, end_at: str) -> Dict[str, str]:
+def _validated_window(start_at: str, end_at: str) -> Dict[str, object]:
     """Check the range locally against the server's own bounds before sending."""
     start = parse_timestamp(start_at, "start_at")
     end = parse_timestamp(end_at, "end_at")
@@ -387,9 +387,9 @@ async def _agent_lens_request(
     path: str,
     entity_name: str,
     project_name: str,
-    track_params: Dict[str, Any],
-    params: Optional[Dict[str, Any]] = None,
-    body: Optional[Dict[str, Any]] = None,
+    track_params: Dict[str, object],
+    params: Optional[Dict[str, object]] = None,
+    body: Optional[Dict[str, object]] = None,
 ) -> str:
     """Call one Agent Lens read endpoint and return a JSON string trimmed to the token budget."""
     result = await fetch_agent_lens_json(
@@ -621,7 +621,7 @@ async def list_category_example_turns(
     if not 1 <= limit <= MAX_EXAMPLE_LIMIT:
         return _invalid_argument(f"limit must be between 1 and {MAX_EXAMPLE_LIMIT}")
     try:
-        params: Dict[str, Any] = dict(_validated_window(start_at, end_at))
+        params = _validated_window(start_at, end_at)
         if topic_ids:
             params["topic_ids[]"] = _bounded_list(topic_ids, MAX_TOPIC_IDS, "topic_ids")
     except ValueError as error:
