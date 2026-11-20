@@ -118,6 +118,7 @@ report. The tool then asks the trace server what did arrive in the same window:
 - nothing at all returns ordered `checks`: endpoint, `wandb-api-key` header,
   `wandb.entity`/`wandb.project` resource attributes, and flushing spans on exit.
 
+Omit `conversation_id` and `trace_id` instead of passing an empty string.
 Ranges are at most 7 days. Without `start_at`/`end_at`, a conversation or
 trace filter covers the last 7 days and a project-wide check the last 24 hours.
 

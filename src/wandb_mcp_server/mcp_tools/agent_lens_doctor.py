@@ -65,9 +65,10 @@ project_name : str
     The W&B project name.
 conversation_id : str, optional
     Check one conversation's traces. Pass "latest" to use the conversation id
-    from the newest agent span in range.
+    from the newest agent span in range. Omit instead of passing an empty string.
 trace_id : str, optional
     Check one trace. Omit this field when using conversation_id="latest".
+    Omit instead of passing an empty string.
 start_at, end_at : str, optional
     RFC 3339 bounds, supplied together, at most 7 days apart. Default: last
     7 days with a conversation or trace filter, else last 24 hours.
