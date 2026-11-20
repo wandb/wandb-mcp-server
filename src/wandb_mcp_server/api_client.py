@@ -128,8 +128,10 @@ def _retry_after_ms(value: object) -> int:
     return min(_MAX_RETRY_AFTER_MS, max(_DEFAULT_RETRY_AFTER_MS, round(seconds * 1_000)))
 
 
-def wandb_server_busy_from_exception(exc: BaseException, *, status_only: bool = False) -> WandBServerBusy | None:
-    """Classify nested W&B overload errors, optionally by HTTP status alone."""
+def wandb_server_busy_from_exception(
+    exc: BaseException, *, require_overload_hint: bool = True
+) -> WandBServerBusy | None:
+    """Classify nested W&B overload errors, optionally requiring a hint for 503."""
     if isinstance(exc, WandBServerBusy):
         return exc
 
@@ -139,8 +141,7 @@ def wandb_server_busy_from_exception(exc: BaseException, *, status_only: bool = 
     for current in _exception_chain(exc):
         if isinstance(current, WandBServerBusy):
             return current
-        if not status_only:
-            messages.append(str(current))
+        messages.append(str(current))
         response = getattr(current, "response", None)
         candidate = _http_status(current) or (_http_status(response) if response is not None else None)
         if candidate in {429, 503}:
@@ -148,35 +149,33 @@ def wandb_server_busy_from_exception(exc: BaseException, *, status_only: bool = 
             headers = getattr(response, "headers", None)
             if isinstance(headers, Mapping):
                 retry_after = headers.get("Retry-After") or headers.get("retry-after")
-            if status_only:
-                break
             for attr in ("reason", "text", "message"):
                 response_text = getattr(response, attr, None)
                 if response_text:
                     messages.append(str(response_text))
             break
 
-    if not status_only:
-        combined_message = " ".join(messages)
-        if status_code is None:
-            match = _OVERLOAD_STATUS_RE.search(combined_message)
-            if match:
-                status_code = int(match.group(1))
+    combined_message = " ".join(messages)
+    if status_code is None:
+        match = _OVERLOAD_STATUS_RE.search(combined_message)
+        if match:
+            status_code = int(match.group(1))
 
-        if status_code == 503 and not _OVERLOAD_HINT_RE.search(combined_message):
-            return None
+    if status_code == 503 and require_overload_hint and not _OVERLOAD_HINT_RE.search(combined_message):
+        return None
 
     if status_code not in {429, 503}:
         return None
+
     return WandBServerBusy(
         status_code=status_code,
         retry_after_ms=_retry_after_ms(retry_after),
     )
 
 
-def raise_for_wandb_server_busy(exc: BaseException, *, status_only: bool = False) -> None:
+def raise_for_wandb_server_busy(exc: BaseException, *, require_overload_hint: bool = True) -> None:
     """Preserve overload backpressure across tool-specific fallback paths."""
-    if busy := wandb_server_busy_from_exception(exc, status_only=status_only):
+    if busy := wandb_server_busy_from_exception(exc, require_overload_hint=require_overload_hint):
         raise busy from exc
 
 

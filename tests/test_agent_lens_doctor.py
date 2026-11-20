@@ -406,25 +406,34 @@ def test_doctor_reports_invalid_latest_span_data(spans: list[dict[str, str | Non
 
 
 @pytest.mark.parametrize(
-    ("status_code", "count_reason"), [(429, "Service overloaded"), (503, "Service overloaded"), (503, "")]
+    ("status_code", "count_reason"),
+    [(429, "Service overloaded"), (503, "Service overloaded"), (503, ""), pytest.param(503, None, id="proxy-tunnel")],
 )
-def test_doctor_count_probe_surfaces_the_same_overload_as_the_span_probe(status_code: int, count_reason: str):
+def test_doctor_count_probe_surfaces_the_same_overload_as_the_span_probe(status_code: int, count_reason: str | None):
     busy_response = requests.Response()
     busy_response.status_code = status_code
     busy_response.reason = "Service overloaded"
     busy_response.headers["Retry-After"] = "7"
     empty_spans = _FakeResponse({"spans": []})
+    count_failure: requests.Response | requests.exceptions.ProxyError
+    if count_reason is None:
+        count_failure = requests.exceptions.ProxyError("Tunnel connection failed: 503")
+    else:
+        count_failure = requests.Response()
+        count_failure.status_code = status_code
+        count_failure.reason = count_reason
+        count_failure.headers.update(busy_response.headers)
 
     with (
         _mocked(_health([], spans=0, traces=0)),
-        patch.object(requests.Session, "post", side_effect=[busy_response, empty_spans, busy_response]),
+        patch.object(requests.Session, "post", side_effect=[busy_response, empty_spans, count_failure]),
     ):
         with pytest.raises(WandBServerBusy) as span_error:
             diagnose_instrumentation(ENTITY, project_name=PROJECT, **WINDOW)
-        busy_response.reason = count_reason
         with pytest.raises(WandBServerBusy) as count_error:
             diagnose_instrumentation(ENTITY, project_name=PROJECT, **WINDOW)
 
     assert count_error.value.status_code == span_error.value.status_code == status_code
-    assert count_error.value.as_dict() == span_error.value.as_dict()
-    assert count_error.value.retry_after_ms == 7_000
+    assert span_error.value.retry_after_ms == 7_000
+    expected_retry_after = 1_000 if count_reason is None else 7_000
+    assert count_error.value.as_dict() == {**span_error.value.as_dict(), "retry_after_ms": expected_retry_after}
