@@ -1024,15 +1024,27 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
 
 
 @pytest.mark.parametrize(
-    ("status", "kwargs", "pages", "calls", "expected", "checks_listed"),
+    ("status", "kwargs", "pages", "calls", "expected", "checks_listed", "reach_checked"),
     [
-        (200, {}, (), 12, "/agents/otel/v1/traces", False),
-        (404, {"trace_id": "t1"}, ([],), 0, "Nothing reached", True),
-        (404, {"conversation_id": "c1"}, ([{"trace_id": "x"}],), 0, "Check that id", False),
-        (200, {"conversation_id": "latest"}, ([], [{"trace_id": "x"}]), 0, "none carries a conversation id", False),
+        (200, {}, (), 12, "/agents/otel/v1/traces", False, True),
+        (404, {"trace_id": "t1"}, ([],), 0, "Nothing reached", True, True),
+        # A filter miss on a project that has agent spans is never blamed on the exporter, even with calls present.
+        (404, {"conversation_id": "c1"}, ([{"trace_id": "x"}],), 12, "Check that id", False, False),
+        (404, {"trace_id": "t1"}, ([{"trace_id": "x"}],), 12, 'conversation_id="latest"', False, False),
+        (
+            200,
+            {"conversation_id": "latest"},
+            ([], [{"trace_id": "x"}]),
+            0,
+            "none carries a conversation id",
+            False,
+            False,
+        ),
     ],
 )
-def test_doctor_never_reports_zero_spans_as_healthy(status, kwargs, pages, calls, expected, checks_listed):
+def test_doctor_never_reports_zero_spans_as_healthy(
+    status, kwargs, pages, calls, expected, checks_listed, reach_checked
+):
     response = _health([], spans=0, traces=0) if status == 200 else _FakeResponse({"detail": "no spans"}, 404)
     with _mocked(response), _trace_server(*pages, calls=calls) as (_query, count):
         result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **kwargs, **WINDOW))
@@ -1042,7 +1054,8 @@ def test_doctor_never_reports_zero_spans_as_healthy(status, kwargs, pages, calls
     assert expected in result["diagnosis"]
     assert "issues" not in result
     assert ("checks" in result) is checks_listed
-    assert ("calls_in_window" in result) is count.called
-    if count.called:
+    assert count.called is reach_checked
+    assert ("calls_in_window" in result) is reach_checked
+    if reach_checked:
         assert count.call_args.args[2] == {"time_range": {"start": WINDOW["start_at"], "end": WINDOW["end_at"]}}
         assert result["calls_in_window"] == calls

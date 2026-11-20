@@ -88,8 +88,8 @@ def _filter_diagnosis(scope: DoctorScope) -> str:
 
     return (
         "This project has agent spans in this window, but no eligible span matches this conversation_id or "
-        "trace_id. Check that id, or pass start_at and end_at covering when it ran. Evaluation traces and "
-        "Weave Signals spans are excluded."
+        "trace_id, so spans are reaching Agent Lens. Check that id, pass start_at and end_at covering when it "
+        'ran, or pass conversation_id="latest". Evaluation traces and Weave Signals spans are excluded.'
     )
 
 
