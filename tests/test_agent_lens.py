@@ -1008,6 +1008,7 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
         _rule("should_half", "should", 5, 10, groups=1),
         _rule("must_tenth", "must", 1, 10, groups=5, spans=30),
         _rule("passing", "must", 0, 10),
+        _rule("inapplicable", "should", 0, 0, rule_type="trace"),
         _rule("must_all", "must", 4, 4, groups=2, rule_type="trace"),
     ]
     newest = [{"conversation_id": "conv-9", "trace_id": "t9"}]

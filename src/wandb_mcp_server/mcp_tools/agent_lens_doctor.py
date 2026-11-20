@@ -146,6 +146,7 @@ def _summarize(report: HealthReport, scope: DoctorScope, *, include_failing_span
     """Keep only failing rules, musts first and then by failing share, with passing rules as a count."""
     failing = sorted((issue for issue in report.issues if issue.failing_count > 0), key=_issue_rank)
     must_count = sum(1 for issue in failing if issue.severity == "must")
+    passing_count = sum(1 for issue in report.issues if issue.applicable_count > 0 and issue.failing_count == 0)
 
     issues = []
     for issue in failing:
@@ -173,7 +174,7 @@ def _summarize(report: HealthReport, scope: DoctorScope, *, include_failing_span
         trace_count=report.trace_count,
         unsettled_trace_count=report.unsettled_trace_count,
         failing_rule_counts={"must": must_count, "should": len(failing) - must_count},
-        passing_rule_count=len(report.issues) - len(failing),
+        passing_rule_count=passing_count,
         issues=issues,
     )
     if report.unsettled_trace_count:
