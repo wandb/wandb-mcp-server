@@ -55,6 +55,7 @@ without a human reading traces:
 
 Span rules update as soon as spans arrive. Verdict "no_spans" means nothing
 was checked. Read its `note` or follow its `diagnosis` and any `checks`.
+Never read it as healthy.
 </when_to_use>
 
 Parameters
