@@ -7,14 +7,15 @@ exporter checks in order.
 
 from __future__ import annotations
 
-import asyncio
 import json
+from functools import partial
 from typing import Optional
 
 from pydantic import ValidationError
 
 from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 from wandb_mcp_server.config import WF_TRACE_SERVER_URL, structured_error
+from wandb_mcp_server.instrumented_server import run_sync_in_current_tool
 from wandb_mcp_server.mcp_tools.agent_lens_doctor_models import AgentSpan, AgentSpanPage, DoctorScope, NoSpansReport
 from wandb_mcp_server.mcp_tools.agents import query_agent_spans
 from wandb_mcp_server.mcp_tools.count_traces import count_traces
@@ -67,15 +68,17 @@ async def no_spans_report(scope: DoctorScope, *, has_agent_spans: bool = False) 
 
 async def newest_agent_span(scope: DoctorScope) -> Optional[AgentSpan] | ToolErrorJSON:
     """Return the newest agent span in `scope`'s range."""
-    response = await asyncio.to_thread(
-        query_agent_spans,
-        scope.entity_name,
-        scope.project_name,
-        started_after=scope.start_at,
-        started_before=scope.end_at,
-        sort_by="started_at",
-        sort_direction="desc",
-        limit=1,
+    response = await run_sync_in_current_tool(
+        partial(
+            query_agent_spans,
+            scope.entity_name,
+            scope.project_name,
+            started_after=scope.start_at,
+            started_before=scope.end_at,
+            sort_by="started_at",
+            sort_direction="desc",
+            limit=1,
+        )
     )
     if isinstance(response, ToolErrorJSON):
         return response
@@ -123,7 +126,7 @@ async def _count_calls(scope: DoctorScope) -> Optional[int]:
     """Count Weave calls started in `scope`'s range, or None on non-overload failures."""
     time_range = {"time_range": {"start": scope.start_at, "end": scope.end_at}}
     try:
-        count = await asyncio.to_thread(count_traces, scope.entity_name, scope.project_name, time_range)
+        count = await run_sync_in_current_tool(partial(count_traces, scope.entity_name, scope.project_name, time_range))
     except Exception as error:
         raise_for_wandb_server_busy(error)
         logger.warning("Weave calls check failed (%s)", type(error).__name__)

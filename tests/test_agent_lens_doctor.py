@@ -1,15 +1,20 @@
 """Unit tests for the Agent Lens instrumentation doctor MCP tool."""
 
+import asyncio
 import json
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from mcp.server.fastmcp.exceptions import ToolError
 
 from tests.test_agent_lens import BASE_URL, ENTITY, PROJECT, WINDOW, _FakeResponse, _mocked, _ok, _sync_call
+from wandb_mcp_server.admission import WeightedAdmissionController
 from wandb_mcp_server.api_client import WandBServerBusy
+from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
 from wandb_mcp_server.mcp_tools import agent_lens_doctor as doctor_mod
 from wandb_mcp_server.mcp_tools import agent_lens_reach as reach_mod
 
@@ -172,6 +177,48 @@ def test_doctor_never_reports_zero_spans_as_healthy(
     if reach_checked:
         assert count.call_args.args[2] == {"time_range": {"start": WINDOW["start_at"], "end": WINDOW["end_at"]}}
         assert result["calls_in_window"] == calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("probe", "result"), [("query_agent_spans", '{"spans": []}'), ("count_traces", 0)])
+async def test_cancelled_doctor_keeps_admission_until_reach_probe_finishes(
+    monkeypatch: pytest.MonkeyPatch, probe: str, result: str | int
+) -> None:
+    monkeypatch.setenv("MCP_ANALYTICS_DISABLED", "true")
+    server = InstrumentedFastMCP("doctor-cancel-test")
+    admission = WeightedAdmissionController(actor_capacity=4, process_capacity=4, wait_timeout_seconds=0.01)
+    server._admission_controller = admission
+    tool = "diagnose_agent_lens_instrumentation_tool"
+    server.add_tool(doctor_mod.diagnose_instrumentation, name=tool)
+    arguments = {"entity_name": ENTITY, "project_name": PROJECT, **WINDOW}
+    started = threading.Event()
+    finish = threading.Event()
+
+    def blocking_probe(*args: object, **kwargs: object) -> str | int:
+        started.set()
+        finish.wait()
+
+        return result
+
+    with _mocked(_health([], spans=0, traces=0)), _trace_server([]), patch.object(reach_mod, probe, blocking_probe):
+        first = asyncio.create_task(server.call_tool(tool, arguments))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+
+            assert admission.process_in_use == 4
+            with pytest.raises(ToolError, match="server_busy"):
+                await server.call_tool(tool, arguments)
+        finally:
+            finish.set()
+            first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
+            await asyncio.gather(*server._deferred_release_tasks)
+            server.shutdown_sync_executor()
+
+    assert admission.process_in_use == 0
 
 
 @pytest.mark.parametrize(
