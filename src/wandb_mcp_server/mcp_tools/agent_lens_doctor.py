@@ -48,13 +48,13 @@ without a human reading traces:
    newest run. A project-wide call also counts older spans in its window.
 3. On verdict "failing", fix issues[0] (must-fix rules rank first), rerun
    your app, and call again.
-4. On verdict "settling", span rules pass but some traces are still open or
-   recent. Trace rules judge a trace only after {SETTLE_MINUTES} quiet minutes
+4. On verdict "settling", some traces are still open or recent.
+   Trace rules judge a trace only after {SETTLE_MINUTES} quiet minutes
    (`unsettled_trace_count`); call again after that.
 5. Stop on verdict "clean".
 
 Span rules update as soon as spans arrive. Verdict "no_spans" means nothing
-was checked. Follow its `diagnosis` and any `checks`. Never read it as healthy.
+was checked. Read its `note` or follow its `diagnosis` and any `checks`.
 </when_to_use>
 
 Parameters
@@ -81,7 +81,8 @@ span/trace/unsettled counts, "failing_rule_counts" {{"must", "should"}},
 "passing_rule_count", and "issues": only failing rules, ranked, each with
 "code", "severity", "rule_type", "title", "impact", "fix", failing/applicable
 counts, {SHOWN_GROUPS} "top_failing_groups", and up to 3 "examples"
-{{"trace_id", "conversation_id"}}. A "no_spans" result always includes "diagnosis".
+{{"trace_id", "conversation_id"}}. A "no_spans" result includes a "note" when
+no rule applied to the received spans, or a "diagnosis" when the span count is zero.
 It includes "calls_in_window" only if no agent spans reached the project in the
 window. Ordered exporter "checks" appear only when that count is zero or unknown.
 """
@@ -147,9 +148,6 @@ async def diagnose_instrumentation(
     if report.span_count == 0:
         return await no_spans_report(scope)
 
-    if not any(issue.applicable_count > 0 for issue in report.issues):
-        return await no_spans_report(scope, span_count=report.span_count)
-
     summary = _summarize(report, scope, include_failing_spans=include_failing_spans)
 
     return json.dumps(summary)
@@ -181,7 +179,7 @@ def _summarize(report: HealthReport, scope: DoctorScope, *, include_failing_span
         issues.append(summary)
 
     result = HealthSummary(
-        verdict=_verdict(failing, report.unsettled_trace_count),
+        verdict=_verdict(failing, report.unsettled_trace_count, passing_count),
         scope=scope.as_dict(),
         span_count=report.span_count,
         trace_count=report.trace_count,
@@ -195,16 +193,22 @@ def _summarize(report: HealthReport, scope: DoctorScope, *, include_failing_span
             f"{report.unsettled_trace_count} trace(s) are still settling. Trace rules judge a trace only after "
             f"{SETTLE_MINUTES} quiet minutes, so call again before treating trace rules as passing."
         )
+    elif result["verdict"] == "no_spans":
+        result["note"] = "Agent Lens received the spans, but no instrumentation rule applied, so nothing was checked."
 
     return result
 
 
-def _verdict(failing: List[HealthIssue], unsettled_trace_count: int) -> Verdict:
-    """Name a loop state: fix `failing`, wait for unsettled traces, or stop."""
+def _verdict(failing: List[HealthIssue], unsettled_trace_count: int, passing_count: int) -> Verdict:
+    """Choose a verdict from failures, unsettled traces, and passing rules."""
     if failing:
         return "failing"
+
     if unsettled_trace_count:
         return "settling"
+
+    if passing_count == 0:
+        return "no_spans"
 
     return "clean"
 

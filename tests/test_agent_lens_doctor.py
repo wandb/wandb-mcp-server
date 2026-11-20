@@ -134,6 +134,33 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
     count.assert_not_called()
 
 
+@pytest.mark.parametrize("filters", [{}, {"trace_id": "t1"}], ids=["project", "filtered"])
+@pytest.mark.parametrize(("unsettled", "verdict"), [(0, "no_spans"), (3, "settling")])
+def test_doctor_keeps_health_summary_when_no_rule_applies(filters, unsettled, verdict):
+    issues = [_rule("span_no_operation_name", "must", 0, 0)]
+    with _mocked(_health(issues, unsettled=unsettled)) as session, _trace_server() as (query, count):
+        result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **filters, **WINDOW))
+
+    assert session.last["params"] == {**WINDOW, **filters}
+    assert result["verdict"] == verdict
+    assert result["scope"] == {"entity_name": ENTITY, "project_name": PROJECT, **WINDOW, **filters}
+    assert result["span_count"] == 40
+    assert result["trace_count"] == 4
+    assert result["unsettled_trace_count"] == unsettled
+    assert result["failing_rule_counts"] == {"must": 0, "should": 0}
+    assert result["passing_rule_count"] == 0
+    assert result["issues"] == []
+    assert "diagnosis" not in result
+    if unsettled:
+        assert f"{unsettled} trace(s) are still settling" in result["note"]
+    else:
+        assert "Agent Lens received the spans" in result["note"]
+        assert "no instrumentation rule applied" in result["note"]
+
+    query.assert_not_called()
+    count.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("span_count", "kwargs", "pages", "calls", "expected", "checks_listed", "reach_checked"),
     [
@@ -146,9 +173,6 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
             "none is eligible for instrumentation checks. Evaluation traces and Weave Signals spans are excluded.",
             False,
             False,
-        ),
-        pytest.param(
-            40, {}, (), 0, "none is eligible for instrumentation checks", False, False, id="no-applicable-rules"
         ),
         (None, {"trace_id": "t1"}, ([],), 0, "Nothing reached", True, True),
         # A filter miss on a project that has agent spans is never blamed on the exporter, even with calls present.
@@ -180,8 +204,7 @@ def test_doctor_never_reports_zero_spans_as_healthy(
     if span_count is None:
         response = _FakeResponse({"detail": "no spans"}, 404)
     else:
-        issues = [_rule("span_no_operation_name", "must", 0, 0)] if span_count else []
-        response = _health(issues, spans=span_count, traces=int(bool(span_count)))
+        response = _health([], spans=span_count, traces=0)
 
     with _mocked(response) as session, _trace_server(*pages, calls=calls) as (query, count):
         result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **kwargs, **WINDOW))
@@ -195,13 +218,8 @@ def test_doctor_never_reports_zero_spans_as_healthy(
         assert session.last["params"] == {**WINDOW, **kwargs}
 
     assert result["verdict"] == "no_spans"
-    assert result["span_count"] == (span_count or 0)
-    if span_count:
-        assert result["passing_rule_count"] == 0
-        query.assert_not_called()
-    else:
-        query.assert_called_once_with(ENTITY, PROJECT, **SPAN_PROBE_KWARGS)
-
+    assert result["span_count"] == 0
+    query.assert_called_once_with(ENTITY, PROJECT, **SPAN_PROBE_KWARGS)
     assert expected in result["diagnosis"]
     assert "issues" not in result
     assert ("checks" in result) is checks_listed
