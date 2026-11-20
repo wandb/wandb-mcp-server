@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import httpx
+import requests
 
 from scripts import agent_lens_smoke
 from wandb_mcp_server.admission import current_tool_deadline
@@ -1084,3 +1085,25 @@ def test_doctor_latest_never_checks_an_older_conversation():
 
     assert result["verdict"] == "no_spans"
     assert session.calls == []
+
+
+@pytest.mark.parametrize("status_code", [429, 503])
+def test_doctor_count_probe_surfaces_the_same_overload_as_the_span_probe(status_code: int):
+    busy_response = requests.Response()
+    busy_response.status_code = status_code
+    busy_response.reason = "Service overloaded"
+    busy_response.headers["Retry-After"] = "7"
+    empty_spans = _FakeResponse({"spans": []})
+
+    with (
+        _mocked(_health([], spans=0, traces=0)),
+        patch.object(requests.Session, "post", side_effect=[busy_response, empty_spans, busy_response]),
+    ):
+        with pytest.raises(WandBServerBusy) as span_error:
+            diagnose_instrumentation(ENTITY, project_name=PROJECT, **WINDOW)
+        with pytest.raises(WandBServerBusy) as count_error:
+            diagnose_instrumentation(ENTITY, project_name=PROJECT, **WINDOW)
+
+    assert count_error.value.status_code == span_error.value.status_code == status_code
+    assert count_error.value.as_dict() == span_error.value.as_dict()
+    assert count_error.value.retry_after_ms == 7_000

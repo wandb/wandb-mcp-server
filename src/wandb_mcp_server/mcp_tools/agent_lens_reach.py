@@ -11,6 +11,7 @@ import asyncio
 import json
 from typing import Optional
 
+from wandb_mcp_server.api_client import raise_for_wandb_server_busy
 from wandb_mcp_server.config import WF_TRACE_SERVER_URL
 from wandb_mcp_server.mcp_tools.agent_lens_doctor_models import AgentSpan, AgentSpanPage, DoctorScope, NoSpansReport
 from wandb_mcp_server.mcp_tools.agents import query_agent_spans
@@ -113,12 +114,12 @@ def _reach_diagnosis(calls: Optional[int]) -> str:
 
 
 async def _count_calls(scope: DoctorScope) -> Optional[int]:
-    """Count Weave calls started in `scope`'s range, or None when `count_traces` fails."""
+    """Count Weave calls started in `scope`'s range, or None on non-overload failures."""
     time_range = {"time_range": {"start": scope.start_at, "end": scope.end_at}}
     try:
         count = await asyncio.to_thread(count_traces, scope.entity_name, scope.project_name, time_range)
-    # `count_traces` wraps transport failures in a bare Exception; this report still lists `REACH_CHECKS`.
     except Exception as error:
+        raise_for_wandb_server_busy(error)
         logger.warning("Weave calls check failed (%s)", type(error).__name__)
         return None
 
