@@ -1026,7 +1026,16 @@ def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conv
 @pytest.mark.parametrize(
     ("status", "kwargs", "pages", "calls", "expected", "checks_listed", "reach_checked"),
     [
-        (200, {}, (), 12, "/agents/otel/v1/traces", False, True),
+        (200, {}, ([],), 12, "/agents/otel/v1/traces", False, True),
+        (
+            200,
+            {},
+            ([{"trace_id": "x"}],),
+            12,
+            "none is eligible for instrumentation checks. Evaluation traces and Weave Signals spans are excluded.",
+            False,
+            False,
+        ),
         (404, {"trace_id": "t1"}, ([],), 0, "Nothing reached", True, True),
         # A filter miss on a project that has agent spans is never blamed on the exporter, even with calls present.
         (404, {"conversation_id": "c1"}, ([{"trace_id": "x"}],), 12, "Check that id", False, False),

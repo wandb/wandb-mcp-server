@@ -1,8 +1,8 @@
 """Explain an empty Agent Lens instrumentation check from what reached the trace server.
 
 A zero-span health report would read as healthy. These helpers ask the trace
-server whether agent spans exist outside the filter or Weave calls arrived
-instead, and otherwise list the exporter checks in order.
+server whether agent spans or Weave calls arrived, and otherwise list the
+exporter checks in order.
 """
 
 from __future__ import annotations
@@ -22,6 +22,10 @@ logger = get_rich_logger(__name__)
 
 LATEST_CONVERSATION = "latest"
 AGENTS_OTLP_ENDPOINT = f"{WF_TRACE_SERVER_URL.rstrip('/')}/agents/otel/v1/traces"
+INELIGIBLE_SPANS_DIAGNOSIS = (
+    "Agent spans arrived in this window, but none is eligible for instrumentation checks. "
+    "Evaluation traces and Weave Signals spans are excluded."
+)
 REACH_CHECKS = (
     f"OTLP exporter endpoint is {AGENTS_OTLP_ENDPOINT}.",
     "Exporter sends a W&B API key in a wandb-api-key header.",
@@ -32,19 +36,17 @@ REACH_CHECKS = (
 
 async def no_spans_report(scope: DoctorScope, *, has_agent_spans: bool = False) -> str:
     """Explain an empty check using agent span presence or Weave calls in range."""
-    if scope.filtered:
-        if not has_agent_spans:
-            any_span = await newest_agent_span(scope)
-            if isinstance(any_span, ToolErrorJSON):
-                return any_span
+    if not has_agent_spans:
+        any_span = await newest_agent_span(scope)
+        if isinstance(any_span, ToolErrorJSON):
+            return any_span
 
-            has_agent_spans = any_span is not None
+        has_agent_spans = any_span is not None
 
-        if has_agent_spans:
-            report = NoSpansReport(
-                verdict="no_spans", scope=scope.as_dict(), span_count=0, diagnosis=_filter_diagnosis(scope)
-            )
-            return json.dumps(report)
+    if has_agent_spans:
+        diagnosis = _filter_diagnosis(scope) if scope.filtered else INELIGIBLE_SPANS_DIAGNOSIS
+        report = NoSpansReport(verdict="no_spans", scope=scope.as_dict(), span_count=0, diagnosis=diagnosis)
+        return json.dumps(report)
 
     calls = await _count_calls(scope)
     report = NoSpansReport(
