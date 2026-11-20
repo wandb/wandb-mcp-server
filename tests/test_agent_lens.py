@@ -21,7 +21,7 @@ import pytest
 import httpx
 
 from scripts import agent_lens_smoke
-from tests.conftest import (
+from tests.agent_lens_fixtures import (
     BASE_URL,
     ENTITY,
     PROJECT,

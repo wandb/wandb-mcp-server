@@ -11,7 +11,7 @@ import pytest
 import requests
 from mcp.server.fastmcp.exceptions import ToolError
 
-from tests.conftest import BASE_URL, ENTITY, PROJECT, WINDOW, _FakeResponse, _mocked, _ok, _sync_call
+from tests.agent_lens_fixtures import BASE_URL, ENTITY, PROJECT, WINDOW, _FakeResponse, _mocked, _ok, _sync_call
 from wandb_mcp_server.admission import WeightedAdmissionController
 from wandb_mcp_server.api_client import WandBServerBusy
 from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
@@ -79,17 +79,23 @@ def _trace_server(*pages, calls=0):
     ],
 )
 def test_doctor_reports_clean_only_once_every_trace_has_settled(unsettled, verdict, window):
+    trace_count = 4
+    settled = trace_count - unsettled
     passing = [
         _rule("span_no_operation_name", "must", 0, 40),
-        _rule("trace_no_root", "should", 0, 4, rule_type="trace"),
+        _rule("trace_no_root", "should", 0, settled, rule_type="trace"),
     ]
-    with _mocked(_health(passing, unsettled=unsettled)) as session, _trace_server() as (query, count):
+    with (
+        _mocked(_health(passing, traces=trace_count, unsettled=unsettled)) as session,
+        _trace_server() as (query, count),
+    ):
         result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **window))
 
     assert session.last["method"] == "GET"
     assert session.last["url"] == f"{BASE_URL}/api/instrumentation/health"
     assert session.last["params"] == window
     assert result["verdict"] == verdict
+    assert result["unsettled_trace_count"] == unsettled
     assert result["issues"] == []
     assert result["failing_rule_counts"] == {"must": 0, "should": 0}
     assert result["passing_rule_count"] == 2
