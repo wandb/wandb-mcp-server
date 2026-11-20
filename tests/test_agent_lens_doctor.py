@@ -11,7 +11,7 @@ import pytest
 import requests
 from mcp.server.fastmcp.exceptions import ToolError
 
-from tests.test_agent_lens import BASE_URL, ENTITY, PROJECT, WINDOW, _FakeResponse, _mocked, _ok, _sync_call
+from tests.conftest import BASE_URL, ENTITY, PROJECT, WINDOW, _FakeResponse, _mocked, _ok, _sync_call
 from wandb_mcp_server.admission import WeightedAdmissionController
 from wandb_mcp_server.api_client import WandBServerBusy
 from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
@@ -79,7 +79,10 @@ def _trace_server(*pages, calls=0):
     ],
 )
 def test_doctor_reports_clean_only_once_every_trace_has_settled(unsettled, verdict, window):
-    passing = [_rule("span_no_operation_name", "must", 0, 40), _rule("trace_no_root", "should", 0, 4)]
+    passing = [
+        _rule("span_no_operation_name", "must", 0, 40),
+        _rule("trace_no_root", "should", 0, 4, rule_type="trace"),
+    ]
     with _mocked(_health(passing, unsettled=unsettled)) as session, _trace_server() as (query, count):
         result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **window))
 
@@ -172,8 +175,16 @@ def test_doctor_never_reports_zero_spans_as_healthy(
     status, kwargs, pages, calls, expected, checks_listed, reach_checked
 ):
     response = _health([], spans=0, traces=0) if status == 200 else _FakeResponse({"detail": "no spans"}, 404)
-    with _mocked(response), _trace_server(*pages, calls=calls) as (query, count):
+    with _mocked(response) as session, _trace_server(*pages, calls=calls) as (query, count):
         result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **kwargs, **WINDOW))
+
+    if kwargs.get("conversation_id") == "latest":
+        assert session.calls == []
+    else:
+        assert len(session.calls) == 1
+        assert session.last["headers"]["X-Wandb-Entity"] == ENTITY
+        assert session.last["headers"]["X-Wandb-Project"] == PROJECT
+        assert session.last["params"] == {**WINDOW, **kwargs}
 
     query.assert_called_once_with(ENTITY, PROJECT, **SPAN_PROBE_KWARGS)
     assert result["verdict"] == "no_spans"
@@ -181,11 +192,14 @@ def test_doctor_never_reports_zero_spans_as_healthy(
     assert expected in result["diagnosis"]
     assert "issues" not in result
     assert ("checks" in result) is checks_listed
-    assert count.called is reach_checked
     assert ("calls_in_window" in result) is reach_checked
     if reach_checked:
-        assert count.call_args.args[2] == {"time_range": {"start": WINDOW["start_at"], "end": WINDOW["end_at"]}}
+        count.assert_called_once_with(
+            ENTITY, PROJECT, {"time_range": {"start": WINDOW["start_at"], "end": WINDOW["end_at"]}}
+        )
         assert result["calls_in_window"] == calls
+    else:
+        count.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -244,6 +258,51 @@ def test_doctor_sends_default_window(selectors: dict[str, str], expected_params:
         diagnose_instrumentation(ENTITY, project_name=PROJECT, **selectors)
 
     assert session.last["params"] == expected_params
+
+
+@pytest.mark.parametrize(
+    ("window", "health_payload", "error", "message"),
+    [
+        pytest.param(
+            {"start_at": WINDOW["start_at"]},
+            None,
+            "agent_lens_invalid_request",
+            "start_at and end_at must be supplied together",
+            id="unpaired-bounds",
+        ),
+        pytest.param(
+            {**WINDOW, "end_at": "2026-09-08T00:00:01Z"},
+            None,
+            "agent_lens_invalid_request",
+            "start_at and end_at must be at most 7 days apart",
+            id="over-seven-days",
+        ),
+        pytest.param(
+            {**WINDOW, "end_at": WINDOW["start_at"]},
+            None,
+            "agent_lens_invalid_request",
+            "start_at and end_at must define a nonempty time range",
+            id="empty-range",
+        ),
+        pytest.param(
+            WINDOW,
+            {"data": {}},
+            "agent_lens_query_failed",
+            "Agent Lens returned an unexpected instrumentation report.",
+            id="bad-health-envelope",
+        ),
+    ],
+)
+def test_doctor_rejects_invalid_bounds_and_health_envelopes(
+    window: dict[str, str], health_payload: dict[str, object] | None, error: str, message: str
+) -> None:
+    with _mocked(_FakeResponse(health_payload)) as session, _trace_server() as (query, count):
+        result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **window))
+
+    assert result == {"error": error, "message": message}
+    assert len(session.calls) == (0 if health_payload is None else 1)
+    query.assert_not_called()
+    count.assert_not_called()
 
 
 @pytest.mark.parametrize(
