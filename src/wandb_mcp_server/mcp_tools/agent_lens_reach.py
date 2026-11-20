@@ -128,7 +128,7 @@ async def _count_calls(scope: DoctorScope) -> Optional[int]:
     try:
         count = await run_sync_in_current_tool(partial(count_traces, scope.entity_name, scope.project_name, time_range))
     except Exception as error:
-        raise_for_wandb_server_busy(error)
+        raise_for_wandb_server_busy(error, status_only=True)
         logger.warning("Weave calls check failed (%s)", type(error).__name__)
         return None
 

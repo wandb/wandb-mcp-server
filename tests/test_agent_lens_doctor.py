@@ -304,8 +304,10 @@ def test_doctor_reports_invalid_latest_span_data(spans: list[dict[str, str | Non
     count.assert_not_called()
 
 
-@pytest.mark.parametrize("status_code", [429, 503])
-def test_doctor_count_probe_surfaces_the_same_overload_as_the_span_probe(status_code: int):
+@pytest.mark.parametrize(
+    ("status_code", "count_reason"), [(429, "Service overloaded"), (503, "Service overloaded"), (503, "")]
+)
+def test_doctor_count_probe_surfaces_the_same_overload_as_the_span_probe(status_code: int, count_reason: str):
     busy_response = requests.Response()
     busy_response.status_code = status_code
     busy_response.reason = "Service overloaded"
@@ -318,6 +320,7 @@ def test_doctor_count_probe_surfaces_the_same_overload_as_the_span_probe(status_
     ):
         with pytest.raises(WandBServerBusy) as span_error:
             diagnose_instrumentation(ENTITY, project_name=PROJECT, **WINDOW)
+        busy_response.reason = count_reason
         with pytest.raises(WandBServerBusy) as count_error:
             diagnose_instrumentation(ENTITY, project_name=PROJECT, **WINDOW)
 
