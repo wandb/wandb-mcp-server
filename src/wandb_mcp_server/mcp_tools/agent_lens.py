@@ -42,7 +42,7 @@ from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text
 from wandb_mcp_server.mcp_tools.tools_utils import track_tool_execution
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
-from wandb_mcp_server.tool_results import ToolErrorPayload, tool_error_json
+from wandb_mcp_server.tool_results import ToolErrorJSON, ToolErrorPayload, tool_error_json
 
 logger = get_rich_logger(__name__)
 
@@ -325,7 +325,7 @@ def _retry_after_ms(value: object) -> int:
     return min(_MAX_RETRY_AFTER_MS, max(_DEFAULT_RETRY_AFTER_MS, round(seconds * 1_000)))
 
 
-def _parse_timestamp(value: str, field: str) -> datetime:
+def parse_timestamp(value: str, field: str) -> datetime:
     """Parse an RFC 3339 bound the way Agent Lens does, normalized to UTC."""
     text = value.strip()
     if not text:
@@ -341,8 +341,8 @@ def _parse_timestamp(value: str, field: str) -> datetime:
 
 def _validated_window(start_at: str, end_at: str) -> Dict[str, str]:
     """Check the range locally against the server's own bounds before sending."""
-    start = _parse_timestamp(start_at, "start_at")
-    end = _parse_timestamp(end_at, "end_at")
+    start = parse_timestamp(start_at, "start_at")
+    end = parse_timestamp(end_at, "end_at")
     if end <= start:
         raise ValueError("start_at and end_at must define a nonempty time range")
     if end - start > timedelta(days=MAX_INSIGHTS_WINDOW_DAYS):
@@ -391,12 +391,40 @@ async def _agent_lens_request(
     params: Optional[Dict[str, Any]] = None,
     body: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Call one Agent Lens read endpoint and return a JSON string.
+    """Call one Agent Lens read endpoint and return a JSON string trimmed to the token budget."""
+    result = await fetch_agent_lens_json(
+        path,
+        tool_name=tool_name,
+        method=method,
+        entity_name=entity_name,
+        project_name=project_name,
+        track_params=track_params,
+        params=params,
+        body=body,
+    )
+    if isinstance(result, ToolErrorJSON):
+        return result
+
+    return _compact_json(_truncate_response(_project_response(tool_name, result)))
+
+
+async def fetch_agent_lens_json(
+    path: str,
+    *,
+    tool_name: str,
+    method: str,
+    entity_name: str,
+    project_name: str,
+    track_params: Dict[str, object],
+    params: Optional[Dict[str, object]] = None,
+    body: Optional[Dict[str, object]] = None,
+) -> Dict[str, object] | ToolErrorJSON:
+    """Call one Agent Lens read endpoint and return the decoded payload or an error envelope.
 
     Follows the Agents tools: a no-retry request wrapped in
-    ``track_tool_execution`` and the standard ``structured_error`` envelope, with
-    the response trimmed to the token budget. Retrying a read belongs to the MCP
-    caller; doing it here would amplify an already loaded service.
+    `track_tool_execution` and the standard `structured_error` envelope.
+    Retrying a read belongs to the MCP caller; doing it here would amplify an
+    already loaded service.
 
     Unlike the trace server, Agent Lens parses the credential as a bearer token
     (``internal/auth/middleware.go``). An explicit Authorization header there
@@ -517,7 +545,7 @@ async def _agent_lens_request(
             ctx.mark_error(type(error).__name__)
             return _compact_json(structured_error("agent_lens_query_failed", "The Agent Lens request failed."))
 
-    return _compact_json(_truncate_response(_project_response(tool_name, result)))
+    return result
 
 
 def _detail(payload: Dict[str, Any]) -> str:

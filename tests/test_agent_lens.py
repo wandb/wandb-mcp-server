@@ -24,6 +24,8 @@ from scripts import agent_lens_smoke
 from wandb_mcp_server.admission import current_tool_deadline
 from wandb_mcp_server.api_client import WandBApiManager, WandBServerBusy
 from wandb_mcp_server.mcp_tools import agent_lens as agent_lens_mod
+from wandb_mcp_server.mcp_tools import agent_lens_doctor as doctor_mod
+from wandb_mcp_server.mcp_tools import agent_lens_reach as reach_mod
 from wandb_mcp_server.mcp_tools.agent_lens import (
     get_category_breakdowns as _get_category_breakdowns,
     get_clustering_status as _get_clustering_status,
@@ -81,6 +83,10 @@ def list_tags(*args, **kwargs):
 
 def list_tagged_conversations(*args, **kwargs):
     return _sync_call(_list_tagged_conversations, *args, **kwargs)
+
+
+def diagnose_instrumentation(*args, **kwargs):
+    return _sync_call(doctor_mod.diagnose_instrumentation, *args, **kwargs)
 
 
 class _FakeResponse:
@@ -926,3 +932,117 @@ def test_live_smoke_empty_fixture_fails_but_still_exercises_all_endpoints(
     assert len(calls) == len(set(calls)) == 9
     assert "8/9 checks passed" in output
     assert "skip" not in output.lower()
+
+
+# ----- instrumentation doctor -----
+
+
+def _rule(code, severity, failing, applicable, *, groups=0, spans=0, rule_type="span"):
+    return {
+        "code": code,
+        "severity": severity,
+        "rule_type": rule_type,
+        "title": f"{code} title",
+        "impact": f"{code} impact",
+        "fix": f"{code} fix",
+        "applicable_count": applicable,
+        "failing_count": failing,
+        "examples": [{"trace_id": f"{code}-t{i}", "conversation_id": f"{code}-c{i}"} for i in range(min(failing, 3))],
+        "failing_spans": [{"trace_id": "t", "span_id": f"s{i}", "conversation_id": "c"} for i in range(spans)],
+        "breakdown": {
+            "group_type": "span",
+            "group_count": groups,
+            "failing_group_count": groups,
+            "failing_groups": [{"name": f"g{i}", "failing_count": 1, "applicable_count": 2} for i in range(groups)],
+        },
+    }
+
+
+def _health(issues, *, spans=40, traces=4, unsettled=0):
+    return _ok({"span_count": spans, "trace_count": traces, "unsettled_trace_count": unsettled, "issues": issues})
+
+
+@contextmanager
+def _trace_server(*pages, calls=0):
+    """Stand in for trace-server reads: each of `pages` answers one agent-span query, in order."""
+    query = MagicMock(side_effect=[json.dumps({"spans": spans}) for spans in pages])
+    count = MagicMock(return_value=calls)
+    with patch.object(reach_mod, "query_agent_spans", query), patch.object(reach_mod, "count_traces", count):
+        yield query, count
+
+
+@pytest.mark.parametrize(("unsettled", "verdict"), [(0, "clean"), (3, "settling")])
+def test_doctor_reports_clean_only_once_every_trace_has_settled(unsettled, verdict):
+    passing = [_rule("span_no_operation_name", "must", 0, 40), _rule("trace_no_root", "should", 0, 4)]
+    with _mocked(_health(passing, unsettled=unsettled)) as session, _trace_server() as (query, count):
+        result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **WINDOW))
+
+    assert session.last["method"] == "GET"
+    assert session.last["url"] == f"{BASE_URL}/api/instrumentation/health"
+    assert session.last["params"] == WINDOW
+    assert result["verdict"] == verdict
+    assert result["issues"] == []
+    assert result["failing_rule_counts"] == {"must": 0, "should": 0}
+    assert result["passing_rule_count"] == 2
+    assert result["scope"] == {"entity_name": ENTITY, "project_name": PROJECT, **WINDOW}
+    assert ("note" in result) is bool(unsettled)
+    query.assert_not_called()
+    count.assert_not_called()
+
+
+def test_doctor_ranks_failing_rules_must_first_then_by_share_for_the_latest_conversation():
+    issues = [
+        _rule("should_half", "should", 5, 10, groups=1),
+        _rule("must_tenth", "must", 1, 10, groups=5, spans=30),
+        _rule("passing", "must", 0, 10),
+        _rule("must_all", "must", 4, 4, groups=2, rule_type="trace"),
+    ]
+    newest = [{"conversation_id": "conv-9", "trace_id": "t9"}]
+    latest = {"project_name": PROJECT, "conversation_id": "latest", **WINDOW}
+    with _mocked(_health(issues)) as session, _trace_server(newest) as (query, count):
+        result = json.loads(diagnose_instrumentation(ENTITY, **latest))
+    with _mocked(_health(issues)), _trace_server(newest):
+        detailed = json.loads(diagnose_instrumentation(ENTITY, include_failing_spans=True, **latest))
+
+    assert query.call_args.kwargs["sort_by"] == "started_at"
+    assert query.call_args.kwargs["limit"] == 1
+    assert query.call_args.kwargs["started_after"] == WINDOW["start_at"]
+    assert session.last["params"] == {**WINDOW, "conversation_id": "conv-9"}
+    assert result["scope"]["conversation_id"] == "conv-9"
+    assert result["verdict"] == "failing"
+    assert [issue["code"] for issue in result["issues"]] == ["must_all", "must_tenth", "should_half"]
+    assert result["failing_rule_counts"] == {"must": 2, "should": 1}
+    assert result["passing_rule_count"] == 1
+    second = result["issues"][1]
+    assert second["fix"] == "must_tenth fix"
+    assert (second["failing_count"], second["applicable_count"], second["group_type"]) == (1, 10, "span")
+    assert [group["name"] for group in second["top_failing_groups"]] == ["g0", "g1", "g2"]
+    assert second["examples"] == [{"trace_id": "must_tenth-t0", "conversation_id": "must_tenth-c0"}]
+    assert "failing_spans" not in second
+    assert len(detailed["issues"][1]["failing_spans"]) == 20
+    count.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("status", "kwargs", "pages", "calls", "expected", "checks_listed"),
+    [
+        (200, {}, (), 12, "/agents/otel/v1/traces", False),
+        (404, {"trace_id": "t1"}, ([],), 0, "Nothing reached", True),
+        (404, {"conversation_id": "c1"}, ([{"trace_id": "x"}],), 0, "Check that id", False),
+        (200, {"conversation_id": "latest"}, ([], [{"trace_id": "x"}]), 0, "none carries a conversation id", False),
+    ],
+)
+def test_doctor_never_reports_zero_spans_as_healthy(status, kwargs, pages, calls, expected, checks_listed):
+    response = _health([], spans=0, traces=0) if status == 200 else _FakeResponse({"detail": "no spans"}, 404)
+    with _mocked(response), _trace_server(*pages, calls=calls) as (_query, count):
+        result = json.loads(diagnose_instrumentation(ENTITY, project_name=PROJECT, **kwargs, **WINDOW))
+
+    assert result["verdict"] == "no_spans"
+    assert result["span_count"] == 0
+    assert expected in result["diagnosis"]
+    assert "issues" not in result
+    assert ("checks" in result) is checks_listed
+    assert ("calls_in_window" in result) is count.called
+    if count.called:
+        assert count.call_args.args[2] == {"time_range": {"start": WINDOW["start_at"], "end": WINDOW["end_at"]}}
+        assert result["calls_in_window"] == calls

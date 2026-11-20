@@ -1,0 +1,120 @@
+"""Explain an empty Agent Lens instrumentation check from what reached the trace server.
+
+A zero-span health report would read as healthy. These helpers ask the trace
+server whether agent spans exist outside the filter or Weave calls arrived
+instead, and otherwise list the exporter checks in order.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Optional
+
+from wandb_mcp_server.config import WF_TRACE_SERVER_URL
+from wandb_mcp_server.mcp_tools.agent_lens_doctor_models import AgentSpan, AgentSpanPage, DoctorScope, NoSpansReport
+from wandb_mcp_server.mcp_tools.agents import query_agent_spans
+from wandb_mcp_server.mcp_tools.count_traces import count_traces
+from wandb_mcp_server.tool_results import ToolErrorJSON
+from wandb_mcp_server.utils import get_rich_logger
+
+logger = get_rich_logger(__name__)
+
+LATEST_CONVERSATION = "latest"
+AGENTS_OTLP_ENDPOINT = f"{WF_TRACE_SERVER_URL.rstrip('/')}/agents/otel/v1/traces"
+HAS_CONVERSATION_QUERY = {"$expr": {"$not": [{"$eq": [{"$getField": "conversation_id"}, {"$literal": ""}]}]}}
+REACH_CHECKS = (
+    f"OTLP exporter endpoint is {AGENTS_OTLP_ENDPOINT}.",
+    "Exporter sends a W&B API key in a wandb-api-key header.",
+    "Tracer resource sets wandb.entity and wandb.project to this project.",
+    "App flushes or shuts down its tracer provider before exiting, so batched spans are sent.",
+)
+
+
+async def no_spans_report(scope: DoctorScope) -> str:
+    """Explain an empty check by testing whether agent spans or Weave calls reached this project."""
+    if scope.filtered:
+        any_span = await newest_agent_span(scope, with_conversation=False)
+        if isinstance(any_span, ToolErrorJSON):
+            return any_span
+        if any_span is not None:
+            report = NoSpansReport(
+                verdict="no_spans", scope=scope.as_dict(), span_count=0, diagnosis=_filter_diagnosis(scope)
+            )
+            return json.dumps(report)
+
+    calls = await _count_calls(scope)
+    report = NoSpansReport(
+        verdict="no_spans",
+        scope=scope.as_dict(),
+        span_count=0,
+        diagnosis=_reach_diagnosis(calls),
+        calls_in_window=calls,
+    )
+    if not calls:
+        report["checks"] = list(REACH_CHECKS)
+
+    return json.dumps(report)
+
+
+async def newest_agent_span(scope: DoctorScope, *, with_conversation: bool) -> Optional[AgentSpan] | ToolErrorJSON:
+    """Return the newest agent span in `scope`'s range, optionally requiring a conversation id."""
+    response = await asyncio.to_thread(
+        query_agent_spans,
+        scope.entity_name,
+        scope.project_name,
+        query=HAS_CONVERSATION_QUERY if with_conversation else None,
+        started_after=scope.start_at,
+        started_before=scope.end_at,
+        sort_by="started_at",
+        sort_direction="desc",
+        limit=1,
+    )
+    if isinstance(response, ToolErrorJSON):
+        return response
+
+    page = AgentSpanPage.model_validate_json(response)
+
+    return page.spans[0] if page.spans else None
+
+
+def _filter_diagnosis(scope: DoctorScope) -> str:
+    """Explain agent spans that exist in range but miss `scope`'s conversation or trace filter."""
+    if scope.conversation_id == LATEST_CONVERSATION:
+        return (
+            "Agent spans arrived in this window, but none carries a conversation id. Set gen_ai.conversation.id "
+            "on each turn's root span, or call without conversation_id to check the whole project."
+        )
+
+    return (
+        "This project has agent spans in this window, but no eligible span matches this conversation_id or "
+        "trace_id. Check that id, or pass start_at and end_at covering when it ran. Evaluation traces and "
+        "Weave Signals spans are excluded."
+    )
+
+
+def _reach_diagnosis(calls: Optional[int]) -> str:
+    """Explain zero agent spans from the Weave call count in the same range."""
+    if calls is None:
+        return "No agent spans arrived, and counting Weave calls failed. Work through `checks` in order."
+    if calls == 0:
+        return "Nothing reached this project in this window. Work through `checks` in order."
+
+    return (
+        f"No agent spans arrived, but {calls} Weave call(s) did, so this exporter targets the legacy "
+        f"/otel/v1/traces endpoint. Point OTLP export at {AGENTS_OTLP_ENDPOINT} and set resource "
+        "attributes wandb.entity and wandb.project."
+    )
+
+
+async def _count_calls(scope: DoctorScope) -> Optional[int]:
+    """Count Weave calls started in `scope`'s range, or None when `count_traces` fails."""
+    time_range = {"time_range": {"start": scope.start_at, "end": scope.end_at}}
+    try:
+        count = await asyncio.to_thread(count_traces, scope.entity_name, scope.project_name, time_range)
+    # `count_traces` wraps transport failures in a bare Exception; this report still lists `REACH_CHECKS`.
+    except Exception as error:
+        logger.warning("Weave calls check failed (%s)", type(error).__name__)
+        return None
+
+    return count
