@@ -54,7 +54,7 @@ without a human reading traces:
 5. Stop on verdict "clean".
 
 Span rules update as soon as spans arrive. Verdict "no_spans" means nothing
-was checked: follow its `diagnosis` and `checks`; never read it as healthy.
+was checked. Follow its `diagnosis` and any `checks`. Never read it as healthy.
 </when_to_use>
 
 Parameters
@@ -81,8 +81,9 @@ span/trace/unsettled counts, "failing_rule_counts" {{"must", "should"}},
 "passing_rule_count", and "issues": only failing rules, ranked, each with
 "code", "severity", "rule_type", "title", "impact", "fix", failing/applicable
 counts, {SHOWN_GROUPS} "top_failing_groups", and up to 3 "examples"
-{{"trace_id", "conversation_id"}}. A "no_spans" result instead carries
-"diagnosis", "calls_in_window", and ordered "checks".
+{{"trace_id", "conversation_id"}}. A "no_spans" result always includes "diagnosis".
+It includes "calls_in_window" only if no agent spans reached the project in the
+window. Ordered exporter "checks" appear only when that count is zero or unknown.
 """
 
 
