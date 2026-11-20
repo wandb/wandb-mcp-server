@@ -130,6 +130,10 @@ from wandb_mcp_server.mcp_tools.agent_lens import (
     list_tags,
     list_tagged_conversations,
 )
+from wandb_mcp_server.mcp_tools.agent_lens_doctor import (
+    DIAGNOSE_INSTRUMENTATION_TOOL_DESCRIPTION,
+    diagnose_instrumentation,
+)
 from wandb_mcp_server.mcp_tools.agents import (
     GET_AGENT_CONVERSATION_TOOL_DESCRIPTION,
     GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION,
@@ -231,6 +235,11 @@ _AGENT_LENS_TOOLS = (
         LIST_TAGGED_CONVERSATIONS_TOOL_DESCRIPTION,
     ),
     _DirectTool("get_agent_lens_tag_distribution_tool", get_tag_distribution, GET_TAG_DISTRIBUTION_TOOL_DESCRIPTION),
+    _DirectTool(
+        "diagnose_agent_lens_instrumentation_tool",
+        diagnose_instrumentation,
+        DIAGNOSE_INSTRUMENTATION_TOOL_DESCRIPTION,
+    ),
 )
 
 

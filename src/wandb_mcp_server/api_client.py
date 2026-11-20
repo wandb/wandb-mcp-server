@@ -128,8 +128,10 @@ def _retry_after_ms(value: object) -> int:
     return min(_MAX_RETRY_AFTER_MS, max(_DEFAULT_RETRY_AFTER_MS, round(seconds * 1_000)))
 
 
-def wandb_server_busy_from_exception(exc: BaseException) -> WandBServerBusy | None:
-    """Classify nested W&B overload errors without retry amplification."""
+def wandb_server_busy_from_exception(
+    exc: BaseException, *, require_overload_hint: bool = True
+) -> WandBServerBusy | None:
+    """Classify nested W&B overload errors, optionally requiring a hint for 503."""
     if isinstance(exc, WandBServerBusy):
         return exc
 
@@ -159,19 +161,21 @@ def wandb_server_busy_from_exception(exc: BaseException) -> WandBServerBusy | No
         if match:
             status_code = int(match.group(1))
 
-    if status_code == 503 and not _OVERLOAD_HINT_RE.search(combined_message):
+    if status_code == 503 and require_overload_hint and not _OVERLOAD_HINT_RE.search(combined_message):
         return None
+
     if status_code not in {429, 503}:
         return None
+
     return WandBServerBusy(
         status_code=status_code,
         retry_after_ms=_retry_after_ms(retry_after),
     )
 
 
-def raise_for_wandb_server_busy(exc: BaseException) -> None:
+def raise_for_wandb_server_busy(exc: BaseException, *, require_overload_hint: bool = True) -> None:
     """Preserve overload backpressure across tool-specific fallback paths."""
-    if busy := wandb_server_busy_from_exception(exc):
+    if busy := wandb_server_busy_from_exception(exc, require_overload_hint=require_overload_hint):
         raise busy from exc
 
 

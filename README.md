@@ -52,7 +52,7 @@ Claude Code, Codex, another harness, or an application, first follow the
 [Agent Lens integration guide](https://docs.coreweave.com/products/agent-lens/get-started/integrations?utm_source=github&utm_medium=referral&utm_campaign=agent-lens-integrations-2026q4&utm_content=wandb-mcp-readme).
 
 Check the tools advertised by your connection. Agent span tools expose
-conversations, turns, model calls, and tools. Insights and tag tools require the
+conversations, turns, model calls, and tools. Insights, tag, and instrumentation tools require the
 explicit Agent Lens profile described in [Agent Lens tools](docs/agent-lens-tools.md);
 managed dedicated deployments reject that profile. Source availability does not
 establish availability in a particular release channel; check the release index above.
@@ -62,6 +62,7 @@ When the corresponding tools are advertised, try:
 - "In my-team/my-project, find conversations mentioning refunds and show one complete conversation."
 - "Check the Insights classification coverage before summarizing the most common failure categories. Include example turn IDs and the covered time range."
 - "List the available tags, then show a bounded sample of conversations for one tag."
+- "Run my app, check instrumentation for the latest conversation, fix the first must-fix issue, and repeat until it is clean."
 
 Open recorded conversations at `https://forge.coreweave.com/agent-lens/<entity>/<project>`.
 Connecting MCP does not install a tracing plugin or enable automatic capture of
@@ -142,7 +143,7 @@ Recommended deployment presets:
 
 | Deployment | Settings |
 |---|---|
-| MT SaaS with Agent Lens and ARIA | `models-weave-agents` + `WANDB_MCP_TOOL_EXTENSIONS=agent-lens,aria`, `shared`, `read-write` (42 tools) |
+| MT SaaS with Agent Lens and ARIA | `models-weave-agents` + `WANDB_MCP_TOOL_EXTENSIONS=agent-lens,aria`, `shared`, `read-write` (44 tools) |
 | Dedicated Models-only | `models-only`, `dedicated`, `read-write` (17 tools) |
 | Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (22 tools) |
 | Local extra GraphQL tool | `models-weave-graphql-compat`, `local`; choose either access mode |
@@ -748,7 +749,7 @@ Exact tool profiles:
 
 | Extension (`WANDB_MCP_TOOL_EXTENSIONS`) | Requires | Managed workloads | Tools |
 |---|---|---|---:|
-| `agent-lens` | weave, agents | shared | 9 |
+| `agent-lens` | weave, agents | shared | 10 |
 | `aria` | weave, agents | shared | 4 |
 | `raw-graphql` | weave | local only | 1 |
 
@@ -758,13 +759,13 @@ Exact tool profiles:
 | `models-weave` | `models-weave` | none | dedicated, shared | 22 | 20 |
 | `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 23 | 21 |
 | `models-weave-agents` | `models-weave-agents` | none | shared | 30 | 28 |
-| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 39 | 37 |
+| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 40 | 38 |
 | `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 34 | 31 |
 | `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 31 | 29 |
-| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 43 | 40 |
-| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 40 | 38 |
+| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 44 | 41 |
+| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 41 | 39 |
 | `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 35 | 32 |
-| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 44 | 41 |
+| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 45 | 42 |
 
 Exact workload defaults:
 
@@ -782,7 +783,7 @@ Exact capacity classes:
 | `medium` | 4 | 8 | 8 | 8 |
 | `large` | 8 | 16 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:fa8b0ba1128ccb28cd5fe885e46847a5f3f8eda7bf14db327db4356d68978867`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:864ffbf4a6adbaf840e806a44f3a0612e0b64f8a4fe11cfe5908cfd76ecd9f66`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line
