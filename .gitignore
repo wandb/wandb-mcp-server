@@ -7,6 +7,8 @@ __pycache__/
 *.so
 
 */node_modules/*
+**/node_modules/
+ui/*/dist/
 .wandb
 wandb/*
 

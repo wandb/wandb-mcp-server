@@ -49,6 +49,12 @@ http = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/wandb_mcp_server"]
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "ui/**/node_modules",
+    "ui/**/dist",
+]
+
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "INFO"  # or "DEBUG"
