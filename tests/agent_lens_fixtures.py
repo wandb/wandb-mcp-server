@@ -119,6 +119,9 @@ class _FakeAsyncClient:
 
     def stream(self, method, url, **kwargs):
         self.calls.append({"method": method, "url": url, **kwargs})
+        if isinstance(self._response, list) and self._response:
+            next_resp = self._response.pop(0) if len(self._response) > 1 else self._response[0]
+            return _FakeStreamContext(next_resp)
         return _FakeStreamContext(self._response)
 
     @property

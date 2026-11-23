@@ -17,11 +17,14 @@ from wandb_mcp_server.mcp_tools import agents as agents_mod
 from wandb_mcp_server.mcp_tools.agents import (
     _normalize_stats_metrics,
     get_agent_conversation,
+    get_agent_conversation_spans,
     get_agent_span_stats,
     get_agent_trace,
     list_agent_custom_attributes,
     list_agent_versions,
     list_agents,
+    manage_agent_feedback,
+    query_agent_feedback,
     query_agent_spans,
     search_agents,
 )
@@ -332,3 +335,108 @@ class TestNormalizeStatsMetrics:
     def test_invalid_entry_raises(self):
         with pytest.raises(ValueError):
             _normalize_stats_metrics([123], "sum")
+
+
+class TestGroupedSpansChatAndFeedbackPrimitives:
+    def test_grouped_spans_with_insight_and_tag_filters(self):
+        with _patched({"groups": [{"conversation_id": "c1", "span_count": 4}], "total_count": 1}) as session:
+            query_agent_spans(
+                "e",
+                "p",
+                conversation_id="c1",
+                status_code="ERROR",
+                group_by=["conversation_id", {"source": "custom_attrs_string", "key": "tier"}],
+                measures=[{"alias": "span_count", "aggregation": "count"}],
+                insight_filters=[{"field": "failure_severity", "values": ["high"]}],
+                tag_filter={"tag_ids": ["30201f95-1221-433a-9ea5-1e513081962f"]},
+            )
+        body = _body(session)
+        assert len(body["query"]["$expr"]["$and"]) == 2
+        assert body["group_by"] == [
+            {"source": "field", "key": "conversation_id"},
+            {"source": "custom_attrs_string", "key": "tier"},
+        ]
+        assert body["measures"] == [{"alias": "span_count", "aggregation": "count"}]
+        assert body["insight_filters"] == [{"field": "failure_severity", "values": ["high"]}]
+
+    def test_span_stats_percentiles_and_custom_group_by(self):
+        with _patched({"rows": []}) as session:
+            get_agent_span_stats(
+                "e",
+                "p",
+                start="2026-06-01T00:00:00Z",
+                metrics=["duration_ms", "is_error"],
+                percentiles=[50, 95, 99],
+                group_by=[{"source": "custom_attrs_string", "key": "daw_tool"}],
+            )
+        body = _body(session)
+        by_alias = {m["alias"]: m for m in body["metrics"]}
+        assert by_alias["duration_ms"]["percentiles"] == [50.0, 95.0, 99.0]
+        assert "percentiles" not in by_alias["is_error"]
+        assert body["group_by"] == [{"source": "custom_attrs_string", "key": "daw_tool"}]
+
+    def test_conversation_chat_defaults_to_chronological_asc_and_compacts_large_tool_result(self, monkeypatch):
+        monkeypatch.setattr(agents_mod, "MAX_RESPONSE_TOKENS", 2500)
+        huge_tool = "z" * 12_000
+        canned = {
+            "conversation_id": "c1",
+            "turns": [{"trace_id": "t1", "messages": [{"role": "tool", "tool_result": huge_tool}]}],
+        }
+        with _patched(canned) as session:
+            out = json.loads(get_agent_conversation("e", "p", conversation_id="c1", include_model_tool_calls=True))
+        body = _body(session)
+        assert body["sort_by"] == [{"field": "started_at", "direction": "asc"}]
+        assert body["include_model_tool_calls"] is True
+        assert out["_field_compaction"]["applied"] is True
+        assert len(out["turns"]) == 1
+        assert len(out["turns"][0]["messages"][0]["tool_result"]) < 4_000
+
+    def test_bulk_conversation_spans_request(self):
+        with _patched({"conversations": [{"conversation_id": "c1", "spans": [], "feedback": []}]}) as session:
+            out = json.loads(get_agent_conversation_spans("e", "p", ["c1", "c2"]))
+        assert _url(session).endswith("/agents/conversations/spans")
+        assert _body(session)["conversation_ids"] == ["c1", "c2"]
+        assert len(out["conversations"]) == 1
+
+    def test_query_feedback_and_aggregate(self):
+        with _patched(
+            {"result": [{"id": "f1", "payload": {"note": "edited bass track"}}], "total_count": 1}
+        ) as session:
+            out = json.loads(query_agent_feedback("e", "p", conversation_id="c1", feedback_type="wandb.note.1"))
+        assert _url(session).endswith("/feedback/query")
+        assert len(_body(session)["query"]["$expr"]["$and"]) == 2
+        assert out["total_count"] == 1
+
+        with _patched({"buckets": []}) as session:
+            query_agent_feedback("e", "p", aggregate=True, after_ms=100, before_ms=200, feedback_type="wandb.note.1")
+        assert _url(session).endswith("/feedback/aggregate")
+        assert _body(session)["feedback_types"] == ["wandb.note.1"]
+
+    def test_manage_feedback_builds_canonical_agent_turn_weave_ref_and_purges(self):
+        with _patched({"id": "fb-1", "created_at": "2026-11-23T00:00:00Z"}) as session:
+            manage_agent_feedback(
+                "acme",
+                "midi-agent",
+                "add_note",
+                conversation_id="conv-1",
+                trace_id="018f1f2a-9c2b-7d3e-b5a1-8c9d2e4f6a7b",
+                note="Should have transposed melody, not drums",
+            )
+        assert _url(session).endswith("/feedback/create")
+        body = _body(session)
+        assert body["weave_ref"] == "weave:///acme/midi-agent/agent_turn/018f1f2a9c2b7d3eb5a18c9d2e4f6a7b"
+        assert body["feedback_type"] == "wandb.note.1"
+        assert body["payload"] == {"note": "Should have transposed melody, not drums"}
+        assert body["span_conversation_id"] == "conv-1"
+        assert body["span_trace_id"] == "018f1f2a9c2b7d3eb5a18c9d2e4f6a7b"
+
+        with _patched({"id": "fb-2"}) as session:
+            manage_agent_feedback("acme", "midi-agent", "add_reaction", trace_id="abc123", emoji="👎")
+        rbody = _body(session)
+        assert rbody["feedback_type"] == "wandb.agent_user_feedback"
+        assert rbody["scorer_tags"] == ["👎"]
+
+        with _patched({}) as session:
+            manage_agent_feedback("acme", "midi-agent", "delete_feedback", feedback_id="fb-1")
+        assert _url(session).endswith("/feedback/purge")
+        assert _body(session)["query"]["$expr"]["$eq"][1] == {"$literal": "fb-1"}

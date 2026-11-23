@@ -196,12 +196,15 @@ extension composed onto it). Dedicated rejects the `agents` group.
 |------|-------------|---------------|
 | **list_weave_agents_tool** | List agents with aggregated stats (invocations, tokens, duration, errors) | *"Which agents ran this week and how many errors did each have?"* |
 | **list_weave_agent_versions_tool** | Per-version stats for one agent | *"Did v2 of my agent regress on latency?"* |
-| **query_weave_agent_spans_tool** | Query individual agent/LLM/tool spans (filter by agent, model, time) | *"Show failed tool spans for my-agent yesterday"* |
-| **get_weave_agent_span_stats_tool** | Time-bucketed metric series (tokens, cost, latency, error rate) | *"Plot daily token usage by agent"* |
+| **query_weave_agent_spans_tool** | Query or group agent/LLM/tool spans with Insight, tag, signal, and custom-attribute filters | *"Group failed tool spans by tool_name for high-severity failures"* |
+| **get_weave_agent_span_stats_tool** | Time- or value-bucketed metric and percentile series (`p50`/`p95`/`p99` latency, tokens, cost, errors) | *"Show hourly p95 tool duration by agent"* |
 | **list_weave_agent_custom_attributes_tool** | Discover custom attribute keys on agent spans | *"What custom attributes do my agent spans have?"* |
 | **search_weave_agents_tool** | Full-text / structured message search, grouped by conversation | *"Find conversations mentioning refunds"* |
 | **get_weave_agent_trace_tool** | Structured chat/trajectory view for one trace (a turn) | *"What did the agent do in trace abc123?"* |
-| **get_weave_agent_conversation_tool** | Multi-turn chat view for a conversation | *"Show the whole conversation conv-42"* |
+| **get_weave_agent_conversation_tool** | Chronological multi-turn chat view for a conversation (`Turn 1` onward by default) | *"Show the whole conversation conv-42"* |
+| **get_weave_agent_conversation_spans_tool** | Batch-load full OTel span trees and feedback markers for up to 100 conversations | *"Fetch span trees for the 15 sampled cluster conversations"* |
+| **query_weave_agent_feedback_tool** | Search or aggregate project-wide human notes (`wandb.note.1`), reactions, and scorer feedback | *"Find human notes mentioning wrong track across the project"* |
+| **manage_weave_agent_feedback_tool** | Add or delete human notes/corrections and reactions on turns or conversations (`read-write` only) | *"Add a note on turn abc123 explaining the expected edit"* |
 
 **Schema-first workflow:** Call `infer_trace_schema_tool` first to discover fields, then `query_weave_traces_tool` with precise columns and `detail_level`:
 - `"schema"` -- structural fields only (fast browsing)
@@ -236,7 +239,7 @@ presence alone never enables the tools. `WANDB_MCP_ACCESS_MODE=read-only` omits
 `aria_send_message` while retaining the three read tools. The `aria` extension
 is allowed on the W&B-hosted `shared` workload (since v0.4.4); Dedicated rejects it.
 
-**ARIA polling:** ARIA calls are asynchronous. Root turns require a caller-written title, set via `PATCH /api/v1/threads/{thread_id}` after turn creation. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn for up to 30 seconds. To revisit an earlier conversation, `aria_list_threads` finds threads and `aria_get_thread` lists a thread's turns; read a turn's answer with `aria_get_turn` and continue with `aria_send_message(parent_turn_id=...)`. MCP-created turns are tagged with a `wandb_client` prompt part (`platform: "agent"`) and every request sends `X-Wandb-Client: wandb-mcp-server/<version>`, so ARIA can separate MCP traffic from UI usage. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
+**ARIA polling:** ARIA calls are asynchronous. Root turns accept an optional caller-written title (or auto-generate one via `POST /api/v1/threads/generate-title` with a bounded prompt fallback), set via `PATCH /api/v1/threads/{thread_id}` after turn creation. `aria_send_message` returns a turn handle, and `aria_get_turn` polls one turn with stepped intervals up to 30 seconds. To revisit an earlier conversation, `aria_list_threads` finds threads and `aria_get_thread` lists a thread's turns; read a turn's answer with `aria_get_turn` and continue with `aria_send_message(parent_turn_id=...)`. MCP-created turns are tagged with a `wandb_client` prompt part (`platform: "agent"`) and every request sends `X-Wandb-Client: wandb-mcp-server/<version>`, so ARIA can separate MCP traffic from UI usage. Poll results are compact by default; pass `include_turn=true` only when a bounded raw service snapshot is needed.
 
 **Agent Lens is explicit and hosted-only in managed deployments (since v0.4.2):** W&B-hosted
 deployments add the `agent-lens` extension to `models-weave-agents` (legacy name
@@ -749,7 +752,7 @@ Exact tool profiles:
 
 | Extension (`WANDB_MCP_TOOL_EXTENSIONS`) | Requires | Managed workloads | Tools |
 |---|---|---|---:|
-| `agent-lens` | weave, agents | shared | 10 |
+| `agent-lens` | weave, agents | shared | 14 |
 | `aria` | weave, agents | shared | 4 |
 | `raw-graphql` | weave | local only | 1 |
 
@@ -758,14 +761,14 @@ Exact tool profiles:
 | `models-only` | `models-only` | none | dedicated, shared | 17 | 15 |
 | `models-weave` | `models-weave` | none | dedicated, shared | 22 | 20 |
 | `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 23 | 21 |
-| `models-weave-agents` | `models-weave-agents` | none | shared | 30 | 28 |
-| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 40 | 38 |
-| `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 34 | 31 |
-| `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 31 | 29 |
-| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 44 | 41 |
-| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 41 | 39 |
-| `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 35 | 32 |
-| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 45 | 42 |
+| `models-weave-agents` | `models-weave-agents` | none | shared | 33 | 30 |
+| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 47 | 42 |
+| `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 37 | 33 |
+| `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 34 | 31 |
+| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 51 | 45 |
+| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 48 | 43 |
+| `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 38 | 34 |
+| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 52 | 46 |
 
 Exact workload defaults:
 
@@ -783,7 +786,7 @@ Exact capacity classes:
 | `medium` | 4 | 8 | 8 | 8 |
 | `large` | 8 | 16 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:864ffbf4a6adbaf840e806a44f3a0612e0b64f8a4fe11cfe5908cfd76ecd9f66`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:c3cdd971289752bd77343397a051cc788e755ab36bd96ad22d229c0cb2b7cc9d`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line

@@ -62,6 +62,9 @@ _NON_IDEMPOTENT_WRITE_TOOLS = frozenset(
         "create_wandb_report_tool",
         "log_analysis_to_wandb",
         "aria_send_message",
+        "manage_weave_agent_feedback_tool",
+        "manage_agent_lens_tags_tool",
+        "manage_agent_lens_guidelines_tool",
     }
 )
 _ARIA_TOOL_COSTS = {
@@ -72,7 +75,14 @@ _ARIA_TOOL_COSTS = {
 }
 _TELEMETRY_RESULT_ERROR_CODES = frozenset(
     {
+        "agent_lens_forbidden",
+        "agent_lens_invalid_request",
+        "agent_lens_not_configured",
+        "agent_lens_query_failed",
+        "agent_lens_response_too_large",
+        "agent_lens_unavailable",
         "agents_api_unavailable",
+        "agents_invalid_request",
         "agents_query_failed",
         "api_error",
         "artifact_inventory_unavailable",

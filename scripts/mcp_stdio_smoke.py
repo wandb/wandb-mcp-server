@@ -80,7 +80,10 @@ _AGENT_TOOL_NAMES = {
     "search_weave_agents_tool",
     "get_weave_agent_trace_tool",
     "get_weave_agent_conversation_tool",
+    "get_weave_agent_conversation_spans_tool",
+    "query_weave_agent_feedback_tool",
 }
+_AGENT_WRITE_TOOL_NAMES = {"manage_weave_agent_feedback_tool"}
 _ARIA_TOOL_NAMES = {"aria_send_message", "aria_get_turn", "aria_list_threads", "aria_get_thread"}
 _WHEEL_RUNTIME_CONTRACT = "wandb_mcp_server/runtime-contract.json"
 
@@ -264,6 +267,10 @@ async def _exercise_profile(
                                 aria_tools_enabled = False
                                 assert len(tools_by_name) == 22
                             assert _AGENT_TOOL_NAMES.issubset(tools_by_name) is agent_tools_enabled
+                            if agent_tools_enabled and profile and not profile.read_only:
+                                assert _AGENT_WRITE_TOOL_NAMES <= tools_by_name.keys()
+                            else:
+                                assert _AGENT_WRITE_TOOL_NAMES.isdisjoint(tools_by_name)
                             if aria_tools_enabled:
                                 expected_aria_tools = _ARIA_TOOL_NAMES - (
                                     {"aria_send_message"} if profile and profile.read_only else set()

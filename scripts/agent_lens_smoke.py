@@ -19,7 +19,7 @@ Usage:
         --tag-name reviewed --conversation-id conv-123
 
 The fixture arguments must identify populated, approved test data. The script
-exits non-zero unless every one of the nine read endpoints returns matching
+exits non-zero unless every one of the eleven read checks returns matching
 fixture data; empty results are not counted as qualification success.
 """
 
@@ -40,9 +40,11 @@ from wandb_mcp_server.mcp_tools.agent_lens import (
     get_clustering_status,
     get_conversation_tags,
     get_failure_attributions,
+    get_guidelines,
     get_insights_coverage,
     get_tag_distribution,
     list_category_example_turns,
+    list_clusters,
     list_tags,
     list_tagged_conversations,
 )
@@ -61,13 +63,7 @@ def _parse_rfc3339(value: str, field: str) -> datetime:
 
 
 def _seed_api_key() -> str | None:
-    """Put a key in the request context, as the server does at startup.
-
-    WandBApiManager.get_api_key() reads a contextvar with no environment
-    fallback, so calling a tool outside a served request finds nothing. Resolve
-    the key through the same precedence the console entrypoint uses (env, then
-    .netrc, then .env) and seed the context for this process.
-    """
+    """Put a key in the request context, as the server does at startup."""
     api_key = os.getenv("WANDB_API_KEY") or get_server_args().wandb_api_key
     if api_key:
         WandBApiManager.set_context_api_key(api_key)
@@ -84,7 +80,7 @@ async def _run(
     """Invoke one tool and summarize its envelope."""
     try:
         payload = json.loads(await call())
-    except Exception as error:  # a tool should return an envelope, never raise
+    except Exception as error:
         print(f"  FAIL  {label}: raised {type(error).__name__}")
         return False, None
 
@@ -117,20 +113,18 @@ def _nonempty_list(value: Any) -> bool:
     return isinstance(value, list) and bool(value)
 
 
+def _list_shaped(value: Any) -> bool:
+    return isinstance(value, list)
+
+
 def _category_present(value: Any, signature_type: str, category_id: str) -> bool:
-    if not isinstance(value, list):
-        return False
-    if signature_type == "intent":
+    if isinstance(value, dict):
+        section = value.get(signature_type) if signature_type in value else value
+        if isinstance(section, dict) and isinstance(section.get("categories"), list):
+            return any(isinstance(row, dict) and row.get("category") == category_id for row in section["categories"])
+    if isinstance(value, list):
         return any(isinstance(row, dict) and row.get("category") == category_id for row in value)
-    return any(
-        isinstance(row, dict)
-        and any(
-            isinstance(item, dict) and item.get("category") == category_id
-            for field in ("counts", "failure_breakdowns")
-            for item in (row.get(field) or [])
-        )
-        for row in value
-    )
+    return False
 
 
 def _conversation_tag_present(value: Any, conversation_id: str, tag_id: str, tag_name: str) -> bool:
@@ -223,7 +217,7 @@ async def main() -> int:
 
     entity, project = args.entity, args.project
     window = {"start_at": args.start_at, "end_at": args.end_at}
-    print("Agent Lens smoke: exercising nine read endpoints against approved fixtures")
+    print("Agent Lens smoke: exercising eleven read checks against approved fixtures")
 
     results: list[bool] = []
 
@@ -261,6 +255,16 @@ async def main() -> int:
     results.append(
         (
             await _run(
+                "clusters",
+                lambda: list_clusters(entity, project, args.signature_type, **window),
+                args.verbose,
+                qualifies=_nonempty_list,
+            )
+        )[0]
+    )
+    results.append(
+        (
+            await _run(
                 "category example turns",
                 lambda: list_category_example_turns(
                     entity,
@@ -287,11 +291,11 @@ async def main() -> int:
         )[0]
     )
 
-    print("\nConversation tags")
+    print("\nConversation tags & guidelines")
     results.append(
         (
             await _run(
-                "tag catalog",
+                "tag catalog (v1)",
                 lambda: list_tags(entity, project),
                 args.verbose,
                 qualifies=lambda data: _tag_present(data, args.tag_id, args.tag_name),
@@ -339,9 +343,19 @@ async def main() -> int:
             )
         )[0]
     )
+    results.append(
+        (
+            await _run(
+                "project guidelines",
+                lambda: get_guidelines(entity, project),
+                args.verbose,
+                qualifies=_list_shaped,
+            )
+        )[0]
+    )
 
-    if len(results) != 9:
-        print("\nFAIL: qualification did not exercise exactly nine endpoints", file=sys.stderr)
+    if len(results) != 11:
+        print("\nFAIL: qualification did not exercise exactly eleven endpoints", file=sys.stderr)
         return 1
     failed = results.count(False)
     print(f"\n{len(results) - failed}/{len(results)} checks passed")

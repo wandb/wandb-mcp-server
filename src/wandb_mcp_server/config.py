@@ -172,8 +172,9 @@ def resolve_aria_base_url(fallback: str | None = None) -> str:
 # selected shared profile, so an operator must name the reviewed origin.
 AGENT_LENS_BASE_URL: str = (os.getenv("AGENT_LENS_BASE_URL") or "").strip().rstrip("/")
 
-# Agent Lens mounts its Huma API under /api; the origin above is the bare host.
+# Agent Lens mounts its Huma API under /api and its official public v1 router under /api/v1.
 AGENT_LENS_API_PREFIX = "/api"
+AGENT_LENS_V1_API_PREFIX = "/api/v1"
 
 
 def resolve_agent_lens_base_url(fallback: str | None = None) -> str:

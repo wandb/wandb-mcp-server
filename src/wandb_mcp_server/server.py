@@ -115,40 +115,54 @@ from wandb_mcp_server.mcp_tools.agent_lens import (
     GET_CLUSTERING_STATUS_TOOL_DESCRIPTION,
     GET_CONVERSATION_TAGS_TOOL_DESCRIPTION,
     GET_FAILURE_ATTRIBUTIONS_TOOL_DESCRIPTION,
+    GET_GUIDELINES_TOOL_DESCRIPTION,
     GET_INSIGHTS_COVERAGE_TOOL_DESCRIPTION,
     GET_TAG_DISTRIBUTION_TOOL_DESCRIPTION,
     LIST_CATEGORY_EXAMPLE_TURNS_TOOL_DESCRIPTION,
+    LIST_CLUSTERS_TOOL_DESCRIPTION,
     LIST_TAGS_TOOL_DESCRIPTION,
     LIST_TAGGED_CONVERSATIONS_TOOL_DESCRIPTION,
+    MANAGE_GUIDELINES_TOOL_DESCRIPTION,
+    MANAGE_TAGS_TOOL_DESCRIPTION,
     get_category_breakdowns,
     get_clustering_status,
     get_conversation_tags,
     get_failure_attributions,
+    get_guidelines,
     get_insights_coverage,
     get_tag_distribution,
     list_category_example_turns,
+    list_clusters,
     list_tags,
     list_tagged_conversations,
+    manage_guidelines,
+    manage_tags,
 )
 from wandb_mcp_server.mcp_tools.agent_lens_doctor import (
     DIAGNOSE_INSTRUMENTATION_TOOL_DESCRIPTION,
     diagnose_instrumentation,
 )
 from wandb_mcp_server.mcp_tools.agents import (
+    GET_AGENT_CONVERSATION_SPANS_TOOL_DESCRIPTION,
     GET_AGENT_CONVERSATION_TOOL_DESCRIPTION,
     GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION,
     GET_AGENT_TRACE_TOOL_DESCRIPTION,
     LIST_AGENT_CUSTOM_ATTRIBUTES_TOOL_DESCRIPTION,
     LIST_AGENT_VERSIONS_TOOL_DESCRIPTION,
     LIST_AGENTS_TOOL_DESCRIPTION,
+    MANAGE_AGENT_FEEDBACK_TOOL_DESCRIPTION,
+    QUERY_AGENT_FEEDBACK_TOOL_DESCRIPTION,
     QUERY_AGENT_SPANS_TOOL_DESCRIPTION,
     SEARCH_AGENTS_TOOL_DESCRIPTION,
     get_agent_conversation,
+    get_agent_conversation_spans,
     get_agent_span_stats,
     get_agent_trace,
     list_agent_custom_attributes,
     list_agent_versions,
     list_agents,
+    manage_agent_feedback,
+    query_agent_feedback,
     query_agent_spans,
     search_agents,
 )
@@ -202,17 +216,27 @@ _AGENT_TOOLS = (
     _DirectTool("search_weave_agents_tool", search_agents, SEARCH_AGENTS_TOOL_DESCRIPTION),
     _DirectTool("get_weave_agent_trace_tool", get_agent_trace, GET_AGENT_TRACE_TOOL_DESCRIPTION),
     _DirectTool("get_weave_agent_conversation_tool", get_agent_conversation, GET_AGENT_CONVERSATION_TOOL_DESCRIPTION),
+    _DirectTool(
+        "get_weave_agent_conversation_spans_tool",
+        get_agent_conversation_spans,
+        GET_AGENT_CONVERSATION_SPANS_TOOL_DESCRIPTION,
+    ),
+    _DirectTool("query_weave_agent_feedback_tool", query_agent_feedback, QUERY_AGENT_FEEDBACK_TOOL_DESCRIPTION),
+)
+_AGENT_WRITE_TOOLS = (
+    _DirectTool("manage_weave_agent_feedback_tool", manage_agent_feedback, MANAGE_AGENT_FEEDBACK_TOOL_DESCRIPTION),
 )
 
-# Agent Lens Insights and conversation-tag reads. Every one is a read, so this
-# group is unaffected by read-only mode; the contract gates it instead on an
-# explicitly configured AGENT_LENS_BASE_URL.
+# Agent Lens v1, Insights, conversation-tag, and guideline tools. Read tools are
+# always available when the profile and AGENT_LENS_BASE_URL are configured;
+# write tools are additionally gated by WANDB_MCP_ACCESS_MODE=read-write.
 _AGENT_LENS_TOOLS = (
     _DirectTool("get_agent_lens_insights_coverage_tool", get_insights_coverage, GET_INSIGHTS_COVERAGE_TOOL_DESCRIPTION),
     _DirectTool("get_agent_lens_clustering_status_tool", get_clustering_status, GET_CLUSTERING_STATUS_TOOL_DESCRIPTION),
     _DirectTool(
         "get_agent_lens_category_breakdowns_tool", get_category_breakdowns, GET_CATEGORY_BREAKDOWNS_TOOL_DESCRIPTION
     ),
+    _DirectTool("list_agent_lens_clusters_tool", list_clusters, LIST_CLUSTERS_TOOL_DESCRIPTION),
     _DirectTool(
         "list_agent_lens_category_example_turns_tool",
         list_category_example_turns,
@@ -235,11 +259,16 @@ _AGENT_LENS_TOOLS = (
         LIST_TAGGED_CONVERSATIONS_TOOL_DESCRIPTION,
     ),
     _DirectTool("get_agent_lens_tag_distribution_tool", get_tag_distribution, GET_TAG_DISTRIBUTION_TOOL_DESCRIPTION),
+    _DirectTool("get_agent_lens_guidelines_tool", get_guidelines, GET_GUIDELINES_TOOL_DESCRIPTION),
     _DirectTool(
         "diagnose_agent_lens_instrumentation_tool",
         diagnose_instrumentation,
         DIAGNOSE_INSTRUMENTATION_TOOL_DESCRIPTION,
     ),
+)
+_AGENT_LENS_WRITE_TOOLS = (
+    _DirectTool("manage_agent_lens_tags_tool", manage_tags, MANAGE_TAGS_TOOL_DESCRIPTION),
+    _DirectTool("manage_agent_lens_guidelines_tool", manage_guidelines, MANAGE_GUIDELINES_TOOL_DESCRIPTION),
 )
 
 
@@ -1441,13 +1470,19 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     # from the function signature.
     for tool in _AGENT_TOOLS:
         register_tool(name=tool.name, description=tool.description)(tool.impl)
+    if not read_only:
+        for tool in _AGENT_WRITE_TOOLS:
+            register_tool(name=tool.name, description=tool.description)(tool.impl)
 
-    # ----- Agent Lens (Insights and conversation tags) tools -----
+    # ----- Agent Lens (v1, Insights, conversation tags, and guidelines) tools -----
     # A distinct service with its own origin and classification data plane. The
     # contract already refused the profile without a validated AGENT_LENS_BASE_URL,
     # so reaching registration means the origin is configured and usable.
     for tool in _AGENT_LENS_TOOLS:
         register_tool(name=tool.name, description=tool.description)(tool.impl)
+    if not read_only:
+        for tool in _AGENT_LENS_WRITE_TOOLS:
+            register_tool(name=tool.name, description=tool.description)(tool.impl)
 
     # ARIA forwards the caller's credential to a distinct hosted service and
     # includes a write operation. Register it only after explicit opt-in;

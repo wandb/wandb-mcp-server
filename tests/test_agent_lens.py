@@ -41,11 +41,15 @@ from wandb_mcp_server.mcp_tools.agent_lens import (
     get_clustering_status as _get_clustering_status,
     get_conversation_tags as _get_conversation_tags,
     get_failure_attributions as _get_failure_attributions,
+    get_guidelines as _get_guidelines,
     get_insights_coverage as _get_insights_coverage,
     get_tag_distribution as _get_tag_distribution,
     list_category_example_turns as _list_category_example_turns,
+    list_clusters as _list_clusters,
     list_tags as _list_tags,
     list_tagged_conversations as _list_tagged_conversations,
+    manage_guidelines as _manage_guidelines,
+    manage_tags as _manage_tags,
 )
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 
@@ -66,6 +70,10 @@ def get_failure_attributions(*args, **kwargs):
     return _sync_call(_get_failure_attributions, *args, **kwargs)
 
 
+def get_guidelines(*args, **kwargs):
+    return _sync_call(_get_guidelines, *args, **kwargs)
+
+
 def get_insights_coverage(*args, **kwargs):
     return _sync_call(_get_insights_coverage, *args, **kwargs)
 
@@ -78,12 +86,24 @@ def list_category_example_turns(*args, **kwargs):
     return _sync_call(_list_category_example_turns, *args, **kwargs)
 
 
+def list_clusters(*args, **kwargs):
+    return _sync_call(_list_clusters, *args, **kwargs)
+
+
 def list_tags(*args, **kwargs):
     return _sync_call(_list_tags, *args, **kwargs)
 
 
 def list_tagged_conversations(*args, **kwargs):
     return _sync_call(_list_tagged_conversations, *args, **kwargs)
+
+
+def manage_guidelines(*args, **kwargs):
+    return _sync_call(_manage_guidelines, *args, **kwargs)
+
+
+def manage_tags(*args, **kwargs):
+    return _sync_call(_manage_tags, *args, **kwargs)
 
 
 class _BodyPoisonResponse(_FakeResponse):
@@ -167,9 +187,39 @@ def test_clustering_status_targets_its_own_path():
 
 
 def test_category_breakdowns_sends_the_window_as_query_parameters():
-    with _mocked(_ok([{"category": "billing"}])) as session:
-        get_category_breakdowns(ENTITY, PROJECT, **WINDOW)
+    intent_body = {
+        "turn_count": 10,
+        "categories": [{"category": "billing", "count": 10, "cluster_breakdowns": [{"id": "c1", "count": 7}]}],
+    }
+    failure_body = {
+        "turn_count": 4,
+        "categories": [{"category": "tool_failure", "count": 4, "cluster_breakdowns": [{"id": "f1", "count": 4}]}],
+    }
+    with _mocked([_ok(intent_body), _ok(failure_body)]) as session:
+        result = json.loads(get_category_breakdowns(ENTITY, PROJECT, **WINDOW, top_n_clusters=5))
+    urls = {call["url"] for call in session.calls}
+    assert urls == {
+        f"{BASE_URL}/api/insights/intent/breakdowns",
+        f"{BASE_URL}/api/insights/failure/breakdowns",
+    }
     assert session.last["params"] == WINDOW
+    assert result["data"]["intent"]["turn_count"] == 10
+    assert result["data"]["failure"]["turn_count"] == 4
+    assert result["top_clusters"]["intent"][0]["id"] == "c1"
+    assert result["top_clusters"]["failure"][0]["id"] == "f1"
+
+
+def test_category_breakdowns_single_type_and_filters():
+    body = {"turn_count": 5, "categories": [{"category": "tool_failure", "count": 5, "cluster_breakdowns": []}]}
+    filters = [{"field": "failure_severity", "values": ["high", "critical"]}]
+    with _mocked(_ok(body)) as session:
+        result = json.loads(
+            get_category_breakdowns(ENTITY, PROJECT, **WINDOW, signature_type="failure", filters=filters)
+        )
+    assert len(session.calls) == 1
+    assert session.last["url"] == f"{BASE_URL}/api/insights/failure/breakdowns"
+    assert json.loads(session.last["params"]["filters"]) == filters
+    assert result["data"]["turn_count"] == 5
 
 
 def test_example_turns_percent_encodes_the_category_in_the_path():
@@ -247,12 +297,19 @@ def test_tag_distribution_sends_epoch_bounds_and_bucket_width():
     }
 
 
-def test_tags_catalog_is_a_get_without_a_body():
+def test_tags_catalog_is_a_v1_get_without_a_body():
     with _mocked(_ok([{"id": "30201f95-1221-433a-9ea5-1e513081962f", "name": "escalated"}])) as session:
         list_tags(ENTITY, PROJECT)
     assert session.last["method"] == "GET"
-    assert session.last["url"] == f"{BASE_URL}/api/tags"
+    assert session.last["url"] == f"{BASE_URL}/api/v1/tags"
     assert session.last["content"] is None
+
+
+def test_tags_single_tag_targets_v1_tag_uuid_path():
+    tag_id = "30201f95-1221-433a-9ea5-1e513081962f"
+    with _mocked(_ok({"id": tag_id, "name": "escalated"})) as session:
+        list_tags(ENTITY, PROJECT, tag_id=tag_id)
+    assert session.last["url"] == f"{BASE_URL}/api/v1/tags/{tag_id}"
 
 
 def test_failure_attributions_posts_trace_ids():
@@ -287,7 +344,7 @@ def test_failure_attributions_requires_a_trace_id():
     with _mocked(_ok([])) as session:
         result = json.loads(get_failure_attributions(ENTITY, PROJECT, []))
     assert session.calls == []
-    assert "at least one value" in result["message"]
+    assert "at least one" in result["message"]
 
 
 def test_failure_attributions_limits_trace_ids_to_500():
@@ -322,7 +379,7 @@ def test_empty_tag_list_is_rejected_locally():
     with _mocked(_ok([])) as session:
         result = json.loads(list_tagged_conversations(ENTITY, PROJECT, []))
     assert session.calls == []
-    assert "at least one value" in result["message"]
+    assert "at least one" in result["message"]
 
 
 def test_distribution_bounds_must_be_ordered():
@@ -715,7 +772,11 @@ def _run_smoke_with_fixtures(
     responses = {
         "get_insights_coverage": {"latest_week": "2026-09-01"},
         "get_clustering_status": [{"signature_type": "intent"}],
-        "get_category_breakdowns": [{"category": "action_request", "failure_breakdowns": []}],
+        "get_category_breakdowns": {
+            "intent": {"turn_count": 10, "categories": [{"category": "action_request", "count": 10}]},
+            "failure": {"turn_count": 2, "categories": []},
+        },
+        "list_clusters": [{"id": "topic-1", "title": "Export MIDI", "category": "action_request", "share": 0.5}],
         "list_category_example_turns": [{"conversation_id": "conv-1", "trace_id": "trace-1"}],
         "get_failure_attributions": [{"trace_id": "trace-1", "failure_reason": "bad answer"}],
         "list_tags": [{"id": "30201f95-1221-433a-9ea5-1e513081962f", "name": "reviewed"}],
@@ -729,6 +790,7 @@ def _run_smoke_with_fixtures(
         ],
         "list_tagged_conversations": ["conv-1"],
         "get_tag_distribution": {"buckets": [{"tag_counts": {"30201f95-1221-433a-9ea5-1e513081962f": 1}}]},
+        "get_guidelines": [{"id": "30201f95-1221-433a-9ea5-1e513081962f", "type": "project", "content": "rule"}],
     }
     calls: list[str] = []
 
@@ -751,15 +813,19 @@ def _run_smoke_with_fixtures(
         start_at,
         end_at,
         topic_ids=None,
+        filters=None,
         limit=10,
         cursor=None,
+        per_topic_limit=None,
     ):
         assert (entity_name, project_name) == (ENTITY, PROJECT)
         assert (signature_type, category_id) == ("intent", "action_request")
         assert (start_at, end_at) == (WINDOW["start_at"], WINDOW["end_at"])
         assert topic_ids == ["topic-1"]
+        assert filters is None
         assert limit == 5
         assert cursor is None
+        assert per_topic_limit is None
         calls.append("list_category_example_turns")
         data = [] if empty_tool == "list_category_example_turns" else responses["list_category_example_turns"]
         return json.dumps({"data": data})
@@ -801,15 +867,15 @@ def _run_smoke_with_fixtures(
     return asyncio.run(agent_lens_smoke.main()), calls
 
 
-def test_live_smoke_requires_matching_data_from_all_nine_endpoints(
+def test_live_smoke_requires_matching_data_from_all_eleven_endpoints(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ):
     result, calls = _run_smoke_with_fixtures(monkeypatch)
     output = capsys.readouterr().out
     assert result == 0
-    assert len(calls) == len(set(calls)) == 9
-    assert "9/9 checks passed" in output
+    assert len(calls) == len(set(calls)) == 11
+    assert "11/11 checks passed" in output
     assert "skip" not in output.lower()
 
 
@@ -820,6 +886,167 @@ def test_live_smoke_empty_fixture_fails_but_still_exercises_all_endpoints(
     result, calls = _run_smoke_with_fixtures(monkeypatch, empty_tool="get_clustering_status")
     output = capsys.readouterr().out
     assert result == 1
-    assert len(calls) == len(set(calls)) == 9
-    assert "8/9 checks passed" in output
+    assert len(calls) == len(set(calls)) == 11
+    assert "10/11 checks passed" in output
     assert "skip" not in output.lower()
+
+
+# ----- v0.4.6 v1 CRUD, stratified sampling, clusters, assignments & guidelines -----
+
+
+def test_stratified_example_turns_samples_per_topic():
+    t1_resp = _FakeResponse({"data": [{"conversation_id": "c1", "trace_id": "tr1"}], "next_cursor": None})
+    t2_resp = _FakeResponse({"data": [{"conversation_id": "c2", "trace_id": "tr2"}], "next_cursor": None})
+    with _mocked([t1_resp, t2_resp]) as session:
+        result = json.loads(
+            list_category_example_turns(
+                ENTITY,
+                PROJECT,
+                "failure",
+                "tool_failure",
+                **WINDOW,
+                topic_ids=["topic-a", "topic-b"],
+                per_topic_limit=3,
+            )
+        )
+    assert len(session.calls) == 2
+    assert set(result["by_topic"]) == {"topic-a", "topic-b"}
+    assert len(result["data"]) == 2
+    assert {row["topic_id"] for row in result["data"]} == {"topic-a", "topic-b"}
+
+
+def test_list_clusters_sorts_by_share_and_fetches_volume():
+    clusters_resp = _ok(
+        [
+            {"id": "low", "title": "Low", "share": 0.1},
+            {"id": "high", "title": "High", "share": 0.6},
+        ]
+    )
+    volume_resp = _ok({"time_bucket_seconds": 3600, "buckets": [{"time_bucket_start_ms": 1, "counts": {}}]})
+    with _mocked([clusters_resp, volume_resp]) as session:
+        result = json.loads(
+            list_clusters(
+                ENTITY,
+                PROJECT,
+                "failure",
+                **WINDOW,
+                top_n=1,
+                include_volume=True,
+                bucket_seconds=3600,
+                include_cluster_counts=True,
+            )
+        )
+    assert len(session.calls) == 2
+    assert result["data"] == [{"id": "high", "title": "High", "share": 0.6}]
+    assert result["volume"]["time_bucket_seconds"] == 3600
+
+
+def test_tagged_conversations_include_assignments_uses_tag_assignments_endpoint():
+    tag_id = "30201f95-1221-433a-9ea5-1e513081962f"
+    payload = _FakeResponse(
+        {
+            "data": [{"conversation_id": "c1", "trace_id": "t1", "turn_number": 2, "source": "judge"}],
+            "total_count": 1,
+        }
+    )
+    with _mocked(payload) as session:
+        result = json.loads(
+            list_tagged_conversations(
+                ENTITY,
+                PROJECT,
+                [tag_id],
+                include_assignments=True,
+                applied_after="2026-09-01T00:00:00Z",
+                limit=25,
+                offset=5,
+            )
+        )
+    assert session.last["method"] == "GET"
+    assert session.last["url"] == f"{BASE_URL}/api/tags/{tag_id}/assignments"
+    assert session.last["params"] == {"limit": 25, "offset": 5, "applied_after": "2026-09-01T00:00:00Z"}
+    assert result["total_count"] == 1
+
+
+def test_manage_tags_v1_crud_and_human_assignment():
+    tag_id = "30201f95-1221-433a-9ea5-1e513081962f"
+    with _mocked(_FakeResponse({"data": {"id": tag_id, "name": "wrong-track"}}, status_code=201)) as session:
+        created = json.loads(
+            manage_tags(
+                ENTITY,
+                PROJECT,
+                "create_tag",
+                name="wrong-track",
+                criteria="Agent edited the wrong MIDI track",
+                llm_judge_enabled=True,
+            )
+        )
+    assert session.last["method"] == "POST"
+    assert session.last["url"] == f"{BASE_URL}/api/v1/tags"
+    assert created["data"]["name"] == "wrong-track"
+
+    with _mocked(_ok({"id": tag_id, "criteria": None})) as session:
+        manage_tags(ENTITY, PROJECT, "update_tag", tag_id=tag_id, clear_criteria=True)
+    assert session.last["url"] == f"{BASE_URL}/api/v1/tags/{tag_id}"
+    assert json.loads(session.last["content"]) == {"criteria": None}
+
+    with _mocked(_FakeResponse(None, status_code=204, raw=b"")) as session:
+        deleted = json.loads(manage_tags(ENTITY, PROJECT, "delete_tag", tag_id=tag_id))
+    assert session.last["method"] == "DELETE"
+    assert session.last["url"] == f"{BASE_URL}/api/v1/tags/{tag_id}"
+    assert deleted == {"data": {"ok": True}}
+
+    with _mocked(_FakeResponse(None, status_code=204, raw=b"")) as session:
+        assigned = json.loads(
+            manage_tags(
+                ENTITY,
+                PROJECT,
+                "assign_tag",
+                tag_id=tag_id,
+                conversation_id="conv-1",
+                trace_id="trace-1",
+            )
+        )
+    assert session.last["method"] == "POST"
+    assert session.last["url"] == f"{BASE_URL}/api/conversation-tags"
+    assert assigned == {"data": {"ok": True}}
+
+
+def test_v1_error_format_extracts_message_and_param():
+    err = _FakeResponse({"message": "Tag name already exists", "param": "name"}, status_code=409)
+    with _mocked(err):
+        result = json.loads(manage_tags(ENTITY, PROJECT, "create_tag", name="duplicate-tag"))
+    assert result["error"] == "agent_lens_invalid_request"
+    assert result["status_code"] == 409
+    assert "name: Tag name already exists" in result["message"]
+
+
+def test_guidelines_read_summarize_and_manage():
+    gid = "30201f95-1221-433a-9ea5-1e513081962f"
+    with _mocked(_FakeResponse({"data": [], "max_length": 2000, "read_only": False})) as session:
+        res = json.loads(get_guidelines(ENTITY, PROJECT))
+    assert session.last["url"] == f"{BASE_URL}/api/guidelines"
+    assert session.last["params"] == {"type": "project"}
+    assert res["max_length"] == 2000
+
+    with _mocked(_FakeResponse({"title": "Bassline edit", "summary": "Edited track 2"})) as session:
+        summary = json.loads(get_guidelines(ENTITY, PROJECT, summarize_conversation_id="conv-9"))
+    assert session.last["method"] == "POST"
+    assert session.last["url"] == f"{BASE_URL}/api/conversations/conv-9/summarize"
+    assert summary["data"]["title"] == "Bassline edit"
+
+    with _mocked(
+        _FakeResponse({"data": {"id": gid, "content": "Minor timing drift is low severity"}}, status_code=201)
+    ) as session:
+        created = json.loads(manage_guidelines(ENTITY, PROJECT, "create", content="Minor timing drift is low severity"))
+    assert session.last["method"] == "POST"
+    assert json.loads(session.last["content"]) == {
+        "type": "project",
+        "content": "Minor timing drift is low severity",
+    }
+    assert created["data"]["id"] == gid
+
+    with _mocked(_FakeResponse(None, status_code=204, raw=b"")) as session:
+        deleted = json.loads(manage_guidelines(ENTITY, PROJECT, "delete", guideline_id=gid))
+    assert session.last["method"] == "DELETE"
+    assert session.last["url"] == f"{BASE_URL}/api/guidelines/{gid}"
+    assert deleted == {"data": {"ok": True}}
