@@ -1,11 +1,12 @@
 # Agent Lens tools
 
-Nine read tools over the [Agent Lens](https://docs.coreweave.com/products/agent-lens) Insights
-and conversation-tag APIs. Agent Lens classifies agent turns into intent and
-failure categories and clusters, and carries human- and judge-applied
-conversation tags. None of that is visible to the Weave calls or Agents data
-planes, so these tools complement rather than duplicate `query_weave_traces_tool`
-and the `*_weave_agent_*` family.
+Ten read tools over the [Agent Lens](https://docs.coreweave.com/products/agent-lens) Insights,
+conversation-tag, and instrumentation-health APIs. Agent Lens classifies agent
+turns into intent and failure categories and clusters, carries human- and
+judge-applied conversation tags, and checks spans against its instrumentation
+rules. None of that is visible to the Weave calls or Agents data planes, so
+these tools complement rather than duplicate `query_weave_traces_tool` and the
+`*_weave_agent_*` family.
 
 ## Enabling them
 
@@ -46,8 +47,8 @@ request additionally carries the project in `X-Wandb-Entity` / `X-Wandb-Project`
 
 ## Read-only by construction
 
-All nine tools are declared `access: read` in the runtime contract, so the group
-is identical under `WANDB_MCP_ACCESS_MODE=read-only` (39 tools read-write, 37
+All ten tools are declared `access: read` in the runtime contract, so the group
+is identical under `WANDB_MCP_ACCESS_MODE=read-only` (40 tools read-write, 38
 read-only — the 2 dropped are models-group writes). Agent Lens mutations
 (creating tags, views, or alignment examples) are deliberately not exposed.
 
@@ -64,6 +65,7 @@ read-only — the 2 dropped are models-group writes). Agent Lens mutations
 | `get_agent_lens_conversation_tags_tool` | `POST /conversation-tags/query` |
 | `list_agent_lens_tagged_conversations_tool` | `POST /conversation-tags/conversations/query` |
 | `get_agent_lens_tag_distribution_tool` | `POST /conversation-tags/distribution` |
+| `diagnose_agent_lens_instrumentation_tool` | `GET /instrumentation/health` |
 
 Four of these are `POST` endpoints that perform reads — Agent Lens uses a request
 body where the filter would not fit in a query string. Read/write selection
@@ -92,6 +94,33 @@ For tags, call `list_agent_lens_tags_tool` first. It returns the project tag
 catalog, including each tag's UUID and display name. Pass UUIDs—not names—to
 `list_agent_lens_tagged_conversations_tool`; assignments returned by
 `get_agent_lens_conversation_tags_tool` include both `tag_id` and `tag`.
+
+## Instrumentation loop
+
+`diagnose_agent_lens_instrumentation_tool` lets a coding agent instrument an
+app without a person reading traces: run the app, call the tool (usually with
+`conversation_id="latest"`), fix `issues[0]`, and repeat until `verdict` is
+`clean`. It returns only failing rules, must-fix first and then by failing
+share, each with its fix, top three failing groups, and up to three example
+traces. Passing rules collapse to `passing_rule_count`, and `failing_spans` is
+included only with `include_failing_spans=true` (20 per rule).
+
+Span rules update as soon as spans arrive. Trace rules wait until a trace has
+been quiet for 10 minutes, so `verdict` is `settling` while
+`unsettled_trace_count` is nonzero and no rule fails.
+
+A check with no matching spans returns `verdict: no_spans`, never a clean
+report. The tool then asks the trace server what did arrive in the same window:
+
+- agent spans outside a conversation or trace filter mean the id or range is wrong;
+- Weave calls without agent spans mean the exporter targets the legacy
+  `/otel/v1/traces` endpoint instead of `/agents/otel/v1/traces`;
+- nothing at all returns ordered `checks`: endpoint, `wandb-api-key` header,
+  `wandb.entity`/`wandb.project` resource attributes, and flushing spans on exit.
+
+Omit `conversation_id` and `trace_id` instead of passing an empty string.
+Ranges are at most 7 days. Without `start_at`/`end_at`, a conversation or
+trace filter covers the last 7 days and a project-wide check the last 24 hours.
 
 ## Bounds
 

@@ -265,6 +265,12 @@
       ],
       "tools": [
         {
+          "name": "diagnose_agent_lens_instrumentation_tool",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "agent-lens-https-origin"
+        },
+        {
           "name": "get_agent_lens_category_breakdowns_tool",
           "access": "read",
           "risk": "credential-forwarding",
