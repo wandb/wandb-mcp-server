@@ -11,7 +11,7 @@
     "maximum_exclusive": "2"
   },
   "locked_runtime": {
-    "wandb": "0.31.0",
+    "wandb": "0.31.2",
     "wandb-workspaces": "0.4.13",
     "weave": "0.53.13"
   },
