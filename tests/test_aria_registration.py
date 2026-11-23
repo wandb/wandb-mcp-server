@@ -38,6 +38,11 @@ def test_aria_tools_are_registered_with_self_guiding_descriptions(monkeypatch) -
     assert "aria_get_turn" in tools["aria_get_thread"].description
     for name in ("aria_send_message", "aria_get_turn", "aria_list_threads", "aria_get_thread"):
         assert "<when_to_use>" in tools[name].description
+        assert "api_key" not in tools[name].inputSchema["properties"]
+        assert "client" not in tools[name].inputSchema["properties"]
+    assert "2 to 8 minutes" in tools["aria_get_turn"].description
+    assert "do not start a duplicate ARIA thread" in tools["aria_get_turn"].description
+    assert "prompt_preview (null on" in tools["aria_list_threads"].description
     for name in ("aria_send_message", "aria_get_turn"):
         assert "include_turn" in tools[name].inputSchema["properties"]
     assert "title" in tools["aria_send_message"].inputSchema["properties"]
