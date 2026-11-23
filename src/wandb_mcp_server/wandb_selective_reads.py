@@ -1894,10 +1894,38 @@ def fetch_registry_organization_info(api: Any, *, entity: str | None) -> dict[st
     return data
 
 
+VIEWER_DEFAULT_ENTITY_QUERY = """
+query MCPViewerDefaultEntity {
+    viewer {
+        entity
+        username
+    }
+}
+"""
+
+
+def fetch_viewer_default_entity(api: Any) -> str | None:
+    """Resolve the caller's default W&B entity or username via a narrow viewer query."""
+    raise_if_tool_deadline_exceeded()
+    try:
+        data = execute_graphql(api, VIEWER_DEFAULT_ENTITY_QUERY, {})
+    except Exception as exc:
+        _raise_selective_failure("viewer default entity query unavailable", exc)
+    viewer = data.get("viewer") if isinstance(data, Mapping) else None
+    if not isinstance(viewer, Mapping):
+        return None
+    for key in ("entity", "username"):
+        candidate = viewer.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
 __all__ = [
     "ARTIFACT_INVENTORY_QUERY",
     "REGISTRY_ARTIFACT_VERSIONS_QUERY",
     "REGISTRY_ORGANIZATION_QUERY",
+    "VIEWER_DEFAULT_ENTITY_QUERY",
     "METRIC_VALUE_STEPS_QUERY",
     "SAMPLED_HISTORY_SERIES_QUERY",
     "PROJECT_METADATA_QUERY",
@@ -1919,6 +1947,7 @@ __all__ = [
     "fetch_sampled_history_series",
     "fetch_registry_artifact_versions",
     "fetch_registry_organization_info",
+    "fetch_viewer_default_entity",
     "fetch_project_counts",
     "fetch_project_metadata",
     "fetch_project_fields",

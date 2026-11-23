@@ -135,10 +135,10 @@ def test_named_profiles_are_exact_contract_shortcuts():
     full = public_release.named_profile(contract, "models-weave-agents-aria")
     strict = public_release.named_profile(contract, "models-weave-agents-aria", "read-only")
 
-    assert len(default.tools) == 22
-    assert len(full.tools) == 34
+    assert len(default.tools) == 23
+    assert len(full.tools) == 38
     assert strict.read_only is True
-    assert len(strict.tools) == 31
+    assert len(strict.tools) == 34
 
 
 def test_release_version_validation_generalizes_to_future_versions(tmp_path):

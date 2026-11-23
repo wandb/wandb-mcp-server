@@ -310,3 +310,62 @@ def test_safe_diagnostics_reach_each_sink_without_raw_details(monkeypatch, level
     retained = json.dumps([event, dd, segment])
     for private in ("customer-private-field", "raw-secret-code", "private-upstream-payload", "private-argument-value"):
         assert private not in retained
+
+
+@pytest.mark.parametrize("level", ["off", "standard", "strict"])
+def test_service_account_emits_actor_type_to_segment_without_setting_canonical_username(monkeypatch, level):
+    monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", level)
+    monkeypatch.setattr(
+        WandBApiManager,
+        "get_cached_viewer_info",
+        lambda: {"actor_type": "service_account", "email_domain": "mistral.ai"},
+    )
+    event = emit(monkeypatch, "tool_call")
+    dd, segment = mapped(event)
+
+    assert segment is not None
+    assert segment["userId"] == FINGERPRINT
+    assert "email_domain" not in segment["properties"]
+    if level == "strict":
+        assert event["actor_type"] == "pseudonymous"
+        assert segment["properties"]["actor_type"] == "pseudonymous"
+        assert event["actor_id"] == event["user_id"] == DISPLAY_FINGERPRINT
+        assert event["email_domain"].startswith("<h:")
+        assert "mistral.ai" not in json.dumps([event, dd, segment])
+    else:
+        assert event["actor_type"] == "service_account"
+        assert segment["properties"]["actor_type"] == "service_account"
+        assert event.get("actor_id") is None and event.get("user_id") is None
+        assert event["email_domain"] == "mistral.ai"
+        assert "usr" not in dd["attributes"]
+
+
+@pytest.mark.parametrize("level", ["off", "standard", "strict"])
+@pytest.mark.parametrize("mode", ["cached_lookup", "auth_error_diagnostic"])
+def test_unauthenticated_tool_calls_are_suppressed_from_segment_while_preserving_datadog(monkeypatch, level, mode):
+    monkeypatch.setenv("MCP_LOG_PRIVACY_LEVEL", level)
+    events = []
+    tracker = analytics.AnalyticsTracker()
+    monkeypatch.setattr(tracker, "_emit", lambda event, labels: events.append(event))
+    if mode == "cached_lookup":
+        monkeypatch.setattr(
+            WandBApiManager,
+            "get_cached_viewer_info",
+            lambda: {"actor_type": "unauthenticated"},
+        )
+        tracker.track_tool_call("search_wandb_docs_tool", "synthetic-session", None, duration_ms=1, success=True)
+    else:
+        tracker.track_tool_call(
+            "query_wandb_tool",
+            "synthetic-session",
+            None,
+            duration_ms=1,
+            success=False,
+            error_diagnostics={"category": "authentication_failed", "exception_type": "AuthenticationError"},
+        )
+    event = events[0]
+    dd, segment = mapped(event)
+    assert event["actor_type"] == "unauthenticated"
+    assert segment is None
+    assert dd["attributes"]["actor_type"] == "unauthenticated"
+    assert dd["attributes"]["tool_name"] in {"search_wandb_docs_tool", "query_wandb_tool"}

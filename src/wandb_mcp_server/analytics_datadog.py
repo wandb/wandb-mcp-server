@@ -192,6 +192,9 @@ def map_to_datadog_log(
     user_id = event.get("user_id") or event.get("actor_id")
     if user_id:
         attributes["usr"] = {"id": user_id}
+    actor_type = event.get("actor_type")
+    if actor_type in {"user", "service_account", "unauthenticated", "unresolved", "pseudonymous"}:
+        attributes["actor_type"] = actor_type
 
     if event.get("error_diagnostics"):
         attributes["error_diagnostics"] = event["error_diagnostics"]

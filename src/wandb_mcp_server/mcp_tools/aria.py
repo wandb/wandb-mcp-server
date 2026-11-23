@@ -47,7 +47,12 @@ MAX_UPSTREAM_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_PROGRESS_TOOL_RECORDS = 100
 MAX_PROGRESS_NODES_PER_RECORD = 200
 MAX_PROGRESS_NESTING_DEPTH = 8
+MAX_TOOL_NAME_LOOKBACK_RECORDS = 1_000
+MAX_FALLBACK_TITLE_CHARS = 80
+MAX_COMPACT_TURN_MESSAGES = 12
+MAX_COMPACT_TURN_TOOL_RECORDS = 16
 POLL_INTERVAL_SECONDS = 1.0
+POLL_BACKOFF_MULTIPLIERS = (1, 2, 3)
 POLL_DEADLINE_SAFETY_SECONDS = 0.5
 MIN_RETRY_AFTER_MS = 1_000
 MAX_RETRY_AFTER_MS = 30_000
@@ -131,12 +136,14 @@ W&B and Weave APIs, and can read and change the W&B UI. ARIA can:
 Earlier ARIA conversations are found with aria_list_threads.
 </when_to_use>
 
-This tool returns promptly by default because ARIA turns are asynchronous. Keep the returned turn_id. If state is queued or in_progress, call aria_get_turn until is_terminal is true. To continue a completed conversation, call this tool again with parent_turn_id set to the previous turn_id; omit entity and project for continuations. Set wait_seconds to wait briefly for a fast result, but the wait is always bounded.
+This tool returns promptly by default because ARIA turns are asynchronous. Keep the returned turn_id. If state is queued or in_progress, call aria_get_turn until is_terminal is true; open-ended project audits and multi-step investigations routinely take 2 to 8 minutes, so do not start a duplicate ARIA thread while a turn is working. Set wait_seconds (up to 30) to wait server-side for a fast result without adding separate client sleep calls. To continue a completed conversation, call this tool again with parent_turn_id set to the previous turn_id; omit entity, project, and title for continuations.
 
 Root turns may omit both entity and project. If only project is supplied, this
-tool resolves the caller's default W&B entity before creating the turn. Results
-are compact by default; set include_turn=true only when a bounded raw ARIA turn
-snapshot is actually needed. Oversized snapshots include `_truncation` metadata.
+tool resolves the caller's default W&B entity before creating the turn. Passing
+a short title is recommended for new conversations; when omitted on a root
+turn, the thread is titled automatically. Results are compact by default; set
+include_turn=true only when a bounded raw ARIA turn snapshot is actually
+needed. Oversized snapshots include `_truncation` metadata.
 
 Parameters
 ----------
@@ -147,7 +154,7 @@ entity : str, optional
 project : str, optional
     W&B project for a new conversation, up to 512 characters. Omit to let ARIA use the default. Must be omitted for continuations.
 title : str, optional
-    Required for a new conversation (omit with parent_turn_id): a short descriptive name you write for this conversation, up to 255 characters; it is shown in aria_list_threads and the ARIA thread list in the W&B UI.
+    Optional for a new conversation (omit with parent_turn_id): a short descriptive name for this conversation, up to 255 characters, shown in aria_list_threads and the ARIA thread list in the W&B UI. When omitted on a new conversation, ARIA titles the thread automatically.
 parent_turn_id : str, optional
     Completed ARIA turn to continue, up to 512 characters. Use the exact turn_id returned by the prior call.
 wait_seconds : int
@@ -170,7 +177,7 @@ presence of latest_response because ARIA can emit a partial response while still
 working.
 </when_to_use>
 
-With wait_seconds=0 this performs one poll; with 1-30 it polls only for that bounded interval and returns early if the turn completes, errors, or is cancelled. In-progress results include a phase, meaningful status text, message/tool counts, and latest tool activity, plus a suggested poll interval. Reuse the same turn_id until is_terminal is true.
+With wait_seconds=0 this performs one poll; with 1-30 it polls server-side for that bounded interval and returns early if the turn completes, errors, or is cancelled. Do not insert separate sleep or wait tool calls between polls because wait_seconds=30 already waits server-side. Open-ended ARIA investigations routinely run 2 to 8 minutes, and individual sandbox scripts or final synthesis passes can run 30 to 90 seconds without changing message_count or tool_call_record_count; treat unchanged counters as active work rather than a hang, reuse the same turn_id until is_terminal is true, and do not start a duplicate ARIA thread while state is queued or in_progress. In-progress results include a phase, meaningful status text, elapsed_seconds when available, message/tool counts, and latest tool activity, plus a suggested poll interval.
 
 When state is completed, latest_response contains ARIA's newest assistant answer. Continue the conversation with aria_send_message(parent_turn_id=turn_id). When state is errored, inspect error_info. A transport/service error uses the MCP error state and keeps turn_id in its JSON payload so this tool can be retried safely. Results are compact by default; set include_turn=true only for a bounded raw snapshot, which may contain `_truncation` metadata.
 
@@ -202,9 +209,9 @@ with the chosen thread_id. Do not use this to poll a turn you just started; use
 aria_get_turn.
 </when_to_use>
 
-Each thread includes thread_id, title, a bounded preview of its first prompt,
-entity/project scope, pinned/visibility flags, and creation and last-turn
-timestamps. Results are paginated: when
+Each thread includes thread_id, title, entity/project scope, pinned/visibility
+flags, creation and last-turn timestamps, and legacy prompt_preview (null on
+titled threads). Results are paginated: when
 has_more is true, call again with offset=next_offset.
 
 Parameters
@@ -485,6 +492,88 @@ def _minimal_bounded_result(result: Dict[str, Any], truncation: Dict[str, Any]) 
     return minimal
 
 
+def _compact_turn_snapshot(turn: Any, stats: Dict[str, int]) -> Dict[str, Any]:
+    if not isinstance(turn, dict):
+        return {"_truncated": True, "reason": "response_token_budget"}
+    compacted: Dict[str, Any] = {
+        "_truncated": True,
+        "reason": "response_token_budget",
+    }
+    for key in (
+        "id",
+        "thread_id",
+        "parent_turn_id",
+        "state",
+        "created_at",
+        "updated_at",
+        "wandb_entity",
+        "wandb_project",
+        "error_info",
+        "agent_questions",
+        "permission_requests",
+    ):
+        if key in turn:
+            compacted[key] = _compact_response_value(
+                turn[key],
+                max_depth=3,
+                max_string_chars=512,
+                max_items=10,
+                stats=stats,
+            )
+
+    messages = turn.get("messages")
+    if isinstance(messages, list):
+        compacted["message_count"] = len(messages)
+        tail_messages = messages[-MAX_COMPACT_TURN_MESSAGES:]
+        if len(messages) > len(tail_messages):
+            omitted = len(messages) - len(tail_messages)
+            compacted["messages_omitted"] = omitted
+            stats["turn_messages_omitted"] = stats.get("turn_messages_omitted", 0) + omitted
+        compact_messages = []
+        for record in tail_messages:
+            if isinstance(record, dict) and ("role" in record or "content" in record):
+                slim = {k: v for k, v in record.items() if k != "message"}
+            else:
+                slim = record
+            compact_messages.append(
+                _compact_response_value(
+                    slim,
+                    max_depth=3,
+                    max_string_chars=1_024,
+                    max_items=10,
+                    stats=stats,
+                )
+            )
+        compacted["messages"] = compact_messages
+
+    tool_calls = turn.get("tool_calls")
+    if isinstance(tool_calls, list):
+        compacted["tool_call_record_count"] = len(tool_calls)
+        tail_tools = tool_calls[-MAX_COMPACT_TURN_TOOL_RECORDS:]
+        if len(tool_calls) > len(tail_tools):
+            omitted = len(tool_calls) - len(tail_tools)
+            compacted["tool_calls_omitted"] = omitted
+            stats["turn_tool_calls_omitted"] = stats.get("turn_tool_calls_omitted", 0) + omitted
+        compact_tools = []
+        for record in tail_tools:
+            enriched = record
+            if isinstance(record, dict) and "name" not in record:
+                resolved_name = _resolve_tool_name(tool_calls, record)
+                if resolved_name is not None:
+                    enriched = {**record, "name": resolved_name}
+            compact_tools.append(
+                _compact_response_value(
+                    enriched,
+                    max_depth=3,
+                    max_string_chars=512,
+                    max_items=10,
+                    stats=stats,
+                )
+            )
+        compacted["tool_calls"] = compact_tools
+    return compacted
+
+
 def _finalize_result(
     value: Dict[str, Any],
     *,
@@ -508,6 +597,23 @@ def _finalize_result(
     if original_tokens <= MAX_RESPONSE_TOKENS:
         return sanitized
 
+    truncation_base: Dict[str, Any] = {
+        "applied": True,
+        "reason": "response_token_budget",
+        "max_tokens": MAX_RESPONSE_TOKENS,
+        "original_estimated_tokens": original_tokens,
+    }
+
+    if "turn" in sanitized and isinstance(sanitized.get("turn"), dict):
+        turn_compaction: Dict[str, int] = {}
+        compact_turn_candidate = dict(sanitized)
+        compact_turn_candidate["turn"] = _compact_turn_snapshot(sanitized["turn"], turn_compaction)
+        compact_truncation = dict(truncation_base)
+        compact_truncation["compaction"] = turn_compaction or {"turn_compacted": 1}
+        compact_turn_candidate["_truncation"] = compact_truncation
+        if _estimate_response_tokens(compact_turn_candidate) <= MAX_RESPONSE_TOKENS:
+            return compact_turn_candidate
+
     omitted_fields: list[str] = []
     candidate = dict(sanitized)
     if "turn" in candidate:
@@ -518,17 +624,16 @@ def _finalize_result(
         }
         if isinstance(turn, dict):
             marker.update(
-                {key: turn[key] for key in ("id", "thread_id", "parent_turn_id", "state", "updated_at") if key in turn}
+                {
+                    key: turn[key]
+                    for key in ("id", "thread_id", "parent_turn_id", "state", "created_at", "updated_at")
+                    if key in turn
+                }
             )
         candidate["turn"] = marker
         omitted_fields.append("turn")
 
-    truncation: Dict[str, Any] = {
-        "applied": True,
-        "reason": "response_token_budget",
-        "max_tokens": MAX_RESPONSE_TOKENS,
-        "original_estimated_tokens": original_tokens,
-    }
+    truncation = dict(truncation_base)
     if omitted_fields:
         truncation["omitted_fields"] = omitted_fields
     candidate["_truncation"] = truncation
@@ -939,27 +1044,33 @@ async def _fetch_turn(client: httpx.AsyncClient, turn_id: str) -> Dict[str, Any]
     return turn
 
 
-async def _poll_turn(
+async def _poll_turn_with_status(
     client: httpx.AsyncClient,
     turn: Dict[str, Any],
     wait_seconds: int,
-) -> Dict[str, Any]:
+    *,
+    confirmed_get: bool = False,
+) -> tuple[Dict[str, Any], Optional[AriaAPIError]]:
     if wait_seconds == 0 or turn.get("state") in TERMINAL_STATES:
-        return turn
+        return turn, None
 
     deadline = time.monotonic() + wait_seconds
     outer_deadline = current_tool_deadline.get()
     if outer_deadline is not None:
         deadline = min(deadline, outer_deadline - POLL_DEADLINE_SAFETY_SECONDS)
+    attempt = 0
     while turn.get("state") not in TERMINAL_STATES:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        await asyncio.sleep(min(POLL_INTERVAL_SECONDS, remaining))
+        multiplier = POLL_BACKOFF_MULTIPLIERS[min(attempt, len(POLL_BACKOFF_MULTIPLIERS) - 1)]
+        await asyncio.sleep(min(POLL_INTERVAL_SECONDS * multiplier, remaining))
         if deadline - time.monotonic() <= 0:
             break
         try:
             turn = await _fetch_turn(client, str(turn["id"]))
+            confirmed_get = True
+            attempt += 1
         except AriaAPIError as exc:
             # The public dispatch timeout must remain available to serialize a
             # truthful pending result. If the request consumed that headroom,
@@ -969,8 +1080,19 @@ async def _poll_turn(
             )
             if exc.error_type == "request_timeout" and outer_remaining is not None and outer_remaining <= 0:
                 break
+            if confirmed_get and exc.retryable:
+                return turn, exc
             raise
-    return turn
+    return turn, None
+
+
+async def _poll_turn(
+    client: httpx.AsyncClient,
+    turn: Dict[str, Any],
+    wait_seconds: int,
+) -> Dict[str, Any]:
+    polled, _ = await _poll_turn_with_status(client, turn, wait_seconds)
+    return polled
 
 
 def _latest_assistant_response(turn: Dict[str, Any]) -> Optional[str]:
@@ -1065,15 +1187,66 @@ def _tool_response_has_error(record: Any) -> bool:
     return _inspect_tool_response(record)[0]
 
 
-def _progress_summary(turn: Dict[str, Any]) -> Dict[str, Any]:
+def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _turn_elapsed_seconds(turn: Dict[str, Any], *, is_terminal: bool) -> Optional[float]:
+    started = _parse_iso_timestamp(turn.get("created_at"))
+    if started is None:
+        return None
+    end = _parse_iso_timestamp(turn.get("updated_at")) if is_terminal else None
+    if end is None:
+        end = datetime.now(timezone.utc)
+    elapsed = (end - started).total_seconds()
+    if not math.isfinite(elapsed):
+        return None
+    return round(max(0.0, elapsed), 1)
+
+
+def _resolve_tool_name(tool_calls: list[Any], record: Dict[str, Any]) -> Optional[str]:
+    explicit_name = record.get("name")
+    if isinstance(explicit_name, str) and explicit_name:
+        return explicit_name
+    call_id = record.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        return None
+    for candidate in reversed(tool_calls[-MAX_TOOL_NAME_LOOKBACK_RECORDS:]):
+        if (
+            isinstance(candidate, dict)
+            and candidate.get("call_id") == call_id
+            and candidate.get("type") == "invocation"
+        ):
+            candidate_name = candidate.get("name")
+            if isinstance(candidate_name, str) and candidate_name:
+                return candidate_name
+    return None
+
+
+def _progress_summary(turn: Dict[str, Any], *, poll_error: Optional[AriaAPIError] = None) -> Dict[str, Any]:
     messages = turn.get("messages")
     tool_calls = turn.get("tool_calls")
     state = str(turn.get("state", "unknown"))
+    is_terminal = state in TERMINAL_STATES
     latest_response = _latest_assistant_response(turn)
     summary: Dict[str, Any] = {
         "message_count": len(messages) if isinstance(messages, list) else 0,
         "tool_call_record_count": (len(tool_calls) if isinstance(tool_calls, list) else 0),
     }
+    elapsed_seconds = _turn_elapsed_seconds(turn, is_terminal=is_terminal)
+    if elapsed_seconds is not None:
+        summary["elapsed_seconds"] = elapsed_seconds
     if isinstance(tool_calls, list):
         inspected_tool_calls = tool_calls[-MAX_PROGRESS_TOOL_RECORDS:]
         inspections = [_inspect_tool_response(record) for record in inspected_tool_calls]
@@ -1092,12 +1265,30 @@ def _progress_summary(turn: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(tool_calls, list) and tool_calls:
         latest = tool_calls[-1]
         if isinstance(latest, dict):
-            latest_activity = {
-                key: latest[key] for key in ("type", "name", "call_id", "is_error", "timestamp") if key in latest
-            }
+            latest_activity: Dict[str, Any] = {}
+            if "type" in latest:
+                latest_activity["type"] = latest["type"]
+            resolved_name = _resolve_tool_name(tool_calls, latest)
+            if resolved_name is not None:
+                latest_activity["name"] = resolved_name
+            for key in ("call_id", "is_error", "timestamp"):
+                if key in latest:
+                    latest_activity[key] = latest[key]
             if _tool_response_has_error(latest):
                 latest_activity["recovered_error"] = True
             summary["latest_tool_activity"] = latest_activity
+
+    if poll_error is not None and not is_terminal:
+        interrupted: Dict[str, Any] = {
+            "type": poll_error.error_type,
+            "message": poll_error.message,
+            "retryable": True,
+        }
+        if poll_error.status_code is not None:
+            interrupted["status_code"] = poll_error.status_code
+        if poll_error.retry_after_ms is not None:
+            interrupted["retry_after_ms"] = poll_error.retry_after_ms
+        summary["poll_interrupted"] = interrupted
 
     if state == "queued":
         summary.update(phase="queued", status_text="ARIA accepted the turn and is waiting for execution.")
@@ -1129,7 +1320,12 @@ def _progress_summary(turn: Dict[str, Any]) -> Dict[str, Any]:
     return summary
 
 
-def _turn_result(turn: Dict[str, Any], *, include_turn: bool = False) -> Dict[str, Any]:
+def _turn_result(
+    turn: Dict[str, Any],
+    *,
+    include_turn: bool = False,
+    poll_error: Optional[AriaAPIError] = None,
+) -> Dict[str, Any]:
     state = str(turn["state"])
     turn_id = str(turn["id"])
     is_terminal = state in TERMINAL_STATES
@@ -1146,10 +1342,28 @@ def _turn_result(turn: Dict[str, Any], *, include_turn: bool = False) -> Dict[st
         )
     elif state == "cancelled":
         next_action = "This turn was cancelled; start a new turn if the work is still needed."
+    elif poll_error is not None:
+        next_action = (
+            "A follow-up poll hit a transient service hiccup after reading turn progress; "
+            "ARIA continues working server-side. Call aria_get_turn again with this turn_id "
+            "and wait_seconds up to 30 (do not add separate sleep calls or start a duplicate thread)."
+        )
     else:
-        next_action = "Call aria_get_turn again with this turn_id; use wait_seconds up to 30 for a bounded wait."
+        next_action = (
+            "Call aria_get_turn again with this turn_id and wait_seconds up to 30 "
+            "(which waits server-side; do not add separate sleep calls or start a duplicate thread)."
+        )
 
-    result = {
+    if is_terminal:
+        poll_after_seconds: Optional[int] = None
+    elif poll_error is not None and poll_error.retry_after_ms is not None:
+        poll_after_seconds = max(2, min(MAX_WAIT_SECONDS, math.ceil(poll_error.retry_after_ms / 1_000)))
+    elif poll_error is not None:
+        poll_after_seconds = 5
+    else:
+        poll_after_seconds = 2
+
+    result: Dict[str, Any] = {
         "ok": True,
         "turn_id": turn_id,
         "thread_id": turn.get("thread_id"),
@@ -1160,18 +1374,81 @@ def _turn_result(turn: Dict[str, Any], *, include_turn: bool = False) -> Dict[st
         },
         "state": state,
         "is_terminal": is_terminal,
+        "created_at": turn.get("created_at"),
         "updated_at": turn.get("updated_at"),
-        "poll_after_seconds": None if is_terminal else 2,
+        "poll_after_seconds": poll_after_seconds,
         "latest_response": _latest_assistant_response(turn),
         "error_info": turn.get("error_info"),
         "agent_questions": turn.get("agent_questions"),
         "permission_requests": turn.get("permission_requests"),
-        "progress": _progress_summary(turn),
+        "progress": _progress_summary(turn, poll_error=poll_error),
         "next_action": next_action,
     }
     if include_turn:
         result["turn"] = turn
     return result
+
+
+def _derive_fallback_title(message: str) -> str:
+    collapsed = " ".join(message.split())
+    if len(collapsed) <= MAX_FALLBACK_TITLE_CHARS:
+        return collapsed
+    return f"{collapsed[: MAX_FALLBACK_TITLE_CHARS - 3].rstrip()}..."
+
+
+async def _apply_root_thread_title(
+    client: httpx.AsyncClient,
+    thread_id: Any,
+    *,
+    explicit_title: Optional[str],
+    message: str,
+) -> Dict[str, str]:
+    if not isinstance(thread_id, str) or not thread_id or len(thread_id) > MAX_IDENTIFIER_LENGTH:
+        return {"title_error": "missing_thread_id"}
+    encoded_thread_id = quote(thread_id, safe="")
+    if explicit_title is not None:
+        try:
+            await _request_json(
+                client,
+                "PATCH",
+                f"/api/v1/threads/{encoded_thread_id}",
+                payload={"title": explicit_title},
+            )
+        except AriaAPIError as exc:
+            return {"title_error": exc.error_type}
+        return {"title": explicit_title}
+
+    try:
+        _, generated = await _request_json(
+            client,
+            "POST",
+            f"/api/v1/threads/{encoded_thread_id}/generate-title",
+            payload=None,
+        )
+        if isinstance(generated, dict):
+            generated_thread_id = generated.get("thread_id")
+            generated_title = generated.get("title")
+            if (
+                (generated_thread_id is None or generated_thread_id == thread_id)
+                and isinstance(generated_title, str)
+                and generated_title.strip()
+                and len(generated_title.strip()) <= MAX_THREAD_TITLE_LENGTH
+            ):
+                return {"title": generated_title.strip()}
+    except AriaAPIError:
+        pass
+
+    fallback_title = _derive_fallback_title(message)
+    try:
+        await _request_json(
+            client,
+            "PATCH",
+            f"/api/v1/threads/{encoded_thread_id}",
+            payload={"title": fallback_title},
+        )
+    except AriaAPIError as exc:
+        return {"title_error": exc.error_type}
+    return {"title": fallback_title}
 
 
 async def send_aria_message(
@@ -1229,7 +1506,7 @@ async def send_aria_message(
                     "title must be omitted when parent_turn_id is set.",
                     retryable=False,
                 )
-        else:
+        elif title is not None:
             title = _normalize_bounded_string(
                 title,
                 name="title",
@@ -1266,24 +1543,19 @@ async def send_aria_message(
         turn = await _request_turn(client, "POST", "/api/v1/turns", payload=payload)
         title_fields: Dict[str, str] = {}
         if parent_turn_id is None:
-            thread_id = turn.get("thread_id")
-            if not isinstance(thread_id, str) or not thread_id or len(thread_id) > MAX_IDENTIFIER_LENGTH:
-                title_fields["title_error"] = "missing_thread_id"
-            else:
-                encoded_thread_id = quote(thread_id, safe="")
-                try:
-                    await _request_json(
-                        client,
-                        "PATCH",
-                        f"/api/v1/threads/{encoded_thread_id}",
-                        payload={"title": title},
-                    )
-                except AriaAPIError as exc:
-                    title_fields["title_error"] = exc.error_type
-                else:
-                    title_fields["title"] = title
+            title_fields = await _apply_root_thread_title(
+                client,
+                turn.get("thread_id"),
+                explicit_title=title,
+                message=message,
+            )
         try:
-            turn = await _poll_turn(client, turn, wait_seconds)
+            turn, poll_error = await _poll_turn_with_status(
+                client,
+                turn,
+                wait_seconds,
+                confirmed_get=False,
+            )
         except AriaAPIError as exc:
             # The non-idempotent POST was confirmed and returned a durable
             # handle. A later GET failure must never erase that handle or imply
@@ -1295,7 +1567,7 @@ async def send_aria_message(
                 result,
                 extra_secrets=(resolved_api_key,),
             )
-        result = _turn_result(turn, include_turn=include_turn)
+        result = _turn_result(turn, include_turn=include_turn, poll_error=poll_error)
         result.update(title_fields)
         return _finalize_result(
             result,
@@ -1335,9 +1607,14 @@ async def get_aria_turn(
             client = _new_http_client(resolved_api_key)
 
         turn = await _fetch_turn(client, turn_id)
-        turn = await _poll_turn(client, turn, wait_seconds)
+        turn, poll_error = await _poll_turn_with_status(
+            client,
+            turn,
+            wait_seconds,
+            confirmed_get=True,
+        )
         return _finalize_result(
-            _turn_result(turn, include_turn=include_turn),
+            _turn_result(turn, include_turn=include_turn, poll_error=poll_error),
             extra_secrets=(resolved_api_key,),
         )
     except AriaAPIError as exc:

@@ -64,6 +64,7 @@ _BASE_PROPERTY_KEYS: List[str] = [
     "environment",
     "hosted_mode",
     "wandb_base_host",
+    "actor_type",
     "agent_harness",
     "client_vendor",
     "call_type",
@@ -110,6 +111,8 @@ def map_to_segment_track(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     event_type = event.get("event_type")
     segment_event_name = _EVENT_NAME_MAP.get(event_type)
     if not segment_event_name:
+        return None
+    if event_type == "tool_call" and event.get("actor_type") == "unauthenticated":
         return None
 
     # The canonical event may contain an approved display username. Segment

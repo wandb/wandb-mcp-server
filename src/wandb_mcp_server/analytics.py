@@ -102,29 +102,39 @@ _USAGE_SHAPE_KEYS = frozenset(
     {
         "columns",
         "config_keys",
+        "conversation_ids",
         "expand_columns",
         "filter",
         "filters",
         "group_by",
+        "group_filters",
         "history_keys",
         "include",
         "include_artifacts",
+        "include_assignments",
         "include_costs",
         "include_details",
         "include_feedback",
         "include_file_diff",
         "include_files",
         "include_history_overlap",
+        "include_model_tool_calls",
         "include_per_task",
         "include_turn",
+        "include_volume",
+        "insight_filters",
         "keys",
+        "measures",
         "metadata_only",
         "metrics",
         "panels",
+        "percentiles",
         "plots_html",
         "return_full_data",
         "roles",
+        "signal_filters",
         "summary_keys",
+        "tag_filter",
         "tags",
         "trace_ids",
         "truncate_content",
@@ -176,6 +186,10 @@ _FREE_TEXT_KEYS: frozenset = frozenset(
         "eval_name",
         "analysis_name",
         "message",
+        "note",
+        "comment",
+        "criteria",
+        "rationale",
     }
 )
 
@@ -219,10 +233,11 @@ def _resolve_privacy_level() -> str:
 
 
 _VIEWER_LOOKUP_TIMEOUT_SECONDS = 3.0
+_VALID_ACTOR_TYPES = frozenset({"user", "service_account", "unauthenticated", "unresolved", "pseudonymous"})
 
 
 def should_resolve_viewer_identity() -> bool:
-    """Return True when a username lookup could change emitted identity."""
+    """Return True when a viewer lookup could change emitted identity."""
     if os.environ.get("MCP_ANALYTICS_DISABLED", "false").lower() == "true":
         return False
     try:
@@ -232,16 +247,16 @@ def should_resolve_viewer_identity() -> bool:
 
 
 def cached_authenticated_viewer(api_key: Optional[str]) -> Optional[Dict[str, str]]:
-    """Return an already-resolved ``{"username": ...}`` without I/O, or None."""
+    """Return an already-resolved viewer attribution dict without I/O, or None."""
     if not api_key or not should_resolve_viewer_identity():
         return None
     try:
         from wandb_mcp_server.api_client import WandBApiManager
 
-        _, username = WandBApiManager.peek_viewer_username(api_key)
+        _, identity = WandBApiManager.peek_viewer_identity(api_key)
+        return WandBApiManager._viewer_info_dict(identity, include_email_domain=True)
     except Exception:
         return None
-    return {"username": username} if username else None
 
 
 _viewer_lookup_executor: Optional[ThreadPoolExecutor] = None
@@ -251,12 +266,12 @@ def _get_viewer_lookup_executor() -> ThreadPoolExecutor:
     """Isolate attribution lookups from the shared default executor."""
     global _viewer_lookup_executor
     if _viewer_lookup_executor is None:
-        _viewer_lookup_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="wandb-viewer-identity")
+        _viewer_lookup_executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="wandb-viewer-identity")
     return _viewer_lookup_executor
 
 
 async def resolve_authenticated_viewer(api_key: Optional[str]) -> Optional[Dict[str, str]]:
-    """Return ``{"username": ...}`` for an authenticated API key, or None.
+    """Return viewer attribution metadata for an authenticated API key, or None.
 
     The W&B lookup runs once per actor per cache TTL on a small dedicated
     executor, bounded by a short wait. A slow lookup keeps running for later
@@ -268,16 +283,16 @@ async def resolve_authenticated_viewer(api_key: Optional[str]) -> Optional[Dict[
     try:
         from wandb_mcp_server.api_client import WandBApiManager
 
-        hit, username = WandBApiManager.peek_viewer_username(api_key)
+        hit, identity = WandBApiManager.peek_viewer_identity(api_key)
         if not hit:
             loop = asyncio.get_running_loop()
-            username = await asyncio.wait_for(
-                loop.run_in_executor(_get_viewer_lookup_executor(), WandBApiManager.resolve_viewer_username, api_key),
+            identity = await asyncio.wait_for(
+                loop.run_in_executor(_get_viewer_lookup_executor(), WandBApiManager.resolve_viewer_identity, api_key),
                 _VIEWER_LOOKUP_TIMEOUT_SECONDS,
             )
+        return WandBApiManager._viewer_info_dict(identity, include_email_domain=True)
     except Exception:
         return None
-    return {"username": username} if username else None
 
 
 class _IdentityPseudonym(str):
@@ -626,6 +641,7 @@ def _prepare_event(event: Dict[str, Any]) -> Dict[str, Any]:
         "mcp_jsonrpc_method",
         "session_id",
         "actor_id",
+        "actor_type",
         "tool_name",
         "mcp_tool_name",
         "success",
@@ -777,6 +793,19 @@ def _strict_event_identities(value: Any) -> Any:
             else _strict_event_identities(child)
             for key, child in value.items()
         }
+        allowed_actor_types = (
+            {"unauthenticated", "unresolved", "pseudonymous"}
+            if _resolve_privacy_level() == _PRIVACY_LEVEL_STRICT
+            else {
+                "user",
+                "service_account",
+                "unauthenticated",
+                "unresolved",
+                "pseudonymous",
+            }
+        )
+        if "actor_type" in projected and projected["actor_type"] not in allowed_actor_types:
+            projected["actor_type"] = "pseudonymous"
         actor = value.get("actor_id")
         if type(actor) is _KeyFingerprint:
             # Do not change a strict-mode actor when its username becomes known.
@@ -832,13 +861,35 @@ class AnalyticsTracker:
     def _extract_email_domain(viewer_info: Any) -> Optional[str]:
         """Return the email domain (e.g. ``anthropic.com``) or ``None``."""
         try:
-            email = None
             if isinstance(viewer_info, str):
-                email = viewer_info
-            else:
-                email = _viewer_fields(viewer_info).get("email")
+                if "@" in viewer_info:
+                    return viewer_info.split("@", 1)[1].lower()
+                return None
+            fields = _viewer_fields(viewer_info)
+            email = fields.get("email")
             if isinstance(email, str) and "@" in email:
-                return email.split("@")[1].lower()
+                return email.split("@", 1)[1].lower()
+            domain = fields.get("email_domain")
+            if isinstance(domain, str):
+                cleaned = domain.strip().lower()
+                if cleaned and "@" not in cleaned:
+                    return cleaned
+            return None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_actor_type(viewer_info: Any) -> Optional[str]:
+        """Return a validated actor_type from materialized viewer fields, or None."""
+        try:
+            if viewer_info is None or isinstance(viewer_info, str):
+                return None
+            fields = _viewer_fields(viewer_info)
+            raw_actor_type = fields.get("actor_type")
+            if isinstance(raw_actor_type, str):
+                normalized = raw_actor_type.strip().lower()
+                if normalized in _VALID_ACTOR_TYPES:
+                    return normalized
             return None
         except Exception:
             return None
@@ -879,14 +930,40 @@ class AnalyticsTracker:
             level = _resolve_privacy_level()
         actor = actor_id_from_api_key_hash(api_key_hash) or current_actor_id()
         username = cls._extract_user_id(viewer_info)
-        if username is None:
+        supplied_actor_type = cls._extract_actor_type(viewer_info)
+        resolved_domain = email_domain or cls._extract_email_domain(viewer_info)
+        if username is None and supplied_actor_type is None:
             try:
                 from wandb_mcp_server.api_client import WandBApiManager
 
-                username = cls._extract_user_id(WandBApiManager.get_cached_viewer_info())
+                cached_viewer = WandBApiManager.get_cached_viewer_info()
+                username = cls._extract_user_id(cached_viewer)
+                supplied_actor_type = cls._extract_actor_type(cached_viewer)
+                if resolved_domain is None:
+                    resolved_domain = cls._extract_email_domain(cached_viewer)
+                if resolved_domain is None and (ctx_key := WandBApiManager.get_api_key()):
+                    hit, cached_identity = WandBApiManager.peek_viewer_identity(ctx_key)
+                    if hit and cached_identity is not None and cached_identity.email_domain:
+                        resolved_domain = cached_identity.email_domain
             except Exception:
                 # Missing enrichment must not interfere with the request.
                 pass
+
+        diagnostics = event.get("error_diagnostics")
+        is_auth_diag = isinstance(diagnostics, dict) and diagnostics.get("category") == "authentication_failed"
+        if level == _PRIVACY_LEVEL_STRICT:
+            actor_type = (
+                "unauthenticated" if (supplied_actor_type == "unauthenticated" or is_auth_diag) else "pseudonymous"
+            )
+        elif username is not None:
+            actor_type = "user"
+        elif supplied_actor_type in {"service_account", "unauthenticated", "unresolved"}:
+            actor_type = supplied_actor_type
+        elif is_auth_diag:
+            actor_type = "unauthenticated"
+        else:
+            actor_type = "unresolved"
+
         pseudonym = actor if type(actor) is _KeyFingerprint else _private_identity(username or actor)
         segment_identity = (
             pseudonym if level == _PRIVACY_LEVEL_STRICT or username is None else _SegmentUsername(username)
@@ -896,11 +973,15 @@ class AnalyticsTracker:
             # This is a hash, not a credential. Keep the historical Segment ID
             # private while giving application logs and Datadog a neutral label.
             display = _IdentityPseudonym(f"user:{display.removeprefix('wandb_key:')}")
-        _, email_domain = cls._apply_identity_privacy(
-            None, email_domain or cls._extract_email_domain(viewer_info), level=level
-        )
+        _, resolved_domain = cls._apply_identity_privacy(None, resolved_domain, level=level)
         return _IdentityEvent(
-            {**event, "actor_id": display, "user_id": display, "email_domain": email_domain},
+            {
+                **event,
+                "actor_id": display,
+                "user_id": display,
+                "actor_type": actor_type,
+                "email_domain": resolved_domain,
+            },
             segment_identity=segment_identity,
         )
 

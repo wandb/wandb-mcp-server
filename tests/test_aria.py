@@ -110,8 +110,8 @@ def test_send_root_turn_uses_bearer_auth_and_openapi_payload(monkeypatch) -> Non
     assert "turn" not in result
 
 
-@pytest.mark.parametrize("title", [None, "   "])
-def test_send_root_turn_requires_title_without_contacting_service(title) -> None:
+@pytest.mark.parametrize("title", ["", "   "])
+def test_send_root_turn_rejects_blank_title_without_contacting_service(title: str) -> None:
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -121,8 +121,7 @@ def test_send_root_turn_requires_title_without_contacting_service(title) -> None
 
     async def run() -> Dict[str, Any]:
         async with _client(httpx.MockTransport(handler)) as client:
-            kwargs = {} if title is None else {"title": title}
-            return await aria.send_aria_message("Start a conversation", api_key="token", client=client, **kwargs)
+            return await aria.send_aria_message("Start a conversation", title=title, api_key="token", client=client)
 
     result = asyncio.run(run())
 
@@ -130,6 +129,76 @@ def test_send_root_turn_requires_title_without_contacting_service(title) -> None
     assert result["ok"] is False
     assert result["error"]["type"] == "invalid_request"
     assert result["error"]["retryable"] is False
+
+
+def test_send_root_turn_omitted_title_calls_generate_title() -> None:
+    calls: list[tuple[str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.raw_path))
+        if request.method == "POST" and request.url.path == "/api/v1/turns":
+            return httpx.Response(202, json=_turn(thread_id="thread/1"), request=request)
+        if request.method == "POST" and request.url.path == "/api/v1/threads/thread/1/generate-title":
+            return httpx.Response(
+                200,
+                json={"thread_id": "thread/1", "title": "Eval Regression Triage"},
+                request=request,
+            )
+        return httpx.Response(500, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.send_aria_message("Compare the latest eval runs", api_key="token", client=client)
+
+    result = asyncio.run(run())
+
+    assert calls == [
+        ("POST", b"/api/v1/turns"),
+        ("POST", b"/api/v1/threads/thread%2F1/generate-title"),
+    ]
+    assert result["ok"] is True
+    assert result["title"] == "Eval Regression Triage"
+    assert "title_error" not in result
+
+
+@pytest.mark.parametrize(
+    "generate_response",
+    [
+        (422, {"detail": "no messages yet"}),
+        (200, {"thread_id": "thread-1", "title": "   "}),
+        (200, {"thread_id": "other-thread", "title": "Wrong Thread Title"}),
+    ],
+)
+def test_send_root_turn_omitted_title_falls_back_to_bounded_patch(
+    generate_response: tuple[int, Dict[str, Any]],
+) -> None:
+    patched: Dict[str, Any] = {}
+    status_code, body = generate_response
+    long_prompt = "   Audit   the   eval   runs\nand summarize " + ("latency " * 20)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/v1/turns":
+            return httpx.Response(202, json=_turn(), request=request)
+        if request.method == "POST" and request.url.path == "/api/v1/threads/thread-1/generate-title":
+            return httpx.Response(status_code, json=body, request=request)
+        if request.method == "PATCH" and request.url.path == "/api/v1/threads/thread-1":
+            patched.update(json.loads(request.content))
+            return httpx.Response(200, json={"id": "thread-1", **patched}, request=request)
+        return httpx.Response(500, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.send_aria_message(long_prompt, api_key="token", client=client)
+
+    result = asyncio.run(run())
+
+    assert result["ok"] is True
+    assert len(patched["title"]) <= 80
+    assert patched["title"].startswith("Audit the eval runs and summarize latency")
+    assert patched["title"].endswith("...")
+    assert "\n" not in patched["title"]
+    assert result["title"] == patched["title"]
+    assert "Wrong Thread Title" not in json.dumps(result)
 
 
 def test_send_rejects_title_on_continuation_without_contacting_service() -> None:
@@ -1748,3 +1817,205 @@ def test_thread_http_logs_hide_scope_and_identifiers(caplog) -> None:
     assert "<aria-service>/api/v1/threads" in logs
     assert "private-entity-canary" not in logs
     assert "private-thread-canary" not in logs
+
+
+def test_poll_turn_uses_stepped_intervals(monkeypatch) -> None:
+    sleeps: list[float] = []
+    calls = 0
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 2))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        state = "completed" if calls == 5 else "in_progress"
+        return httpx.Response(200, json=_turn(state), request=request)
+
+    monkeypatch.setattr(aria.asyncio, "sleep", fake_sleep)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn("turn-1", wait_seconds=30, api_key="token", client=client)
+
+    result = asyncio.run(run())
+
+    assert result["ok"] is True
+    assert result["state"] == "completed"
+    assert calls == 5
+    assert sleeps == [1.0, 2.0, 3.0, 3.0]
+
+
+def test_get_turn_returns_confirmed_progress_on_mid_poll_transient_error(monkeypatch) -> None:
+    calls = 0
+    in_progress = _turn(
+        "in_progress",
+        created_at="2026-08-07T11:58:00Z",
+        updated_at="2026-08-07T12:00:00Z",
+        tool_calls=[
+            {"type": "invocation", "name": "shell", "call_id": "call-7", "timestamp": "2026-08-07T11:59:30Z"},
+            {"type": "response", "call_id": "call-7", "is_error": False, "timestamp": "2026-08-07T11:59:59Z"},
+        ],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(200, json=in_progress, request=request)
+        return httpx.Response(503, headers={"Retry-After": "4"}, json={"detail": "upstream busy"}, request=request)
+
+    monkeypatch.setattr(aria, "POLL_INTERVAL_SECONDS", 0)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn("turn-1", wait_seconds=30, api_key="token", client=client)
+
+    result = asyncio.run(run())
+
+    assert calls == 2
+    assert result["ok"] is True
+    assert result["state"] == "in_progress"
+    assert result["is_terminal"] is False
+    assert result["created_at"] == "2026-08-07T11:58:00Z"
+    assert result["poll_after_seconds"] == 4
+    assert result["progress"]["latest_tool_activity"]["name"] == "shell"
+    assert result["progress"]["status_text"] == "ARIA received a result from shell and is still working."
+    assert result["progress"]["elapsed_seconds"] >= 120.0
+    assert result["progress"]["poll_interrupted"] == {
+        "type": "service_unavailable",
+        "message": "ARIA is currently unavailable or failed to process the request.",
+        "retryable": True,
+        "status_code": 503,
+        "retry_after_ms": 4_000,
+    }
+    assert "do not add separate sleep calls" in result["next_action"]
+
+
+def test_send_returns_confirmed_progress_when_second_poll_hits_transient_error(monkeypatch) -> None:
+    get_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal get_calls
+        if request.method == "POST":
+            return httpx.Response(202, json=_turn("queued"), request=request)
+        if request.method == "PATCH":
+            return httpx.Response(200, json={"id": "thread-1", "title": "Eval audit"}, request=request)
+        get_calls += 1
+        if get_calls == 1:
+            return httpx.Response(200, json=_turn("in_progress"), request=request)
+        return httpx.Response(429, headers={"Retry-After": "6"}, json={"detail": "rate limit"}, request=request)
+
+    monkeypatch.setattr(aria, "POLL_INTERVAL_SECONDS", 0)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.send_aria_message(
+                "Audit eval runs",
+                title="Eval audit",
+                wait_seconds=30,
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+
+    assert get_calls == 2
+    assert result["ok"] is True
+    assert result["title"] == "Eval audit"
+    assert result["state"] == "in_progress"
+    assert result["poll_after_seconds"] == 6
+    assert result["progress"]["poll_interrupted"]["type"] == "rate_limited"
+
+
+def test_get_turn_fails_closed_on_mid_poll_non_retryable_auth_error(monkeypatch) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(200, json=_turn("in_progress"), request=request)
+        return httpx.Response(401, json={"detail": "revoked"}, request=request)
+
+    monkeypatch.setattr(aria, "POLL_INTERVAL_SECONDS", 0)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn("turn-1", wait_seconds=10, api_key="token", client=client)
+
+    result = asyncio.run(run())
+
+    assert calls == 2
+    assert result["ok"] is False
+    assert result["error"]["type"] == "authentication_error"
+
+
+def test_terminal_turn_computes_exact_elapsed_seconds() -> None:
+    turn = _turn(
+        "completed",
+        created_at="2026-08-07T12:00:00Z",
+        updated_at="2026-08-07T12:08:12.4Z",
+        messages=[{"role": "assistant", "content": "Audit complete."}],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=turn, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn("turn-1", api_key="token", client=client)
+
+    result = asyncio.run(run())
+
+    assert result["created_at"] == "2026-08-07T12:00:00Z"
+    assert result["progress"]["elapsed_seconds"] == 492.4
+
+
+def test_include_turn_compacts_oversized_snapshot_before_stubbing() -> None:
+    messages = [
+        {"role": "user" if idx % 2 == 0 else "assistant", "content": f"msg-{idx} " + ("detail " * 800)}
+        for idx in range(20)
+    ]
+    messages.append({"role": "assistant", "content": "Final grounded synthesis."})
+    tool_calls: list[Dict[str, Any]] = []
+    for idx in range(12):
+        call_id = f"call-{idx}"
+        tool_calls.append({"type": "invocation", "name": "shell", "call_id": call_id, "arguments": {"cmd": "python"}})
+        tool_calls.append(
+            {
+                "type": "response",
+                "call_id": call_id,
+                "is_error": False,
+                "output": {"stdout": f"row-{idx} " + ("payload " * 2_000)},
+            }
+        )
+    turn = _turn(
+        "completed",
+        created_at="2026-08-07T12:00:00Z",
+        updated_at="2026-08-07T12:03:00Z",
+        messages=messages,
+        tool_calls=tool_calls,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=turn, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn("turn-1", include_turn=True, api_key="token", client=client)
+
+    result = asyncio.run(run())
+
+    assert result["ok"] is True
+    assert aria._estimate_response_tokens(result) <= aria.MAX_RESPONSE_TOKENS
+    assert result["_truncation"]["applied"] is True
+    assert "omitted_fields" not in result["_truncation"]
+    assert result["turn"]["_truncated"] is True
+    assert result["turn"]["message_count"] == 21
+    assert result["turn"]["messages_omitted"] == 9
+    assert len(result["turn"]["messages"]) == 12
+    assert result["turn"]["tool_call_record_count"] == 24
+    assert result["turn"]["tool_calls_omitted"] == 8
+    assert len(result["turn"]["tool_calls"]) == 16
+    assert result["turn"]["tool_calls"][-1]["name"] == "shell"

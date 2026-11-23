@@ -11,7 +11,7 @@
     "maximum_exclusive": "2"
   },
   "locked_runtime": {
-    "wandb": "0.31.0",
+    "wandb": "0.31.2",
     "wandb-workspaces": "0.4.13",
     "weave": "0.53.13"
   },
@@ -20,8 +20,11 @@
   "qualification_tests": [
     "scripts/mcp_stdio_smoke.py",
     "tests/test_agent_lens.py",
+    "tests/test_agent_lens_doctor.py",
+    "tests/test_agents.py",
     "tests/test_documentation.py",
     "tests/test_graphql_compat_safety.py",
+    "tests/test_line_plot.py",
     "tests/test_public_release.py",
     "tests/test_query_wandb_compat.py",
     "tests/test_runtime_contract.py"
