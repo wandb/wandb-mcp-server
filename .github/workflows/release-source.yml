@@ -29,7 +29,7 @@ concurrency:
 jobs:
   build:
     name: Verify signed tag and build once
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04-2-cores
     timeout-minutes: 20
     outputs:
       version: ${{ steps.release.outputs.version }}
@@ -145,7 +145,7 @@ jobs:
   exact-profiles:
     name: Installed wheel / Python ${{ matrix.python-version }}
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04-2-cores
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -203,7 +203,7 @@ jobs:
   qualify:
     name: SBOM, vulnerability report, and qualification
     needs: [build, exact-profiles]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04-2-cores
     timeout-minutes: 20
     permissions:
       contents: read
@@ -342,7 +342,7 @@ jobs:
     name: Sign source artifacts and prepare draft release
     if: github.event_name != 'pull_request'
     needs: [build, qualify]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04-2-cores
     timeout-minutes: 20
     environment: public-source-release
     permissions:
