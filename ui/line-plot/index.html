@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>W&amp;B Line Plot</title>
+  </head>
+  <body>
+    <div id="app-root" class="lp-shell" data-display-mode="inline">
+      <header class="lp-header">
+        <div class="lp-heading">
+          <div class="lp-title-row">
+            <h1 id="lp-title" class="lp-title">Loading W&amp;B metrics…</h1>
+            <span id="lp-active-badge" class="lp-badge lp-badge-live" hidden></span>
+          </div>
+          <p id="lp-subtitle" class="lp-subtitle">Connecting to MCP host…</p>
+        </div>
+        <div class="lp-actions">
+          <button
+            id="lp-expand-btn"
+            type="button"
+            class="lp-btn lp-btn-secondary"
+            hidden
+            aria-label="Expand chart"
+          >
+            Expand chart
+          </button>
+          <button
+            id="lp-open-wandb-btn"
+            type="button"
+            class="lp-btn lp-btn-secondary"
+            hidden
+          >
+            Open in W&amp;B ↗
+          </button>
+        </div>
+      </header>
+
+      <section id="lp-toolbar" class="lp-toolbar" aria-label="Chart controls" hidden>
+        <label class="lp-control" for="lp-smooth-slider">
+          <span class="lp-control-label">Smooth</span>
+          <input
+            id="lp-smooth-slider"
+            type="range"
+            min="0"
+            max="0.99"
+            step="0.01"
+            value="0"
+          />
+          <output id="lp-smooth-value" for="lp-smooth-slider" class="lp-mono">0</output>
+        </label>
+
+        <button
+          id="lp-logy-btn"
+          type="button"
+          class="lp-chip-btn"
+          aria-pressed="false"
+          title="Toggle logarithmic Y scale"
+        >
+          Log Y
+        </button>
+
+        <button
+          id="lp-reset-zoom-btn"
+          type="button"
+          class="lp-chip-btn"
+          hidden
+          title="Reset zoom to full overview"
+        >
+          Reset zoom
+        </button>
+
+        <span id="lp-hint" class="lp-hint">Drag to zoom · Cmd/Ctrl-click legend to isolate</span>
+      </section>
+
+      <main id="lp-main" class="lp-main" data-legend="north">
+        <div id="lp-legend" class="lp-legend" role="toolbar" aria-label="Chart series" hidden></div>
+        <div id="lp-stage" class="lp-stage">
+          <div id="lp-empty" class="lp-empty" role="status">Waiting for W&amp;B run history…</div>
+          <div id="lp-plot" class="lp-plot" hidden></div>
+          <div id="lp-tooltip" class="lp-tooltip" hidden></div>
+        </div>
+      </main>
+
+      <div id="lp-banner" class="lp-banner" role="status" aria-live="polite" hidden>
+        <span id="lp-banner-text"></span>
+        <button id="lp-banner-dismiss" type="button" class="lp-banner-dismiss" aria-label="Dismiss notice">✕</button>
+      </div>
+
+      <footer id="lp-footer" class="lp-footer" hidden>
+        <div id="lp-meta" class="lp-meta"></div>
+        <div class="lp-refresh-group">
+          <label id="lp-live-label" class="lp-live-toggle" hidden>
+            <input id="lp-live-checkbox" type="checkbox" />
+            <span>Live refresh (10s)</span>
+          </label>
+          <span id="lp-refreshed-at" class="lp-refreshed" hidden>
+            Updated <time id="lp-refreshed-time"></time>
+          </span>
+        </div>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

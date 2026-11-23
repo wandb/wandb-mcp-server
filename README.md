@@ -92,6 +92,7 @@ the coding agent's own sessions.
 | **query_wandb_tool** | Use structured W&B reads or a bounded, query-only GraphQL document | *"Show me runs with loss < 0.1"* |
 | **probe_project_tool** | Discover useful project fields and bounded samples | *"What metrics and config fields are available?"* |
 | **get_run_history_tool** | Bounded time-series data with sparse, multi-key outer-union sampling | *"Show loss and validation-loss curves for run abc123"* |
+| **render_wandb_line_plot_tool** | Render interactive W&B line charts inline as an MCP App with live refresh, zoom, smoothing, and compact summary stats | *"Plot train/loss for the latest runs in my project"* |
 | **compare_runs_tool** | Compare selected metrics and configuration across runs | *"Compare these three training runs"* |
 | **diagnose_run_tool** | Diagnose a run using bounded metadata and history reads | *"Why did this run diverge?"* |
 | **summarize_evaluation_tool** | Summarize bounded evaluation results with coverage metadata | *"Summarize this evaluation"* |
@@ -758,17 +759,17 @@ Exact tool profiles:
 
 | Resolved profile | Base | Extensions | Managed workloads | Read-write | Read-only |
 |---|---|---|---|---:|---:|
-| `models-only` | `models-only` | none | dedicated, shared | 17 | 15 |
-| `models-weave` | `models-weave` | none | dedicated, shared | 22 | 20 |
-| `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 23 | 21 |
-| `models-weave-agents` | `models-weave-agents` | none | shared | 33 | 30 |
-| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 47 | 42 |
-| `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 37 | 33 |
-| `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 34 | 31 |
-| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 51 | 45 |
-| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 48 | 43 |
-| `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 38 | 34 |
-| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 52 | 46 |
+| `models-only` | `models-only` | none | dedicated, shared | 18 | 16 |
+| `models-weave` | `models-weave` | none | dedicated, shared | 23 | 21 |
+| `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 24 | 22 |
+| `models-weave-agents` | `models-weave-agents` | none | shared | 34 | 31 |
+| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 48 | 43 |
+| `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 38 | 34 |
+| `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 35 | 32 |
+| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 52 | 46 |
+| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 49 | 44 |
+| `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 39 | 35 |
+| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 53 | 47 |
 
 Exact workload defaults:
 
@@ -786,7 +787,7 @@ Exact capacity classes:
 | `medium` | 4 | 8 | 8 | 8 |
 | `large` | 8 | 16 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:c3cdd971289752bd77343397a051cc788e755ab36bd96ad22d229c0cb2b7cc9d`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:b132f6abd3330c860bb07a964cde31e8764eabde14c232352669a221807e5379`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line

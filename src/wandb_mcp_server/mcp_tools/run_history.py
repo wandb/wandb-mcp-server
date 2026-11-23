@@ -180,9 +180,10 @@ class _HistoryFetch:
 class _BoundedHistoryRun:
     """Delegate sampled reads while keeping scans off the full history-key query."""
 
-    def __init__(self, run: Any, *, last_step: int | None):
+    def __init__(self, run: Any, *, last_step: int | None, run_state: str | None = None):
         self._run = run
         self._last_step = last_step
+        self.run_state = run_state
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._run, name)
@@ -267,9 +268,11 @@ def _resolve_bounded_history_run(
         api_key=getattr(api, "api_key", None),
     )
     last_step = snapshot.get("last_step")
+    raw_state = snapshot.get("state")
     bounded_run = _BoundedHistoryRun(
         run,
         last_step=(last_step if isinstance(last_step, int) and not isinstance(last_step, bool) else None),
+        run_state=(raw_state.strip() if isinstance(raw_state, str) and raw_state.strip() else None),
     )
     return bounded_run, bounded_run.lastHistoryStep
 
@@ -632,6 +635,8 @@ def get_run_history(
         }
         if stream == "default" and len(requested_keys) > 1 and target_x is None:
             result_dict["join"] = "outer"
+        if isinstance(getattr(run, "run_state", None), str):
+            result_dict["run_state"] = run.run_state
         if fetched.key_counts_exact:
             result_dict["missing_keys"] = unobserved_keys
         if profile_limit_applied:

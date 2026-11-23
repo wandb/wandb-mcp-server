@@ -174,6 +174,7 @@ HEAVY_TOOLS = frozenset(
         "query_wandb_graphql_tool",
         "compare_artifact_versions_tool",
         "get_weave_agent_conversation_spans_tool",
+        "render_wandb_line_plot_tool",
     }
 )
 

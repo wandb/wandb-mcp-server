@@ -1262,6 +1262,64 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                 }
             )
 
+    from mcp.types import CallToolResult
+    from wandb_mcp_server.mcp_tools.line_plot import (
+        LINE_PLOT_DESCRIPTION,
+        RESOURCE_URI,
+        TOOL_NAME as LINE_PLOT_TOOL_NAME,
+        register_line_plot_resource,
+        render_line_plot,
+    )
+
+    if LINE_PLOT_TOOL_NAME in selection.tools:
+        register_line_plot_resource(mcp_instance)
+
+    @register_tool(
+        description=LINE_PLOT_DESCRIPTION,
+        meta={"ui": {"resourceUri": RESOURCE_URI}, "ui/resourceUri": RESOURCE_URI},
+    )
+    def render_wandb_line_plot_tool(
+        project_name: str,
+        entity_name: Optional[str] = None,
+        run_ids: Annotated[
+            Optional[List[str]],
+            Field(
+                description="Optional 1–10 unique run IDs. When omitted, auto-discovers newest runs logging the metric(s).",
+                min_length=1,
+                max_length=10,
+            ),
+        ] = None,
+        metric: Annotated[
+            Optional[str],
+            Field(description="Single metric key shorthand (e.g. 'train/loss') when config.metrics is omitted."),
+        ] = None,
+        config: Annotated[
+            Optional[Dict[str, Any]],
+            Field(
+                description="Optional camelCase RunsLinePlotConfig (metrics, smoothingWeight, yLogScale, groupBy, etc.)."
+            ),
+        ] = None,
+        limit: Annotated[
+            Optional[StrictInt],
+            Field(description="Max runs/groups to plot (1–10; defaults to 10).", ge=1, le=10),
+        ] = None,
+        samples: Annotated[StrictInt, Field(ge=1)] = 500,
+        min_step: Annotated[Optional[StrictInt], Field(ge=0)] = None,
+        max_step: Annotated[Optional[StrictInt], Field(ge=0)] = None,
+    ) -> CallToolResult:
+        """Render W&B run metrics as an interactive MCP App line plot."""
+        return render_line_plot(
+            entity_name=entity_name,
+            project_name=project_name,
+            run_ids=run_ids,
+            config=config,
+            samples=samples,
+            min_step=min_step,
+            max_step=max_step,
+            metric=metric,
+            limit=limit,
+        )
+
     # --- Registry & Artifact tools ---
 
     @register_tool(description=LIST_REGISTRIES_TOOL_DESCRIPTION)

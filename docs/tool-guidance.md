@@ -520,7 +520,7 @@ every metric from wide runs and usually answers the question in one request.
 
 Prefer the existing specialized tools when they match the request:
 - entity/project discovery: list_entities_tool and query_wandb_entity_projects
-- time-series metrics: get_run_history_tool
+- time-series metrics: get_run_history_tool and render_wandb_line_plot_tool
 - artifact reads: list_artifact_versions_tool and get_artifact_details_tool
 - registry reads: list_registries_tool and list_registry_collections_tool
 - automations/integrations: list_wandb_automations_tool and list_wandb_integrations_tool
@@ -690,3 +690,12 @@ Examples
 ...     "my-team", "my-project", "h0fm5qp5",
 ...     keys=["validation/loss"], x_axis="validation/step", target_x=1000,
 ... )
+
+---
+
+## `render_wandb_line_plot_tool`
+
+Render W&B run metrics as an interactive MCP App line chart (`ui://wandb/line-plot.html`) plus compact summary stats.
+
+- **1-call quick plot or full `RunsLinePlotConfig`:** `project_name` is required; `entity_name` (auto-resolves viewer default entity) and `run_ids` (auto-selects newest runs logging the requested metrics) are optional. Pass `metric` (single metric shorthand) or camelCase `config` matching W&B report spec panels.
+- **Interactive MCP App UX:** Supports fullscreen/PiP expansion, outward whole-step drag-zoom, client-side smoothing/log-Y/series isolation, 10-second active-run live refresh, and stateless `ui/update-model-context` synchronization (`[MCP Line Plot Context]`).
