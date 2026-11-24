@@ -650,9 +650,7 @@ def workload_policy(
             per_key = int(rate_policy["per_key_per_minute"])
             global_rate = int(rate_policy["global_per_minute"])
             if (per_key > 0) != (global_rate > 0):
-                raise ValueError(
-                    "HTTP rate overrides must either set both per-key and global rates > 0 or both to 0"
-                )
+                raise ValueError("HTTP rate overrides must either set both per-key and global rates > 0 or both to 0")
             rate_policy["enabled"] = per_key > 0 and global_rate > 0
     else:
         for env_name in HTTP_RATE_OVERRIDE_ENVS.values():

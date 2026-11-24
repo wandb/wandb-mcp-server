@@ -291,4 +291,3 @@ def test_custom_wandb_base_url_derives_customer_trace_server_in_local_mode() -> 
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "https://acme.wandb.io/traces"
-

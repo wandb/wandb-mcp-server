@@ -451,4 +451,3 @@ def test_shared_workload_keeps_session_limits_locked_even_with_override_opt_in()
     )
     assert process.returncode != 0
     assert "SESSION_TTL_SECONDS cannot override managed MCP_WORKLOAD_PROFILE=shared" in process.stderr
-

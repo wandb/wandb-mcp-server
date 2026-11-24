@@ -60,6 +60,8 @@ def _effective_agents_timeout() -> float:
     if deadline is None:
         return base
     return max(0.1, min(base, deadline - time.monotonic()))
+
+
 _MAX_CONVERSATION_SPANS_BATCH = 100
 _MAX_FEEDBACK_QUERY_LIMIT = 200
 _MAX_FEEDBACK_NOTE_CHARS = 10_000
