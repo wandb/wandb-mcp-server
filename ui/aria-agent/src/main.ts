@@ -75,6 +75,8 @@ let state: AriaStudioState = createInitialState();
 let pollTimer: number | null = null;
 let clockInterval: number | null = null;
 let actionBusy = false;
+let lastRenderedSessionId: string | null = null;
+let lastRenderedTurnCount = 0;
 
 function showBanner(message: string, tone: "info" | "warning" | "error" = "info"): void {
   state = { ...state, bannerMessage: message, bannerTone: tone };
@@ -1095,6 +1097,15 @@ function renderMain(): void {
     const isLatest = idx === active.turns.length - 1;
     turnStreamEl.appendChild(buildTurnGroupNode(entry, idx, isLatest, nowMs));
   });
+
+  if (active.sessionId !== lastRenderedSessionId) {
+    turnStreamEl.scrollTop = 0;
+  } else if (active.turns.length > lastRenderedTurnCount && active.turns.length > 1) {
+    const newestGroup = turnStreamEl.lastElementChild as HTMLElement | null;
+    newestGroup?.scrollIntoView({ block: "start" });
+  }
+  lastRenderedSessionId = active.sessionId;
+  lastRenderedTurnCount = active.turns.length;
 
   const latest = latestSessionEntry(active);
   const canReply =

@@ -459,7 +459,12 @@ export function applyThreadPayloadToState(
 ): AriaStudioState {
   const { thread, turns } = payload;
   const chronological = [...turns].reverse();
-  let next = state;
+  const wasParallel = state.sessions.length >= 2;
+  // In 1-to-1 Studio mode, switching threads via aria_get_thread replaces the focused
+  // conversation cleanly instead of turning thread navigation into a 2-agent fleet.
+  let next: AriaStudioState = wasParallel
+    ? state
+    : { ...state, sessions: [], selectedSessionId: null };
   if (chronological.length === 0) {
     const placeholder: AriaTurnPayload = {
       ok: true,
@@ -474,7 +479,8 @@ export function applyThreadPayloadToState(
       access_mode: payload.access_mode,
       forge_home_url: payload.forge_home_url,
     };
-    return upsertTurnIntoState(next, placeholder, nowMs, { selectUpserted: true });
+    const out = upsertTurnIntoState(next, placeholder, nowMs, { selectUpserted: true });
+    return wasParallel ? { ...out, parallelLayout: "split" } : out;
   }
 
   chronological.forEach((summary, index) => {
@@ -498,7 +504,7 @@ export function applyThreadPayloadToState(
       selectUpserted: index === chronological.length - 1,
     });
   });
-  return next;
+  return wasParallel ? { ...next, parallelLayout: "split" } : next;
 }
 
 export function applyThreadsListToState(

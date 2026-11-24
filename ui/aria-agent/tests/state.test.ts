@@ -3,12 +3,14 @@ import { parseAriaToolEnvelope } from "../src/schema";
 import {
   applyOptimisticSendInput,
   applyParallelBatchToState,
+  applyThreadPayloadToState,
   buildModelContextPayload,
   computeLiveElapsedSeconds,
   createInitialState,
   deriveSessionPhase,
   extractRequestedDomains,
   formatElapsedClock,
+  getHydratableCompletedTurnIds,
   getPollableTurnIds,
   summarizeFleet,
   upsertTurnIntoState,
@@ -258,5 +260,62 @@ describe("ARIA MCP App schema & state engine", () => {
     const ctx = buildModelContextPayload(state);
     expect(ctx?.structuredContent.mode).toBe("parallel");
     expect(ctx?.text).toContain("ARIA Parallel Sub-Agents (4)");
+  });
+
+  it("keeps 1-to-1 Studio mode when switching threads via aria_get_thread and flags hydration", () => {
+    let state = createInitialState();
+    state = upsertTurnIntoState(
+      state,
+      {
+        ok: true,
+        turn_id: "turn-current",
+        thread_id: "thread-current",
+        title: "Current Session",
+        scope: { entity: "wandb", project: "looped-transformer-lab" },
+        state: "completed",
+        is_terminal: true,
+        latest_response: "Done.",
+      },
+      1_000,
+    );
+    expect(state.sessions).toHaveLength(1);
+
+    state = applyThreadPayloadToState(
+      state,
+      {
+        ok: true,
+        thread: {
+          thread_id: "thread-older",
+          root_turn_id: "turn-old-1",
+          latest_turn_id: "turn-old-2",
+          turn_count: 2,
+          title: "8x RoPE Base Frequency Sweep",
+          prompt_preview: "Sweep RoPE theta across 10k, 50k, and 250k",
+          scope: { entity: "wandb", project: "looped-transformer-lab" },
+          state: "completed",
+          is_terminal: true,
+        },
+        turns: [
+          {
+            turn_id: "turn-old-2",
+            parent_turn_id: "turn-old-1",
+            state: "completed",
+            is_terminal: true,
+          },
+          {
+            turn_id: "turn-old-1",
+            parent_turn_id: null,
+            state: "completed",
+            is_terminal: true,
+          },
+        ],
+      },
+      2_000,
+    );
+
+    expect(state.sessions).toHaveLength(1);
+    expect(state.sessions[0]!.sessionId).toBe("thread-older");
+    expect(state.sessions[0]!.label).toBe("8x RoPE Base Frequency Sweep");
+    expect(getHydratableCompletedTurnIds(state)).toEqual(["turn-old-2"]);
   });
 });
