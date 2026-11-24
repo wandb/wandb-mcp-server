@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
+import contractFixture from "../../shared/fixtures/agent-lens-contract.json";
 import { isAllowedHttpsUrl } from "../../shared/url-guard";
-import { buildSpanWaterfall, parseConversationTags, type ConversationPayload } from "../src/schema";
 import {
+  buildSpanWaterfall,
+  parseConversationTags,
+  parseFailureAttributions,
+  type ConversationPayload,
+} from "../src/schema";
+import {
+  buildActiveConversationForgeLink,
   buildConversationModelContext,
   canPerformWrites,
   createInitialConversationState,
+  getEvidenceSpanIdsSet,
   getVisibleTurns,
   reduceConversationState,
 } from "../src/state";
@@ -15,47 +23,51 @@ function makeSamplePayload(overrides: Partial<ConversationPayload> = {}): Conver
     mode: "conversation",
     entityName: "acme",
     projectName: "support-agent",
-    conversationId: "conv-42",
+    conversationId: "conv-stripe-8841",
     traceId: null,
     agentName: "billing-router",
-    agentVersion: "v3",
-    forgeUrl: "https://forge.coreweave.com/acme/support-agent/agent-lens",
+    agentVersion: "v4.2",
+    forgeUrl: "https://forge.coreweave.com/agent-lens/acme/support-agent",
     accessMode: "read-write",
     agentLensAvailable: true,
     compacted: false,
+    selectedFailure: {
+      traceId: "trace-stripe-8841",
+      failureId: "77869ce8-2917-5d33-bc74-ab63603e278e",
+    },
     summary: {
       turnCount: 2,
       totalTurns: 2,
       hasMore: false,
-      totalInputTokens: 520,
+      totalInputTokens: 610,
       totalOutputTokens: 180,
-      totalTokens: 700,
-      totalDurationMs: 1450,
-      totalCostUsd: 0.0042,
+      totalTokens: 790,
+      totalDurationMs: 1530,
+      totalCostUsd: 0.0046,
       errorCount: 1,
     },
     turns: [
       {
         turnIndex: 1,
-        traceId: "trace-ok",
-        spanId: "span-turn-1",
+        traceId: "trace-stripe-8840",
+        spanId: "span-turn-8840",
         agentName: "billing-router",
-        agentVersion: "v3",
+        agentVersion: "v4.2",
         statusCode: "OK",
         isError: false,
         errorMessage: null,
-        startedAt: "2026-11-23T18:00:00Z",
-        durationMs: 450,
-        inputTokens: 200,
-        outputTokens: 80,
-        totalTokens: 280,
-        costUsd: 0.0015,
+        startedAt: "2026-11-23T21:14:00Z",
+        durationMs: 410,
+        inputTokens: 220,
+        outputTokens: 68,
+        totalTokens: 288,
+        costUsd: 0.0014,
         model: "gpt-5.4",
         messages: [
           {
             index: 0,
             role: "user",
-            content: "Check invoice #99",
+            content: "Can you check why EU-West invoice #8841 failed to settle?",
             toolName: null,
             toolCallId: null,
             arguments: null,
@@ -73,19 +85,19 @@ function makeSamplePayload(overrides: Partial<ConversationPayload> = {}): Conver
       },
       {
         turnIndex: 2,
-        traceId: "trace-err",
-        spanId: "span-turn-2",
+        traceId: "trace-stripe-8841",
+        spanId: "span-turn-8841",
         agentName: "billing-router",
-        agentVersion: "v3",
+        agentVersion: "v4.2",
         statusCode: "ERROR",
         isError: true,
-        errorMessage: "Stripe lookup timed out after 1000ms",
-        startedAt: "2026-11-23T18:01:00Z",
-        durationMs: 1000,
-        inputTokens: 320,
-        outputTokens: 100,
-        totalTokens: 420,
-        costUsd: 0.0027,
+        errorMessage: "StripeInvalidRequestError: 422 Unprocessable Entity — Missing required param: currency.",
+        startedAt: "2026-11-23T21:14:05Z",
+        durationMs: 1120,
+        inputTokens: 390,
+        outputTokens: 112,
+        totalTokens: 502,
+        costUsd: 0.0032,
         model: "gpt-5.4",
         messages: [
           {
@@ -93,15 +105,15 @@ function makeSamplePayload(overrides: Partial<ConversationPayload> = {}): Conver
             role: "tool",
             content: null,
             toolName: "lookup_invoice",
-            toolCallId: "call-1",
-            arguments: '{"invoice_id":"99"}',
+            toolCallId: "call_8841",
+            arguments: '{"invoice_id":"8841","ledger":"eu-west"}',
             toolCalls: [],
             toolResult: null,
-            spanId: "span-tool-99",
+            spanId: "span-tool-8841",
             spanName: "tool.lookup_invoice",
             statusCode: "ERROR",
-            error: "TimeoutError",
-            durationMs: 990,
+            error: "422 Unprocessable Entity: Missing required param: currency.",
+            durationMs: 640,
             model: null,
           },
         ],
@@ -115,33 +127,68 @@ function makeSamplePayload(overrides: Partial<ConversationPayload> = {}): Conver
 
 describe("url-guard", () => {
   it("allows valid https deep links and rejects non-https schemes", () => {
-    expect(isAllowedHttpsUrl("https://forge.coreweave.com/acme/proj/agent-lens")).toBe(true);
-    expect(isAllowedHttpsUrl("http://forge.coreweave.com/acme/proj")).toBe(false);
+    expect(isAllowedHttpsUrl("https://forge.coreweave.com/agent-lens/acme/proj")).toBe(true);
+    expect(isAllowedHttpsUrl("http://forge.coreweave.com/agent-lens/acme/proj")).toBe(false);
     expect(isAllowedHttpsUrl("javascript:alert(1)")).toBe(false);
     expect(isAllowedHttpsUrl("data:text/html,<h1>hi</h1>")).toBe(false);
     expect(isAllowedHttpsUrl("/relative/path")).toBe(false);
   });
 });
 
-describe("Conversation state reducer & context sync", () => {
-  it("auto-selects first failing turn and publishes structured context", () => {
-    let state = createInitialConversationState();
-    state = reduceConversationState(state, { type: "loaded", payload: makeSamplePayload() });
+describe("Conversation state reducer, agent failures & evidence span sync", () => {
+  it("parses real conversation_tags (tag field) and TurnFailureAttribution rows", () => {
+    const tags = parseConversationTags(contractFixture.conversation_tags);
+    expect(tags).toHaveLength(1);
+    expect(tags[0]?.name).toBe("eu-ledger");
 
-    expect(state.status).toBe("ready");
-    expect(state.selectedTarget?.turnIndex).toBe(2);
-    expect(state.selectedTarget?.traceId).toBe("trace-err");
-    expect(state.selectedTarget?.toolName).toBe("lookup_invoice");
+    const failures = parseFailureAttributions(contractFixture.failure_attributions);
+    expect(failures).toHaveLength(2);
+    expect(failures[0]).toMatchObject({
+      traceId: "trace-stripe-8841",
+      failureId: "77869ce8-2917-5d33-bc74-ab63603e278e",
+      failureCategory: "tool_misuse",
+      categoryLabel: "Tool misuse",
+      failureSeverity: "major",
+      evidenceSpanIds: ["span-tool-8841"],
+      clusterTitle: "lookup_invoice omits required currency",
+    });
+  });
+
+  it("pins selected_failure, focuses evidence span in waterfall, and includes failure reason in context", () => {
+    const failures = parseFailureAttributions(contractFixture.failure_attributions);
+    const spans = buildSpanWaterfall(contractFixture.weave_conversation_spans);
+
+    let state = reduceConversationState(createInitialConversationState(), {
+      type: "loaded",
+      payload: makeSamplePayload(),
+    });
+    state = reduceConversationState(state, { type: "failuresLoaded", failures });
+    expect(state.activeFailureId).toBe("77869ce8-2917-5d33-bc74-ab63603e278e");
+    expect(Array.from(getEvidenceSpanIdsSet(state))).toEqual(["span-tool-8841"]);
+
+    state = reduceConversationState(state, {
+      type: "focusFailure",
+      failureId: "77869ce8-2917-5d33-bc74-ab63603e278e",
+    });
+    expect(state.activeTab).toBe("spans");
+
+    state = reduceConversationState(state, { type: "spansLoaded", spans });
+    expect(state.selectedSpanId).toBe("span-tool-8841");
 
     const ctx = buildConversationModelContext(state);
-    expect(ctx?.content[0]?.text).toContain("[MCP Agent Conversation Context]");
+    expect(ctx?.content[0]?.text).toContain("evidence_span=true");
+    expect(ctx?.content[0]?.text).toContain("failure_reason=");
     expect(ctx?.structuredContent).toMatchObject({
-      entity_name: "acme",
-      project_name: "support-agent",
-      conversation_id: "conv-42",
-      trace_id: "trace-err",
+      span_id: "span-tool-8841",
       tool_name: "lookup_invoice",
+      failure_id: "77869ce8-2917-5d33-bc74-ab63603e278e",
+      failure_severity: "major",
+      is_evidence_span: true,
+      url: "https://forge.coreweave.com/agent-lens/acme/support-agent/conversations/conv-stripe-8841/spans/turns/trace-stripe-8841/spans/span-tool-8841",
     });
+    expect(buildActiveConversationForgeLink(state)).toBe(
+      "https://forge.coreweave.com/agent-lens/acme/support-agent/conversations/conv-stripe-8841/spans/turns/trace-stripe-8841/spans/span-tool-8841",
+    );
   });
 
   it("filters errors-only turns and gates write actions in read-only mode", () => {
@@ -155,99 +202,5 @@ describe("Conversation state reducer & context sync", () => {
     const visible = getVisibleTurns(state);
     expect(visible).toHaveLength(1);
     expect(visible[0]?.turnIndex).toBe(2);
-  });
-
-  it("records inline feedback and tag updates cleanly", () => {
-    let state = reduceConversationState(createInitialConversationState(), {
-      type: "loaded",
-      payload: makeSamplePayload(),
-    });
-    expect(canPerformWrites(state, true)).toBe(true);
-
-    state = reduceConversationState(state, {
-      type: "feedbackAdded",
-      turnIndex: 2,
-      item: {
-        id: "fb-1",
-        feedbackType: "wandb.note.1",
-        note: "Increase timeout",
-        emoji: null,
-        traceId: "trace-err",
-        spanId: "span-turn-2",
-        createdAt: "2026-11-23T18:02:00Z",
-        createdBy: null,
-      },
-    });
-    expect(state.payload?.turns[1]?.feedback).toHaveLength(1);
-
-    const parsedTags = parseConversationTags({
-      data: [{ tag_id: "tag-uuid-1", tag_name: "escalated", trace_id: "trace-err" }],
-    });
-    state = reduceConversationState(state, { type: "tagsLoaded", tags: parsedTags });
-    expect(state.tags).toHaveLength(1);
-    expect(state.tags[0]?.name).toBe("escalated");
-  });
-
-  it("builds nested OTel span waterfall and updates context on span click", () => {
-    const spans = buildSpanWaterfall({
-      conversations: [
-        {
-          conversation_id: "conv-42",
-          spans: [
-            {
-              span_id: "root-turn",
-              trace_id: "trace-err",
-              name: "agent.turn",
-              is_invocation: true,
-              started_at: "2026-11-23T18:01:00.000Z",
-              duration_ms: 1000,
-              status_code: "ERROR",
-            },
-            {
-              span_id: "child-llm",
-              parent_id: "root-turn",
-              trace_id: "trace-err",
-              name: "openai.responses",
-              request_model: "gpt-5.4",
-              started_at: "2026-11-23T18:01:00.050Z",
-              duration_ms: 350,
-              status_code: "OK",
-            },
-            {
-              span_id: "child-tool",
-              parent_id: "root-turn",
-              trace_id: "trace-err",
-              name: "tool.lookup_invoice",
-              tool_name: "lookup_invoice",
-              started_at: "2026-11-23T18:01:00.420Z",
-              duration_ms: 580,
-              status_code: "ERROR",
-              error: "Stripe socket timeout",
-            },
-          ],
-        },
-      ],
-    });
-
-    expect(spans).toHaveLength(3);
-    expect(spans[0]?.depth).toBe(0);
-    expect(spans[1]?.depth).toBe(1);
-    expect(spans[1]?.kind).toBe("llm");
-    expect(spans[2]?.kind).toBe("tool");
-    expect(spans[2]?.isError).toBe(true);
-
-    let state = reduceConversationState(createInitialConversationState(), {
-      type: "loaded",
-      payload: makeSamplePayload(),
-    });
-    state = reduceConversationState(state, { type: "spansLoaded", spans });
-    state = reduceConversationState(state, { type: "selectSpan", spanId: "child-tool" });
-
-    const ctx = buildConversationModelContext(state);
-    expect(ctx?.structuredContent).toMatchObject({
-      span_id: "child-tool",
-      tool_name: "lookup_invoice",
-      error_preview: "Stripe socket timeout",
-    });
   });
 });

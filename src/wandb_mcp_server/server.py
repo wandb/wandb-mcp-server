@@ -1557,6 +1557,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         trace_id: str,
         include_feedback: bool = False,
         include_model_tool_calls: bool = False,
+        selected_failure: Optional[Dict[str, str]] = None,
     ) -> CallToolResult:
         """Get the structured chat/trajectory view for one trace."""
         return render_agent_trace(
@@ -1565,6 +1566,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             trace_id=trace_id,
             include_feedback=include_feedback,
             include_model_tool_calls=include_model_tool_calls,
+            selected_failure=selected_failure,
             _access_mode=effective_access_mode,
             _agent_lens_available=agent_lens_group_enabled,
         )
@@ -1585,6 +1587,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         sort_direction: Literal["asc", "desc"] = "asc",
         include_feedback: bool = False,
         include_model_tool_calls: bool = False,
+        selected_failure: Optional[Dict[str, str]] = None,
     ) -> CallToolResult:
         """Get the multi-turn chat view for a conversation."""
         return render_agent_conversation(
@@ -1596,6 +1599,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             sort_direction=sort_direction,
             include_feedback=include_feedback,
             include_model_tool_calls=include_model_tool_calls,
+            selected_failure=selected_failure,
             _access_mode=effective_access_mode,
             _agent_lens_available=agent_lens_group_enabled,
         )

@@ -4,89 +4,60 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>W&amp;B Agent Conversation Inspector</title>
+    <title>Agent Lens Conversation</title>
   </head>
   <body>
     <div id="app-root" class="ac-shell" data-display-mode="inline">
       <header class="ac-header">
-        <div class="ac-heading">
+        <div class="ac-header-left">
           <div class="ac-title-row">
-            <span id="ac-mode-pill" class="ac-pill ac-pill-mode">CONVERSATION</span>
-            <h1 id="ac-title" class="ac-title">Loading agent trajectory…</h1>
-            <span id="ac-version-pill" class="ac-pill" hidden></span>
-            <span id="ac-error-pill" class="ac-pill ac-pill-error" hidden></span>
-          </div>
-          <div id="ac-meta-strip" class="ac-meta-strip">
-            <span id="ac-subtitle">Connecting to MCP host…</span>
+            <h1 id="ac-title" class="ac-title">Loading conversation…</h1>
+            <button id="ac-copy-conv-btn" type="button" class="ac-copy-conv-btn" hidden></button>
+            <span id="ac-version-pill" class="ac-subtle-badge" hidden></span>
+            <span id="ac-error-pill" class="ac-error-badge" hidden></span>
           </div>
           <div id="ac-tags-row" class="ac-tags-row" hidden></div>
         </div>
-        <div class="ac-actions">
-          <button
-            id="ac-expand-btn"
-            type="button"
-            class="ac-btn"
-            hidden
-            aria-label="Expand inspector"
-          >
-            Expand
-          </button>
-          <button
-            id="ac-open-forge-btn"
-            type="button"
-            class="ac-btn ac-btn-accent"
-            hidden
-          >
-            Open in Forge Agent Lens ↗
-          </button>
+
+        <div class="ac-header-right">
+          <div id="ac-meta-strip" class="ac-meta-strip">
+            <span id="ac-subtitle">Connecting…</span>
+          </div>
+          <div class="ac-actions">
+            <button id="ac-expand-btn" type="button" class="ac-btn" hidden aria-label="Expand view">
+              Expand
+            </button>
+            <button id="ac-open-forge-btn" type="button" class="ac-btn" hidden>
+              Open in Agent Lens ↗
+            </button>
+          </div>
         </div>
       </header>
 
-      <nav id="ac-toolbar" class="ac-toolbar" aria-label="Trajectory views" hidden>
+      <nav id="ac-toolbar" class="ac-toolbar" aria-label="Conversation views" hidden>
         <div class="ac-tabs" role="tablist">
-          <button
-            id="ac-tab-conversation"
-            type="button"
-            role="tab"
-            class="ac-tab"
-            aria-selected="true"
-          >
-            Conversation
+          <button id="ac-tab-conversation" type="button" role="tab" class="ac-tab" aria-selected="true">
+            Thread
           </button>
-          <button
-            id="ac-tab-spans"
-            type="button"
-            role="tab"
-            class="ac-tab"
-            aria-selected="false"
-          >
-            OTel Spans
+          <button id="ac-tab-spans" type="button" role="tab" class="ac-tab" aria-selected="false">
+            Spans
           </button>
         </div>
 
         <div class="ac-toolbar-right">
-          <button
-            id="ac-errors-only-btn"
-            type="button"
-            class="ac-chip-btn"
-            aria-pressed="false"
-            hidden
-          >
+          <button id="ac-failures-btn" type="button" class="ac-chip-btn ac-chip-failures" aria-expanded="true" hidden>
+            Agent failures
+          </button>
+          <button id="ac-errors-only-btn" type="button" class="ac-chip-btn" aria-pressed="false" hidden>
             Errors only
           </button>
-          <button
-            id="ac-tag-menu-btn"
-            type="button"
-            class="ac-chip-btn"
-            aria-expanded="false"
-            hidden
-          >
+          <button id="ac-tag-menu-btn" type="button" class="ac-chip-btn" aria-expanded="false" hidden>
             + Tag
           </button>
-          <span id="ac-context-hint" class="ac-hint">Click any turn or span to sync coding context</span>
         </div>
       </nav>
 
+      <section id="ac-failures-panel" class="ac-failures-panel" aria-label="Agent failures in conversation" hidden></section>
       <section id="ac-tag-popover" class="ac-popover" aria-label="Manage conversation tags" hidden></section>
 
       <div id="ac-banner" class="ac-banner" role="status" aria-live="polite" hidden>
@@ -95,10 +66,10 @@
       </div>
 
       <main id="ac-main" class="ac-main">
-        <div id="ac-empty" class="ac-empty" role="status">Waiting for Weave agent trajectory…</div>
+        <div id="ac-empty" class="ac-empty" role="status">Waiting for conversation…</div>
         <div id="ac-conversation-view" class="ac-turn-stream" hidden></div>
         <div id="ac-spans-view" class="ac-spans-layout" hidden>
-          <div id="ac-spans-list" class="ac-waterfall"></div>
+          <div id="ac-spans-list" class="ac-span-tree"></div>
           <aside id="ac-span-drawer" class="ac-span-drawer" aria-label="Selected span details" hidden></aside>
         </div>
       </main>

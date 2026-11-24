@@ -19,8 +19,8 @@ from wandb_mcp_server.mcp_tools.agent_lens import (
     CLUSTERS_PATH,
     FAILURE_ATTRIBUTIONS_PATH,
     LATEST_WEEK_PATH,
-    _breakdowns_path,
     _bounded_list,
+    _breakdowns_path,
     _serialize_insights_filters,
     _validated_window,
     fetch_agent_lens_json,
@@ -32,12 +32,40 @@ INSIGHTS_RESOURCE_URI = "ui://wandb/agent-lens-insights.html"
 INSIGHTS_TOOL_NAME = "render_agent_lens_insights_tool"
 INSIGHTS_SCHEMA = "wandb.agent_lens_insights/v1"
 VALID_WINDOW_DAYS = frozenset({1, 7, 14, 30})
+VALID_FAILURE_SEVERITIES = frozenset({"info", "minor", "major"})
 MAX_OVERVIEW_CLUSTERS = 50
 MAX_OVERVIEW_TRACE_IDS = 50
 
+FAILURE_CATEGORY_LABELS: Dict[str, str] = {
+    "unproductive_loop": "Unproductive loop",
+    "refusal": "Improper refusal",
+    "improper_refusal": "Improper refusal",
+    "context_loss": "Lost context",
+    "task_misunderstanding": "Task misunderstanding",
+    "tool_misuse": "Tool misuse",
+    "requirement_violation": "Missed requirement",
+    "capability_gap": "Capability limitation",
+    "system_error": "System error",
+    "wrong_output": "Incorrect result",
+    "tool_failure": "Tool failure",
+    "unsafe_behavior": "Unsafe behavior",
+    "safety_violation": "Unsafe behavior",
+}
+
+INTENT_CATEGORY_LABELS: Dict[str, str] = {
+    "action_request": "Task request",
+    "refinement": "Clarification or correction",
+    "information_request": "Question",
+    "approval": "Approval",
+    "problem_report": "Issue report",
+    "negative_feedback": "Negative feedback",
+    "rejection": "Decline or cancellation",
+    "positive_feedback": "Positive feedback",
+}
+
 RENDER_AGENT_LENS_INSIGHTS_TOOL_DESCRIPTION = """Render project-wide Agent Lens failure & intent insights as an interactive MCP App (`ui://wandb/agent-lens-insights.html`) plus compact summary JSON.
 
-Gathers classified turn coverage, clustering status, failure & intent category breakdowns, top topic clusters, and optional failure attributions in one parallel call (`window_days`: 1, 7, 14, or 30, or explicit RFC 3339 `start_at`/`end_at` <= 30 days; optional `agent_name` filter). Interactive hosts support window switching, inline example-turn & attribution expansion, conversation inspection, and `[MCP Agent Lens Insights Context]` sync."""
+Gathers coverage weeks, clustering status, failure & intent category/cluster breakdowns, and optional failure attributions in one parallel call (`window_days`: 1, 7, 14, or 30, or explicit RFC 3339 `start_at`/`end_at` <= 30 days; optional `agent_name` filter). Interactive hosts support window switching, nested cluster & example-turn drilldown, conversation inspection, and coding-agent markdown brief sync."""
 
 
 def register_agent_lens_insights_resource(mcp: FastMCP) -> None:
@@ -89,6 +117,12 @@ def _humanize_slug(value: str) -> str:
     return " ".join(part.capitalize() if part.islower() else part for part in cleaned.split()) or value
 
 
+def label_for_category(signature_type: Literal["failure", "intent"], category_id: str) -> str:
+    """Return the user-facing Agent Lens category label, falling back to humanized slug."""
+    table = FAILURE_CATEGORY_LABELS if signature_type == "failure" else INTENT_CATEGORY_LABELS
+    return table.get(category_id) or _humanize_slug(category_id)
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     if isinstance(value, bool):
         return default
@@ -119,42 +153,29 @@ def _safe_optional_float(value: Any) -> Optional[float]:
     return parsed
 
 
-def _normalize_severity(raw: Any) -> Optional[str]:
+def _normalize_severity(raw: Any) -> Optional[Literal["info", "minor", "major"]]:
+    """Accept real Agent Lens cluster/finding severities (`info | minor | major`) only."""
     if not isinstance(raw, str):
         return None
     lowered = raw.strip().lower()
-    if lowered in {"critical", "high", "medium", "low"}:
-        return lowered
-    return lowered[:32] if lowered else None
+    if lowered in VALID_FAILURE_SEVERITIES:
+        return lowered  # type: ignore[return-value]
+    return None
 
 
-def _normalize_coverage(raw_res: Any) -> Dict[str, Any]:
+def _normalize_coverage(raw_res: Any) -> Dict[str, Optional[str]]:
+    """Normalize `/insights/latest-week`, which returns `first_week` and `latest_week` only."""
     data = raw_res.get("data") if isinstance(raw_res, dict) else None
     if not isinstance(data, dict):
         return {
             "firstWeek": None,
             "latestWeek": None,
-            "classifiedTurnCount": None,
-            "totalTurnCount": None,
-            "coveragePct": None,
         }
     first_week = str(data["first_week"]).strip() if data.get("first_week") else None
     latest_week = str(data["latest_week"]).strip() if data.get("latest_week") else None
-    classified = _safe_optional_int(
-        data.get("classified_turn_count") if "classified_turn_count" in data else data.get("classified_turns")
-    )
-    total = _safe_optional_int(data.get("total_turn_count") if "total_turn_count" in data else data.get("total_turns"))
-    pct = _safe_optional_float(data.get("coverage_pct") if "coverage_pct" in data else data.get("coverage_percentage"))
-    if pct is None and classified is not None and total is not None and total > 0:
-        pct = round((classified / total) * 100.0, 1)
-    elif pct is not None and 0.0 <= pct <= 1.0 and (classified is None or total is None):
-        pct = round(pct * 100.0, 1)
     return {
         "firstWeek": first_week,
         "latestWeek": latest_week,
-        "classifiedTurnCount": classified,
-        "totalTurnCount": total,
-        "coveragePct": pct,
     }
 
 
@@ -167,21 +188,43 @@ def _normalize_clustering_status(raw_res: Any) -> List[Dict[str, Any]]:
         if not isinstance(entry, dict):
             continue
         sig = str(entry.get("signature_type") or entry.get("type") or "").strip().lower()
-        if not sig:
+        if sig not in {"intent", "failure"}:
             continue
-        completed_at = entry.get("completed_at") or entry.get("updated_at") or entry.get("last_run_at")
+        completed_at = entry.get("completed_at")
+        window_start = entry.get("window_start")
+        window_end = entry.get("window_end")
         status = entry.get("status") or ("ready" if completed_at else "pending")
         items.append(
             {
                 "signatureType": sig,
                 "status": str(status).strip(),
                 "completedAt": str(completed_at).strip() if completed_at else None,
+                "windowStart": str(window_start).strip() if window_start else None,
+                "windowEnd": str(window_end).strip() if window_end else None,
             }
         )
     return items
 
 
+def _normalize_impact_fields(raw_obj: Dict[str, Any], count: int) -> Dict[str, Any]:
+    conv_count = _safe_int(raw_obj.get("conversation_count"), 0)
+    failed_count = _safe_int(raw_obj.get("failed_count"), 0)
+    frustrated_count = _safe_int(raw_obj.get("frustrated_count"), 0)
+    avg_latency = _safe_optional_float(raw_obj.get("average_latency_ms"))
+    avg_cost = _safe_optional_float(raw_obj.get("average_cost_per_turn_usd"))
+    return {
+        "conversationCount": conv_count,
+        "failedCount": failed_count,
+        "frustratedCount": frustrated_count,
+        "failureRate": round(failed_count / count, 4) if count > 0 else 0.0,
+        "frustrationRate": round(frustrated_count / count, 4) if count > 0 else 0.0,
+        "averageLatencyMs": round(avg_latency, 2) if avg_latency is not None else 0.0,
+        "averageCostPerTurnUsd": round(avg_cost, 6) if avg_cost is not None else 0.0,
+    }
+
+
 def _normalize_signature_section(
+    signature_type: Literal["failure", "intent"],
     breakdown_res: Any,
     clusters_res: Any,
     top_n_clusters: int,
@@ -192,8 +235,19 @@ def _normalize_signature_section(
     turn_count = _safe_int(bd_data.get("turn_count"), 0)
     raw_categories = bd_data.get("categories") if isinstance(bd_data.get("categories"), list) else []
 
+    raw_cluster_options: Dict[str, Dict[str, Any]] = {}
+    raw_clusters_list = clusters_res.get("data") if isinstance(clusters_res, dict) else None
+    if isinstance(raw_clusters_list, list):
+        for opt in raw_clusters_list:
+            if isinstance(opt, dict) and opt.get("id"):
+                cid = str(opt["id"]).strip()
+                if cid:
+                    raw_cluster_options[cid] = opt
+
+    no_failure_count: Optional[int] = None
     cluster_meta_from_bd: Dict[str, Dict[str, Any]] = {}
     categories: List[Dict[str, Any]] = []
+
     for raw_cat in raw_categories:
         if not isinstance(raw_cat, dict):
             continue
@@ -201,13 +255,15 @@ def _normalize_signature_section(
         if not cat_id:
             continue
         count = _safe_int(raw_cat.get("count"), 0)
-        raw_share = _safe_optional_float(raw_cat.get("share"))
-        if raw_share is None:
-            share = round(count / turn_count, 4) if turn_count > 0 else 0.0
-        else:
-            share = round(raw_share / 100.0, 4) if raw_share > 1.0 else round(max(0.0, raw_share), 4)
-        severity = _normalize_severity(raw_cat.get("severity") or raw_cat.get("max_severity"))
-        label = str(raw_cat.get("title") or raw_cat.get("label") or _humanize_slug(cat_id)).strip()
+        if signature_type == "failure" and cat_id == "no_failure":
+            no_failure_count = count
+            continue
+        if count <= 0:
+            continue
+
+        share = round(count / turn_count, 4) if turn_count > 0 else 0.0
+        cat_label = label_for_category(signature_type, cat_id)
+        cat_impact = _normalize_impact_fields(raw_cat, count)
 
         cluster_breakdowns: List[Dict[str, Any]] = []
         raw_cb_list = raw_cat.get("cluster_breakdowns")
@@ -219,86 +275,96 @@ def _normalize_signature_section(
                 if not cid:
                     continue
                 c_count = _safe_int(cb.get("count"), 0)
-                c_share = _safe_optional_float(cb.get("share"))
-                if c_share is None and turn_count > 0:
-                    c_share = round(c_count / turn_count, 4)
-                c_title = str(cb.get("title") or cb.get("name") or "").strip() or None
-                c_sev = _normalize_severity(cb.get("severity"))
+                if c_count <= 0:
+                    continue
+                opt_meta = raw_cluster_options.get(cid, {})
+                c_share_raw = _safe_optional_float(opt_meta.get("share"))
+                if c_share_raw is not None and 0.0 <= c_share_raw <= 1.0:
+                    c_share = round(c_share_raw, 4)
+                else:
+                    c_share = round(c_count / turn_count, 4) if turn_count > 0 else 0.0
+                c_title = str(cb.get("title") or opt_meta.get("title") or "").strip()
+                c_label = str(cb.get("label") or opt_meta.get("label") or "").strip()
+                display_title = c_title or c_label or cid
+                desc_raw = cb.get("description")
+                c_desc = sanitize_sensitive_text(desc_raw, max_chars=480) if isinstance(desc_raw, str) and desc_raw.strip() else None
+                c_sev = _normalize_severity(cb.get("severity")) if signature_type == "failure" else None
+                c_impact = _normalize_impact_fields(cb, c_count)
+
                 cb_item = {
                     "id": cid,
-                    "title": c_title,
+                    "title": display_title,
+                    "label": c_label or display_title,
+                    "description": c_desc,
+                    "severity": c_sev,
                     "count": c_count,
                     "share": c_share,
-                    "severity": c_sev,
+                    **c_impact,
                 }
                 cluster_breakdowns.append(cb_item)
                 cluster_meta_from_bd[cid] = {
+                    **cb_item,
                     "categoryId": cat_id,
-                    "count": c_count,
-                    "share": c_share,
-                    "title": c_title,
-                    "severity": c_sev,
+                    "categoryLabel": cat_label,
                 }
-        cluster_breakdowns.sort(key=lambda item: item["count"], reverse=True)
+
+        cluster_breakdowns.sort(key=lambda item: (item["count"], item["title"]), reverse=True)
         categories.append(
             {
                 "categoryId": cat_id,
-                "label": label,
+                "label": cat_label,
                 "count": count,
                 "share": share,
-                "severity": severity,
+                **cat_impact,
                 "clusterBreakdowns": cluster_breakdowns[:top_n_clusters],
             }
         )
 
-    categories.sort(key=lambda item: item["count"], reverse=True)
+    categories.sort(key=lambda item: (-item["count"], item["categoryId"]))
 
-    raw_clusters = clusters_res.get("data") if isinstance(clusters_res, dict) else None
     seen_cluster_ids: set[str] = set()
     clusters: List[Dict[str, Any]] = []
-    if isinstance(raw_clusters, list):
-        for raw_cl in raw_clusters:
+    if isinstance(raw_clusters_list, list):
+        for raw_cl in raw_clusters_list:
             if not isinstance(raw_cl, dict):
                 continue
-            cid = str(raw_cl.get("id") or raw_cl.get("topic_id") or "").strip()
+            cid = str(raw_cl.get("id") or "").strip()
             if not cid or cid in seen_cluster_ids:
                 continue
             seen_cluster_ids.add(cid)
             bd_meta = cluster_meta_from_bd.get(cid, {})
-            c_count = _safe_optional_int(raw_cl.get("count"))
-            if c_count is None:
-                c_count = bd_meta.get("count")
-            c_share = _safe_optional_float(raw_cl.get("share"))
-            if c_share is None:
-                c_share = bd_meta.get("share")
-            if c_share is None:
-                c_share = round(c_count / turn_count, 4) if (c_count is not None and turn_count > 0) else 0.0
-            elif c_share > 1.0:
-                c_share = round(c_share / 100.0, 4)
-            cat_id = (
-                str(raw_cl.get("category") or raw_cl.get("category_id") or bd_meta.get("categoryId") or "").strip()
-                or None
-            )
-            title = str(raw_cl.get("title") or raw_cl.get("name") or bd_meta.get("title") or cid).strip()
-            summary_raw = raw_cl.get("description") or raw_cl.get("summary")
-            summary = sanitize_sensitive_text(summary_raw, max_chars=280) if summary_raw else None
-            severity = _normalize_severity(raw_cl.get("severity") or bd_meta.get("severity"))
-            attribution_raw = raw_cl.get("attribution") or raw_cl.get("failure_attribution") or raw_cl.get("root_cause")
-            attribution = str(attribution_raw).strip() if attribution_raw else None
+            cat_id = str(raw_cl.get("category") or bd_meta.get("categoryId") or "").strip() or None
+            cat_label = label_for_category(signature_type, cat_id) if cat_id else bd_meta.get("categoryLabel")
+            c_title = str(raw_cl.get("title") or bd_meta.get("title") or "").strip()
+            c_label = str(raw_cl.get("label") or bd_meta.get("label") or "").strip()
+            display_title = c_title or c_label or cid
+            c_share_raw = _safe_optional_float(raw_cl.get("share"))
+            if c_share_raw is not None:
+                c_share = round(c_share_raw / 100.0, 4) if c_share_raw > 1.0 else round(max(0.0, c_share_raw), 4)
+            else:
+                c_share = float(bd_meta.get("share") or 0.0)
+            c_count = bd_meta.get("count")
             clusters.append(
                 {
                     "id": cid,
-                    "title": title,
-                    "summary": summary,
+                    "title": display_title,
+                    "label": c_label or display_title,
+                    "description": bd_meta.get("description"),
                     "categoryId": cat_id,
+                    "categoryLabel": cat_label,
                     "count": c_count,
-                    "share": round(max(0.0, c_share), 4),
-                    "severity": severity,
-                    "attribution": attribution,
+                    "share": c_share,
+                    "severity": bd_meta.get("severity") if signature_type == "failure" else None,
+                    "conversationCount": bd_meta.get("conversationCount"),
+                    "failedCount": bd_meta.get("failedCount"),
+                    "frustratedCount": bd_meta.get("frustratedCount"),
+                    "failureRate": bd_meta.get("failureRate"),
+                    "frustrationRate": bd_meta.get("frustrationRate"),
+                    "averageLatencyMs": bd_meta.get("averageLatencyMs"),
+                    "averageCostPerTurnUsd": bd_meta.get("averageCostPerTurnUsd"),
                 }
             )
 
-    # Backfill clusters present in breakdown cluster_breakdowns if /insights/clusters returned fewer
     for cid, bd_meta in cluster_meta_from_bd.items():
         if cid in seen_cluster_ids:
             continue
@@ -306,50 +372,89 @@ def _normalize_signature_section(
         clusters.append(
             {
                 "id": cid,
-                "title": bd_meta.get("title") or cid,
-                "summary": None,
-                "categoryId": bd_meta.get("categoryId"),
-                "count": bd_meta.get("count"),
-                "share": round(float(bd_meta.get("share") or 0.0), 4),
-                "severity": bd_meta.get("severity"),
-                "attribution": None,
+                "title": bd_meta["title"],
+                "label": bd_meta["label"],
+                "description": bd_meta["description"],
+                "categoryId": bd_meta["categoryId"],
+                "categoryLabel": bd_meta["categoryLabel"],
+                "count": bd_meta["count"],
+                "share": bd_meta["share"],
+                "severity": bd_meta["severity"],
+                "conversationCount": bd_meta["conversationCount"],
+                "failedCount": bd_meta["failedCount"],
+                "frustratedCount": bd_meta["frustratedCount"],
+                "failureRate": bd_meta["failureRate"],
+                "frustrationRate": bd_meta["frustrationRate"],
+                "averageLatencyMs": bd_meta["averageLatencyMs"],
+                "averageCostPerTurnUsd": bd_meta["averageCostPerTurnUsd"],
             }
         )
 
-    clusters.sort(key=lambda item: (item["share"], item["count"] or 0), reverse=True)
+    clusters.sort(key=lambda item: (item["count"] or 0, item["share"]), reverse=True)
+
+    failing_turn_count: Optional[int] = None
+    if signature_type == "failure":
+        if no_failure_count is not None:
+            failing_turn_count = max(0, turn_count - no_failure_count)
+        else:
+            cat_sum = sum(item["count"] for item in categories)
+            failing_turn_count = min(turn_count, cat_sum) if turn_count > 0 else cat_sum
+
     return {
         "turnCount": turn_count,
+        "failingTurnCount": failing_turn_count,
         "categories": categories,
         "clusters": clusters[:top_n_clusters],
     }
 
 
 def _normalize_failure_attributions(raw_res: Any) -> List[Dict[str, Any]]:
+    """Map `/insights/failure-attributions/query` `TurnFailureAttribution` rows."""
     data = raw_res.get("data") if isinstance(raw_res, dict) else None
-    rows = data if isinstance(data, list) else (data.get("attributions") if isinstance(data, dict) else None)
-    if not isinstance(rows, list):
+    if not isinstance(data, list):
         return []
     normalized: List[Dict[str, Any]] = []
-    for item in rows[:MAX_OVERVIEW_TRACE_IDS]:
+    for item in data[:MAX_OVERVIEW_TRACE_IDS]:
         if not isinstance(item, dict):
             continue
         trace_id = str(item.get("trace_id") or "").strip()
-        root_cause = (
-            item.get("root_cause")
-            or item.get("attribution")
-            or item.get("failure_type")
-            or item.get("category")
-            or "unknown"
+        if not trace_id:
+            continue
+        source_trace_id = str(item.get("source_trace_id") or trace_id).strip() or trace_id
+        failure_id = str(item["failure_id"]).strip() if item.get("failure_id") else None
+        failure_cat = str(item["failure_category"]).strip() if item.get("failure_category") else None
+        reason_raw = item.get("failure_reason")
+        failure_reason = (
+            sanitize_sensitive_text(reason_raw, max_chars=600)
+            if isinstance(reason_raw, str) and reason_raw.strip()
+            else None
         )
-        summary_raw = item.get("summary") or item.get("reason") or item.get("explanation") or item.get("failure_reason")
+        failure_severity = _normalize_severity(item.get("failure_severity"))
+        raw_spans = item.get("failure_evidence_span_ids")
+        evidence_span_ids = (
+            [str(s).strip() for s in raw_spans if isinstance(s, str) and s.strip()]
+            if isinstance(raw_spans, list)
+            else []
+        )
+        raw_cluster = item.get("failure_cluster")
+        failure_cluster: Optional[Dict[str, Optional[str]]] = None
+        if isinstance(raw_cluster, dict) and raw_cluster.get("id"):
+            fc_id = str(raw_cluster["id"]).strip()
+            fc_title = str(raw_cluster.get("title") or "").strip() or None
+            if fc_id:
+                failure_cluster = {"id": fc_id, "title": fc_title}
+
         normalized.append(
             {
-                "traceId": trace_id or None,
-                "failureId": str(item["failure_id"]).strip() if item.get("failure_id") else None,
-                "rootCause": str(root_cause).strip(),
-                "severity": _normalize_severity(item.get("severity")),
-                "summary": sanitize_sensitive_text(summary_raw, max_chars=280) if summary_raw else None,
-                "spanName": str(item["span_name"]).strip() if item.get("span_name") else None,
+                "traceId": trace_id,
+                "sourceTraceId": source_trace_id,
+                "failureId": failure_id,
+                "failureCategory": failure_cat,
+                "categoryLabel": label_for_category("failure", failure_cat) if failure_cat else None,
+                "failureReason": failure_reason,
+                "failureSeverity": failure_severity,
+                "failureEvidenceSpanIds": evidence_span_ids,
+                "failureCluster": failure_cluster,
             }
         )
     return normalized
@@ -516,7 +621,6 @@ async def render_agent_lens_insights(
     coverage_res, clustering_res, failure_bd_res, intent_bd_res, failure_cl_res, intent_cl_res = results[:6]
     attributions_res = results[6] if len(results) > 6 else None
 
-    # Hard-fail immediately on auth/configuration/forbidden errors or if both primary breakdowns failed.
     fatal_codes = {"agent_lens_not_configured", "auth_required", "agent_lens_forbidden"}
     for sub_res in results:
         if isinstance(sub_res, ToolErrorJSON):
@@ -552,11 +656,13 @@ async def render_agent_lens_insights(
         clustering_res if not isinstance(clustering_res, ToolErrorJSON) else None
     )
     failure_section = _normalize_signature_section(
+        "failure",
         failure_bd_res if not isinstance(failure_bd_res, ToolErrorJSON) else None,
         failure_cl_res if not isinstance(failure_cl_res, ToolErrorJSON) else None,
         top_n_clusters=top_n_clusters,
     )
     intent_section = _normalize_signature_section(
+        "intent",
         intent_bd_res if not isinstance(intent_bd_res, ToolErrorJSON) else None,
         intent_cl_res if not isinstance(intent_cl_res, ToolErrorJSON) else None,
         top_n_clusters=top_n_clusters,
@@ -595,13 +701,17 @@ async def render_agent_lens_insights(
         "clustering_status": clustering_status,
         "failure": {
             "turn_count": failure_section["turnCount"],
+            "failing_turn_count": failure_section["failingTurnCount"],
             "categories": [
                 {
                     "category_id": c["categoryId"],
                     "label": c["label"],
                     "count": c["count"],
+                    "conversation_count": c["conversationCount"],
                     "share": c["share"],
-                    "severity": c["severity"],
+                    "frustration_rate": c["frustrationRate"],
+                    "average_latency_ms": c["averageLatencyMs"],
+                    "average_cost_per_turn_usd": c["averageCostPerTurnUsd"],
                 }
                 for c in failure_section["categories"][:10]
             ],
@@ -611,6 +721,7 @@ async def render_agent_lens_insights(
                     "title": cl["title"],
                     "category_id": cl["categoryId"],
                     "count": cl["count"],
+                    "conversation_count": cl["conversationCount"],
                     "share": cl["share"],
                     "severity": cl["severity"],
                 }
@@ -624,7 +735,10 @@ async def render_agent_lens_insights(
                     "category_id": c["categoryId"],
                     "label": c["label"],
                     "count": c["count"],
+                    "conversation_count": c["conversationCount"],
                     "share": c["share"],
+                    "failure_rate": c["failureRate"],
+                    "frustration_rate": c["frustrationRate"],
                 }
                 for c in intent_section["categories"][:10]
             ],
@@ -653,10 +767,13 @@ async def render_agent_lens_insights(
 
 
 __all__ = [
+    "FAILURE_CATEGORY_LABELS",
     "INSIGHTS_RESOURCE_URI",
     "INSIGHTS_SCHEMA",
     "INSIGHTS_TOOL_NAME",
+    "INTENT_CATEGORY_LABELS",
     "RENDER_AGENT_LENS_INSIGHTS_TOOL_DESCRIPTION",
+    "label_for_category",
     "register_agent_lens_insights_resource",
     "render_agent_lens_insights",
 ]

@@ -318,6 +318,16 @@ def _normalize_turn(raw_turn: Dict[str, Any], turn_index: int) -> Dict[str, Any]
     }
 
 
+def _normalize_selected_failure(raw: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    if not isinstance(raw, dict):
+        return None
+    trace_id = str(raw.get("trace_id") or raw.get("traceId") or "").strip()
+    failure_id = str(raw.get("failure_id") or raw.get("failureId") or "").strip()
+    if not trace_id or not failure_id:
+        return None
+    return {"traceId": trace_id, "failureId": failure_id}
+
+
 def build_agent_conversation_result(
     raw_json: str,
     *,
@@ -327,6 +337,7 @@ def build_agent_conversation_result(
     conversation_id: Optional[str] = None,
     trace_id: Optional[str] = None,
     offset: int = 0,
+    selected_failure: Optional[Dict[str, str]] = None,
     access_mode: Optional[Literal["read-only", "read-write"]] = None,
     agent_lens_available: Optional[bool] = None,
 ) -> CallToolResult:
@@ -437,6 +448,7 @@ def build_agent_conversation_result(
         },
         "turns": turns,
         "feedback": merged_feedback,
+        "selectedFailure": _normalize_selected_failure(selected_failure),
     }
 
     return CallToolResult(
@@ -452,6 +464,7 @@ def render_agent_trace(
     trace_id: str,
     include_feedback: bool = False,
     include_model_tool_calls: bool = False,
+    selected_failure: Optional[Dict[str, str]] = None,
     *,
     _access_mode: Optional[Literal["read-only", "read-write"]] = None,
     _agent_lens_available: Optional[bool] = None,
@@ -470,6 +483,7 @@ def render_agent_trace(
         entity_name=entity_name,
         project_name=project_name,
         trace_id=trace_id,
+        selected_failure=selected_failure,
         access_mode=_access_mode,
         agent_lens_available=_agent_lens_available,
     )
@@ -484,6 +498,7 @@ def render_agent_conversation(
     sort_direction: Literal["asc", "desc"] = "asc",
     include_feedback: bool = False,
     include_model_tool_calls: bool = False,
+    selected_failure: Optional[Dict[str, str]] = None,
     *,
     _access_mode: Optional[Literal["read-only", "read-write"]] = None,
     _agent_lens_available: Optional[bool] = None,
@@ -506,6 +521,7 @@ def render_agent_conversation(
         project_name=project_name,
         conversation_id=conversation_id,
         offset=offset,
+        selected_failure=selected_failure,
         access_mode=_access_mode,
         agent_lens_available=_agent_lens_available,
     )

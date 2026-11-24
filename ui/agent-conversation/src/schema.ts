@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  normalizeFailureSeverity,
+  type FailureSeverityId,
+} from "../../shared/failure-cluster-markdown";
 
 export const ToolErrorPayloadSchema = z.object({
   error: z.union([z.string(), z.record(z.string(), z.unknown())]),
@@ -76,6 +80,11 @@ export const ConversationSummarySchema = z.object({
   errorCount: z.number().default(0),
 });
 
+export const SelectedFailurePinSchema = z.object({
+  traceId: z.string(),
+  failureId: z.string(),
+});
+
 export const ConversationPayloadSchema = z.object({
   schema: z.literal("wandb.agent_conversation/v1"),
   mode: z.enum(["conversation", "trace"]),
@@ -89,16 +98,31 @@ export const ConversationPayloadSchema = z.object({
   accessMode: z.enum(["read-only", "read-write"]).default("read-only"),
   agentLensAvailable: z.boolean().default(false),
   compacted: z.boolean().default(false),
+  selectedFailure: SelectedFailurePinSchema.nullable().default(null),
   summary: ConversationSummarySchema,
   turns: z.array(NormalizedTurnSchema).default([]),
   feedback: z.array(NormalizedFeedbackSchema).default([]),
 });
 
+export type SelectedFailurePin = z.infer<typeof SelectedFailurePinSchema>;
 export type NormalizedFeedback = z.infer<typeof NormalizedFeedbackSchema>;
 export type NormalizedToolCall = z.infer<typeof NormalizedToolCallSchema>;
 export type NormalizedMessage = z.infer<typeof NormalizedMessageSchema>;
 export type NormalizedTurn = z.infer<typeof NormalizedTurnSchema>;
 export type ConversationPayload = z.infer<typeof ConversationPayloadSchema>;
+
+export interface AgentFailureFinding {
+  traceId: string;
+  sourceTraceId: string | null;
+  failureId: string;
+  failureCategory: string | null;
+  categoryLabel: string;
+  failureReason: string;
+  failureSeverity: FailureSeverityId | null;
+  evidenceSpanIds: string[];
+  clusterId: string | null;
+  clusterTitle: string | null;
+}
 
 export interface AppliedConversationTag {
   tagId: string | null;
@@ -135,6 +159,113 @@ export interface SpanWaterfallNode {
   inputTokens: number | null;
   outputTokens: number | null;
   attributesJson: string | null;
+}
+
+const FAILURE_CATEGORY_LABELS: Record<string, string> = {
+  unproductive_loop: "Unproductive loop",
+  refusal: "Improper refusal",
+  improper_refusal: "Improper refusal",
+  context_loss: "Lost context",
+  task_misunderstanding: "Task misunderstanding",
+  tool_misuse: "Tool misuse",
+  requirement_violation: "Missed requirement",
+  capability_gap: "Capability limitation",
+  system_error: "System error",
+  wrong_output: "Incorrect result",
+  tool_failure: "Tool failure",
+  unsafe_behavior: "Unsafe behavior",
+  safety_violation: "Unsafe behavior",
+};
+
+function humanizeCategory(id: string | null): string {
+  if (!id) {
+    return "Agent failure";
+  }
+  const known = FAILURE_CATEGORY_LABELS[id.toLowerCase()];
+  if (known) {
+    return known;
+  }
+  return id
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+/**
+ * Parse `/insights/failure-attributions/query` `TurnFailureAttribution` rows.
+ */
+export function parseFailureAttributions(rawJsonOrObj: unknown): AgentFailureFinding[] {
+  let root: unknown = rawJsonOrObj;
+  if (typeof rawJsonOrObj === "string") {
+    try {
+      root = JSON.parse(rawJsonOrObj);
+    } catch {
+      return [];
+    }
+  }
+  if (!root || typeof root !== "object") {
+    return [];
+  }
+  const data = (root as Record<string, unknown>).data;
+  if (!Array.isArray(data)) {
+    return [];
+  }
+
+  const out: AgentFailureFinding[] = [];
+  data.forEach((entry, idx) => {
+    if (!entry || typeof entry !== "object") {
+      return;
+    }
+    const rec = entry as Record<string, unknown>;
+    const traceId = typeof rec.trace_id === "string" ? rec.trace_id.trim() : "";
+    if (!traceId) {
+      return;
+    }
+    const failureCategory =
+      typeof rec.failure_category === "string" && rec.failure_category.trim()
+        ? rec.failure_category.trim()
+        : null;
+    if (failureCategory === "no_failure") {
+      return;
+    }
+    const failureId =
+      typeof rec.failure_id === "string" && rec.failure_id.trim()
+        ? rec.failure_id.trim()
+        : `${traceId}-failure-${idx + 1}`;
+    const failureReason =
+      typeof rec.failure_reason === "string" && rec.failure_reason.trim()
+        ? rec.failure_reason.trim()
+        : humanizeCategory(failureCategory);
+    const evidenceSpanIds = Array.isArray(rec.failure_evidence_span_ids)
+      ? rec.failure_evidence_span_ids
+          .filter((s): s is string => typeof s === "string")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [];
+    let clusterId: string | null = null;
+    let clusterTitle: string | null = null;
+    if (rec.failure_cluster && typeof rec.failure_cluster === "object") {
+      const fc = rec.failure_cluster as Record<string, unknown>;
+      clusterId = typeof fc.id === "string" && fc.id.trim() ? fc.id.trim() : null;
+      clusterTitle = typeof fc.title === "string" && fc.title.trim() ? fc.title.trim() : null;
+    }
+    out.push({
+      traceId,
+      sourceTraceId:
+        typeof rec.source_trace_id === "string" && rec.source_trace_id.trim()
+          ? rec.source_trace_id.trim()
+          : null,
+      failureId,
+      failureCategory,
+      categoryLabel: humanizeCategory(failureCategory),
+      failureReason,
+      failureSeverity: normalizeFailureSeverity(rec.failure_severity),
+      evidenceSpanIds,
+      clusterId,
+      clusterTitle,
+    });
+  });
+  return out;
 }
 
 function parseTimestampMs(raw: unknown): number | null {
@@ -416,7 +547,7 @@ export function parseConversationTags(rawJsonOrObj: unknown): AppliedConversatio
     }
     const rec = raw as Record<string, unknown>;
     const tagId = typeof (rec.tag_id ?? rec.id) === "string" ? String(rec.tag_id ?? rec.id).trim() : null;
-    const name = String(rec.tag_name ?? rec.name ?? tagId ?? "").trim();
+    const name = String(rec.tag ?? rec.tag_name ?? rec.name ?? tagId ?? "").trim();
     if (!name) {
       continue;
     }

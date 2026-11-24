@@ -290,7 +290,10 @@ export class InsightsHostBridge {
     if (!payload || !this.connected || !this.app.getHostCapabilities()?.updateModelContext) {
       return;
     }
-    const signature = JSON.stringify(payload.structuredContent ?? payload.content);
+    const signature = JSON.stringify({
+      content: payload.content,
+      structuredContent: payload.structuredContent ?? null,
+    });
     if (signature === this.lastPublishedSignature) {
       return;
     }

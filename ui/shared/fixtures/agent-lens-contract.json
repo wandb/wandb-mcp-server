@@ -1,0 +1,457 @@
+{
+  "project": {
+    "entity": "coreweave-support",
+    "project": "billing-agent-prod",
+    "agent_name": "billing-router",
+    "agent_version": "v4.2"
+  },
+  "window_7d": {
+    "start_at": "2026-11-17T00:00:00Z",
+    "end_at": "2026-11-24T00:00:00Z",
+    "window_days": 7
+  },
+  "window_30d": {
+    "start_at": "2026-10-25T00:00:00Z",
+    "end_at": "2026-11-24T00:00:00Z",
+    "window_days": 30
+  },
+  "latest_week": {
+    "$schema": "https://agent-pulse.wandb.ai/api/schemas/WeekOutputBody.json",
+    "data": {
+      "first_week": "2026-10-05",
+      "latest_week": "2026-11-16"
+    }
+  },
+  "clustering_status": {
+    "$schema": "https://agent-pulse.wandb.ai/api/schemas/ClusteringStatusOutputBody.json",
+    "data": [
+      {
+        "signature_type": "intent",
+        "completed_at": "2026-11-24T03:03:40.805534Z",
+        "window_start": "2026-11-17T03:00:00.000000Z",
+        "window_end": "2026-11-24T03:00:00.000000Z"
+      },
+      {
+        "signature_type": "failure",
+        "completed_at": "2026-11-24T03:19:48.887704Z",
+        "window_start": "2026-11-17T03:00:00.000000Z",
+        "window_end": "2026-11-24T03:00:00.000000Z"
+      }
+    ]
+  },
+  "failure_breakdowns": {
+    "$schema": "https://agent-pulse.wandb.ai/api/schemas/BreakdownsOutputBody.json",
+    "data": {
+      "turn_count": 12840,
+      "categories": [
+        {
+          "category": "no_failure",
+          "count": 12228,
+          "conversation_count": 7890,
+          "failed_count": 0,
+          "frustrated_count": 148,
+          "average_latency_ms": 920.4,
+          "average_cost_per_turn_usd": 0.0034,
+          "cluster_breakdowns": []
+        },
+        {
+          "category": "tool_misuse",
+          "count": 362,
+          "conversation_count": 248,
+          "failed_count": 362,
+          "frustrated_count": 74,
+          "average_latency_ms": 1420.5,
+          "average_cost_per_turn_usd": 0.0046,
+          "cluster_breakdowns": [
+            {
+              "id": "01a1fc1d-f6a4-7e82-9d62-fbdeb71f5d12",
+              "title": "lookup_invoice omits required currency",
+              "label": "The assistant calls lookup_invoice on EU-West invoices without an ISO-4217 currency code.",
+              "description": "Calls to lookup_invoice omit the required ISO-4217 currency parameter on EU-West and UK ledgers, causing 422 Unprocessable Entity responses.",
+              "severity": "major",
+              "count": 284,
+              "conversation_count": 196,
+              "failed_count": 284,
+              "frustrated_count": 61,
+              "average_latency_ms": 1240.0,
+              "average_cost_per_turn_usd": 0.0042
+            },
+            {
+              "id": "01a1fc1d-f6a4-7e82-9d62-fbc5e52346d7",
+              "title": "refund_order called with cents as float",
+              "label": "The assistant passes decimal dollar amounts instead of integer minor units to refund_order.",
+              "description": "Partial credit requests send floating-point amounts to refund_order instead of integer cents.",
+              "severity": "minor",
+              "count": 78,
+              "conversation_count": 59,
+              "failed_count": 78,
+              "frustrated_count": 13,
+              "average_latency_ms": 1680.2,
+              "average_cost_per_turn_usd": 0.0053
+            }
+          ]
+        },
+        {
+          "category": "tool_failure",
+          "count": 156,
+          "conversation_count": 121,
+          "failed_count": 156,
+          "frustrated_count": 39,
+          "average_latency_ms": 4380.0,
+          "average_cost_per_turn_usd": 0.0049,
+          "cluster_breakdowns": [
+            {
+              "id": "01a1fc1d-f6a4-7e82-9d62-fbe064f966d4",
+              "title": "EU SEPA settlement gateway 504 timeout",
+              "label": "Upstream SEPA gateway timed out during batch invoice status checks.",
+              "description": "Correctly formed SEPA settlement queries time out after 4s when upstream batch windows lock.",
+              "severity": "major",
+              "count": 156,
+              "conversation_count": 121,
+              "failed_count": 156,
+              "frustrated_count": 39,
+              "average_latency_ms": 4380.0,
+              "average_cost_per_turn_usd": 0.0049
+            }
+          ]
+        },
+        {
+          "category": "wrong_output",
+          "count": 94,
+          "conversation_count": 82,
+          "failed_count": 94,
+          "frustrated_count": 22,
+          "average_latency_ms": 1190.8,
+          "average_cost_per_turn_usd": 0.0039,
+          "cluster_breakdowns": [
+            {
+              "id": "01a1fc1d-f6a4-7e82-9d62-fb91ab2041c8",
+              "title": "Annual SLA credit proration omits leap day",
+              "label": "Calculated SLA credit memo uses 365 days instead of contract billing cycle days.",
+              "description": "The assistant computes SLA credit percentages against a 365-day denominator rather than invoice period days.",
+              "severity": "info",
+              "count": 94,
+              "conversation_count": 82,
+              "failed_count": 94,
+              "frustrated_count": 22,
+              "average_latency_ms": 1190.8,
+              "average_cost_per_turn_usd": 0.0039
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "intent_breakdowns": {
+    "$schema": "https://agent-pulse.wandb.ai/api/schemas/BreakdownsOutputBody.json",
+    "data": {
+      "turn_count": 12840,
+      "categories": [
+        {
+          "category": "action_request",
+          "count": 7820,
+          "conversation_count": 4910,
+          "failed_count": 468,
+          "frustrated_count": 192,
+          "average_latency_ms": 1180.4,
+          "average_cost_per_turn_usd": 0.0041,
+          "cluster_breakdowns": [
+            {
+              "id": "01a1fc0f-33c0-7712-83f5-ee20b0b90502",
+              "title": "Invoice status lookup and credit memo issue",
+              "label": "Users ask the assistant to verify failed regional invoices and issue duplicate credit memos.",
+              "description": "Requests involve looking up EU-West or US-East invoices and issuing credit adjustments when double-billed.",
+              "count": 4120,
+              "conversation_count": 2640,
+              "failed_count": 318,
+              "frustrated_count": 114,
+              "average_latency_ms": 1290.0,
+              "average_cost_per_turn_usd": 0.0043
+            }
+          ]
+        },
+        {
+          "category": "information_request",
+          "count": 3640,
+          "conversation_count": 2590,
+          "failed_count": 86,
+          "frustrated_count": 44,
+          "average_latency_ms": 840.2,
+          "average_cost_per_turn_usd": 0.0031,
+          "cluster_breakdowns": []
+        },
+        {
+          "category": "problem_report",
+          "count": 1380,
+          "conversation_count": 1020,
+          "failed_count": 58,
+          "frustrated_count": 47,
+          "average_latency_ms": 1060.5,
+          "average_cost_per_turn_usd": 0.0037,
+          "cluster_breakdowns": []
+        }
+      ]
+    }
+  },
+  "failure_clusters": {
+    "data": [
+      {
+        "id": "01a1fc1d-f6a4-7e82-9d62-fbdeb71f5d12",
+        "title": "lookup_invoice omits required currency",
+        "label": "The assistant calls lookup_invoice on EU-West invoices without an ISO-4217 currency code.",
+        "category": "tool_misuse",
+        "share": 0.022118380062305297
+      },
+      {
+        "id": "01a1fc1d-f6a4-7e82-9d62-fbe064f966d4",
+        "title": "EU SEPA settlement gateway 504 timeout",
+        "label": "Upstream SEPA gateway timed out during batch invoice status checks.",
+        "category": "tool_failure",
+        "share": 0.012149532710280374
+      },
+      {
+        "id": "01a1fc1d-f6a4-7e82-9d62-fb91ab2041c8",
+        "title": "Annual SLA credit proration omits leap day",
+        "label": "Calculated SLA credit memo uses 365 days instead of contract billing cycle days.",
+        "category": "wrong_output",
+        "share": 0.007320872274143302
+      },
+      {
+        "id": "01a1fc1d-f6a4-7e82-9d62-fbc5e52346d7",
+        "title": "refund_order called with cents as float",
+        "label": "The assistant passes decimal dollar amounts instead of integer minor units to refund_order.",
+        "category": "tool_misuse",
+        "share": 0.006074766355140187
+      }
+    ]
+  },
+  "intent_clusters": {
+    "data": [
+      {
+        "id": "01a1fc0f-33c0-7712-83f5-ee20b0b90502",
+        "title": "Invoice status lookup and credit memo issue",
+        "label": "Users ask the assistant to verify failed regional invoices and issue duplicate credit memos.",
+        "category": "action_request",
+        "share": 0.32087227414330216
+      }
+    ]
+  },
+  "example_turns": {
+    "$schema": "https://agent-pulse.wandb.ai/api/schemas/InsightExamplesOutputBody.json",
+    "data": [
+      {
+        "conversation_id": "conv-stripe-8841",
+        "trace_id": "trace-stripe-8841",
+        "turn_number": 2,
+        "failure_id": "77869ce8-2917-5d33-bc74-ab63603e278e",
+        "failure_category": "tool_misuse",
+        "failure_config_sha": "d8120743270c960d533853bbe37558444ac55243ec36c47c1128b6a5ca42ee99",
+        "failure_reason": "The assistant called lookup_invoice ([[span:span-tool-8841]]) for EU-West invoice #8841 without passing the required ISO-4217 currency parameter, causing HTTP 422.",
+        "failure_severity": "major",
+        "failure_evidence_span_ids": [
+          "span-tool-8841"
+        ]
+      },
+      {
+        "conversation_id": "conv-stripe-8819",
+        "trace_id": "trace-stripe-8819",
+        "turn_number": 3,
+        "failure_id": "53671de7-2691-52f3-9371-239a7a6aed53",
+        "failure_category": "tool_misuse",
+        "failure_config_sha": "d8120743270c960d533853bbe37558444ac55243ec36c47c1128b6a5ca42ee99",
+        "failure_reason": "The assistant retried lookup_invoice ([[span:span-tool-8819]]) on UK ledger #8819 without GBP currency after the user confirmed the region.",
+        "failure_severity": "major",
+        "failure_evidence_span_ids": [
+          "span-tool-8819"
+        ]
+      }
+    ],
+    "next_cursor": null
+  },
+  "failure_attributions": {
+    "$schema": "https://agent-pulse.wandb.ai/api/schemas/TurnFailureAttributionsOutputBody.json",
+    "data": [
+      {
+        "failure_cluster": {
+          "id": "01a1fc1d-f6a4-7e82-9d62-fbdeb71f5d12",
+          "title": "lookup_invoice omits required currency"
+        },
+        "trace_id": "trace-stripe-8841",
+        "source_trace_id": "trace-stripe-8841",
+        "failure_id": "77869ce8-2917-5d33-bc74-ab63603e278e",
+        "failure_category": "tool_misuse",
+        "failure_config_sha": "d8120743270c960d533853bbe37558444ac55243ec36c47c1128b6a5ca42ee99",
+        "failure_reason": "The assistant called lookup_invoice ([[span:span-tool-8841]]) for EU-West invoice #8841 without passing the required ISO-4217 currency parameter, causing HTTP 422.",
+        "failure_severity": "major",
+        "failure_evidence_span_ids": [
+          "span-tool-8841"
+        ]
+      },
+      {
+        "failure_cluster": {
+          "id": "01a1fc1d-f6a4-7e82-9d62-fbdeb71f5d12",
+          "title": "lookup_invoice omits required currency"
+        },
+        "trace_id": "trace-stripe-8819",
+        "source_trace_id": "trace-stripe-8819",
+        "failure_id": "53671de7-2691-52f3-9371-239a7a6aed53",
+        "failure_category": "tool_misuse",
+        "failure_config_sha": "d8120743270c960d533853bbe37558444ac55243ec36c47c1128b6a5ca42ee99",
+        "failure_reason": "The assistant retried lookup_invoice ([[span:span-tool-8819]]) on UK ledger #8819 without GBP currency after the user confirmed the region.",
+        "failure_severity": "major",
+        "failure_evidence_span_ids": [
+          "span-tool-8819"
+        ]
+      }
+    ]
+  },
+  "conversation_tags": {
+    "data": [
+      {
+        "tag_id": "30201f95-1221-433a-9ea5-1e513081962f",
+        "color": "#FF8A3D",
+        "conversation_id": "conv-stripe-8841",
+        "trace_id": "trace-stripe-8841",
+        "tag": "eu-ledger",
+        "trace_ended_at": "2026-11-23T21:14:07.240Z",
+        "agent_id": "billing-router",
+        "agent_name": "billing-router",
+        "agent_version": "v4.2",
+        "source": "judge",
+        "judge_version": "v1",
+        "wb_user_id": "",
+        "rationale": "Turn queries EU-West Stripe invoice ledger.",
+        "inserted_at": "2026-11-23T21:15:00Z"
+      }
+    ]
+  },
+  "weave_conversation": {
+    "conversation_id": "conv-stripe-8841",
+    "agent_name": "billing-router",
+    "agent_version": "v4.2",
+    "total_turns": 2,
+    "has_more": false,
+    "total_cost_usd": 0.0046,
+    "turns": [
+      {
+        "trace_id": "trace-stripe-8840",
+        "span_id": "span-turn-8840",
+        "agent_name": "billing-router",
+        "agent_version": "v4.2",
+        "status_code": "OK",
+        "started_at": "2026-11-23T21:14:00Z",
+        "total_duration_ms": 410,
+        "input_tokens": 220,
+        "output_tokens": 68,
+        "total_tokens": 288,
+        "cost_usd": 0.0014,
+        "model": "gpt-5.4",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Can you check why EU-West invoice #8841 failed to settle?"
+          },
+          {
+            "role": "assistant",
+            "content": "Let me look up EU-West invoice #8841 right now.",
+            "model": "gpt-5.4"
+          }
+        ],
+        "feedback": []
+      },
+      {
+        "trace_id": "trace-stripe-8841",
+        "span_id": "span-turn-8841",
+        "agent_name": "billing-router",
+        "agent_version": "v4.2",
+        "status_code": "ERROR",
+        "error": "StripeInvalidRequestError: 422 Unprocessable Entity — Missing required param: currency.",
+        "started_at": "2026-11-23T21:14:05Z",
+        "total_duration_ms": 1120,
+        "input_tokens": 390,
+        "output_tokens": 112,
+        "total_tokens": 502,
+        "cost_usd": 0.0032,
+        "model": "gpt-5.4",
+        "messages": [
+          {
+            "role": "tool",
+            "tool_name": "lookup_invoice",
+            "tool_call_id": "call_8841",
+            "arguments": {
+              "invoice_id": "8841",
+              "ledger": "eu-west"
+            },
+            "tool_result": {
+              "status": 422,
+              "error": {
+                "param": "currency",
+                "message": "Missing required param: currency."
+              }
+            },
+            "span_id": "span-tool-8841",
+            "span_name": "tool.lookup_invoice",
+            "status_code": "ERROR",
+            "error": "422 Unprocessable Entity: Missing required param: currency.",
+            "duration_ms": 640
+          },
+          {
+            "role": "assistant",
+            "content": "I ran into a validation error looking up invoice #8841.",
+            "model": "gpt-5.4"
+          }
+        ],
+        "feedback": []
+      }
+    ]
+  },
+  "weave_conversation_spans": {
+    "conversations": [
+      {
+        "conversation_id": "conv-stripe-8841",
+        "spans": [
+          {
+            "span_id": "span-turn-8841",
+            "trace_id": "trace-stripe-8841",
+            "name": "turn.billing-router",
+            "is_invocation": true,
+            "started_at": "2026-11-23T21:14:05.000Z",
+            "duration_ms": 1120,
+            "status_code": "ERROR"
+          },
+          {
+            "span_id": "span-llm-8841",
+            "parent_id": "span-turn-8841",
+            "trace_id": "trace-stripe-8841",
+            "name": "openai.responses",
+            "request_model": "gpt-5.4",
+            "started_at": "2026-11-23T21:14:05.040Z",
+            "duration_ms": 380,
+            "input_tokens": 390,
+            "output_tokens": 112,
+            "status_code": "OK"
+          },
+          {
+            "span_id": "span-tool-8841",
+            "parent_id": "span-turn-8841",
+            "trace_id": "trace-stripe-8841",
+            "name": "tool.lookup_invoice",
+            "tool_name": "lookup_invoice",
+            "started_at": "2026-11-23T21:14:05.440Z",
+            "duration_ms": 640,
+            "status_code": "ERROR",
+            "error": "422 Unprocessable Entity: Missing required param: currency.",
+            "inputs": {
+              "invoice_id": "8841",
+              "ledger": "eu-west"
+            },
+            "outputs": {
+              "status": 422,
+              "param": "currency"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

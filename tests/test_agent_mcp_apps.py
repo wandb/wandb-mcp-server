@@ -17,7 +17,16 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.server.fastmcp import FastMCP
 import pytest
 
-from tests.agent_lens_fixtures import BASE_URL, ENTITY, PROJECT, WINDOW, _FakeResponse, _mocked, _ok
+from tests.agent_lens_fixtures import (
+    BASE_URL,
+    ENTITY,
+    PROJECT,
+    WINDOW,
+    _FakeResponse,
+    _mocked,
+    _ok,
+    load_contract_fixture,
+)
 from wandb_mcp_server.admission import tool_cost
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.instrumented_server import InstrumentedFastMCP
@@ -30,42 +39,28 @@ from wandb_mcp_server.wandb_urls import public_forge_agent_lens_url
 def test_public_forge_agent_lens_url_encodes_segments_and_enforces_https(monkeypatch: pytest.MonkeyPatch):
     assert (
         public_forge_agent_lens_url("acme", "support/bot v1")
-        == "https://forge.coreweave.com/acme/support%2Fbot%20v1/agent-lens"
+        == "https://forge.coreweave.com/agent-lens/acme/support%2Fbot%20v1"
+    )
+    assert (
+        public_forge_agent_lens_url("acme", "proj", "insights", "failure")
+        == "https://forge.coreweave.com/agent-lens/acme/proj/insights/failure"
     )
     monkeypatch.setenv("FORGE_APP_BASE_URL", "http://insecure.internal.local")
-    assert public_forge_agent_lens_url("acme", "proj") == "https://forge.coreweave.com/acme/proj/agent-lens"
+    assert public_forge_agent_lens_url("acme", "proj") == "https://forge.coreweave.com/agent-lens/acme/proj"
     monkeypatch.setenv("FORGE_APP_BASE_URL", "https://forge-staging.coreweave.com/")
-    assert public_forge_agent_lens_url("acme", "proj") == "https://forge-staging.coreweave.com/acme/proj/agent-lens"
+    assert public_forge_agent_lens_url("acme", "proj") == "https://forge-staging.coreweave.com/agent-lens/acme/proj"
 
 
-def test_render_agent_lens_insights_gathers_parallel_sections_and_merges_clusters():
+def test_render_agent_lens_insights_contract_fixture_parity():
+    contract = load_contract_fixture()
     responses = [
-        _ok({"first_week": "2026-10-05", "latest_week": "2026-11-16", "classified_turns": 470, "total_turns": 500}),
-        _ok([{"signature_type": "failure", "completed_at": "2026-11-23T02:00:00Z"}]),
-        _ok(
-            {
-                "turn_count": 20,
-                "categories": [
-                    {
-                        "category": "tool_failure",
-                        "count": 15,
-                        "severity": "critical",
-                        "cluster_breakdowns": [{"id": "f1", "count": 12}],
-                    }
-                ],
-            }
-        ),
-        _ok(
-            {
-                "turn_count": 450,
-                "categories": [
-                    {"category": "billing_question", "count": 300, "cluster_breakdowns": [{"id": "i1", "count": 200}]}
-                ],
-            }
-        ),
-        _ok([{"id": "f1", "title": "Stripe 422 Missing Currency", "share": 0.6, "attribution": "tool_error"}]),
-        _ok([{"id": "i1", "title": "Invoice Lookup", "share": 0.44}]),
-        _ok([{"trace_id": "trace-1", "root_cause": "tool_error", "summary": "Missing currency argument"}]),
+        _ok(contract["latest_week"]["data"]),
+        _ok(contract["clustering_status"]["data"]),
+        _ok(contract["failure_breakdowns"]["data"]),
+        _ok(contract["intent_breakdowns"]["data"]),
+        _ok(contract["failure_clusters"]["data"]),
+        _ok(contract["intent_clusters"]["data"]),
+        _ok(contract["failure_attributions"]["data"]),
     ]
     with _mocked(responses) as session:
         result = asyncio.run(
@@ -74,7 +69,7 @@ def test_render_agent_lens_insights_gathers_parallel_sections_and_merges_cluster
                 PROJECT,
                 window_days=7,
                 agent_name="billing-router",
-                trace_ids=["trace-1"],
+                trace_ids=["trace-stripe-8841"],
                 _access_mode="read-write",
             )
         )
@@ -83,30 +78,85 @@ def test_render_agent_lens_insights_gathers_parallel_sections_and_merges_cluster
     assert len(session.calls) == 7
     sc = result.structuredContent
     assert sc["schema"] == "wandb.agent_lens_insights/v1"
-    assert sc["forgeUrl"] == f"https://forge.coreweave.com/{ENTITY}/{PROJECT}/agent-lens"
+    assert sc["forgeUrl"] == f"https://forge.coreweave.com/agent-lens/{ENTITY}/{PROJECT}"
     assert sc["window"]["windowDays"] == 7
     assert sc["window"]["agentName"] == "billing-router"
-    assert sc["coverage"]["coveragePct"] == 94.0
-    assert sc["failure"]["turnCount"] == 20
-    assert sc["failure"]["categories"][0]["categoryId"] == "tool_failure"
-    assert sc["failure"]["categories"][0]["share"] == 0.75
-    assert sc["failure"]["clusters"][0]["id"] == "f1"
-    assert sc["failure"]["clusters"][0]["title"] == "Stripe 422 Missing Currency"
-    assert sc["failure"]["clusters"][0]["count"] == 12
-    assert sc["failure"]["clusters"][0]["categoryId"] == "tool_failure"
-    assert sc["failureAttributions"][0]["rootCause"] == "tool_error"
+
+    # 1. Coverage has firstWeek / latestWeek only (no unreachable coveragePct)
+    assert sc["coverage"] == {
+        "firstWeek": "2026-10-05",
+        "latestWeek": "2026-11-16",
+    }
+
+    # 2. no_failure is filtered out; failingTurnCount = turn_count - no_failure.count
+    assert sc["failure"]["turnCount"] == 12840
+    assert sc["failure"]["failingTurnCount"] == 612
+    category_ids = [c["categoryId"] for c in sc["failure"]["categories"]]
+    assert "no_failure" not in category_ids
+    assert category_ids == ["tool_misuse", "tool_failure", "wrong_output"]
+
+    # 3. Product category labels + impact metrics + no category-level severity
+    top_cat = sc["failure"]["categories"][0]
+    assert top_cat["label"] == "Tool misuse"
+    assert sc["failure"]["categories"][1]["label"] == "Tool failure"
+    assert sc["failure"]["categories"][2]["label"] == "Incorrect result"
+    assert sc["intent"]["categories"][0]["label"] == "Task request"
+    assert "severity" not in top_cat
+    assert top_cat["conversationCount"] == 248
+    assert top_cat["frustratedCount"] == 74
+    assert top_cat["averageLatencyMs"] == 1420.5
+    assert top_cat["averageCostPerTurnUsd"] == 0.0046
+
+    # 4. Cluster severity (info | minor | major) and description preserved
+    top_cluster = top_cat["clusterBreakdowns"][0]
+    assert top_cluster["id"] == "01a1fc1d-f6a4-7e82-9d62-fbdeb71f5d12"
+    assert top_cluster["title"] == "lookup_invoice omits required currency"
+    assert top_cluster["severity"] == "major"
+    assert "422 Unprocessable Entity" in top_cluster["description"]
+    assert top_cluster["conversationCount"] == 196
+
+    # 5. Real TurnFailureAttribution fields mapped
+    attr = sc["failureAttributions"][0]
+    assert attr["traceId"] == "trace-stripe-8841"
+    assert attr["failureId"] == "77869ce8-2917-5d33-bc74-ab63603e278e"
+    assert attr["failureCategory"] == "tool_misuse"
+    assert attr["categoryLabel"] == "Tool misuse"
+    assert attr["failureSeverity"] == "major"
+    assert attr["failureEvidenceSpanIds"] == ["span-tool-8841"]
+    assert attr["failureCluster"] == {
+        "id": "01a1fc1d-f6a4-7e82-9d62-fbdeb71f5d12",
+        "title": "lookup_invoice omits required currency",
+    }
     assert sc["warnings"] == []
 
     text_summary = json.loads(result.content[0].text)
     assert text_summary["schema"] == "wandb.agent_lens_insights/v1"
-    assert text_summary["failure"]["turn_count"] == 20
+    assert text_summary["failure"]["turn_count"] == 12840
+    assert text_summary["failure"]["failing_turn_count"] == 612
+
+
+def test_severity_and_unknown_category_fallback_strictness():
+    assert agent_lens_insights_app._normalize_severity("major") == "major"
+    assert agent_lens_insights_app._normalize_severity("minor") == "minor"
+    assert agent_lens_insights_app._normalize_severity("info") == "info"
+    assert agent_lens_insights_app._normalize_severity("critical") is None
+    assert agent_lens_insights_app._normalize_severity("high") is None
+    assert agent_lens_insights_app.label_for_category("failure", "custom_domain_slip") == "Custom Domain Slip"
 
 
 def test_render_agent_lens_insights_partial_cluster_404_degrades_gracefully():
     responses = [
         _ok({"first_week": "2026-11-16", "latest_week": "2026-11-16"}),
         _FakeResponse({"detail": "not clustered yet"}, status_code=404),
-        _ok({"turn_count": 4, "categories": [{"category": "timeout", "count": 4, "cluster_breakdowns": []}]}),
+        _ok(
+            {
+                "turn_count": 10,
+                "categories": [
+                    {"category": "no_failure", "count": 6, "cluster_breakdowns": []},
+                    {"category": "tool_misuse", "count": 4, "cluster_breakdowns": []},
+                ],
+            }
+        ),
         _ok({"turn_count": 10, "categories": []}),
         _FakeResponse({"detail": "not clustered yet"}, status_code=404),
         _FakeResponse({"detail": "not clustered yet"}, status_code=404),
@@ -123,8 +173,9 @@ def test_render_agent_lens_insights_partial_cluster_404_degrades_gracefully():
 
     assert not result.isError
     sc = result.structuredContent
-    assert sc["failure"]["turnCount"] == 4
-    assert sc["coverage"]["coveragePct"] is None
+    assert sc["failure"]["turnCount"] == 10
+    assert sc["failure"]["failingTurnCount"] == 4
+    assert len(sc["failure"]["categories"]) == 1
     assert len(sc["warnings"]) == 3
 
 
@@ -145,45 +196,9 @@ def test_render_agent_lens_insights_rejects_invalid_arguments_and_propagates_for
     assert forbidden.structuredContent["error"] == "agent_lens_forbidden"
 
 
-def test_render_agent_conversation_and_trace_preserve_exact_text_and_populate_structured_content():
-    canned_conv = {
-        "conversation_id": "conv-99",
-        "agent_name": "support-router",
-        "agent_version": "v2",
-        "total_turns": 2,
-        "has_more": False,
-        "total_cost_usd": 0.0084,
-        "turns": [
-            {
-                "trace_id": "tr-1",
-                "status_code": "OK",
-                "total_duration_ms": 310,
-                "input_tokens": 120,
-                "output_tokens": 45,
-                "messages": [
-                    {"role": "user", "content": [{"type": "text", "text": "Where is my refund?"}]},
-                    {"role": "assistant", "content": "Checking order #55."},
-                ],
-                "feedback": [{"id": "fb-1", "feedback_type": "wandb.agent_user_feedback", "scorer_tags": ["👍"]}],
-            },
-            {
-                "trace_id": "tr-2",
-                "status_code": "ERROR",
-                "total_duration_ms": 890,
-                "input_tokens": 200,
-                "output_tokens": 60,
-                "messages": [
-                    {
-                        "role": "tool",
-                        "tool_name": "refund_order",
-                        "arguments": {"order_id": "55"},
-                        "status_code": "ERROR",
-                        "error": "Refund window expired",
-                    }
-                ],
-            },
-        ],
-    }
+def test_render_agent_conversation_and_trace_preserve_exact_text_and_selected_failure():
+    contract = load_contract_fixture()
+    canned_conv = contract["weave_conversation"]
 
     fake_resp = MagicMock(status_code=200, headers={})
     fake_resp.json.return_value = canned_conv
@@ -198,8 +213,12 @@ def test_render_agent_conversation_and_trace_preserve_exact_text_and_populate_st
         conv_res = agent_conversation_app.render_agent_conversation(
             "acme",
             "support-bot",
-            conversation_id="conv-99",
+            conversation_id="conv-stripe-8841",
             include_feedback=True,
+            selected_failure={
+                "trace_id": "trace-stripe-8841",
+                "failure_id": "77869ce8-2917-5d33-bc74-ab63603e278e",
+            },
             _access_mode="read-only",
             _agent_lens_available=True,
         )
@@ -211,14 +230,14 @@ def test_render_agent_conversation_and_trace_preserve_exact_text_and_populate_st
     assert sc["mode"] == "conversation"
     assert sc["accessMode"] == "read-only"
     assert sc["agentLensAvailable"] is True
-    assert sc["forgeUrl"] == "https://forge.coreweave.com/acme/support-bot/agent-lens"
+    assert sc["forgeUrl"] == "https://forge.coreweave.com/agent-lens/acme/support-bot"
+    assert sc["selectedFailure"] == {
+        "traceId": "trace-stripe-8841",
+        "failureId": "77869ce8-2917-5d33-bc74-ab63603e278e",
+    }
     assert sc["summary"]["turnCount"] == 2
     assert sc["summary"]["errorCount"] == 1
-    assert sc["summary"]["totalInputTokens"] == 320
-    assert sc["turns"][0]["messages"][0]["content"] == "Where is my refund?"
     assert sc["turns"][1]["isError"] is True
-    assert sc["turns"][1]["errorMessage"] == "Refund window expired"
-    assert sc["feedback"][0]["emoji"] == "👍"
 
 
 def test_mcp_app_resources_follow_selected_tools(monkeypatch: pytest.MonkeyPatch):
@@ -315,12 +334,20 @@ async def test_stateless_streamable_http_serves_both_new_mcp_apps(monkeypatch: p
                                     "entity_name": "acme",
                                     "project_name": "support",
                                     "trace_id": "trace-abc",
+                                    "selected_failure": {
+                                        "trace_id": "trace-abc",
+                                        "failure_id": "fail-1",
+                                    },
                                 },
                             )
                         assert not trace_result.isError
                         assert trace_result.structuredContent["schema"] == "wandb.agent_conversation/v1"
                         assert trace_result.structuredContent["accessMode"] == "read-only"
                         assert trace_result.structuredContent["agentLensAvailable"] is True
+                        assert trace_result.structuredContent["selectedFailure"] == {
+                            "traceId": "trace-abc",
+                            "failureId": "fail-1",
+                        }
                         assert json.loads(trace_result.content[0].text) == canned_trace
     finally:
         server._sync_executor.shutdown(wait=True)
@@ -359,14 +386,11 @@ def test_all_mcp_app_bundles_are_offline_and_integrity_stamped(bundle_name: str)
 def test_tools_list_serialized_payload_stays_under_128_kib_across_all_22_profiles(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    import asyncio
-    from mcp.server.fastmcp import FastMCP
     from mcp.types import ListToolsResult
     from wandb_mcp_server.runtime_contract import (
         load_runtime_contract,
         profile_combinations,
     )
-    from wandb_mcp_server.server import register_tools
 
     contract = load_runtime_contract()
     combinations = profile_combinations(contract)

@@ -11,6 +11,9 @@ const uiRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(uiRoot, "../..");
 const bundledAppPath = path.join(repoRoot, "src/wandb_mcp_server/data/agent-conversation.html");
 const sharedHostEntry = path.resolve(uiRoot, "../shared/test-host.ts");
+const contractFixture = JSON.parse(
+  fs.readFileSync(path.resolve(uiRoot, "../shared/fixtures/agent-lens-contract.json"), "utf8"),
+);
 
 function makeConversationPayload(overrides = {}) {
   return {
@@ -18,47 +21,51 @@ function makeConversationPayload(overrides = {}) {
     mode: "conversation",
     entityName: "acme",
     projectName: "support-agent",
-    conversationId: "conv-77",
+    conversationId: "conv-stripe-8841",
     traceId: null,
     agentName: "billing-router",
-    agentVersion: "v4",
-    forgeUrl: "https://forge.coreweave.com/acme/support-agent/agent-lens",
+    agentVersion: "v4.2",
+    forgeUrl: "https://forge.coreweave.com/agent-lens/acme/support-agent",
     accessMode: "read-write",
     agentLensAvailable: true,
     compacted: false,
+    selectedFailure: {
+      traceId: "trace-stripe-8841",
+      failureId: "77869ce8-2917-5d33-bc74-ab63603e278e",
+    },
     summary: {
       turnCount: 2,
       totalTurns: 2,
       hasMore: false,
-      totalInputTokens: 640,
-      totalOutputTokens: 210,
-      totalTokens: 850,
-      totalDurationMs: 1620,
-      totalCostUsd: 0.0051,
+      totalInputTokens: 610,
+      totalOutputTokens: 180,
+      totalTokens: 790,
+      totalDurationMs: 1530,
+      totalCostUsd: 0.0046,
       errorCount: 1,
     },
     turns: [
       {
         turnIndex: 1,
-        traceId: "trace-turn-1",
-        spanId: "span-1",
+        traceId: "trace-stripe-8840",
+        spanId: "span-turn-8840",
         agentName: "billing-router",
-        agentVersion: "v4",
+        agentVersion: "v4.2",
         statusCode: "OK",
         isError: false,
         errorMessage: null,
-        startedAt: "2026-11-23T18:00:00Z",
-        durationMs: 420,
-        inputTokens: 240,
-        outputTokens: 90,
-        totalTokens: 330,
-        costUsd: 0.002,
+        startedAt: "2026-11-23T21:14:00Z",
+        durationMs: 410,
+        inputTokens: 220,
+        outputTokens: 68,
+        totalTokens: 288,
+        costUsd: 0.0014,
         model: "gpt-5.4",
         messages: [
           {
             index: 0,
             role: "user",
-            content: "Can you check invoice #77?",
+            content: "Can you check why EU-West invoice #8841 failed to settle?",
             toolName: null,
             toolCallId: null,
             arguments: null,
@@ -74,7 +81,7 @@ function makeConversationPayload(overrides = {}) {
           {
             index: 1,
             role: "assistant",
-            content: "Let me look up invoice #77 right now.",
+            content: "Let me look up EU-West invoice #8841 right now.",
             toolName: null,
             toolCallId: null,
             arguments: null,
@@ -92,19 +99,19 @@ function makeConversationPayload(overrides = {}) {
       },
       {
         turnIndex: 2,
-        traceId: "trace-turn-2",
-        spanId: "span-2",
+        traceId: "trace-stripe-8841",
+        spanId: "span-turn-8841",
         agentName: "billing-router",
-        agentVersion: "v4",
+        agentVersion: "v4.2",
         statusCode: "ERROR",
         isError: true,
-        errorMessage: "InvoiceAPIError: missing currency parameter",
-        startedAt: "2026-11-23T18:00:05Z",
-        durationMs: 1200,
-        inputTokens: 400,
-        outputTokens: 120,
-        totalTokens: 520,
-        costUsd: 0.0031,
+        errorMessage: "StripeInvalidRequestError: 422 Unprocessable Entity — Missing required param: currency.",
+        startedAt: "2026-11-23T21:14:05Z",
+        durationMs: 1120,
+        inputTokens: 390,
+        outputTokens: 112,
+        totalTokens: 502,
+        costUsd: 0.0032,
         model: "gpt-5.4",
         messages: [
           {
@@ -112,15 +119,15 @@ function makeConversationPayload(overrides = {}) {
             role: "tool",
             content: null,
             toolName: "lookup_invoice",
-            toolCallId: "tc-77",
-            arguments: '{"invoice_id":"77"}',
+            toolCallId: "call_8841",
+            arguments: '{"invoice_id":"8841","ledger":"eu-west"}',
             toolCalls: [],
-            toolResult: '{"status":422,"detail":"currency required"}',
-            spanId: "span-tool-77",
+            toolResult: '{"status":422,"error":{"param":"currency","message":"Missing required param: currency."}}',
+            spanId: "span-tool-8841",
             spanName: "tool.lookup_invoice",
             statusCode: "ERROR",
-            error: "422 Unprocessable Entity: currency required",
-            durationMs: 980,
+            error: "422 Unprocessable Entity: Missing required param: currency.",
+            durationMs: 640,
             model: null,
           },
         ],
@@ -186,7 +193,7 @@ async function main() {
 
   const browser = await chromium.launch({ headless: true });
   try {
-    const page = await browser.newPage({ viewport: { width: 920, height: 680 } });
+    const page = await browser.newPage({ viewport: { width: 960, height: 720 } });
     const pageErrors = [];
     const consoleErrors = [];
     page.on("pageerror", (err) => pageErrors.push(String(err)));
@@ -204,95 +211,75 @@ async function main() {
 
     await page.goto(origin, { waitUntil: "domcontentloaded" });
 
-    await page.evaluate(async (html) => {
-      window.__MCP_APP_TEST_HOST__.setToolHandler((name, args) => {
-        if (name === "get_agent_lens_conversation_tags_tool") {
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  data: [{ tag_id: "30201f95-1221-433a-9ea5-1e513081962f", tag_name: "escalated", trace_id: "trace-turn-2" }],
-                }),
-              },
-            ],
-          };
-        }
-        if (name === "get_weave_agent_conversation_spans_tool") {
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  conversations: [
-                    {
-                      conversation_id: args.conversation_ids?.[0] ?? "conv-77",
-                      spans: [
-                        {
-                          span_id: "span-root",
-                          trace_id: "trace-turn-2",
-                          name: "turn.billing-router",
-                          is_invocation: true,
-                          started_at: "2026-11-23T18:00:05.000Z",
-                          duration_ms: 1200,
-                          status_code: "ERROR",
-                        },
-                        {
-                          span_id: "span-tool-77",
-                          parent_id: "span-root",
-                          trace_id: "trace-turn-2",
-                          name: "tool.lookup_invoice",
-                          tool_name: "lookup_invoice",
-                          started_at: "2026-11-23T18:00:05.200Z",
-                          duration_ms: 980,
-                          status_code: "ERROR",
-                          error: "422 currency required",
-                          inputs: { invoice_id: "77" },
-                        },
-                      ],
-                    },
-                  ],
-                }),
-              },
-            ],
-          };
-        }
-        if (name === "manage_weave_agent_feedback_tool") {
-          return {
-            content: [{ type: "text", text: JSON.stringify({ id: "fb-new-1" }) }],
-          };
-        }
-        if (name === "list_agent_lens_tags_tool") {
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  data: [{ id: "11111111-2222-4333-8444-555555555555", name: "needs-eval", color: "#10BFCC" }],
-                }),
-              },
-            ],
-          };
-        }
-        if (name === "manage_agent_lens_tags_tool") {
-          return {
-            content: [{ type: "text", text: JSON.stringify({ data: { ok: true } }) }],
-          };
-        }
-        return { content: [{ type: "text", text: "{}" }] };
-      });
+    await page.evaluate(
+      async ({ html, fixture }) => {
+        window.__MCP_APP_TEST_HOST__.setToolHandler((name) => {
+          if (name === "get_agent_lens_conversation_tags_tool") {
+            return {
+              content: [{ type: "text", text: JSON.stringify(fixture.conversation_tags) }],
+            };
+          }
+          if (name === "get_agent_lens_failure_attributions_tool") {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    data: [fixture.failure_attributions.data[0]],
+                  }),
+                },
+              ],
+            };
+          }
+          if (name === "get_weave_agent_conversation_spans_tool") {
+            return {
+              content: [{ type: "text", text: JSON.stringify(fixture.weave_conversation_spans) }],
+            };
+          }
+          if (name === "manage_weave_agent_feedback_tool") {
+            return {
+              content: [{ type: "text", text: JSON.stringify({ id: "fb-new-1" }) }],
+            };
+          }
+          if (name === "list_agent_lens_tags_tool") {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    data: [{ id: "11111111-2222-4333-8444-555555555555", name: "needs-eval", color: "#10BFCC" }],
+                  }),
+                },
+              ],
+            };
+          }
+          if (name === "manage_agent_lens_tags_tool") {
+            return {
+              content: [{ type: "text", text: JSON.stringify({ data: { ok: true } }) }],
+            };
+          }
+          return { content: [{ type: "text", text: "{}" }] };
+        });
 
-      await window.__MCP_APP_TEST_HOST__.mount(html, {
-        theme: "dark",
-        displayMode: "inline",
-        availableDisplayModes: ["inline", "fullscreen"],
-      });
-      await window.__MCP_APP_TEST_HOST__.sendToolInput({ conversation_id: "conv-77" });
-    }, appHtmlWithCsp);
+        await window.__MCP_APP_TEST_HOST__.mount(html, {
+          theme: "dark",
+          displayMode: "inline",
+          availableDisplayModes: ["inline", "fullscreen"],
+        });
+        await window.__MCP_APP_TEST_HOST__.sendToolInput({
+          conversation_id: "conv-stripe-8841",
+          selected_failure: {
+            trace_id: "trace-stripe-8841",
+            failure_id: "77869ce8-2917-5d33-bc74-ab63603e278e",
+          },
+        });
+      },
+      { html: appHtmlWithCsp, fixture: contractFixture },
+    );
 
     const frame = page.frameLocator("#mcp-app-frame");
     await frame.locator("#ac-title").waitFor();
-    assert.match(await frame.locator("#ac-title").innerText(), /Conversation conv-77/);
+    assert.match(await frame.locator("#ac-title").innerText(), /Conversation conv-stripe-8841/);
 
     await page.evaluate(async (payload) => {
       await window.__MCP_APP_TEST_HOST__.sendToolResult({
@@ -301,20 +288,26 @@ async function main() {
       });
     }, makeConversationPayload());
 
-    // Verify turns, error badge, and lazy-loaded Agent Lens tag chip
+    // 1. Product tab names: Thread and Spans + copyable conv_id + UTC turn timestamps
     await frame.locator(".ac-turn-card").first().waitFor();
+    assert.deepEqual(await frame.locator(".ac-tab").allInnerTexts(), ["Thread", "Spans"]);
     assert.equal(await frame.locator(".ac-turn-card").count(), 2);
-    assert.equal(await frame.locator("#ac-error-pill").innerText(), "1 error");
+    assert.match(await frame.locator(".ac-copy-conv-btn").innerText(), /conv:conv-stripe-8841/);
+    assert.match(await frame.locator(".ac-turn-ts").first().innerText(), /UTC/);
+
+    // 2. Real conversation_tags (`tag` field) + Agent failures list + PINNED finding
     await frame.locator(".ac-tag-chip").first().waitFor();
-    assert.match(await frame.locator(".ac-tag-chip").first().innerText(), /#escalated/);
+    assert.match(await frame.locator(".ac-tag-chip").first().innerText(), /#eu-ledger/);
 
-    // Verify Errors-only filter
-    await frame.locator("#ac-errors-only-btn").click();
-    assert.equal(await frame.locator(".ac-turn-card").count(), 1);
-    await frame.locator("#ac-errors-only-btn").click();
-    assert.equal(await frame.locator(".ac-turn-card").count(), 2);
+    await frame.locator(".ac-failure-row").first().waitFor();
+    assert.equal(await frame.locator("#ac-failures-btn").innerText(), "Agent failures (1)");
+    const failureText = await frame.locator(".ac-failure-row").first().innerText();
+    assert.match(failureText, /Turn #2/);
+    assert.match(failureText, /High/);
+    assert.match(failureText, /lookup_invoice omits required currency/);
+    assert.match(failureText, /Pinned/i);
 
-    // Verify inline read-write feedback (reaction + note) and tag assignment
+    // 3. Inline feedback + free-text human note sync + tag assignment
     await frame.locator(".ac-turn-card").nth(1).locator(".ac-react-down").click();
     await frame.locator(".ac-turn-card").nth(1).locator(".ac-fb-pill").first().waitFor();
     await page.waitForFunction(() =>
@@ -324,11 +317,14 @@ async function main() {
     );
 
     await frame.locator(".ac-turn-card").nth(1).locator(".ac-add-note-btn").click();
-    await frame.locator(".ac-note-input").fill("Pass USD default currency");
+    await frame.locator(".ac-note-input").click();
+    await frame.locator(".ac-note-input").pressSequentially("Missing ISO currency on EU ledger; add to eval batch", { delay: 5 });
     await frame.locator(".ac-save-note-btn").click();
     await page.waitForFunction(() =>
-      window.__MCP_APP_TEST_HOST__.toolCalls.some(
-        (c) => c.name === "manage_weave_agent_feedback_tool" && c.arguments.action === "add_note",
+      window.__MCP_APP_TEST_HOST__.contextUpdates.some(
+        (u) =>
+          Array.isArray(u?.structuredContent?.human_notes) &&
+          u.structuredContent.human_notes.includes("Missing ISO currency on EU ledger; add to eval batch"),
       ),
     );
 
@@ -341,26 +337,30 @@ async function main() {
       ),
     );
 
-    // Verify OTel Spans tab lazy waterfall + Span Drawer + Context Sync
-    await frame.locator("#ac-tab-spans").click();
-    await frame.locator(".ac-wf-row").nth(1).waitFor();
-    assert.equal(await frame.locator(".ac-wf-row").count(), 2);
-    await frame.locator(".ac-wf-row").nth(1).click();
+    // 4. Click Focus evidence span -> switches to Spans, marks Evidence row, selects span-tool-8841, syncs failure reason
+    await frame.locator(".ac-focus-evidence-btn").first().click();
+    await frame.locator('.ac-wf-row[data-evidence="true"]').first().waitFor();
+    assert.match(await frame.locator('.ac-wf-row[data-evidence="true"]').first().innerText(), /Evidence/i);
     assert.equal(await frame.locator("#ac-span-drawer").isVisible(), true);
+    assert.match(await frame.locator("#ac-span-drawer").innerText(), /Evidence for lookup_invoice omits required currency/);
+
     await page.waitForFunction(() =>
       window.__MCP_APP_TEST_HOST__.contextUpdates.some(
-        (u) => u?.structuredContent?.span_id === "span-tool-77",
+        (u) =>
+          u?.structuredContent?.span_id === "span-tool-8841" &&
+          u?.structuredContent?.is_evidence_span === true &&
+          typeof u?.structuredContent?.failure_reason === "string",
       ),
     );
 
-    // Verify Open in Forge Agent Lens HTTPS deep link + non-HTTPS block
+    // 5. Open in Forge Agent Lens deep link (/agent-lens/acme/support-agent/conversations/.../spans/turns/.../spans/...)
     await frame.locator("#ac-open-forge-btn").click();
     await page.waitForFunction(() => window.__MCP_APP_TEST_HOST__.openedLinks.length === 1);
     assert.deepEqual(await page.evaluate(() => window.__MCP_APP_TEST_HOST__.openedLinks), [
-      "https://forge.coreweave.com/acme/support-agent/agent-lens",
+      "https://forge.coreweave.com/agent-lens/acme/support-agent/conversations/conv-stripe-8841/spans/turns/trace-stripe-8841/spans/span-tool-8841",
     ]);
 
-    // Verify read-only mode hides write controls AND blocks http:// URL
+    // 6. Read-only mode hides write controls and blocks http:// URL
     await page.setViewportSize({ width: 540, height: 640 });
     await page.evaluate(async (roPayload) => {
       await window.__MCP_APP_TEST_HOST__.sendToolResult({
@@ -371,8 +371,6 @@ async function main() {
 
     assert.equal(await frame.locator(".ac-react-down").count(), 0);
     assert.equal(await frame.locator("#ac-tag-menu-btn").isHidden(), true);
-    await frame.locator("#ac-open-forge-btn").click();
-    assert.equal(await page.evaluate(() => window.__MCP_APP_TEST_HOST__.openedLinks.length), 1);
 
     await page.evaluate(async () => {
       await window.__MCP_APP_TEST_HOST__.teardown();

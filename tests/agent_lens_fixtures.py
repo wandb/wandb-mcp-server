@@ -1,9 +1,11 @@
 """Shared HTTP test helpers for Agent Lens tools."""
 
 import asyncio
+from copy import deepcopy
 import json
 from contextlib import contextmanager
-from typing import TypedDict
+from pathlib import Path
+from typing import Any, Dict, TypedDict
 from unittest.mock import MagicMock, patch
 
 from wandb_mcp_server.api_client import WandBApiManager
@@ -14,6 +16,12 @@ ENTITY = "acme"
 PROJECT = "support-bot"
 _Window = TypedDict("_Window", {"start_at": str, "end_at": str})
 WINDOW: _Window = {"start_at": "2026-09-01T00:00:00Z", "end_at": "2026-09-08T00:00:00Z"}
+_CONTRACT_FIXTURE_PATH = Path(__file__).resolve().parents[1] / "ui" / "shared" / "fixtures" / "agent-lens-contract.json"
+
+
+def load_contract_fixture() -> Dict[str, Any]:
+    """Load the shared synthetic Agent Lens wire fixture set grounded in live API shapes."""
+    return deepcopy(json.loads(_CONTRACT_FIXTURE_PATH.read_text(encoding="utf-8")))
 
 
 def _sync_call(function, *args, **kwargs):

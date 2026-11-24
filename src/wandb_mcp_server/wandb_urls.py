@@ -20,8 +20,8 @@ def public_forge_base_url() -> str:
 
 
 def public_forge_agent_lens_url(entity_name: object, project_name: object, *extra_segments: object) -> str:
-    """Build a public Forge Agent Lens deep link (never legacy /weave/agents/ paths)."""
-    segments = (entity_name, project_name, "agent-lens", *extra_segments)
+    """Build a public Forge Agent Lens deep link (`/agent-lens/<entity>/<project>/...`)."""
+    segments = ("agent-lens", entity_name, project_name, *extra_segments)
     suffix = "/".join(quote(str(segment).strip("/"), safe="") for segment in segments if str(segment).strip("/"))
     return f"{public_forge_base_url()}/{suffix}"
 

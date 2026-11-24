@@ -11,11 +11,12 @@ import {
   ConversationPayloadSchema,
   ToolErrorPayloadSchema,
   type ConversationPayload,
+  type SelectedFailurePin,
 } from "./schema";
 import type { DisplayMode, ModelContextPayload } from "./state";
 
 export interface ConversationHostCallbacks {
-  onToolInput: (title: string | null) => void;
+  onToolInput: (title: string | null, selectedFailure: SelectedFailurePin | null) => void;
   onPayloadLoaded: (payload: ConversationPayload) => void;
   onToolFailed: (message: string) => void;
   onHostContext: (
@@ -49,6 +50,21 @@ function extractInputTitle(args: Record<string, unknown> | undefined): string | 
     return args.project_name.trim();
   }
   return null;
+}
+
+function extractInputSelectedFailure(
+  args: Record<string, unknown> | undefined,
+): SelectedFailurePin | null {
+  if (!args || !args.selected_failure || typeof args.selected_failure !== "object") {
+    return null;
+  }
+  const sf = args.selected_failure as Record<string, unknown>;
+  const traceId = String(sf.trace_id ?? sf.traceId ?? "").trim();
+  const failureId = String(sf.failure_id ?? sf.failureId ?? "").trim();
+  if (!traceId || !failureId) {
+    return null;
+  }
+  return { traceId, failureId };
 }
 
 function extractTextError(result: {
@@ -104,7 +120,10 @@ export class ConversationHostBridge {
     );
 
     this.app.addEventListener("toolinput", (params) => {
-      this.callbacks.onToolInput(extractInputTitle(params.arguments));
+      this.callbacks.onToolInput(
+        extractInputTitle(params.arguments),
+        extractInputSelectedFailure(params.arguments),
+      );
     });
 
     this.app.addEventListener("toolresult", (params) => {
@@ -274,7 +293,10 @@ export class ConversationHostBridge {
     if (!payload || !this.connected || !this.app.getHostCapabilities()?.updateModelContext) {
       return;
     }
-    const signature = JSON.stringify(payload.structuredContent ?? payload.content);
+    const signature = JSON.stringify({
+      content: payload.content,
+      structuredContent: payload.structuredContent ?? null,
+    });
     if (signature === this.lastPublishedSignature) {
       return;
     }
