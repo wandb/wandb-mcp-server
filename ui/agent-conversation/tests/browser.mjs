@@ -231,7 +231,10 @@ async function main() {
               ],
             };
           }
-          if (name === "get_weave_agent_conversation_spans_tool") {
+          if (
+            name === "query_weave_agent_spans_tool" ||
+            name === "get_weave_agent_conversation_spans_tool"
+          ) {
             return {
               content: [{ type: "text", text: JSON.stringify(fixture.weave_conversation_spans) }],
             };

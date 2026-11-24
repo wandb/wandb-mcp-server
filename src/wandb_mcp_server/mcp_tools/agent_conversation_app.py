@@ -5,6 +5,7 @@ from __future__ import annotations
 from importlib.resources import files
 import json
 import os
+import re
 from typing import Any, Dict, List, Literal, Optional
 
 from mcp.server.fastmcp import FastMCP
@@ -103,8 +104,6 @@ def _stringify_value(value: Any) -> Optional[str]:
     except (TypeError, ValueError):
         return str(value)
 
-
-import re
 
 def _canonical_trace_hex(raw: Any) -> Optional[str]:
     text = str(raw or "").strip().lower().replace("-", "")
@@ -540,16 +539,13 @@ def _normalize_turn(raw_turn: Dict[str, Any], turn_index: int) -> Dict[str, Any]
         if msg_costs:
             cost_usd = round(sum(msg_costs), 6)
 
-    started_at = (
-        str(raw_turn.get("started_at") or raw_turn.get("created_at") or "").strip()
-        or next(
-            (
-                str(rm.get("started_at")).strip()
-                for rm in raw_messages
-                if isinstance(rm, dict) and isinstance(rm.get("started_at"), str) and rm.get("started_at").strip()
-            ),
-            None,
-        )
+    started_at = str(raw_turn.get("started_at") or raw_turn.get("created_at") or "").strip() or next(
+        (
+            str(rm.get("started_at")).strip()
+            for rm in raw_messages
+            if isinstance(rm, dict) and isinstance(rm.get("started_at"), str) and rm.get("started_at").strip()
+        ),
+        None,
     )
     model = str(
         raw_turn.get("response_model") or raw_turn.get("request_model") or raw_turn.get("model") or ""

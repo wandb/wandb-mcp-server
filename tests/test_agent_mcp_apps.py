@@ -579,4 +579,3 @@ def test_agent_conversation_unpacks_weave_tagged_union_messages_and_weave_ref_fe
     assert turn["model"] == "claude-sonnet-4.5"
     assert sc["feedback"][0]["traceId"] == turn_uuid
     assert sc["feedback"][0]["note"] == "Mutated lead_vox while chorus_synth was focused"
-

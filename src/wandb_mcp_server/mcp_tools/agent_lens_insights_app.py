@@ -287,7 +287,11 @@ def _normalize_signature_section(
                 c_label = str(cb.get("label") or opt_meta.get("label") or "").strip()
                 display_title = c_title or c_label or cid
                 desc_raw = cb.get("description")
-                c_desc = sanitize_sensitive_text(desc_raw, max_chars=480) if isinstance(desc_raw, str) and desc_raw.strip() else None
+                c_desc = (
+                    sanitize_sensitive_text(desc_raw, max_chars=480)
+                    if isinstance(desc_raw, str) and desc_raw.strip()
+                    else None
+                )
                 c_sev = _normalize_severity(cb.get("severity")) if signature_type == "failure" else None
                 c_impact = _normalize_impact_fields(cb, c_count)
 
