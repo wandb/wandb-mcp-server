@@ -180,57 +180,46 @@ ARIA_SEND_MESSAGE_TOOL_DESCRIPTION = """Start or continue an asynchronous conver
 <when_to_use>
 ARIA is W&B's own agent: it has the caller's W&B context, runs code against the
 W&B and Weave APIs, and can read and change the W&B UI. ARIA can:
-- Workspaces: create or edit saved views, filters, grouping, sorting, sections,
+- Workspaces: create/edit saved views, filters, grouping, sorting, sections,
   panels, run colours, pinned/baseline runs; describe what a workspace shows.
-- Runs: rank, compare, diff configs, find regressions and anomalies, explain
-  runtime or metric differences, read run console logs, tag/rename/move/delete
-  runs, export run tables.
-- Sweeps: create, run and analyse sweeps and parameter importance.
-- Reports: create or edit reports and verify them; PDF export.
-- Artifacts and Registry: lineage, versions, promotion, storage cleanup.
-- Weave: query traces, debug evaluations, prompts/datasets/leaderboards,
-  monitors; Agent Lens conversations and insights.
-- Automations and alerts, Launch queues, Serverless training and inference,
-  notebooks, Sandboxes, GitHub repos when the user enabled it.
-- Investigations: open-ended "why is this slow", "what regressed", "audit this
-  project" with a written analysis.
+- Runs & Sweeps: rank, compare, diff configs, find regressions, read console
+  logs, tag/rename/move/delete runs, export tables, run/analyse sweeps.
+- Reports, Artifacts & Registry: create/edit reports, PDF export, lineage,
+  versions, promotion, storage cleanup.
+- Weave & Agent Lens: query traces, debug evaluations, prompts/datasets,
+  monitors, conversations, and insights.
+- Platform & Investigations: automations, Launch, Serverless training/inference,
+  notebooks, Sandboxes, GitHub repos, and open-ended project audits.
 Earlier ARIA conversations are found with aria_list_threads.
 </when_to_use>
 
-This tool returns promptly by default because ARIA turns are asynchronous. Keep the returned turn_id. If state is queued or in_progress, call aria_get_turn until is_terminal is true; open-ended project audits and multi-step investigations routinely take 2 to 8 minutes, so do not start a duplicate ARIA thread while a turn is working. Set wait_seconds (up to 30) to wait server-side for a fast result without adding separate client sleep calls. To continue a completed conversation, call this tool again with parent_turn_id set to the previous turn_id; omit entity, project, and title for continuations.
-
-Root turns may omit both entity and project. If only project is supplied, this
-tool resolves the caller's default W&B entity before creating the turn. Passing
-a short title is recommended for new conversations; when omitted on a root
-turn, the thread is titled automatically. Results are compact by default; set
-include_turn=true only when a bounded raw ARIA turn snapshot is actually
-needed. Oversized snapshots include `_truncation` metadata.
+ARIA turns are asynchronous: keep `turn_id` and poll `aria_get_turn` until `is_terminal` is true (audits routinely take 2 to 8 minutes; do not start a duplicate thread while working). Set `wait_seconds` (up to 30) to wait server-side without client sleep calls. Continue a completed turn with `parent_turn_id` (omit `entity`, `project`, and `title`). Root turns may omit `entity`/`project` (auto-resolves default entity when only `project` is set) and auto-title when `title` is omitted. Set `include_turn=true` only when a bounded raw snapshot (`_truncation` when oversized) is needed.
 
 Parameters
 ----------
 message : str
-    A focused request for ARIA, limited to 32 KiB of UTF-8 text. Include relevant W&B entity/project names, run IDs, call IDs, URLs, metrics, time windows, and the desired output shape.
+    Focused request (up to 32 KiB UTF-8) with relevant entity/project, IDs, metrics, windows, and output shape.
 entity : str, optional
-    W&B entity for a new conversation, up to 512 characters. Omit to let ARIA use the account default. Must be omitted for continuations.
+    W&B entity for a new conversation (<= 512 chars). Omit on continuations.
 project : str, optional
-    W&B project for a new conversation, up to 512 characters. Omit to let ARIA use the default. Must be omitted for continuations.
+    W&B project for a new conversation (<= 512 chars). Omit on continuations.
 title : str, optional
-    Optional for a new conversation (omit with parent_turn_id): a short descriptive name for this conversation, up to 255 characters, shown in aria_list_threads and the ARIA thread list in the W&B UI. When omitted on a new conversation, ARIA titles the thread automatically.
+    Short name for a new conversation (<= 255 chars; omit with `parent_turn_id`).
 parent_turn_id : str, optional
-    Completed ARIA turn to continue, up to 512 characters. Use the exact turn_id returned by the prior call.
+    Completed `turn_id` to continue (<= 512 chars).
 wait_seconds : int
-    Seconds to poll before returning, from 0 to 30. Default 0 returns the initial asynchronous handle immediately.
+    Seconds to poll server-side before returning (0-30, default 0).
 include_turn : bool
-    Include a bounded raw turn snapshot. Oversized data is truncated with metadata. Default false avoids very large responses.
+    Include bounded raw turn snapshot (default false).
 allowed_network_domains : list[str], optional
-    Public DNS hostnames (e.g. ["arxiv.org"]) added to ARIA's sandbox egress allowlist; merged with parent turn grants on continuations.
+    Public DNS hostnames (e.g. `["arxiv.org"]`) added to ARIA's sandbox egress allowlist; merged with parent grants on continuations.
 network_access_mode : {"prompt", "auto_safe", "auto_public", "deny"}, optional
-    How to handle ARIA network_access permission_requests: "prompt" (default; uses MCP elicitation if supported or pauses with phase="awaiting_permission"), "auto_safe" (auto-grants vetted research/package registries such as arxiv.org, pypi.org, huggingface.co), "auto_public" (use only when the host harness runs in user-authorized full-auto mode; auto-grants validated public FQDNs), or "deny" (declines and resumes offline).
+    Policy for ARIA `network_access` `permission_requests`: `"prompt"` (default; elicits or pauses with `phase="awaiting_permission"`), `"auto_safe"` (auto-grants vetted registries like `arxiv.org`, `pypi.org`, `huggingface.co`), `"auto_public"` (only when the host harness runs in user-authorized full-auto mode), or `"deny"` (continues offline).
 
 Returns
 -------
 dict
-    Compact state, progress, scope, turn/thread handles, latest assistant response, and next action. Errors use the MCP error state with a JSON payload and never include the W&B token.
+    Compact state, progress, scope, turn/thread handles, latest response, and next action. Errors use the MCP error state and never include the W&B token.
 """
 
 ARIA_GET_TURN_TOOL_DESCRIPTION = """Get the current state and result of an asynchronous ARIA turn.
