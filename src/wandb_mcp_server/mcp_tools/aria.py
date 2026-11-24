@@ -115,6 +115,8 @@ class _AriaNetworkAccessElicitation(BaseModel):
         default=True,
         description="Grant ARIA outbound sandbox access to the requested domain(s) and continue the turn.",
     )
+
+
 _OUTBOUND_LIMITERS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = WeakKeyDictionary()
 _OUTBOUND_LIMITERS_LOCK = threading.Lock()
 
@@ -1512,7 +1514,9 @@ async def _elicit_network_permission(
             timeout=timeout,
         )
     except Exception as exc:
-        logger.debug("MCP elicitation unavailable or failed (%s); falling back to awaiting_permission.", type(exc).__name__)
+        logger.debug(
+            "MCP elicitation unavailable or failed (%s); falling back to awaiting_permission.", type(exc).__name__
+        )
         return None
     action = getattr(outcome, "action", None)
     if action == "accept":
@@ -2201,17 +2205,11 @@ async def get_aria_turn(
         )
         active_turn_id = str(turn.get("id") or turn_id)
         resolution_meta: Dict[str, Any] = {}
-        can_auto_resolve = allow_writes and (
-            mode_explicit or _client_supports_elicitation(ctx)
-        )
+        can_auto_resolve = allow_writes and (mode_explicit or _client_supports_elicitation(ctx))
         if can_auto_resolve and poll_error is None and str(turn.get("state")) == "completed":
             perm_info = _inspect_permission_requests(turn)
             if perm_info["has_requests"] and perm_info["all_network_access"]:
-                existing_child = (
-                    await _find_existing_child_turn_id(client, turn)
-                    if was_terminal_before_poll
-                    else None
-                )
+                existing_child = await _find_existing_child_turn_id(client, turn) if was_terminal_before_poll else None
                 if existing_child:
                     resolution_meta["continued_in_turn_id"] = existing_child
                 else:
@@ -2239,9 +2237,7 @@ async def get_aria_turn(
     except AriaAPIError as exc:
         logger.warning("ARIA get failed: %s", exc.error_type)
         safe_turn_id = (
-            active_turn_id
-            if isinstance(active_turn_id, str) and len(active_turn_id) <= MAX_IDENTIFIER_LENGTH
-            else None
+            active_turn_id if isinstance(active_turn_id, str) and len(active_turn_id) <= MAX_IDENTIFIER_LENGTH else None
         )
         return _finalize_result(
             exc.as_result(turn_id=safe_turn_id, operation="get"),

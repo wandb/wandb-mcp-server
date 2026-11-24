@@ -261,7 +261,9 @@ def list_automations(
             )
         if integration_kind is not None and integration_kind not in _VALID_INTEGRATION_KINDS:
             ctx.mark_error(f"invalid kind: {integration_kind!r}")
-            msg = f"integration_kind must be one of {sorted(_VALID_INTEGRATION_KINDS)} or null, got {integration_kind!r}"
+            msg = (
+                f"integration_kind must be one of {sorted(_VALID_INTEGRATION_KINDS)} or null, got {integration_kind!r}"
+            )
             return tool_error_json({"error": "invalid_input", "message": msg})
 
         target_project = project.strip() if isinstance(project, str) and project.strip() else None

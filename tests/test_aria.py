@@ -2272,9 +2272,7 @@ def test_read_only_and_already_continued_get_turn_never_create_duplicate_continu
         "completed",
         id="turn-1",
         thread_id="thread-1",
-        permission_requests=[
-            {"type": "network_access", "reason": "Read arXiv", "domains": ["arxiv.org"]}
-        ],
+        permission_requests=[{"type": "network_access", "reason": "Read arXiv", "domains": ["arxiv.org"]}],
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2413,4 +2411,3 @@ def test_mcp_elicitation_prompts_and_grants_or_declines_network_access(monkeypat
     assert accepted["permission_resolution"]["grants"][0]["source"] == "mcp_elicitation"
     assert declined["turn_id"] == "turn-1"
     assert declined["permission_resolution"]["action"] == "declined_by_user"
-

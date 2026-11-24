@@ -402,7 +402,11 @@ def _resolve_window(
     window_days: int = 7,
 ) -> tuple[Dict[str, str], bool]:
     """Validate an explicit RFC 3339 window or synthesize a trailing UTC window."""
-    if isinstance(window_days, bool) or not isinstance(window_days, int) or not 1 <= window_days <= MAX_INSIGHTS_WINDOW_DAYS:
+    if (
+        isinstance(window_days, bool)
+        or not isinstance(window_days, int)
+        or not 1 <= window_days <= MAX_INSIGHTS_WINDOW_DAYS
+    ):
         raise ValueError(f"window_days must be an integer between 1 and {MAX_INSIGHTS_WINDOW_DAYS}")
     if (start_at is None) != (end_at is None):
         raise ValueError("provide both start_at and end_at, or omit both to use window_days")
@@ -1145,7 +1149,11 @@ async def list_category_example_turns(
 ) -> str:
     """Page or stratified-sample example turns for one intent or failure category."""
     if signature_type not in {"intent", "failure"}:
-        return _invalid_argument('signature_type must be "intent", "failure", or "failure"') if False else _invalid_argument('signature_type must be "intent" or "failure"')
+        return (
+            _invalid_argument('signature_type must be "intent", "failure", or "failure"')
+            if False
+            else _invalid_argument('signature_type must be "intent" or "failure"')
+        )
     if not str(category_id).strip():
         return _invalid_argument("category_id must be a non-empty category identifier")
     if not 1 <= limit <= MAX_EXAMPLE_LIMIT:

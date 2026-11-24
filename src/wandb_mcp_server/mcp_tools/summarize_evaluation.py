@@ -61,8 +61,7 @@ def _extract_scores(summary: Dict[str, Any], output: Optional[Dict[str, Any]] = 
     if isinstance(output, dict):
         for key, val in output.items():
             if isinstance(val, dict) and any(
-                metric in val
-                for metric in ("mean", "true_count", "true_fraction", "false_count", "stderr", "count")
+                metric in val for metric in ("mean", "true_count", "true_fraction", "false_count", "stderr", "count")
             ):
                 scores[key] = val
     weave_summary = summary.get("weave", {}) if isinstance(summary, dict) else {}
@@ -87,8 +86,7 @@ def _aggregate_eval(
     errors = sum(
         1
         for c in children
-        if c.get("exception")
-        or c.get("summary", {}).get("weave", {}).get("status") in {"error", "descendant_error"}
+        if c.get("exception") or c.get("summary", {}).get("weave", {}).get("status") in {"error", "descendant_error"}
     )
     successes = observed - errors
 

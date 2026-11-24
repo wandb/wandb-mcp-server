@@ -80,8 +80,7 @@ def list_entity_projects(
             {
                 "error": "invalid_input",
                 "message": (
-                    "order must be one of '-updated_at', '-last_active', "
-                    "'-created_at', '+created_at', or '+updated_at'"
+                    "order must be one of '-updated_at', '-last_active', '-created_at', '+created_at', or '+updated_at'"
                 ),
             }
         )

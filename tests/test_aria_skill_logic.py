@@ -7,7 +7,14 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from wandb_mcp_server.mcp_tools import agent_lens, agents, automations, probe_project, query_artifacts, summarize_evaluation
+from wandb_mcp_server.mcp_tools import (
+    agent_lens,
+    agents,
+    automations,
+    probe_project,
+    query_artifacts,
+    summarize_evaluation,
+)
 from wandb_mcp_server.mcp_tools.list_wandb_entities_projects import list_entity_projects
 from wandb_mcp_server.weave_api.query_builder import QueryBuilder
 
