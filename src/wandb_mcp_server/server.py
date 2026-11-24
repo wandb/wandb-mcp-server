@@ -24,7 +24,7 @@ import sys
 from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Union
 
 import wandb
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field, PositiveInt, StrictInt
 
@@ -1674,6 +1674,9 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                 wait_seconds: int = 0,
                 include_turn: bool = False,
                 title: Optional[str] = None,
+                allowed_network_domains: Optional[List[str]] = None,
+                network_access_mode: Optional[Literal["prompt", "auto_safe", "auto_public", "deny"]] = None,
+                ctx: Optional[Context] = None,
             ) -> Dict[str, Any]:
                 return _aria_result_or_tool_error(
                     await send_aria_message(
@@ -1684,6 +1687,9 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                         parent_turn_id=parent_turn_id,
                         wait_seconds=wait_seconds,
                         include_turn=include_turn,
+                        allowed_network_domains=allowed_network_domains,
+                        network_access_mode=network_access_mode,
+                        ctx=ctx,
                     )
                 )
 
@@ -1692,12 +1698,17 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             turn_id: str,
             wait_seconds: int = 0,
             include_turn: bool = False,
+            network_access_mode: Optional[Literal["prompt", "auto_safe", "auto_public", "deny"]] = None,
+            ctx: Optional[Context] = None,
         ) -> Dict[str, Any]:
             return _aria_result_or_tool_error(
                 await get_aria_turn(
                     turn_id=turn_id,
                     wait_seconds=wait_seconds,
                     include_turn=include_turn,
+                    network_access_mode=network_access_mode,
+                    ctx=ctx,
+                    allow_writes=not read_only,
                 )
             )
 
