@@ -36,7 +36,7 @@ EXPECTED_COUNTS = {
 EXPECTED_MANAGED = {
     "models-only": ("dedicated", "shared"),
     "models-weave": ("dedicated", "shared"),
-    "models-weave-agents": ("shared",),
+    "models-weave-agents": ("dedicated", "shared"),
     "models-weave-agents-agent-lens": ("shared",),
     "models-weave-agents-aria": ("shared",),
     "models-weave-agents-agent-lens-aria": ("shared",),
@@ -122,7 +122,7 @@ def test_contract_hash_is_canonical_and_tamper_changes_identity():
         validate_runtime_contract(tampered)
 
     tampered = copy.deepcopy(contract)
-    tampered["workload_profiles"]["dedicated"]["limits"]["MCP_MAX_HISTORY_SAMPLES"] = 1_000_000
+    tampered["workload_profiles"]["dedicated"]["limits"]["MCP_MAX_HISTORY_SAMPLES"] = 100_000_000
     with pytest.raises(ValueError, match="workload limit"):
         validate_runtime_contract(tampered)
 
@@ -397,3 +397,57 @@ def test_dedicated_rejects_every_extension_group():
                     WANDB_MCP_TOOL_EXTENSIONS=extension,
                 )
             )
+
+
+def test_managed_workload_allows_bounded_overrides_when_explicitly_enabled(monkeypatch: pytest.MonkeyPatch):
+    from wandb_mcp_server.runtime_contract import resolve_runtime_selection, workload_policy
+
+    env = _shared_environment(
+        MCP_WORKLOAD_PROFILE="dedicated",
+        MCP_CAPACITY_CLASS="small",
+        WANDB_MCP_TOOL_PROFILE="models-weave-agents",
+        MCP_ALLOW_LIMIT_OVERRIDES="true",
+        MCP_TOOL_TIMEOUT_SECONDS="180",
+        MCP_WANDB_REQUEST_TIMEOUT_SECONDS="90",
+        MCP_MAX_HISTORY_SAMPLES="4000",
+        MCP_HTTP_RATE_PER_KEY_PER_MINUTE="600",
+        MCP_HTTP_RATE_GLOBAL_PER_MINUTE="5000",
+    )
+    selection = resolve_runtime_selection(env)
+    assert selection.limit_overrides_enabled is True
+    assert selection.groups == frozenset({"models", "weave", "agents"})
+
+    policy = workload_policy(selection, env)
+    assert policy["limit_overrides_enabled"] is True
+    assert policy["limits"]["MCP_TOOL_TIMEOUT_SECONDS"] == 180
+    assert policy["limits"]["MCP_WANDB_REQUEST_TIMEOUT_SECONDS"] == 90
+    assert policy["limits"]["MCP_MAX_HISTORY_SAMPLES"] == 4000
+    assert policy["http_rate_policy"] == {
+        "enabled": True,
+        "per_key_per_minute": 600,
+        "global_per_minute": 5000,
+    }
+
+
+def test_shared_workload_keeps_session_limits_locked_even_with_override_opt_in():
+    root = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONPATH": str(root / "src"),
+            "MCP_WORKLOAD_PROFILE": "shared",
+            "MCP_CAPACITY_CLASS": "large",
+            "MCP_ALLOW_LIMIT_OVERRIDES": "true",
+            "SESSION_TTL_SECONDS": "60",
+        }
+    )
+    process = subprocess.run(
+        [sys.executable, "-c", "import wandb_mcp_server.config"],
+        cwd=root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert process.returncode != 0
+    assert "SESSION_TTL_SECONDS cannot override managed MCP_WORKLOAD_PROFILE=shared" in process.stderr

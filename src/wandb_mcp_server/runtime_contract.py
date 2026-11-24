@@ -36,7 +36,7 @@ WORKLOAD_LIMIT_BOUNDS: dict[str, tuple[int, int]] = {
     "MCP_MAX_FULL_TRACE_LIMIT": (1, 1_000),
     "MCP_MAX_HISTORY_SAMPLES": (1, 10_000),
     "MCP_MAX_HISTORY_KEYS": (1, 500),
-    "MCP_MAX_HISTORY_RANGE_STEPS": (1, 1_000_000),
+    "MCP_MAX_HISTORY_RANGE_STEPS": (1, 10_000_000),
     "MCP_MAX_WANDB_QUERY_ITEMS": (1, 10_000),
     "MCP_MAX_FULL_DETAIL_ITEMS": (1, 100),
     "MCP_MAX_PROJECT_FIELDS": (1, 10_000),
@@ -56,6 +56,26 @@ CAPACITY_BOUNDS: dict[str, tuple[int, int]] = {
     "count_workers": (1, 16),
 }
 HTTP_RATE_MAXIMA = {"per_key_per_minute": 10_000, "global_per_minute": 100_000}
+LIMIT_OVERRIDES_ENV = "MCP_ALLOW_LIMIT_OVERRIDES"
+SESSION_OWNED_LIMITS = frozenset({"SESSION_TTL_SECONDS", "MAX_SESSIONS_PER_KEY"})
+HTTP_RATE_OVERRIDE_ENVS = {
+    "per_key_per_minute": "MCP_HTTP_RATE_PER_KEY_PER_MINUTE",
+    "global_per_minute": "MCP_HTTP_RATE_GLOBAL_PER_MINUTE",
+}
+
+
+def resolve_limit_overrides_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    """Return True when an operator explicitly enables bounded managed limit overrides."""
+    env = os.environ if environment is None else environment
+    raw = env.get(LIMIT_OVERRIDES_ENV)
+    if raw is None:
+        return False
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{LIMIT_OVERRIDES_ENV} must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +91,7 @@ class RuntimeSelection:
     runtime_contract_sha256: str
     extensions: frozenset[str] = frozenset()
     base_profile: str = ""
+    limit_overrides_enabled: bool = False
 
     @property
     def read_only(self) -> bool:
@@ -544,6 +565,7 @@ def resolve_runtime_selection(environment: Mapping[str, str] | None = None) -> R
             if response_budget_value < 64:
                 raise ValueError("MAX_RESPONSE_TOKENS must be at least 64 for the ARIA tool profile")
 
+    limit_overrides = resolve_limit_overrides_enabled(env)
     tools = tools_for_profile(contract, resolution.base_profile, access_mode, resolution.extensions)
     return RuntimeSelection(
         tool_profile=tool_profile,
@@ -555,13 +577,93 @@ def resolve_runtime_selection(environment: Mapping[str, str] | None = None) -> R
         runtime_contract_sha256=runtime_contract_sha256(contract),
         extensions=frozenset(resolution.extensions),
         base_profile=resolution.base_profile,
+        limit_overrides_enabled=limit_overrides,
     )
 
 
-def workload_policy(selection: RuntimeSelection) -> Mapping[str, Any]:
-    """Return the immutable workload/capacity policy for one selection."""
+def _override_int(env: Mapping[str, str], name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = env.get(name)
+    if raw is None:
+        return default
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer") from None
+    if parsed < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    if parsed > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+    return parsed
+
+
+def workload_policy(
+    selection: RuntimeSelection,
+    environment: Mapping[str, str] | None = None,
+) -> Mapping[str, Any]:
+    """Return the effective bounded workload/capacity policy for one selection."""
     contract = load_runtime_contract()
+    env = os.environ if environment is None else environment
+    base_workload = dict(contract["workload_profiles"][selection.workload_profile])
+    limits = dict(base_workload["limits"])
+    rate_policy = dict(base_workload["http_rate_policy"])
+    capacity = dict(contract["capacity_classes"][selection.capacity_class])
+
+    allow_overrides = not base_workload["managed"] or resolve_limit_overrides_enabled(env)
+    if allow_overrides:
+        for limit_name, (minimum, maximum) in WORKLOAD_LIMIT_BOUNDS.items():
+            if selection.workload_profile == "shared" and limit_name in SESSION_OWNED_LIMITS:
+                continue
+            limits[limit_name] = _override_int(
+                env,
+                limit_name,
+                int(limits[limit_name]),
+                minimum=minimum,
+                maximum=maximum,
+            )
+        if "MCP_ADMISSION_CONTROL_ENABLED" in env:
+            raw_bool = env["MCP_ADMISSION_CONTROL_ENABLED"].strip().lower()
+            if raw_bool in {"1", "true", "yes", "on"}:
+                limits["MCP_ADMISSION_CONTROL_ENABLED"] = True
+            elif raw_bool in {"0", "false", "no", "off"}:
+                limits["MCP_ADMISSION_CONTROL_ENABLED"] = False
+            else:
+                raise ValueError("MCP_ADMISSION_CONTROL_ENABLED must be a boolean")
+        capacity_env_map = {
+            "actor_capacity": "MCP_ADMISSION_ACTOR_CAPACITY",
+            "process_capacity": "MCP_ADMISSION_PROCESS_CAPACITY",
+            "sync_workers": "MCP_SYNC_TOOL_WORKERS",
+            "count_workers": "MCP_COUNT_TOOL_WORKERS",
+        }
+        for cap_key, env_name in capacity_env_map.items():
+            minimum, maximum = CAPACITY_BOUNDS[cap_key]
+            capacity[cap_key] = _override_int(env, env_name, int(capacity[cap_key]), minimum=minimum, maximum=maximum)
+        for rate_key, env_name in HTTP_RATE_OVERRIDE_ENVS.items():
+            if env_name in env:
+                rate_policy[rate_key] = _override_int(
+                    env,
+                    env_name,
+                    int(rate_policy[rate_key]),
+                    minimum=0,
+                    maximum=HTTP_RATE_MAXIMA[rate_key],
+                )
+        if any(env_name in env for env_name in HTTP_RATE_OVERRIDE_ENVS.values()):
+            per_key = int(rate_policy["per_key_per_minute"])
+            global_rate = int(rate_policy["global_per_minute"])
+            if (per_key > 0) != (global_rate > 0):
+                raise ValueError("HTTP rate overrides must either set both per-key and global rates > 0 or both to 0")
+            rate_policy["enabled"] = per_key > 0 and global_rate > 0
+    else:
+        for env_name in HTTP_RATE_OVERRIDE_ENVS.values():
+            if env_name in env:
+                raise ValueError(
+                    f"{env_name} cannot override managed MCP_WORKLOAD_PROFILE={selection.workload_profile} "
+                    f"(set {LIMIT_OVERRIDES_ENV}=true to allow bounded operator overrides)"
+                )
+
     return {
-        **contract["workload_profiles"][selection.workload_profile],
-        "capacity": contract["capacity_classes"][selection.capacity_class],
+        **base_workload,
+        "limits": limits,
+        "http_rate_policy": rate_policy,
+        "capacity": capacity,
+        "limit_overrides_enabled": allow_overrides and bool(base_workload["managed"]),
     }

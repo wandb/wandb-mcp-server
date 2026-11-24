@@ -206,7 +206,6 @@ def test_aria_profile_requires_explicit_safe_https_origin(monkeypatch: pytest.Mo
     [
         ("shared", "models-weave-graphql-compat"),
         ("shared", "models-weave-agents-raw-graphql"),
-        ("dedicated", "models-weave-agents"),
         ("dedicated", "models-weave-agents-aria"),
         ("dedicated", "models-weave-graphql-compat"),
         ("dedicated", "models-weave-agents-agent-lens"),
@@ -219,10 +218,22 @@ def test_managed_profiles_reject_aria_raw_graphql_and_unsupported_groups(
 ):
     monkeypatch.setenv("MCP_WORKLOAD_PROFILE", workload)
     monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", profile)
+    monkeypatch.setenv("WF_TRACE_SERVER_URL", "https://trace.wandb.ai")
     monkeypatch.setenv("WB_AGENT_BASE_URL", "https://wb-agent.wandb.ai")
     monkeypatch.setenv("AGENT_LENS_BASE_URL", "https://agent-lens.example.com")
     with pytest.raises(ValueError, match="not allowed with managed"):
         register_tools(FastMCP("test"))
+
+
+def test_dedicated_allows_models_weave_agents_when_trace_backend_configured(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("MCP_WORKLOAD_PROFILE", "dedicated")
+    monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-weave-agents")
+    monkeypatch.setenv("WF_TRACE_SERVER_URL", "https://customer.wandb.io/traces")
+    server = FastMCP("dedicated-agents-test")
+    register_tools(server)
+    assert any(tool.name == "query_weave_agent_spans_tool" for tool in asyncio.run(server.list_tools()))
 
 
 def test_registration_never_mutates_private_fastmcp_registry():

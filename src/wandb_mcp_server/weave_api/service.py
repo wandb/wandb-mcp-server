@@ -101,7 +101,7 @@ class TraceService:
         api_key: Optional[str] = None,
         server_url: Optional[str] = None,
         retries: int = 0,
-        timeout: int = 10,
+        timeout: Optional[int] = None,
     ):
         """Initialize the TraceService.
 
@@ -110,7 +110,8 @@ class TraceService:
             server_url: Weave API server URL. Defaults to env-driven config.
             retries: Retained for compatibility. Functional trace requests are
                 not retried automatically.
-            timeout: Request timeout in seconds.
+            timeout: Request timeout in seconds. Defaults to MCP_WANDB_REQUEST_TIMEOUT_SECONDS
+                clamped to the active MCP tool deadline when running inside a tool call.
         """
         # If no API key provided, try to get from context only (no fallbacks!)
         if api_key is None:
@@ -128,12 +129,25 @@ class TraceService:
                 "For STDIO: Ensure API key is set at server startup."
             )
 
+        if timeout is None:
+            import time as _time
+            from wandb_mcp_server.admission import current_tool_deadline
+            from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS
+
+            effective_timeout: float | int = MCP_WANDB_REQUEST_TIMEOUT_SECONDS
+            deadline = current_tool_deadline.get()
+            if deadline is not None:
+                remaining = max(0.1, deadline - _time.monotonic())
+                effective_timeout = min(float(MCP_WANDB_REQUEST_TIMEOUT_SECONDS), remaining)
+        else:
+            effective_timeout = timeout
+
         # Pass the resolved API key to WeaveApiClient
         self.client = WeaveApiClient(
             api_key=api_key,
             server_url=server_url or WF_TRACE_SERVER_URL,
             retries=retries,
-            timeout=timeout,
+            timeout=effective_timeout,
         )
 
         # Initialize collection for invalid columns (for warning messages)

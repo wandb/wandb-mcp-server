@@ -207,7 +207,8 @@
       "kind": "base",
       "requires": [],
       "managed_workloads": [
-        "shared"
+        "shared",
+        "dedicated"
       ],
       "tools": [
         {
@@ -472,22 +473,22 @@
       "limits": {
         "MAX_RESPONSE_TOKENS": 30000,
         "MAX_ACCUMULATED_BYTES": 1073741824,
-        "MCP_TOOL_TIMEOUT_SECONDS": 30,
-        "MCP_WANDB_REQUEST_TIMEOUT_SECONDS": 20,
+        "MCP_TOOL_TIMEOUT_SECONDS": 90,
+        "MCP_WANDB_REQUEST_TIMEOUT_SECONDS": 60,
         "MCP_ADMISSION_CONTROL_ENABLED": false,
         "MCP_ADMISSION_WAIT_MS": 0,
-        "MCP_MAX_QUERY_LIMIT": 100,
-        "MCP_MAX_FULL_TRACE_LIMIT": 25,
-        "MCP_MAX_HISTORY_SAMPLES": 500,
-        "MCP_MAX_HISTORY_KEYS": 20,
-        "MCP_MAX_HISTORY_RANGE_STEPS": 5000,
-        "MCP_MAX_WANDB_QUERY_ITEMS": 100,
-        "MCP_MAX_FULL_DETAIL_ITEMS": 3,
-        "MCP_MAX_PROJECT_FIELDS": 500,
-        "MCP_MAX_PROBE_RUNS": 6,
-        "MCP_MAX_EVALUATION_ROWS": 500,
-        "MCP_MAX_SCHEMA_SAMPLE_ROWS": 100,
-        "MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE": 50,
+        "MCP_MAX_QUERY_LIMIT": 250,
+        "MCP_MAX_FULL_TRACE_LIMIT": 100,
+        "MCP_MAX_HISTORY_SAMPLES": 1000,
+        "MCP_MAX_HISTORY_KEYS": 50,
+        "MCP_MAX_HISTORY_RANGE_STEPS": 50000,
+        "MCP_MAX_WANDB_QUERY_ITEMS": 250,
+        "MCP_MAX_FULL_DETAIL_ITEMS": 10,
+        "MCP_MAX_PROJECT_FIELDS": 1500,
+        "MCP_MAX_PROBE_RUNS": 12,
+        "MCP_MAX_EVALUATION_ROWS": 1000,
+        "MCP_MAX_SCHEMA_SAMPLE_ROWS": 200,
+        "MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE": 200,
         "MCP_MAX_GQL_ITEMS": 100,
         "MCP_MAX_GQL_ITEMS_PER_PAGE": 50,
         "SESSION_TTL_SECONDS": 3600,
@@ -504,19 +505,19 @@
       "limits": {
         "MAX_RESPONSE_TOKENS": 30000,
         "MAX_ACCUMULATED_BYTES": 1073741824,
-        "MCP_TOOL_TIMEOUT_SECONDS": 30,
-        "MCP_WANDB_REQUEST_TIMEOUT_SECONDS": 20,
+        "MCP_TOOL_TIMEOUT_SECONDS": 120,
+        "MCP_WANDB_REQUEST_TIMEOUT_SECONDS": 60,
         "MCP_ADMISSION_CONTROL_ENABLED": true,
-        "MCP_ADMISSION_WAIT_MS": 2000,
-        "MCP_MAX_QUERY_LIMIT": 250,
+        "MCP_ADMISSION_WAIT_MS": 10000,
+        "MCP_MAX_QUERY_LIMIT": 500,
         "MCP_MAX_FULL_TRACE_LIMIT": 250,
-        "MCP_MAX_HISTORY_SAMPLES": 1500,
-        "MCP_MAX_HISTORY_KEYS": 50,
-        "MCP_MAX_HISTORY_RANGE_STEPS": 20000,
-        "MCP_MAX_WANDB_QUERY_ITEMS": 250,
-        "MCP_MAX_FULL_DETAIL_ITEMS": 10,
+        "MCP_MAX_HISTORY_SAMPLES": 2500,
+        "MCP_MAX_HISTORY_KEYS": 100,
+        "MCP_MAX_HISTORY_RANGE_STEPS": 100000,
+        "MCP_MAX_WANDB_QUERY_ITEMS": 500,
+        "MCP_MAX_FULL_DETAIL_ITEMS": 25,
         "MCP_MAX_PROJECT_FIELDS": 2000,
-        "MCP_MAX_PROBE_RUNS": 12,
+        "MCP_MAX_PROBE_RUNS": 24,
         "MCP_MAX_EVALUATION_ROWS": 2000,
         "MCP_MAX_SCHEMA_SAMPLE_ROWS": 250,
         "MCP_MAX_WANDB_QUERY_ITEMS_PER_PAGE": 200,
@@ -527,8 +528,8 @@
       },
       "http_rate_policy": {
         "enabled": true,
-        "per_key_per_minute": 60,
-        "global_per_minute": 1000
+        "per_key_per_minute": 300,
+        "global_per_minute": 2000
       }
     },
     "local": {
@@ -536,8 +537,8 @@
       "limits": {
         "MAX_RESPONSE_TOKENS": 30000,
         "MAX_ACCUMULATED_BYTES": 1073741824,
-        "MCP_TOOL_TIMEOUT_SECONDS": 30,
-        "MCP_WANDB_REQUEST_TIMEOUT_SECONDS": 20,
+        "MCP_TOOL_TIMEOUT_SECONDS": 120,
+        "MCP_WANDB_REQUEST_TIMEOUT_SECONDS": 60,
         "MCP_ADMISSION_CONTROL_ENABLED": false,
         "MCP_ADMISSION_WAIT_MS": 2000,
         "MCP_MAX_QUERY_LIMIT": 1000,
@@ -566,20 +567,20 @@
   },
   "capacity_classes": {
     "small": {
-      "actor_capacity": 4,
-      "process_capacity": 4,
+      "actor_capacity": 8,
+      "process_capacity": 8,
       "sync_workers": 4,
       "count_workers": 4
     },
     "medium": {
-      "actor_capacity": 4,
-      "process_capacity": 8,
+      "actor_capacity": 12,
+      "process_capacity": 16,
       "sync_workers": 8,
       "count_workers": 8
     },
     "large": {
-      "actor_capacity": 8,
-      "process_capacity": 16,
+      "actor_capacity": 16,
+      "process_capacity": 32,
       "sync_workers": 16,
       "count_workers": 8
     }
