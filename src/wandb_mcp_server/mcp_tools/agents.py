@@ -15,12 +15,19 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from typing import Any, Dict, List, Literal, Optional, Sequence
 
 import requests
 
+from wandb_mcp_server.admission import current_tool_deadline
 from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
-from wandb_mcp_server.config import MAX_RESPONSE_TOKENS, WF_TRACE_SERVER_URL, structured_error
+from wandb_mcp_server.config import (
+    MAX_RESPONSE_TOKENS,
+    MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+    WF_TRACE_SERVER_URL,
+    structured_error,
+)
 from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text
 from wandb_mcp_server.mcp_tools.tools_utils import get_no_retry_session, track_tool_execution
 from wandb_mcp_server.tool_results import tool_error_json
@@ -44,7 +51,17 @@ FEEDBACK_AGGREGATE_PATH = "/feedback/aggregate"
 FEEDBACK_CREATE_PATH = "/feedback/create"
 FEEDBACK_PURGE_PATH = "/feedback/purge"
 
-_REQUEST_TIMEOUT_SECONDS = 30
+_REQUEST_TIMEOUT_SECONDS = MCP_WANDB_REQUEST_TIMEOUT_SECONDS
+
+
+def _effective_agents_timeout() -> float:
+    base = float(_REQUEST_TIMEOUT_SECONDS)
+    deadline = current_tool_deadline.get()
+    if deadline is None:
+        return base
+    return max(0.1, min(base, deadline - time.monotonic()))
+
+
 _MAX_CONVERSATION_SPANS_BATCH = 100
 _MAX_FEEDBACK_QUERY_LIMIT = 200
 _MAX_FEEDBACK_NOTE_CHARS = 10_000
@@ -210,7 +227,7 @@ def _agents_request(tool_name: str, path: str, body: Dict[str, Any], track_param
                 url,
                 headers=headers,
                 data=data,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
+                timeout=_effective_agents_timeout(),
             )
         except Exception as e:
             logger.error("Agents API request failed (%s)", type(e).__name__)
@@ -378,24 +395,64 @@ def _combine_equality_query(
     return {"$expr": {"$and": clauses}}
 
 
-def _sort_by(sort_field: Optional[str], sort_direction: str) -> Optional[List[Dict[str, str]]]:
+_AGENT_SORT_FIELD_ALIASES = {
+    "updated_at": "last_seen",
+    "last_active": "last_seen",
+    "last_activity": "last_seen",
+    "created_at": "first_seen",
+    "started_at": "first_seen",
+    "duration_ms": "total_duration_ms",
+    "latency_ms": "total_duration_ms",
+    "duration": "total_duration_ms",
+    "invocations": "invocation_count",
+    "turns": "invocation_count",
+    "count": "invocation_count",
+    "spans": "span_count",
+    "errors": "error_count",
+    "input_tokens": "total_input_tokens",
+    "output_tokens": "total_output_tokens",
+    "cost": "total_cost_usd",
+    "total_cost": "total_cost_usd",
+    "name": "agent_name",
+}
+
+
+def _sort_by(
+    sort_field: Optional[str],
+    sort_direction: str,
+    *,
+    alias_map: Optional[Dict[str, str]] = None,
+) -> Optional[List[Dict[str, str]]]:
     """Build an AgentSortBy / SortBy list from a field name + direction."""
-    return [{"field": sort_field, "direction": sort_direction}] if sort_field else None
+    if not sort_field:
+        return None
+    raw = sort_field.strip()
+    if not raw:
+        return None
+    direction = sort_direction.lower().strip() if sort_direction else "desc"
+    if raw[0] in "+-" and len(raw) > 1:
+        direction = "asc" if raw[0] == "+" else "desc"
+        raw = raw[1:].strip()
+    if direction not in {"asc", "desc"}:
+        direction = "desc"
+    canonical = alias_map.get(raw, raw) if alias_map else raw
+    return [{"field": canonical, "direction": direction}]
 
 
 # =============================================================================
 # Tool descriptions
 # =============================================================================
 
-LIST_AGENTS_TOOL_DESCRIPTION = """List GenAI agents in a Weave project with aggregated stats.
+LIST_AGENTS_TOOL_DESCRIPTION = """List GenAI agents in a Weave project with aggregated stats and optional per-version breakdown.
 
 <when_to_use>
 Entry point for the Weave Agents (OTel) data plane: returns per-agent invocation
 counts, span counts, token totals, duration, error counts, and optional USD
-costs (`include_costs=True`). Distinct from classic Weave calls (`query_weave_traces_tool`).
+costs (`include_costs=True`). Pass `agent_name` + `include_versions=True` to
+include per-version stats in the same call.
 </when_to_use>
 
-Returns `{"agents": [...], "total_count": int}`.
+Returns `{"agents": [...], "total_count": int, "versions"?: [...]}`.
 """
 
 LIST_AGENT_VERSIONS_TOOL_DESCRIPTION = """List per-version aggregated stats for a single GenAI agent (`agent_name`).
@@ -527,22 +584,57 @@ def list_agents(
     limit: Optional[int] = None,
     offset: int = 0,
     include_costs: bool = False,
+    include_versions: bool = False,
 ) -> str:
-    """List GenAI agents with aggregated stats."""
+    """List GenAI agents with aggregated stats, and optional per-version breakdown."""
+    sort_spec = _sort_by(sort_by, sort_direction, alias_map=_AGENT_SORT_FIELD_ALIASES)
     body = {
         "project_id": f"{entity_name}/{project_name}",
         "filters": {"agent_name": agent_name} if agent_name else None,
-        "sort_by": _sort_by(sort_by, sort_direction),
+        "sort_by": sort_spec,
         "limit": limit,
         "offset": offset,
         "include_costs": include_costs,
     }
-    return _agents_request(
+    agents_raw = _agents_request(
         "list_agents",
         AGENTS_QUERY_PATH,
         body,
-        {"entity_name": entity_name, "project_name": project_name, "agent_name": agent_name},
+        {
+            "entity_name": entity_name,
+            "project_name": project_name,
+            "agent_name": agent_name,
+            "include_versions": include_versions,
+        },
     )
+    if not include_versions:
+        return agents_raw
+    if not agent_name or not agent_name.strip():
+        return _invalid_agents_argument("agent_name is required when include_versions=True")
+    try:
+        agents_payload = json.loads(agents_raw)
+    except Exception:
+        return agents_raw
+    if not isinstance(agents_payload, dict) or agents_payload.get("error"):
+        return agents_raw
+    versions_raw = list_agent_versions(
+        entity_name=entity_name,
+        project_name=project_name,
+        agent_name=agent_name.strip(),
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+        limit=limit,
+        offset=offset,
+        include_costs=include_costs,
+    )
+    try:
+        versions_payload = json.loads(versions_raw)
+    except Exception:
+        return agents_raw
+    if isinstance(versions_payload, dict) and not versions_payload.get("error"):
+        agents_payload["versions"] = versions_payload.get("versions", [])
+        agents_payload["versions_total_count"] = versions_payload.get("total_count", 0)
+    return json.dumps(_truncate_response(agents_payload), default=str)
 
 
 def list_agent_versions(
@@ -559,7 +651,7 @@ def list_agent_versions(
     body = {
         "project_id": f"{entity_name}/{project_name}",
         "agent_name": agent_name,
-        "sort_by": _sort_by(sort_by, sort_direction),
+        "sort_by": _sort_by(sort_by, sort_direction, alias_map=_AGENT_SORT_FIELD_ALIASES),
         "limit": limit,
         "offset": offset,
         "include_costs": include_costs,

@@ -48,6 +48,10 @@ field_pattern : str, optional
     Server-side field-name pattern for narrowing very wide schemas.
 include_artifacts : bool, optional
     Include a compact project artifact type/collection inventory.
+include_traces : bool, optional
+    Probe Classic Weave Calls and OTel Weave Agents planes alongside W&B Models
+    runs (`telemetry_planes`). Especially useful when `run_count == 0` or on
+    Weave / Agent Lens projects.
 
 Returns
 -------
@@ -184,12 +188,79 @@ def _safe_sample_value(value: Any) -> Any:
     return str(value)[:50]
 
 
+def _probe_trace_planes(entity_name: str, project_name: str) -> dict[str, Any]:
+    """Best-effort bounded probe of Classic Weave Calls and Weave Agents planes."""
+    import base64
+    from wandb_mcp_server.config import WF_TRACE_SERVER_URL
+    from wandb_mcp_server.mcp_tools.count_traces import count_traces
+    from wandb_mcp_server.mcp_tools.tools_utils import get_no_retry_session
+
+    planes: dict[str, Any] = {}
+    api_key = WandBApiManager.get_api_key()
+    if not api_key or not WF_TRACE_SERVER_URL:
+        return {
+            "weave_calls": {"status": "unavailable", "reason": "trace_server_or_api_key_unconfigured"},
+            "weave_agents": {"status": "unavailable", "reason": "trace_server_or_api_key_unconfigured"},
+        }
+
+    try:
+        root_calls = count_traces(
+            entity_name=entity_name,
+            project_name=project_name,
+            filters={"trace_roots_only": True},
+            request_timeout=5,
+        )
+        planes["weave_calls"] = {
+            "status": "ok",
+            "present": root_calls > 0,
+            "root_trace_count": root_calls,
+        }
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
+        planes["weave_calls"] = {"status": "unavailable", "error_type": type(exc).__name__}
+
+    try:
+        auth_token = base64.b64encode(f":{api_key}".encode()).decode()
+        resp = get_no_retry_session().post(
+            f"{WF_TRACE_SERVER_URL}/agents/query",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Basic {auth_token}",
+            },
+            data=json.dumps({"project_id": f"{entity_name}/{project_name}", "limit": 5}),
+            timeout=5.0,
+        )
+        if resp.status_code == 200:
+            body = resp.json()
+            agents = body.get("agents") if isinstance(body, dict) and isinstance(body.get("agents"), list) else []
+            total_agents = int(body.get("total_count") or len(agents)) if isinstance(body, dict) else len(agents)
+            planes["weave_agents"] = {
+                "status": "ok",
+                "present": total_agents > 0,
+                "agent_count": total_agents,
+                "sample_agents": [
+                    str(item.get("agent_name"))
+                    for item in agents[:5]
+                    if isinstance(item, dict) and item.get("agent_name")
+                ],
+            }
+        else:
+            planes["weave_agents"] = {"status": "unavailable", "status_code": resp.status_code}
+    except Exception as exc:
+        raise_for_wandb_server_busy(exc)
+        planes["weave_agents"] = {"status": "unavailable", "error_type": type(exc).__name__}
+
+    return planes
+
+
 def probe_project(
     entity_name: str,
     project_name: str,
     sample_runs: int = DEFAULT_SAMPLE_RUNS,
     field_pattern: str | None = None,
     include_artifacts: bool = False,
+    include_traces: bool = False,
 ) -> str:
     """Return a bounded, explicit project-scale and schema snapshot."""
     if not isinstance(entity_name, str) or not entity_name.strip():
@@ -202,6 +273,8 @@ def probe_project(
         raise ValueError("field_pattern must be a non-empty string when supplied")
     if not isinstance(include_artifacts, bool):
         raise ValueError("include_artifacts must be a boolean")
+    if not isinstance(include_traces, bool):
+        raise ValueError("include_traces must be a boolean")
 
     applied_samples = min(sample_runs, MCP_MAX_PROBE_RUNS)
     with track_tool_execution(
@@ -213,6 +286,7 @@ def probe_project(
             "sample_runs": applied_samples,
             "has_field_pattern": field_pattern is not None,
             "include_artifacts": include_artifacts,
+            "include_traces": include_traces,
         },
         mcp_tool_name="probe_project_tool",
     ) as ctx:
@@ -324,6 +398,17 @@ def probe_project(
                         "parameters": {"keys": [item["path"] for item in summary_fields[:5]]},
                     }
                 )
+            if counts["all"] == 0 and not include_traces:
+                recommendations.append(
+                    {
+                        "tool": "probe_project_tool",
+                        "reason": (
+                            "Project has 0 W&B Models runs; re-probe with include_traces=True to check "
+                            "Classic Weave Calls and OTel Weave Agents planes."
+                        ),
+                        "parameters": {"include_traces": True},
+                    }
+                )
 
             result: dict[str, Any] = {
                 "source": "wandb_selective_read" if fallback_caveat is None else "wandb_sdk_fallback",
@@ -375,6 +460,28 @@ def probe_project(
                         "error": "artifact_inventory_unavailable",
                         "message": str(exc),
                     }
+            if include_traces:
+                trace_planes = _probe_trace_planes(entity_name, project_name)
+                result["telemetry_planes"] = {
+                    "models_runs": {"status": "ok", "present": counts["all"] > 0, "run_count": counts["all"]},
+                    **trace_planes,
+                }
+                if (trace_planes.get("weave_calls") or {}).get("present"):
+                    recommendations.append(
+                        {
+                            "tool": "query_weave_traces_tool",
+                            "reason": "Project logs Classic Weave Calls; inspect root traces or schema.",
+                            "parameters": {"filters": {"trace_roots_only": True}, "limit": 20},
+                        }
+                    )
+                if (trace_planes.get("weave_agents") or {}).get("present"):
+                    recommendations.append(
+                        {
+                            "tool": "list_weave_agents_tool",
+                            "reason": "Project logs OTel Weave Agents spans; inspect agents and spans.",
+                            "parameters": {"include_costs": True},
+                        }
+                    )
             return json.dumps(result, default=str)
         except Exception as exc:
             raise_for_wandb_server_busy(exc)

@@ -12,6 +12,7 @@ import {
   type GraphPayload,
 } from "./schema";
 import type { DisplayMode, ModelContextPayload } from "./state";
+import { isAllowedHttpsUrl } from "../../shared/url-guard";
 
 export const SERVER_TOOL_NAME = "render_wandb_line_plot_tool";
 
@@ -231,6 +232,9 @@ export class LinePlotHostBridge {
   }
 
   async openExternalUrl(url: string): Promise<{ ok: true } | { ok: false; message: string }> {
+    if (!isAllowedHttpsUrl(url)) {
+      return { ok: false, message: "Blocked non-HTTPS external link." };
+    }
     if (!this.connected || !this.canOpenLinks()) {
       return { ok: false, message: `Copy link to open in browser: ${url}` };
     }

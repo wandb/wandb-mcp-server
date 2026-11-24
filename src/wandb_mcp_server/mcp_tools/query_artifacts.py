@@ -25,6 +25,7 @@ from wandb_mcp_server.registry_support import (
 from wandb_mcp_server.utils import get_rich_logger
 from wandb_mcp_server.wandb_selective_reads import (
     SelectiveReadUnavailable,
+    fetch_artifact_inventory,
     fetch_registry_artifact_versions,
 )
 from wandb_mcp_server.tool_results import tool_error_json
@@ -85,7 +86,8 @@ registry_name : str, optional
 organization : str, optional
     W&B organization name. Only used when source="registry".
 type_name : str, optional
-    Artifact type (e.g., "model", "dataset"). Required for project source.
+    Artifact type (e.g., "model", "dataset"). Optional for project source when
+    auto-resolvable from the project's artifact inventory.
 source : str, optional
     "project" (default) or "registry". Determines the API path.
 max_items : int, optional
@@ -175,6 +177,7 @@ def list_artifact_versions(
             api = WandBApiManager.get_api()
             compatibility_caveat: str | None = None
             exact_total: int | None = None
+            resolved_type_name: str | None = type_name
 
             if source == "registry":
                 resolved_organization = resolve_registry_organization(api, organization)
@@ -210,8 +213,29 @@ def list_artifact_versions(
                 qualified_name = collection_name
                 if "/" not in collection_name and entity_name and project_name:
                     qualified_name = f"{entity_name}/{project_name}/{collection_name}"
+                if not resolved_type_name:
+                    parts = [part for part in qualified_name.split("/") if part]
+                    if len(parts) != 3:
+                        return tool_error_json(
+                            {
+                                "error": "invalid_input",
+                                "message": (
+                                    "type_name is required when source='project' unless collection_name is "
+                                    "qualified with entity_name and project_name so the artifact type can be inferred."
+                                ),
+                            }
+                        )
+                    ent, proj, bare_coll = parts
+                    resolved_type_name, type_err = _infer_project_artifact_type(
+                        api,
+                        entity=ent,
+                        project=proj,
+                        collection_name=bare_coll,
+                    )
+                    if type_err:
+                        return tool_error_json({"error": "invalid_input", "message": type_err})
                 versions_iter = api.artifacts(
-                    type_name=type_name,
+                    type_name=resolved_type_name,
                     name=qualified_name,
                     order=order_value,
                     # W&B 0.28 applies ``tags`` while converting each SDK
@@ -272,6 +296,8 @@ def list_artifact_versions(
             }
             if compatibility_caveat:
                 result["compatibility_caveat"] = compatibility_caveat
+            if source == "project" and resolved_type_name:
+                result["type_name"] = resolved_type_name
             if source == "registry":
                 result = fit_registry_response(
                     result,
@@ -565,6 +591,52 @@ def _serialize_artifact_summary(artifact: Any) -> Dict[str, Any]:
     }
 
 
+def _infer_project_artifact_type(
+    api: Any,
+    *,
+    entity: str,
+    project: str,
+    collection_name: str,
+) -> tuple[str | None, str | None]:
+    """Infer an artifact type from the project's artifact inventory when type_name is omitted."""
+    try:
+        inventory = fetch_artifact_inventory(api, entity=entity, project=project, type_limit=50)
+    except SelectiveReadUnavailable as exc:
+        raise_for_wandb_server_busy(exc)
+        return None, "type_name is required when source='project' (project artifact inventory unavailable)"
+    types = inventory.get("types") if isinstance(inventory, dict) else None
+    if not isinstance(types, list) or not types:
+        return None, "type_name is required when source='project' (no artifact types found in project)"
+    matching_types: list[str] = []
+    all_types: list[str] = []
+    for entry in types:
+        if not isinstance(entry, dict):
+            continue
+        t_name = entry.get("type")
+        if not isinstance(t_name, str) or not t_name:
+            continue
+        all_types.append(t_name)
+        for sample in entry.get("sample_collections") or []:
+            if isinstance(sample, dict) and sample.get("name") == collection_name:
+                matching_types.append(t_name)
+                break
+    if len(matching_types) == 1:
+        return matching_types[0], None
+    if len(matching_types) > 1:
+        return (
+            None,
+            f"collection {collection_name!r} exists under multiple artifact types ({', '.join(matching_types)}); "
+            "pass type_name explicitly",
+        )
+    if len(all_types) == 1:
+        return all_types[0], None
+    return (
+        None,
+        f"type_name is required when source='project'; candidate artifact types in {entity}/{project}: "
+        f"{', '.join(all_types[:10])}",
+    )
+
+
 def _validate_version_query(
     *,
     collection_name: str,
@@ -583,8 +655,8 @@ def _validate_version_query(
         return "source must be 'project' or 'registry'"
     if source == "registry" and not registry_name:
         return "registry_name is required when source='registry'"
-    if source == "project" and not type_name:
-        return "type_name is required when source='project'"
+    if type_name is not None and (not isinstance(type_name, str) or not type_name.strip()):
+        return "type_name must be a non-empty string when supplied"
     if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items < 1:
         return "max_items must be a positive integer"
     try:

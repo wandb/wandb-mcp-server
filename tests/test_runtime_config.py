@@ -123,6 +123,7 @@ def test_worker_pool_cannot_exceed_process_admission_capacity(worker_variable: s
     "variable",
     [
         "MCP_HOSTED_MODE",
+        "MCP_ALLOW_LIMIT_OVERRIDES",
         "MCP_ADMISSION_CONTROL_ENABLED",
         "MCP_SERVER_ENABLE_HMAC_SHA256_SESSIONS",
     ],
@@ -269,3 +270,24 @@ def test_runtime_bounds_reject_oversized_values(variable: str, value: str) -> No
 
     assert result.returncode != 0
     assert variable in result.stderr
+
+
+def test_custom_wandb_base_url_derives_customer_trace_server_in_local_mode() -> None:
+    environment = os.environ.copy()
+    environment.pop("WF_TRACE_SERVER_URL", None)
+    environment.pop("WEAVE_TRACE_SERVER_URL", None)
+    environment["WANDB_BASE_URL"] = "https://acme.wandb.io"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from wandb_mcp_server.config import WF_TRACE_SERVER_URL; print(WF_TRACE_SERVER_URL)",
+        ],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "https://acme.wandb.io/traces"

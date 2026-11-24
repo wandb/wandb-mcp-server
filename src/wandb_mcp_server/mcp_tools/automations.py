@@ -59,8 +59,7 @@ LIST_AUTOMATIONS_TOOL_DESCRIPTION = dedent(
     - "Which automations send to Slack channel #foo?"
 
     If the user wants to know the available Slack channels or webhook URLs that
-    existing or new automations can target, call list_wandb_integrations_tool
-    instead (or in addition).
+    existing or new automations can target, set include_integrations=True.
     </when_to_use>
 
     <critical_info>
@@ -85,11 +84,25 @@ LIST_AUTOMATIONS_TOOL_DESCRIPTION = dedent(
     ----------
     entity : str, optional
         W&B entity (team or user) to filter by. If omitted, returns every
-        automation the authenticated viewer has access to.
+        automation the authenticated viewer has access to (unless organization
+        + registry_name resolves the org entity automatically).
+    project : str, optional
+        Project name filter (`scope.type == "PROJECT"` and `scope.name == project`).
+    registry_name : str, optional
+        Registry name filter. Registry-wide automations live on the backing
+        project `wandb-registry-{registry_name}` under the organization entity.
+    organization : str, optional
+        W&B organization name used to resolve the org entity when `registry_name`
+        is supplied without `entity`.
     name : str, optional
         Exact-match filter on the automation's name.
     max_items : int, optional
         Maximum automations to return. Default 50, ceiling 200.
+    include_integrations : bool, optional
+        Also return Slack/webhook integration destinations (`integrations`) for
+        the resolved entity in the same call. Default False.
+    integration_kind : "slack" | "webhook", optional
+        Filter `integrations` when `include_integrations=True`.
 
     Returns
     -------
@@ -97,7 +110,9 @@ LIST_AUTOMATIONS_TOOL_DESCRIPTION = dedent(
     - automations: list of automation objects (see fields above)
     - count: number of automations returned
     - entity: the entity filter applied (or null)
+    - project: the project / registry backing-project filter applied (or null)
     - truncated: whether more automations exist beyond max_items
+    - integrations: optional list of Slack/webhook integrations when include_integrations=True
     """
 )
 
@@ -188,29 +203,133 @@ def _jsonify_automation(automation: Automation) -> dict[str, Any]:
     return jsonable | {"scope": jsonable_scope, "event": jsonable_event, "action": jsonable_action}
 
 
+_REGISTRY_PREFIX: Final[str] = "wandb-registry-"
+
+
+def _fetch_integrations_list(
+    api: Any,
+    *,
+    entity: str | None,
+    kind: IntegrationKind | str | None,
+    max_items: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    iterator: Iterator[Integration]
+    match kind:
+        case "slack":
+            iterator = api.slack_integrations(entity=entity, per_page=_clamp(max_items, 1, 100))
+        case "webhook":
+            iterator = api.webhook_integrations(entity=entity, per_page=_clamp(max_items, 1, 100))
+        case _:
+            iterator = api.integrations(entity=entity, per_page=_clamp(max_items, 1, 100))
+    integrations = list(map(_jsonify_integration, islice(iterator, max_items)))
+    truncated = next(iterator, None) is not None
+    return integrations, truncated
+
+
 def list_automations(
     entity: str | None = None,
     name: str | None = None,
     max_items: PositiveInt = MAX_ITEMS_DEFAULT,
+    project: str | None = None,
+    registry_name: str | None = None,
+    organization: str | None = None,
+    include_integrations: bool = False,
+    integration_kind: IntegrationKind | str | None = None,
 ) -> str:
     """List W&B Automations accessible with the current API key."""
-    params = locals()  # Must be first so it only picks up the function args
+    params = {
+        "entity": entity,
+        "name": name,
+        "max_items": max_items,
+        "project": project,
+        "registry_name": registry_name,
+        "organization": organization,
+        "include_integrations": include_integrations,
+        "integration_kind": integration_kind,
+    }
 
     api = WandBApiManager.get_api()
     with track_tool_execution("list_automations", None, params) as ctx:
         max_items = _clamp(max_items, 1, MAX_ITEMS_CEIL)
+        if project and registry_name:
+            return tool_error_json(
+                {
+                    "error": "invalid_input",
+                    "message": "Provide either project or registry_name, not both.",
+                }
+            )
+        if integration_kind is not None and integration_kind not in _VALID_INTEGRATION_KINDS:
+            ctx.mark_error(f"invalid kind: {integration_kind!r}")
+            msg = (
+                f"integration_kind must be one of {sorted(_VALID_INTEGRATION_KINDS)} or null, got {integration_kind!r}"
+            )
+            return tool_error_json({"error": "invalid_input", "message": msg})
+
+        target_project = project.strip() if isinstance(project, str) and project.strip() else None
+        effective_entity = entity.strip() if isinstance(entity, str) and entity.strip() else None
+        if registry_name is not None:
+            reg = registry_name.strip()
+            if not reg:
+                return tool_error_json({"error": "invalid_input", "message": "registry_name must be non-empty"})
+            target_project = reg if reg.startswith(_REGISTRY_PREFIX) else f"{_REGISTRY_PREFIX}{reg}"
+            if effective_entity is None and organization:
+                try:
+                    from wandb_mcp_server.wandb_selective_reads import fetch_registry_organization_info
+
+                    org_info = fetch_registry_organization_info(api, entity=None)
+                    orgs = org_info.get("organizations") if isinstance(org_info, dict) else None
+                    if isinstance(orgs, list):
+                        for org_entry in orgs:
+                            if isinstance(org_entry, dict) and org_entry.get("name") == organization:
+                                org_ent = org_entry.get("org_entity")
+                                if isinstance(org_ent, str) and org_ent.strip():
+                                    effective_entity = org_ent.strip()
+                                    break
+                except Exception as exc:
+                    raise_for_wandb_server_busy(exc)
 
         try:
-            iterator = api.automations(entity=entity, name=name, per_page=_clamp(max_items, 1, 100))
-            automations = list(map(_jsonify_automation, islice(iterator, max_items)))
-            truncated = next(iterator, None) is not None
+            scan_cap = MAX_ITEMS_CEIL if target_project else max_items
+            iterator = api.automations(entity=effective_entity, name=name, per_page=_clamp(scan_cap, 1, 100))
+            automations: list[dict[str, Any]] = []
+            scanned = 0
+            truncated = False
+            for raw_auto in iterator:
+                scanned += 1
+                serialized = _jsonify_automation(raw_auto)
+                if target_project is not None:
+                    scope = serialized.get("scope") or {}
+                    if scope.get("type") != "PROJECT" or scope.get("name") != target_project:
+                        if scanned >= scan_cap:
+                            truncated = next(iterator, None) is not None
+                            break
+                        continue
+                if len(automations) >= max_items:
+                    truncated = True
+                    break
+                automations.append(serialized)
+                if not target_project and len(automations) >= max_items:
+                    truncated = next(iterator, None) is not None
+                    break
 
-            result = {
+            result: dict[str, Any] = {
                 "automations": automations,
                 "count": len(automations),
-                "entity": entity,
+                "entity": effective_entity,
                 "truncated": truncated,
             }
+            if target_project is not None:
+                result["project"] = target_project
+            if include_integrations:
+                integrations, int_truncated = _fetch_integrations_list(
+                    api,
+                    entity=effective_entity,
+                    kind=integration_kind,
+                    max_items=max_items,
+                )
+                result["integrations"] = integrations
+                result["integrations_count"] = len(integrations)
+                result["integrations_truncated"] = int_truncated
             return json.dumps(result)
 
         except Exception as e:

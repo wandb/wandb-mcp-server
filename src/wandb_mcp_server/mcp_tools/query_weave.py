@@ -57,8 +57,8 @@ traces matching the current filters before limit, not the project-wide total.
 Use count_weave_traces_tool without filters for a project-wide count.
 For evaluations, inspect a small sample and count children using parent_ids;
 keep queries scoped to the evaluation and state how many traces were analyzed.
-After finding child calls, use resolve_trace_roots_tool with their trace_ids
-to retrieve root context in a single batched request.
+After finding child calls, pass filters={"trace_ids": [...], "trace_roots_only": True}
+to query_weave_traces_tool to retrieve root context in a single batched request.
 
 <conventions>
 - Counting: "traces" or "calls" means all calls including children unless the
@@ -103,7 +103,7 @@ def query_traces(
     return_full_data: bool = True,
     api_key: str = "",
     query_expr: Any = None,  # We ignore this in the new implementation
-    request_timeout: int = 10,
+    request_timeout: Optional[int] = None,
     retries: int = 3,
 ) -> List[Dict[str, Any]]:
     """
@@ -111,9 +111,9 @@ def query_traces(
     but delegates to our new implementation.
     """
     service = get_trace_service()
-    if api_key:
+    if api_key or request_timeout is not None:
         service = TraceService(
-            api_key=api_key,
+            api_key=api_key or None,
             retries=retries,
             timeout=request_timeout,
         )

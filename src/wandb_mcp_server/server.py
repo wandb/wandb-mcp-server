@@ -24,9 +24,9 @@ import sys
 from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Union
 
 import wandb
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import Field, PositiveInt, StrictInt
+from pydantic import Field, StrictInt
 
 from wandb_mcp_server.config import (
     MCP_COUNT_TOOL_WORKERS,
@@ -56,9 +56,7 @@ except ImportError:
 
 from wandb_mcp_server.mcp_tools.automations import (
     LIST_AUTOMATIONS_TOOL_DESCRIPTION,
-    LIST_INTEGRATIONS_TOOL_DESCRIPTION,
     list_automations,
-    list_integrations,
 )
 from wandb_mcp_server.mcp_tools.aria import (
     ARIA_GET_THREAD_TOOL_DESCRIPTION,
@@ -70,6 +68,11 @@ from wandb_mcp_server.mcp_tools.aria import (
     list_aria_threads,
     normalize_aria_json_value,
     send_aria_message,
+)
+from wandb_mcp_server.mcp_tools.aria_app import (
+    ARIA_UI_META,
+    enrich_aria_result_for_ui,
+    register_aria_agent_resource,
 )
 from wandb_mcp_server.mcp_tools.count_traces import (
     COUNT_WEAVE_TRACES_TOOL_DESCRIPTION,
@@ -112,27 +115,19 @@ from wandb_mcp_server.mcp_tools.query_weave import (
 )
 from wandb_mcp_server.mcp_tools.agent_lens import (
     GET_CATEGORY_BREAKDOWNS_TOOL_DESCRIPTION,
-    GET_CLUSTERING_STATUS_TOOL_DESCRIPTION,
     GET_CONVERSATION_TAGS_TOOL_DESCRIPTION,
     GET_FAILURE_ATTRIBUTIONS_TOOL_DESCRIPTION,
     GET_GUIDELINES_TOOL_DESCRIPTION,
-    GET_INSIGHTS_COVERAGE_TOOL_DESCRIPTION,
-    GET_TAG_DISTRIBUTION_TOOL_DESCRIPTION,
     LIST_CATEGORY_EXAMPLE_TURNS_TOOL_DESCRIPTION,
-    LIST_CLUSTERS_TOOL_DESCRIPTION,
     LIST_TAGS_TOOL_DESCRIPTION,
     LIST_TAGGED_CONVERSATIONS_TOOL_DESCRIPTION,
     MANAGE_GUIDELINES_TOOL_DESCRIPTION,
     MANAGE_TAGS_TOOL_DESCRIPTION,
     get_category_breakdowns,
-    get_clustering_status,
     get_conversation_tags,
     get_failure_attributions,
     get_guidelines,
-    get_insights_coverage,
-    get_tag_distribution,
     list_category_example_turns,
-    list_clusters,
     list_tags,
     list_tagged_conversations,
     manage_guidelines,
@@ -142,24 +137,33 @@ from wandb_mcp_server.mcp_tools.agent_lens_doctor import (
     DIAGNOSE_INSTRUMENTATION_TOOL_DESCRIPTION,
     diagnose_instrumentation,
 )
+from wandb_mcp_server.mcp_tools.agent_lens_insights_app import (
+    INSIGHTS_RESOURCE_URI,
+    INSIGHTS_TOOL_NAME,
+    RENDER_AGENT_LENS_INSIGHTS_TOOL_DESCRIPTION,
+    register_agent_lens_insights_resource,
+    render_agent_lens_insights,
+)
+from wandb_mcp_server.mcp_tools.agent_conversation_app import (
+    CONVERSATION_RESOURCE_URI,
+    register_agent_conversation_resource,
+    render_agent_conversation,
+    render_agent_trace,
+)
 from wandb_mcp_server.mcp_tools.agents import (
     GET_AGENT_CONVERSATION_SPANS_TOOL_DESCRIPTION,
     GET_AGENT_CONVERSATION_TOOL_DESCRIPTION,
     GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION,
     GET_AGENT_TRACE_TOOL_DESCRIPTION,
     LIST_AGENT_CUSTOM_ATTRIBUTES_TOOL_DESCRIPTION,
-    LIST_AGENT_VERSIONS_TOOL_DESCRIPTION,
     LIST_AGENTS_TOOL_DESCRIPTION,
     MANAGE_AGENT_FEEDBACK_TOOL_DESCRIPTION,
     QUERY_AGENT_FEEDBACK_TOOL_DESCRIPTION,
     QUERY_AGENT_SPANS_TOOL_DESCRIPTION,
     SEARCH_AGENTS_TOOL_DESCRIPTION,
-    get_agent_conversation,
     get_agent_conversation_spans,
     get_agent_span_stats,
-    get_agent_trace,
     list_agent_custom_attributes,
-    list_agent_versions,
     list_agents,
     manage_agent_feedback,
     query_agent_feedback,
@@ -190,22 +194,19 @@ logger = get_rich_logger("weave-mcp-server", default_level_str="WARNING", env_va
 
 @dataclass(frozen=True, slots=True)
 class _DirectTool:
-    """One directly-registered tool: the MCP tool name, its implementation, and
-    its description. Implementations in mcp_tools.agents and mcp_tools.agent_lens
-    are complete tools -- each builds its own request and returns a JSON string --
-    so they are registered without a wrapper and their parameter schemas come
-    from the function signatures.
+    """One directly-registered tool: the MCP tool name, its implementation,
+    its description, and optional MCP tool metadata (e.g. MCP App UI resourceUri).
     """
 
     name: str
     impl: Callable[..., Any]
     description: str
+    meta: Optional[Dict[str, Any]] = None
 
 
 # Implementations for the agent tools selected by the packaged runtime contract.
 _AGENT_TOOLS = (
     _DirectTool("list_weave_agents_tool", list_agents, LIST_AGENTS_TOOL_DESCRIPTION),
-    _DirectTool("list_weave_agent_versions_tool", list_agent_versions, LIST_AGENT_VERSIONS_TOOL_DESCRIPTION),
     _DirectTool("query_weave_agent_spans_tool", query_agent_spans, QUERY_AGENT_SPANS_TOOL_DESCRIPTION),
     _DirectTool("get_weave_agent_span_stats_tool", get_agent_span_stats, GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION),
     _DirectTool(
@@ -214,8 +215,6 @@ _AGENT_TOOLS = (
         LIST_AGENT_CUSTOM_ATTRIBUTES_TOOL_DESCRIPTION,
     ),
     _DirectTool("search_weave_agents_tool", search_agents, SEARCH_AGENTS_TOOL_DESCRIPTION),
-    _DirectTool("get_weave_agent_trace_tool", get_agent_trace, GET_AGENT_TRACE_TOOL_DESCRIPTION),
-    _DirectTool("get_weave_agent_conversation_tool", get_agent_conversation, GET_AGENT_CONVERSATION_TOOL_DESCRIPTION),
     _DirectTool(
         "get_weave_agent_conversation_spans_tool",
         get_agent_conversation_spans,
@@ -231,12 +230,9 @@ _AGENT_WRITE_TOOLS = (
 # always available when the profile and AGENT_LENS_BASE_URL are configured;
 # write tools are additionally gated by WANDB_MCP_ACCESS_MODE=read-write.
 _AGENT_LENS_TOOLS = (
-    _DirectTool("get_agent_lens_insights_coverage_tool", get_insights_coverage, GET_INSIGHTS_COVERAGE_TOOL_DESCRIPTION),
-    _DirectTool("get_agent_lens_clustering_status_tool", get_clustering_status, GET_CLUSTERING_STATUS_TOOL_DESCRIPTION),
     _DirectTool(
         "get_agent_lens_category_breakdowns_tool", get_category_breakdowns, GET_CATEGORY_BREAKDOWNS_TOOL_DESCRIPTION
     ),
-    _DirectTool("list_agent_lens_clusters_tool", list_clusters, LIST_CLUSTERS_TOOL_DESCRIPTION),
     _DirectTool(
         "list_agent_lens_category_example_turns_tool",
         list_category_example_turns,
@@ -258,7 +254,6 @@ _AGENT_LENS_TOOLS = (
         list_tagged_conversations,
         LIST_TAGGED_CONVERSATIONS_TOOL_DESCRIPTION,
     ),
-    _DirectTool("get_agent_lens_tag_distribution_tool", get_tag_distribution, GET_TAG_DISTRIBUTION_TOOL_DESCRIPTION),
     _DirectTool("get_agent_lens_guidelines_tool", get_guidelines, GET_GUIDELINES_TOOL_DESCRIPTION),
     _DirectTool(
         "diagnose_agent_lens_instrumentation_tool",
@@ -633,7 +628,6 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     Available tools:
     - query_weave_traces_tool: Query LLM traces with filtering and pagination
     - count_weave_traces_tool: Efficiently count traces without returning data
-    - resolve_trace_roots_tool: Batch-resolve root spans for child trace_ids
     - query_wandb_tool: Query W&B experiment data through the public SDK
     - create_wandb_report_tool: Create shareable reports with visualizations
     - log_analysis_to_wandb: Log analysis results as W&B runs
@@ -651,15 +645,11 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     - summarize_evaluation_tool: Aggregate Weave evaluation results
     - diagnose_run_tool: Automatic training health check
     - probe_project_tool: Run-side schema and structure discovery
-    - list_wandb_automations_tool: List W&B Automations (rules that trigger
-      notifications/webhooks on artifact, run-state, or run-metric events)
-    - list_wandb_integrations_tool: List Slack and webhook integrations
-      available as targets for Automation actions
+    - list_wandb_automations_tool: List W&B Automations and optional Slack/webhook integrations
 
     Weave Agents (OTel/GenAI) tools -- read the agent-spans data plane, which
     is separate from classic Weave calls:
-    - list_weave_agents_tool: List agents with aggregated stats
-    - list_weave_agent_versions_tool: Per-version stats for one agent
+    - list_weave_agents_tool: List agents with aggregated stats and optional version breakdown
     - query_weave_agent_spans_tool: Query individual agent/LLM/tool spans
     - get_weave_agent_span_stats_tool: Time-bucketed metric series
     - list_weave_agent_custom_attributes_tool: Discover custom attribute keys
@@ -963,24 +953,6 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                 }
             )
 
-    from wandb_mcp_server.mcp_tools.resolve_trace_roots import (
-        RESOLVE_TRACE_ROOTS_TOOL_DESCRIPTION,
-        resolve_trace_roots,
-    )
-
-    @register_tool(description=RESOLVE_TRACE_ROOTS_TOOL_DESCRIPTION)
-    def resolve_trace_roots_tool(
-        entity_name: str,
-        project_name: str,
-        trace_ids: List[str],
-    ) -> str:
-        """Batch-resolve root spans for child trace_ids."""
-        return resolve_trace_roots(
-            entity_name=entity_name,
-            project_name=project_name,
-            trace_ids=trace_ids,
-        )
-
     @register_tool(description=QUERY_WANDB_TOOL_DESCRIPTION)
     def query_wandb_tool(
         entity_name: Optional[str] = None,
@@ -1113,27 +1085,33 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     def query_wandb_entity_projects(
         entity: Optional[str] = None,
         max_projects: int = 50,
+        order: str = "-updated_at",
     ) -> str:
         """List projects for a W&B entity."""
-        return list_entity_projects(entity=entity, max_projects=max_projects)
+        return list_entity_projects(entity=entity, max_projects=max_projects, order=order)
 
     @register_tool(description=LIST_AUTOMATIONS_TOOL_DESCRIPTION)
     def list_wandb_automations_tool(
         entity: Optional[str] = None,
         name: Optional[str] = None,
         max_items: int = 50,
+        project: Optional[str] = None,
+        registry_name: Optional[str] = None,
+        organization: Optional[str] = None,
+        include_integrations: bool = False,
+        integration_kind: Optional[str] = None,
     ) -> str:
         """List W&B Automations accessible with the current API key."""
-        return list_automations(entity=entity, name=name, max_items=max_items)
-
-    @register_tool(description=LIST_INTEGRATIONS_TOOL_DESCRIPTION)
-    def list_wandb_integrations_tool(
-        entity: str | None = None,
-        kind: str | None = None,
-        max_items: PositiveInt = 50,
-    ) -> str:
-        """List Slack and webhook integrations for a W&B entity."""
-        return list_integrations(entity=entity, kind=kind, max_items=max_items)
+        return list_automations(
+            entity=entity,
+            name=name,
+            max_items=max_items,
+            project=project,
+            registry_name=registry_name,
+            organization=organization,
+            include_integrations=include_integrations,
+            integration_kind=integration_kind,
+        )
 
     from wandb_mcp_server.mcp_tools.infer_schema import (
         INFER_TRACE_SCHEMA_TOOL_DESCRIPTION,
@@ -1511,6 +1489,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         sample_runs: int = 6,
         field_pattern: Optional[str] = None,
         include_artifacts: bool = False,
+        include_traces: bool = False,
     ) -> str:
         """Probe a W&B project to discover its structure."""
         return probe_project(
@@ -1519,6 +1498,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             sample_runs=sample_runs,
             field_pattern=field_pattern,
             include_artifacts=include_artifacts,
+            include_traces=include_traces,
         )
 
     # ----- Weave Agents (OTel/GenAI) tools -----
@@ -1526,21 +1506,126 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     # calls), so they are registered directly and independently gated below.
     # Each implementation is a complete tool; its parameter schema is derived
     # from the function signature.
+    effective_access_mode: Literal["read-only", "read-write"] = "read-only" if read_only else "read-write"
+    agent_lens_group_enabled = "agent-lens" in selection.groups
+
+    if {"get_weave_agent_trace_tool", "get_weave_agent_conversation_tool"} & selection.tools:
+        register_agent_conversation_resource(mcp_instance)
+
     for tool in _AGENT_TOOLS:
-        register_tool(name=tool.name, description=tool.description)(tool.impl)
+        register_tool(name=tool.name, description=tool.description, **({"meta": tool.meta} if tool.meta else {}))(
+            tool.impl
+        )
+
+    @register_tool(
+        description=GET_AGENT_TRACE_TOOL_DESCRIPTION,
+        meta={
+            "ui": {"resourceUri": CONVERSATION_RESOURCE_URI},
+            "ui/resourceUri": CONVERSATION_RESOURCE_URI,
+        },
+    )
+    def get_weave_agent_trace_tool(
+        entity_name: str,
+        project_name: str,
+        trace_id: str,
+        include_feedback: bool = False,
+        include_model_tool_calls: bool = False,
+        selected_failure: Optional[Dict[str, str]] = None,
+    ) -> CallToolResult:
+        """Get the structured chat/trajectory view for one trace."""
+        return render_agent_trace(
+            entity_name=entity_name,
+            project_name=project_name,
+            trace_id=trace_id,
+            include_feedback=include_feedback,
+            include_model_tool_calls=include_model_tool_calls,
+            selected_failure=selected_failure,
+            _access_mode=effective_access_mode,
+            _agent_lens_available=agent_lens_group_enabled,
+        )
+
+    @register_tool(
+        description=GET_AGENT_CONVERSATION_TOOL_DESCRIPTION,
+        meta={
+            "ui": {"resourceUri": CONVERSATION_RESOURCE_URI},
+            "ui/resourceUri": CONVERSATION_RESOURCE_URI,
+        },
+    )
+    def get_weave_agent_conversation_tool(
+        entity_name: str,
+        project_name: str,
+        conversation_id: str,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        sort_direction: Literal["asc", "desc"] = "asc",
+        include_feedback: bool = False,
+        include_model_tool_calls: bool = False,
+        selected_failure: Optional[Dict[str, str]] = None,
+    ) -> CallToolResult:
+        """Get the multi-turn chat view for a conversation."""
+        return render_agent_conversation(
+            entity_name=entity_name,
+            project_name=project_name,
+            conversation_id=conversation_id,
+            limit=limit,
+            offset=offset,
+            sort_direction=sort_direction,
+            include_feedback=include_feedback,
+            include_model_tool_calls=include_model_tool_calls,
+            selected_failure=selected_failure,
+            _access_mode=effective_access_mode,
+            _agent_lens_available=agent_lens_group_enabled,
+        )
+
     if not read_only:
         for tool in _AGENT_WRITE_TOOLS:
-            register_tool(name=tool.name, description=tool.description)(tool.impl)
+            register_tool(name=tool.name, description=tool.description, **({"meta": tool.meta} if tool.meta else {}))(
+                tool.impl
+            )
 
     # ----- Agent Lens (v1, Insights, conversation tags, and guidelines) tools -----
     # A distinct service with its own origin and classification data plane. The
     # contract already refused the profile without a validated AGENT_LENS_BASE_URL,
     # so reaching registration means the origin is configured and usable.
+    if INSIGHTS_TOOL_NAME in selection.tools:
+        register_agent_lens_insights_resource(mcp_instance)
     for tool in _AGENT_LENS_TOOLS:
-        register_tool(name=tool.name, description=tool.description)(tool.impl)
+        register_tool(name=tool.name, description=tool.description, **({"meta": tool.meta} if tool.meta else {}))(
+            tool.impl
+        )
+
+    @register_tool(
+        description=RENDER_AGENT_LENS_INSIGHTS_TOOL_DESCRIPTION,
+        meta={"ui": {"resourceUri": INSIGHTS_RESOURCE_URI}, "ui/resourceUri": INSIGHTS_RESOURCE_URI},
+    )
+    async def render_agent_lens_insights_tool(
+        entity_name: str,
+        project_name: str,
+        window_days: Literal[1, 7, 14, 30] = 7,
+        start_at: Optional[str] = None,
+        end_at: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        top_n_clusters: int = 12,
+        trace_ids: Optional[List[str]] = None,
+    ) -> CallToolResult:
+        """Render Agent Lens failure & intent insights as an interactive MCP App."""
+        return await render_agent_lens_insights(
+            entity_name=entity_name,
+            project_name=project_name,
+            window_days=window_days,
+            start_at=start_at,
+            end_at=end_at,
+            agent_name=agent_name,
+            top_n_clusters=top_n_clusters,
+            trace_ids=trace_ids,
+            _access_mode=effective_access_mode,
+        )
+
     if not read_only:
         for tool in _AGENT_LENS_WRITE_TOOLS:
-            register_tool(name=tool.name, description=tool.description)(tool.impl)
+            register_tool(name=tool.name, description=tool.description, **({"meta": tool.meta} if tool.meta else {}))(
+                tool.impl
+            )
 
     # ARIA forwards the caller's credential to a distinct hosted service and
     # includes a write operation. Register it only after explicit opt-in;
@@ -1551,9 +1636,10 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         # here so a late configuration can never silently fall back to a
         # different credential-bearing origin.
         resolve_aria_base_url()
+        register_aria_agent_resource(mcp_instance)
         if not read_only:
 
-            @register_tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
+            @register_tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION, meta=ARIA_UI_META)
             async def aria_send_message(
                 message: str,
                 entity: Optional[str] = None,
@@ -1562,34 +1648,53 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                 wait_seconds: int = 0,
                 include_turn: bool = False,
                 title: Optional[str] = None,
+                allowed_network_domains: Optional[List[str]] = None,
+                network_access_mode: Optional[Literal["prompt", "auto_safe", "auto_public", "deny"]] = None,
+                ctx: Optional[Context] = None,
             ) -> Dict[str, Any]:
                 return _aria_result_or_tool_error(
-                    await send_aria_message(
-                        message=message,
-                        entity=entity,
-                        project=project,
-                        title=title,
-                        parent_turn_id=parent_turn_id,
-                        wait_seconds=wait_seconds,
-                        include_turn=include_turn,
+                    enrich_aria_result_for_ui(
+                        await send_aria_message(
+                            message=message,
+                            entity=entity,
+                            project=project,
+                            title=title,
+                            parent_turn_id=parent_turn_id,
+                            wait_seconds=wait_seconds,
+                            include_turn=include_turn,
+                            allowed_network_domains=allowed_network_domains,
+                            network_access_mode=network_access_mode,
+                            ctx=ctx,
+                        ),
+                        access_mode=effective_access_mode,
                     )
                 )
 
-        @register_tool(description=ARIA_GET_TURN_TOOL_DESCRIPTION)
+        @register_tool(description=ARIA_GET_TURN_TOOL_DESCRIPTION, meta=ARIA_UI_META)
         async def aria_get_turn(
             turn_id: str,
             wait_seconds: int = 0,
             include_turn: bool = False,
+            network_access_mode: Optional[Literal["prompt", "auto_safe", "auto_public", "deny"]] = None,
+            parallel_turn_ids: Optional[List[str]] = None,
+            ctx: Optional[Context] = None,
         ) -> Dict[str, Any]:
             return _aria_result_or_tool_error(
-                await get_aria_turn(
-                    turn_id=turn_id,
-                    wait_seconds=wait_seconds,
-                    include_turn=include_turn,
+                enrich_aria_result_for_ui(
+                    await get_aria_turn(
+                        turn_id=turn_id,
+                        wait_seconds=wait_seconds,
+                        include_turn=include_turn,
+                        network_access_mode=network_access_mode,
+                        parallel_turn_ids=parallel_turn_ids,
+                        ctx=ctx,
+                        allow_writes=not read_only,
+                    ),
+                    access_mode=effective_access_mode,
                 )
             )
 
-        @register_tool(description=ARIA_LIST_THREADS_TOOL_DESCRIPTION)
+        @register_tool(description=ARIA_LIST_THREADS_TOOL_DESCRIPTION, meta=ARIA_UI_META)
         async def aria_list_threads(
             entity: Optional[str] = None,
             project: Optional[str] = None,
@@ -1597,16 +1702,24 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             offset: int = 0,
         ) -> Dict[str, Any]:
             return _aria_result_or_tool_error(
-                await list_aria_threads(entity=entity, project=project, limit=limit, offset=offset)
+                enrich_aria_result_for_ui(
+                    await list_aria_threads(entity=entity, project=project, limit=limit, offset=offset),
+                    access_mode=effective_access_mode,
+                )
             )
 
-        @register_tool(description=ARIA_GET_THREAD_TOOL_DESCRIPTION)
+        @register_tool(description=ARIA_GET_THREAD_TOOL_DESCRIPTION, meta=ARIA_UI_META)
         async def aria_get_thread(
             thread_id: str,
             limit: int = 20,
             offset: int = 0,
         ) -> Dict[str, Any]:
-            return _aria_result_or_tool_error(await get_aria_thread(thread_id=thread_id, limit=limit, offset=offset))
+            return _aria_result_or_tool_error(
+                enrich_aria_result_for_ui(
+                    await get_aria_thread(thread_id=thread_id, limit=limit, offset=offset),
+                    access_mode=effective_access_mode,
+                )
+            )
 
     missing = selection.tools - registered_tools
     unexpected = registered_tools - selection.tools

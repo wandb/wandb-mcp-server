@@ -21,22 +21,22 @@ from wandb_mcp_server.runtime_contract import (
 
 
 EXPECTED_COUNTS = {
-    "models-only": {"read-write": 18, "read-only": 16},
-    "models-weave": {"read-write": 23, "read-only": 21},
-    "models-weave-graphql-compat": {"read-write": 24, "read-only": 22},
-    "models-weave-agents": {"read-write": 34, "read-only": 31},
-    "models-weave-agents-agent-lens": {"read-write": 48, "read-only": 43},
-    "models-weave-agents-aria": {"read-write": 38, "read-only": 34},
-    "models-weave-agents-raw-graphql": {"read-write": 35, "read-only": 32},
-    "models-weave-agents-agent-lens-aria": {"read-write": 52, "read-only": 46},
-    "models-weave-agents-agent-lens-raw-graphql": {"read-write": 49, "read-only": 44},
-    "models-weave-agents-aria-raw-graphql": {"read-write": 39, "read-only": 35},
-    "models-weave-agents-agent-lens-aria-raw-graphql": {"read-write": 53, "read-only": 47},
+    "models-only": {"read-write": 17, "read-only": 15},
+    "models-weave": {"read-write": 21, "read-only": 19},
+    "models-weave-graphql-compat": {"read-write": 22, "read-only": 20},
+    "models-weave-agents": {"read-write": 31, "read-only": 28},
+    "models-weave-agents-agent-lens": {"read-write": 42, "read-only": 37},
+    "models-weave-agents-aria": {"read-write": 35, "read-only": 31},
+    "models-weave-agents-raw-graphql": {"read-write": 32, "read-only": 29},
+    "models-weave-agents-agent-lens-aria": {"read-write": 46, "read-only": 40},
+    "models-weave-agents-agent-lens-raw-graphql": {"read-write": 43, "read-only": 38},
+    "models-weave-agents-aria-raw-graphql": {"read-write": 36, "read-only": 32},
+    "models-weave-agents-agent-lens-aria-raw-graphql": {"read-write": 47, "read-only": 41},
 }
 EXPECTED_MANAGED = {
     "models-only": ("dedicated", "shared"),
     "models-weave": ("dedicated", "shared"),
-    "models-weave-agents": ("shared",),
+    "models-weave-agents": ("dedicated", "shared"),
     "models-weave-agents-agent-lens": ("shared",),
     "models-weave-agents-aria": ("shared",),
     "models-weave-agents-agent-lens-aria": ("shared",),
@@ -69,7 +69,7 @@ def test_packaged_contract_has_exact_profiles_and_complete_tool_metadata():
         for tool in group["tools"]:
             assert set(tool) == {"name", "access", "risk", "prerequisite"}
             names.append(tool["name"])
-    assert len(names) == len(set(names)) == 53
+    assert len(names) == len(set(names)) == 47
 
     for profile, access_counts in EXPECTED_COUNTS.items():
         resolution = combinations[profile]
@@ -122,7 +122,7 @@ def test_contract_hash_is_canonical_and_tamper_changes_identity():
         validate_runtime_contract(tampered)
 
     tampered = copy.deepcopy(contract)
-    tampered["workload_profiles"]["dedicated"]["limits"]["MCP_MAX_HISTORY_SAMPLES"] = 1_000_000
+    tampered["workload_profiles"]["dedicated"]["limits"]["MCP_MAX_HISTORY_SAMPLES"] = 100_000_000
     with pytest.raises(ValueError, match="workload limit"):
         validate_runtime_contract(tampered)
 
@@ -181,7 +181,7 @@ def test_default_selection_is_public_models_weave(monkeypatch: pytest.MonkeyPatc
     assert selection.access_mode == "read-write"
     assert selection.workload_profile == "local"
     assert selection.capacity_class == "small"
-    assert len(selection.tools) == 23
+    assert len(selection.tools) == 21
     assert selection.runtime_contract_sha256.startswith("sha256:")
 
 
@@ -340,7 +340,7 @@ def test_extensions_compose_onto_a_base_profile_regardless_of_order():
     assert first.base_profile == "models-weave-agents"
     assert first.extensions == frozenset({"agent-lens", "aria"})
     assert first.groups == frozenset({"models", "weave", "agents", "agent-lens", "aria"})
-    assert len(first.tools) == 52
+    assert len(first.tools) == 46
     assert first.tools == tools_for_profile(contract, "models-weave-agents", "read-write", ("agent-lens", "aria"))
 
     plain = resolve_runtime_selection(_shared_environment(WANDB_MCP_TOOL_PROFILE="models-weave-agents"))
@@ -397,3 +397,57 @@ def test_dedicated_rejects_every_extension_group():
                     WANDB_MCP_TOOL_EXTENSIONS=extension,
                 )
             )
+
+
+def test_managed_workload_allows_bounded_overrides_when_explicitly_enabled(monkeypatch: pytest.MonkeyPatch):
+    from wandb_mcp_server.runtime_contract import resolve_runtime_selection, workload_policy
+
+    env = _shared_environment(
+        MCP_WORKLOAD_PROFILE="dedicated",
+        MCP_CAPACITY_CLASS="small",
+        WANDB_MCP_TOOL_PROFILE="models-weave-agents",
+        MCP_ALLOW_LIMIT_OVERRIDES="true",
+        MCP_TOOL_TIMEOUT_SECONDS="180",
+        MCP_WANDB_REQUEST_TIMEOUT_SECONDS="90",
+        MCP_MAX_HISTORY_SAMPLES="4000",
+        MCP_HTTP_RATE_PER_KEY_PER_MINUTE="600",
+        MCP_HTTP_RATE_GLOBAL_PER_MINUTE="5000",
+    )
+    selection = resolve_runtime_selection(env)
+    assert selection.limit_overrides_enabled is True
+    assert selection.groups == frozenset({"models", "weave", "agents"})
+
+    policy = workload_policy(selection, env)
+    assert policy["limit_overrides_enabled"] is True
+    assert policy["limits"]["MCP_TOOL_TIMEOUT_SECONDS"] == 180
+    assert policy["limits"]["MCP_WANDB_REQUEST_TIMEOUT_SECONDS"] == 90
+    assert policy["limits"]["MCP_MAX_HISTORY_SAMPLES"] == 4000
+    assert policy["http_rate_policy"] == {
+        "enabled": True,
+        "per_key_per_minute": 600,
+        "global_per_minute": 5000,
+    }
+
+
+def test_shared_workload_keeps_session_limits_locked_even_with_override_opt_in():
+    root = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONPATH": str(root / "src"),
+            "MCP_WORKLOAD_PROFILE": "shared",
+            "MCP_CAPACITY_CLASS": "large",
+            "MCP_ALLOW_LIMIT_OVERRIDES": "true",
+            "SESSION_TTL_SECONDS": "60",
+        }
+    )
+    process = subprocess.run(
+        [sys.executable, "-c", "import wandb_mcp_server.config"],
+        cwd=root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert process.returncode != 0
+    assert "SESSION_TTL_SECONDS cannot override managed MCP_WORKLOAD_PROFILE=shared" in process.stderr

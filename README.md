@@ -86,9 +86,8 @@ the coding agent's own sessions.
 | Tool | Description | Example Query |
 |------|-------------|---------------|
 | **infer_trace_schema_tool** | Discover field names, types, and sample values | *"What fields are in my traces?"* |
-| **query_weave_traces_tool** | Analyze LLM traces with `detail_level` control | *"Show failed traces with full data"* |
+| **query_weave_traces_tool** | Analyze LLM traces (including root resolution via `trace_roots_only=True`) with `detail_level` control | *"Show failed traces with full data"* |
 | **count_weave_traces_tool** | Count traces and get storage metrics | *"How many traces failed?"* |
-| **resolve_trace_roots_tool** | Resolve spans to their root traces | *"Find the root traces for these calls"* |
 | **query_wandb_tool** | Use structured W&B reads or a bounded, query-only GraphQL document | *"Show me runs with loss < 0.1"* |
 | **probe_project_tool** | Discover useful project fields and bounded samples | *"What metrics and config fields are available?"* |
 | **get_run_history_tool** | Bounded time-series data with sparse, multi-key outer-union sampling | *"Show loss and validation-loss curves for run abc123"* |
@@ -106,8 +105,7 @@ the coding agent's own sessions.
 | **list_artifact_versions_tool** | List versions of an artifact collection | *"Show versions of my model artifact"* |
 | **get_artifact_details_tool** | Get full details of an artifact version | *"What's in model-v2 artifact?"* |
 | **compare_artifact_versions_tool** | Diff two artifact versions | *"Compare model v1 vs v2"* |
-| **list_wandb_automations_tool** | List W&B Automations | *"What automations alert on run metrics or status for my team's runs?"* |
-| **list_wandb_integrations_tool** | List registered integrations for W&B automations (e.g. Slack, webhook) | *"Which Slack channels can my automations target?"* |
+| **list_wandb_automations_tool** | List W&B Automations (scoped by entity, project, or registry) and optional Slack/webhook integrations | *"What automations alert on run metrics or status for my team's runs?"* |
 | **aria_send_message** *(opt-in)* | Start or continue async work with the hosted W&B agent | *"Ask ARIA to diagnose these failed evals"* |
 | **aria_get_turn** *(opt-in)* | Poll an ARIA turn for progress or its final result | *"Check whether that ARIA analysis finished"* |
 | **aria_list_threads** *(opt-in)* | Find earlier ARIA conversations, filtered by entity/project | *"Find my ARIA conversation about the eval regressions"* |
@@ -144,9 +142,10 @@ Recommended deployment presets:
 
 | Deployment | Settings |
 |---|---|
-| MT SaaS with Agent Lens and ARIA | `models-weave-agents` + `WANDB_MCP_TOOL_EXTENSIONS=agent-lens,aria`, `shared`, `read-write` (44 tools) |
+| MT SaaS with Agent Lens and ARIA | `models-weave-agents` + `WANDB_MCP_TOOL_EXTENSIONS=agent-lens,aria`, `shared`, `read-write` (46 tools) |
 | Dedicated Models-only | `models-only`, `dedicated`, `read-write` (17 tools) |
-| Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (22 tools) |
+| Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (21 tools) |
+| Dedicated with Weave + Agents | `models-weave-agents`, `dedicated`, `read-write` (31 tools) |
 | Local extra GraphQL tool | `models-weave-graphql-compat`, `local`; choose either access mode |
 
 **Compatibility with v0.3.7:** Existing query-only `query_wandb_tool` calls can
@@ -191,18 +190,17 @@ caller-supplied GraphQL, and is part of every supported managed tool profile.
 **Weave Agents (OTel) tools** — these read the OpenTelemetry/GenAI agent-spans data plane shown in Agent Lens **Conversations**, which is separate from the classic Weave calls above:
 
 These tools are present in the `models-weave-agents` base profile (and every
-extension composed onto it). Dedicated rejects the `agents` group.
+extension composed onto it) on both `shared` and `dedicated` workloads when `WF_TRACE_SERVER_URL` is configured.
 
 | Tool | Description | Example Query |
 |------|-------------|---------------|
-| **list_weave_agents_tool** | List agents with aggregated stats (invocations, tokens, duration, errors) | *"Which agents ran this week and how many errors did each have?"* |
-| **list_weave_agent_versions_tool** | Per-version stats for one agent | *"Did v2 of my agent regress on latency?"* |
+| **list_weave_agents_tool** | List agents with aggregated stats and optional per-version breakdown (`include_versions=True`) | *"Which agents ran this week and did v2 regress on latency?"* |
 | **query_weave_agent_spans_tool** | Query or group agent/LLM/tool spans with Insight, tag, signal, and custom-attribute filters | *"Group failed tool spans by tool_name for high-severity failures"* |
 | **get_weave_agent_span_stats_tool** | Time- or value-bucketed metric and percentile series (`p50`/`p95`/`p99` latency, tokens, cost, errors) | *"Show hourly p95 tool duration by agent"* |
 | **list_weave_agent_custom_attributes_tool** | Discover custom attribute keys on agent spans | *"What custom attributes do my agent spans have?"* |
 | **search_weave_agents_tool** | Full-text / structured message search, grouped by conversation | *"Find conversations mentioning refunds"* |
-| **get_weave_agent_trace_tool** | Structured chat/trajectory view for one trace (a turn) | *"What did the agent do in trace abc123?"* |
-| **get_weave_agent_conversation_tool** | Chronological multi-turn chat view for a conversation (`Turn 1` onward by default) | *"Show the whole conversation conv-42"* |
+| **get_weave_agent_trace_tool** | Structured chat/trajectory view for one trace (a turn), rendered inline as an interactive Conversation & Span Trajectory MCP App | *"What did the agent do in trace abc123?"* |
+| **get_weave_agent_conversation_tool** | Chronological multi-turn chat view (`Turn 1` onward by default) rendered inline as an interactive Conversation & Span Trajectory MCP App with lazy OTel span waterfall and feedback triage | *"Show the whole conversation conv-42"* |
 | **get_weave_agent_conversation_spans_tool** | Batch-load full OTel span trees and feedback markers for up to 100 conversations | *"Fetch span trees for the 15 sampled cluster conversations"* |
 | **query_weave_agent_feedback_tool** | Search or aggregate project-wide human notes (`wandb.note.1`), reactions, and scorer feedback | *"Find human notes mentioning wrong track across the project"* |
 | **manage_weave_agent_feedback_tool** | Add or delete human notes/corrections and reactions on turns or conversations (`read-write` only) | *"Add a note on turn abc123 explaining the expected edit"* |
@@ -753,41 +751,41 @@ Exact tool profiles:
 
 | Extension (`WANDB_MCP_TOOL_EXTENSIONS`) | Requires | Managed workloads | Tools |
 |---|---|---|---:|
-| `agent-lens` | weave, agents | shared | 14 |
+| `agent-lens` | weave, agents | shared | 11 |
 | `aria` | weave, agents | shared | 4 |
 | `raw-graphql` | weave | local only | 1 |
 
 | Resolved profile | Base | Extensions | Managed workloads | Read-write | Read-only |
 |---|---|---|---|---:|---:|
-| `models-only` | `models-only` | none | dedicated, shared | 18 | 16 |
-| `models-weave` | `models-weave` | none | dedicated, shared | 23 | 21 |
-| `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 24 | 22 |
-| `models-weave-agents` | `models-weave-agents` | none | shared | 34 | 31 |
-| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 48 | 43 |
-| `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 38 | 34 |
-| `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 35 | 32 |
-| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 52 | 46 |
-| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 49 | 44 |
-| `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 39 | 35 |
-| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 53 | 47 |
+| `models-only` | `models-only` | none | dedicated, shared | 17 | 15 |
+| `models-weave` | `models-weave` | none | dedicated, shared | 21 | 19 |
+| `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 22 | 20 |
+| `models-weave-agents` | `models-weave-agents` | none | dedicated, shared | 31 | 28 |
+| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 42 | 37 |
+| `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 35 | 31 |
+| `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 32 | 29 |
+| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 46 | 40 |
+| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 43 | 38 |
+| `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 36 | 32 |
+| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 47 | 41 |
 
 Exact workload defaults:
 
 | Workload | Collection rows | History samples | Metric keys | Range span | Full-detail rows | Admission / HTTP rate |
 |---|---:|---:|---:|---:|---:|---|
-| `shared` | 100 | 500 | 20 | 5,000 | 3 | application admission and HTTP rate limiting off |
-| `dedicated` | 250 | 1,500 | 50 | 20,000 | 10 | admission on; 60/key/minute, 1000/process/minute |
+| `shared` | 250 | 1,000 | 50 | 50,000 | 10 | application admission and HTTP rate limiting off |
+| `dedicated` | 500 | 2,500 | 100 | 100,000 | 25 | admission on; 300/key/minute, 2000/process/minute |
 | `local` | 1,000 | 5,000 | 100 | 100,000 | 25 | application admission and HTTP rate limiting off |
 
 Exact capacity classes:
 
 | Capacity class | Actor | Process | Sync workers | Count workers |
 |---|---:|---:|---:|---:|
-| `small` | 4 | 4 | 4 | 4 |
-| `medium` | 4 | 8 | 8 | 8 |
-| `large` | 8 | 16 | 16 | 8 |
+| `small` | 8 | 8 | 4 | 4 |
+| `medium` | 12 | 16 | 8 | 8 |
+| `large` | 16 | 32 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:b132f6abd3330c860bb07a964cde31e8764eabde14c232352669a221807e5379`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:d1179268b8ed70cc795bbb5802685109e94eb862df6f6ec8b13dadf6a501f3a6`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line

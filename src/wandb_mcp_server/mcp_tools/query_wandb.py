@@ -106,7 +106,7 @@ Prefer dedicated tools for:
 - history: get_run_history_tool
 - artifacts: list_artifact_versions_tool, get_artifact_details_tool
 - registries: list_registries_tool, list_registry_collections_tool
-- automation/integration: list_wandb_automations_tool, list_wandb_integrations_tool
+- automation/integration: list_wandb_automations_tool (pass include_integrations=True for Slack/webhook destinations)
 
 For introspection, unmodeled fields, aliases, cross-resource nesting, or exact
 GraphQL shape, a local operator may select models-weave-graphql-compat and use

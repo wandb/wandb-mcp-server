@@ -47,10 +47,12 @@ class TestLogAnalysis:
         assert result["row_count"] == 2
         assert "latency_ms" in result["table_columns"]
 
+        from wandb_mcp_server.config import MCP_WANDB_REQUEST_TIMEOUT_SECONDS
+
         mock_wandb.Api.assert_called_once_with(
             api_key="test-key",
             overrides={"base_url": mock_wandb.Api.call_args[1]["overrides"]["base_url"]},
-            timeout=20,
+            timeout=MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
         )
         mock_api.create_run.assert_called_once_with(entity="test", project="proj")
         mock_run.summary.update.assert_called_once()

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>W&amp;B ARIA</title>
+  </head>
+  <body>
+    <div id="app-root" class="ar-shell" data-display-mode="inline">
+      <header class="ar-header">
+        <div class="ar-header-left">
+          <button
+            id="ar-back-btn"
+            type="button"
+            class="ar-link-btn ar-back-btn"
+            hidden
+          ></button>
+          <span class="ar-brand-mark" aria-hidden="true">ARIA</span>
+          <h1 id="ar-title" class="ar-title">ARIA</h1>
+          <span id="ar-scope-pill" class="ar-scope-pill" hidden></span>
+          <span id="ar-phase-pill" class="ar-phase-pill" data-tone="muted" hidden></span>
+        </div>
+
+        <div class="ar-header-right">
+          <button
+            id="ar-refresh-link"
+            type="button"
+            class="ar-link-btn"
+            hidden
+          >
+            Refresh
+          </button>
+          <button id="ar-expand-btn" type="button" class="ar-btn" hidden>
+            Expand
+          </button>
+          <div id="ar-menu-wrap" class="ar-menu-wrap">
+            <button
+              id="ar-menu-btn"
+              type="button"
+              class="ar-icon-btn ar-menu-trigger"
+              aria-label="More options"
+              aria-haspopup="menu"
+              aria-expanded="false"
+            >
+              ⋯
+            </button>
+            <div id="ar-menu-popover" class="ar-menu-popover" role="menu" hidden>
+              <button
+                id="ar-menu-threads"
+                type="button"
+                role="menuitem"
+                class="ar-menu-item"
+              >
+                Recent threads
+              </button>
+              <button
+                id="ar-menu-live"
+                type="button"
+                role="menuitem"
+                class="ar-menu-item"
+              >
+                Pause live updates
+              </button>
+              <button
+                id="ar-menu-forge"
+                type="button"
+                role="menuitem"
+                class="ar-menu-item"
+              >
+                Open in Forge ↗
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div id="ar-banner" class="ar-banner" role="status" aria-live="polite" hidden>
+        <span id="ar-banner-text"></span>
+        <button id="ar-banner-dismiss" type="button" class="ar-icon-btn" aria-label="Dismiss notice">✕</button>
+      </div>
+
+      <main id="ar-main" class="ar-main">
+        <div id="ar-empty" class="ar-empty" role="status">
+          Waiting for ARIA…
+        </div>
+
+        <section id="ar-run-view" class="ar-run-view" hidden>
+          <div id="ar-earlier-wrap" class="ar-earlier-wrap" hidden></div>
+          <div id="ar-latest-turn" class="ar-latest-turn"></div>
+          <div id="ar-readonly-line" class="ar-readonly-line" hidden></div>
+          <div id="ar-composer" class="ar-composer" hidden>
+            <textarea
+              id="ar-reply-input"
+              class="ar-reply-input"
+              rows="1"
+              placeholder="Ask a follow-up… (Enter to send)"
+              aria-label="Follow-up message to ARIA"
+            ></textarea>
+            <button id="ar-reply-send-btn" type="button" class="ar-btn ar-btn-primary">
+              Send
+            </button>
+          </div>
+        </section>
+
+        <section id="ar-run-list-view" class="ar-list-view" aria-label="Parallel ARIA batch status" hidden>
+          <div id="ar-run-list-summary" class="ar-list-summary"></div>
+          <div id="ar-run-list-rows" class="ar-list-rows"></div>
+        </section>
+
+        <section id="ar-thread-list-view" class="ar-list-view" aria-label="Recent ARIA threads" hidden>
+          <div id="ar-thread-list-summary" class="ar-list-summary"></div>
+          <div id="ar-thread-list-rows" class="ar-list-rows"></div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
