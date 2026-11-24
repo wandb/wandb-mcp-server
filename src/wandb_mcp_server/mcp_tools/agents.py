@@ -15,12 +15,19 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from typing import Any, Dict, List, Literal, Optional, Sequence
 
 import requests
 
+from wandb_mcp_server.admission import current_tool_deadline
 from wandb_mcp_server.api_client import WandBApiManager, raise_for_wandb_server_busy
-from wandb_mcp_server.config import MAX_RESPONSE_TOKENS, WF_TRACE_SERVER_URL, structured_error
+from wandb_mcp_server.config import (
+    MAX_RESPONSE_TOKENS,
+    MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
+    WF_TRACE_SERVER_URL,
+    structured_error,
+)
 from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text
 from wandb_mcp_server.mcp_tools.tools_utils import get_no_retry_session, track_tool_execution
 from wandb_mcp_server.tool_results import tool_error_json
@@ -44,7 +51,15 @@ FEEDBACK_AGGREGATE_PATH = "/feedback/aggregate"
 FEEDBACK_CREATE_PATH = "/feedback/create"
 FEEDBACK_PURGE_PATH = "/feedback/purge"
 
-_REQUEST_TIMEOUT_SECONDS = 30
+_REQUEST_TIMEOUT_SECONDS = MCP_WANDB_REQUEST_TIMEOUT_SECONDS
+
+
+def _effective_agents_timeout() -> float:
+    base = float(_REQUEST_TIMEOUT_SECONDS)
+    deadline = current_tool_deadline.get()
+    if deadline is None:
+        return base
+    return max(0.1, min(base, deadline - time.monotonic()))
 _MAX_CONVERSATION_SPANS_BATCH = 100
 _MAX_FEEDBACK_QUERY_LIMIT = 200
 _MAX_FEEDBACK_NOTE_CHARS = 10_000
@@ -210,7 +225,7 @@ def _agents_request(tool_name: str, path: str, body: Dict[str, Any], track_param
                 url,
                 headers=headers,
                 data=data,
-                timeout=_REQUEST_TIMEOUT_SECONDS,
+                timeout=_effective_agents_timeout(),
             )
         except Exception as e:
             logger.error("Agents API request failed (%s)", type(e).__name__)

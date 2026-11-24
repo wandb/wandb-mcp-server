@@ -35,6 +35,7 @@ from wandb_mcp_server.config import (
     AGENT_LENS_V1_API_PREFIX,
     MAX_ACCUMULATED_BYTES,
     MAX_RESPONSE_TOKENS,
+    MCP_WANDB_REQUEST_TIMEOUT_SECONDS,
     resolve_agent_lens_base_url,
     structured_error,
 )
@@ -108,7 +109,7 @@ def _conversation_summarize_path(conversation_id: str) -> str:
     return f"/conversations/{quote(conversation_id, safe='')}/summarize"
 
 
-_REQUEST_TIMEOUT_SECONDS = 30
+_REQUEST_TIMEOUT_SECONDS = MCP_WANDB_REQUEST_TIMEOUT_SECONDS
 MAX_AGENT_LENS_RESPONSE_BYTES = 4 * 1024 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
 _DEFAULT_RETRY_AFTER_MS = 1_000

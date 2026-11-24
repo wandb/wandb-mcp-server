@@ -8,6 +8,7 @@ installation.
 
 | Version | Status | Release notes |
 |---|---|---|
+| 0.4.7 | Candidate; all channels pending | [v0.4.7](v0.4.7.md) |
 | 0.4.6 | Candidate; all channels pending | [v0.4.6](v0.4.6.md) |
 | 0.4.5 | Candidate; all channels pending | [v0.4.5](v0.4.5.md) |
 | 0.4.4 | Candidate; all channels pending | [v0.4.4](v0.4.4.md) |

@@ -103,7 +103,7 @@ def query_traces(
     return_full_data: bool = True,
     api_key: str = "",
     query_expr: Any = None,  # We ignore this in the new implementation
-    request_timeout: int = 10,
+    request_timeout: Optional[int] = None,
     retries: int = 3,
 ) -> List[Dict[str, Any]]:
     """
@@ -111,9 +111,9 @@ def query_traces(
     but delegates to our new implementation.
     """
     service = get_trace_service()
-    if api_key:
+    if api_key or request_timeout is not None:
         service = TraceService(
-            api_key=api_key,
+            api_key=api_key or None,
             retries=retries,
             timeout=request_timeout,
         )
