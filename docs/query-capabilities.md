@@ -64,7 +64,7 @@ change only the page `limit` when continuing; mismatched reuse returns
 | Report lookup/list/spec | `query_wandb_tool(resource="reports", report_name=...)`; `report_name` accepts an exact internal name or display title | No |
 | Run metric history, including sparse keys logged at different cadences | `get_run_history_tool` | No |
 | Artifacts and registries | `list_artifact_versions_tool`, `get_artifact_details_tool`, `list_registries_tool`, and `list_registry_collections_tool` | No |
-| Automations and integrations | `list_wandb_automations_tool` and `list_wandb_integrations_tool` | No |
+| Automations and integrations | `list_wandb_automations_tool` (`include_integrations=True` for Slack/webhook destinations) | No |
 | Schema introspection or unmodeled/custom fields | `query_wandb_tool(query=..., variables=...)` | Yes |
 | Aliases or exact GraphQL response shape | `query_wandb_tool(query=..., variables=...)` | Yes |
 | Cross-resource/compound nesting | `query_wandb_tool(query=..., variables=...)` | Yes |

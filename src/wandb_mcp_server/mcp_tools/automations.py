@@ -59,8 +59,7 @@ LIST_AUTOMATIONS_TOOL_DESCRIPTION = dedent(
     - "Which automations send to Slack channel #foo?"
 
     If the user wants to know the available Slack channels or webhook URLs that
-    existing or new automations can target, call list_wandb_integrations_tool
-    instead (or in addition).
+    existing or new automations can target, set include_integrations=True.
     </when_to_use>
 
     <critical_info>

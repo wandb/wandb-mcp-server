@@ -166,7 +166,6 @@ def test_query_capability_matrix_routes_typed_specialized_and_raw_reads():
         "list_registries_tool",
         "list_registry_collections_tool",
         "list_wandb_automations_tool",
-        "list_wandb_integrations_tool",
     ):
         assert f"`{specialized_tool}`" in text
 
