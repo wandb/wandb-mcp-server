@@ -24,7 +24,7 @@ import sys
 from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Union
 
 import wandb
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field, PositiveInt, StrictInt
 
@@ -1113,18 +1113,33 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     def query_wandb_entity_projects(
         entity: Optional[str] = None,
         max_projects: int = 50,
+        order: str = "-updated_at",
     ) -> str:
         """List projects for a W&B entity."""
-        return list_entity_projects(entity=entity, max_projects=max_projects)
+        return list_entity_projects(entity=entity, max_projects=max_projects, order=order)
 
     @register_tool(description=LIST_AUTOMATIONS_TOOL_DESCRIPTION)
     def list_wandb_automations_tool(
         entity: Optional[str] = None,
         name: Optional[str] = None,
         max_items: int = 50,
+        project: Optional[str] = None,
+        registry_name: Optional[str] = None,
+        organization: Optional[str] = None,
+        include_integrations: bool = False,
+        integration_kind: Optional[str] = None,
     ) -> str:
         """List W&B Automations accessible with the current API key."""
-        return list_automations(entity=entity, name=name, max_items=max_items)
+        return list_automations(
+            entity=entity,
+            name=name,
+            max_items=max_items,
+            project=project,
+            registry_name=registry_name,
+            organization=organization,
+            include_integrations=include_integrations,
+            integration_kind=integration_kind,
+        )
 
     @register_tool(description=LIST_INTEGRATIONS_TOOL_DESCRIPTION)
     def list_wandb_integrations_tool(
@@ -1511,6 +1526,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         sample_runs: int = 6,
         field_pattern: Optional[str] = None,
         include_artifacts: bool = False,
+        include_traces: bool = False,
     ) -> str:
         """Probe a W&B project to discover its structure."""
         return probe_project(
@@ -1519,6 +1535,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             sample_runs=sample_runs,
             field_pattern=field_pattern,
             include_artifacts=include_artifacts,
+            include_traces=include_traces,
         )
 
     # ----- Weave Agents (OTel/GenAI) tools -----
@@ -1562,6 +1579,9 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                 wait_seconds: int = 0,
                 include_turn: bool = False,
                 title: Optional[str] = None,
+                allowed_network_domains: Optional[List[str]] = None,
+                network_access_mode: Optional[Literal["prompt", "auto_safe", "auto_public", "deny"]] = None,
+                ctx: Optional[Context] = None,
             ) -> Dict[str, Any]:
                 return _aria_result_or_tool_error(
                     await send_aria_message(
@@ -1572,6 +1592,9 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                         parent_turn_id=parent_turn_id,
                         wait_seconds=wait_seconds,
                         include_turn=include_turn,
+                        allowed_network_domains=allowed_network_domains,
+                        network_access_mode=network_access_mode,
+                        ctx=ctx,
                     )
                 )
 
@@ -1580,12 +1603,17 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             turn_id: str,
             wait_seconds: int = 0,
             include_turn: bool = False,
+            network_access_mode: Optional[Literal["prompt", "auto_safe", "auto_public", "deny"]] = None,
+            ctx: Optional[Context] = None,
         ) -> Dict[str, Any]:
             return _aria_result_or_tool_error(
                 await get_aria_turn(
                     turn_id=turn_id,
                     wait_seconds=wait_seconds,
                     include_turn=include_turn,
+                    network_access_mode=network_access_mode,
+                    ctx=ctx,
+                    allow_writes=not read_only,
                 )
             )
 

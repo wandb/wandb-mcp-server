@@ -15,6 +15,30 @@ from wandb_mcp_server.wandb_graphql import GraphQLResponseTooLarge, execute_grap
 MAX_SAFE_HISTORY_STEP = (1 << 63) - 2
 
 
+ENTITY_PROJECTS_QUERY = """
+query MCPEntityProjects($entity: String!, $first: Int!, $order: String) {
+  entity(name: $entity) {
+    projects(first: $first, order: $order) {
+      pageInfo {
+        hasNextPage
+      }
+      edges {
+        node {
+          name
+          entityName
+          description
+          public
+          createdAt
+          updatedAt
+          runCount
+        }
+      }
+    }
+  }
+}
+"""
+
+
 REGISTRY_ORGANIZATION_QUERY = """
 query MCPRegistryOrganization($entity: String!, $hasEntity: Boolean!) {
   entity(name: $entity) @include(if: $hasEntity) {
@@ -1904,6 +1928,62 @@ query MCPViewerDefaultEntity {
 """
 
 
+def fetch_entity_projects(
+    api: Any,
+    *,
+    entity: str,
+    limit: int,
+    order: str = "-updatedAt",
+) -> tuple[list[dict[str, Any]], bool]:
+    """Fetch bounded, ordered projects for an entity in one GraphQL round-trip."""
+    raise_if_tool_deadline_exceeded()
+    bounded_limit = max(1, min(limit, 200))
+    try:
+        data = execute_graphql(
+            api,
+            ENTITY_PROJECTS_QUERY,
+            {"entity": entity, "first": bounded_limit, "order": order},
+        )
+    except Exception as exc:
+        _raise_selective_failure("entity projects query unavailable", exc)
+
+    if not isinstance(data, Mapping):
+        raise SelectiveReadUnavailable("entity projects query returned non-mapping payload")
+    entity_payload = data.get("entity")
+    if not isinstance(entity_payload, Mapping):
+        raise ValueError(f"W&B entity {entity!r} was not found or is not accessible")
+    projects_conn = entity_payload.get("projects")
+    if not isinstance(projects_conn, Mapping):
+        raise SelectiveReadUnavailable("entity projects query returned no projects connection")
+    edges = projects_conn.get("edges")
+    if not isinstance(edges, list):
+        raise SelectiveReadUnavailable("entity projects query returned invalid edges")
+
+    rows: list[dict[str, Any]] = []
+    for edge in edges[:bounded_limit]:
+        node = edge.get("node") if isinstance(edge, Mapping) else None
+        if not isinstance(node, Mapping) or not isinstance(node.get("name"), str):
+            continue
+        is_public = node.get("public")
+        visibility = "public" if is_public is True else ("private" if is_public is False else None)
+        run_count = node.get("runCount")
+        rows.append(
+            {
+                "name": node["name"],
+                "entity": node.get("entityName") or entity,
+                "description": node.get("description"),
+                "visibility": visibility,
+                "created_at": str(node.get("createdAt") or ""),
+                "updated_at": str(node.get("updatedAt") or ""),
+                "run_count": run_count if isinstance(run_count, int) and not isinstance(run_count, bool) else None,
+                "tags": [],
+            }
+        )
+    page_info = projects_conn.get("pageInfo")
+    has_more = bool(isinstance(page_info, Mapping) and page_info.get("hasNextPage"))
+    return rows, has_more
+
+
 def fetch_viewer_default_entity(api: Any) -> str | None:
     """Resolve the caller's default W&B entity or username via a narrow viewer query."""
     raise_if_tool_deadline_exceeded()
@@ -1923,6 +2003,7 @@ def fetch_viewer_default_entity(api: Any) -> str | None:
 
 __all__ = [
     "ARTIFACT_INVENTORY_QUERY",
+    "ENTITY_PROJECTS_QUERY",
     "REGISTRY_ARTIFACT_VERSIONS_QUERY",
     "REGISTRY_ORGANIZATION_QUERY",
     "VIEWER_DEFAULT_ENTITY_QUERY",
@@ -1943,6 +2024,7 @@ __all__ = [
     "ProjectedReportCursorError",
     "SelectiveReadUnavailable",
     "fetch_artifact_inventory",
+    "fetch_entity_projects",
     "fetch_metric_value_steps",
     "fetch_sampled_history_series",
     "fetch_registry_artifact_versions",
