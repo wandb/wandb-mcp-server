@@ -170,7 +170,7 @@ export class AriaHostBridge {
     try {
       const result = await this.app.requestDisplayMode({ mode });
       if (result.mode !== mode) {
-        return { ok: false, message: `Host kept ARIA studio in ${result.mode} mode.` };
+        return { ok: false, message: `Host kept ARIA card in ${result.mode} mode.` };
       }
       return { ok: true, mode: result.mode };
     } catch {

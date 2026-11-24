@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "license": "MIT",
-  "description": "Self-contained MCP App ARIA Studio & Parallel Sub-Agents Monitor for wandb-mcp-server",
+  "description": "Self-contained MCP App compact ARIA conversation card for wandb-mcp-server",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "vite build && node scripts/finalize-bundle.mjs",

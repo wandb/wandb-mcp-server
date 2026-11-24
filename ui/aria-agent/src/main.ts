@@ -9,74 +9,67 @@ import {
   applyThreadsListToState,
   buildModelContextPayload,
   computeLiveElapsedSeconds,
+  countRecoveredErrors,
+  countTurnSteps,
   createInitialState,
   deriveSessionPhase,
   deriveTurnPhase,
   extractAgentQuestions,
   extractRequestedDomains,
   formatElapsedClock,
+  formatLiveStepLine,
   getHydratableCompletedTurnIds,
   getPollableTurnIds,
+  isLongInlineAnswer,
   latestSessionEntry,
   phaseDisplayMeta,
-  summarizeFleet,
+  summarizeBatch,
   upsertTurnIntoState,
   type AriaAgentSession,
-  type AriaStudioState,
+  type AriaCardState,
   type SyncedTurnEntry,
 } from "./state";
 
 const appRoot = document.getElementById("app-root") as HTMLDivElement;
+const backBtn = document.getElementById("ar-back-btn") as HTMLButtonElement;
 const titleEl = document.getElementById("ar-title") as HTMLHeadingElement;
 const scopePillEl = document.getElementById("ar-scope-pill") as HTMLSpanElement;
 const phasePillEl = document.getElementById("ar-phase-pill") as HTMLSpanElement;
-const subtitleEl = document.getElementById("ar-subtitle") as HTMLParagraphElement;
 
-const autoPollBtn = document.getElementById("ar-autopoll-btn") as HTMLButtonElement;
-const pollNowBtn = document.getElementById("ar-poll-now-btn") as HTMLButtonElement;
-const spawnToggleBtn = document.getElementById("ar-spawn-toggle-btn") as HTMLButtonElement;
-const threadsToggleBtn = document.getElementById("ar-threads-toggle-btn") as HTMLButtonElement;
+const refreshLinkBtn = document.getElementById("ar-refresh-link") as HTMLButtonElement;
 const expandBtn = document.getElementById("ar-expand-btn") as HTMLButtonElement;
-const openForgeBtn = document.getElementById("ar-open-forge-btn") as HTMLButtonElement;
-
-const fleetBarEl = document.getElementById("ar-fleet-bar") as HTMLElement;
-const fleetCountsEl = document.getElementById("ar-fleet-counts") as HTMLDivElement;
-const fleetMeterEl = document.getElementById("ar-fleet-meter") as HTMLDivElement;
-const layoutGridBtn = document.getElementById("ar-layout-grid-btn") as HTMLButtonElement;
-const layoutSplitBtn = document.getElementById("ar-layout-split-btn") as HTMLButtonElement;
-
-const spawnDrawerEl = document.getElementById("ar-spawn-drawer") as HTMLElement;
-const spawnCloseBtn = document.getElementById("ar-spawn-close-btn") as HTMLButtonElement;
-const spawnEntityInput = document.getElementById("ar-spawn-entity") as HTMLInputElement;
-const spawnProjectInput = document.getElementById("ar-spawn-project") as HTMLInputElement;
-const spawnTitleInput = document.getElementById("ar-spawn-title") as HTMLInputElement;
-const spawnPromptsInput = document.getElementById("ar-spawn-prompts") as HTMLTextAreaElement;
-const spawnCountHintEl = document.getElementById("ar-spawn-count-hint") as HTMLSpanElement;
-const spawnSubmitBtn = document.getElementById("ar-spawn-submit-btn") as HTMLButtonElement;
-
-const threadsDrawerEl = document.getElementById("ar-threads-drawer") as HTMLElement;
-const threadsCloseBtn = document.getElementById("ar-threads-close-btn") as HTMLButtonElement;
-const threadsListEl = document.getElementById("ar-threads-list") as HTMLDivElement;
+const menuWrapEl = document.getElementById("ar-menu-wrap") as HTMLDivElement;
+const menuBtn = document.getElementById("ar-menu-btn") as HTMLButtonElement;
+const menuPopoverEl = document.getElementById("ar-menu-popover") as HTMLDivElement;
+const menuThreadsBtn = document.getElementById("ar-menu-threads") as HTMLButtonElement;
+const menuLiveBtn = document.getElementById("ar-menu-live") as HTMLButtonElement;
+const menuForgeBtn = document.getElementById("ar-menu-forge") as HTMLButtonElement;
 
 const bannerEl = document.getElementById("ar-banner") as HTMLDivElement;
 const bannerTextEl = document.getElementById("ar-banner-text") as HTMLSpanElement;
 const bannerDismissBtn = document.getElementById("ar-banner-dismiss") as HTMLButtonElement;
 
 const emptyEl = document.getElementById("ar-empty") as HTMLDivElement;
-const gridViewEl = document.getElementById("ar-grid-view") as HTMLDivElement;
-const workspaceEl = document.getElementById("ar-workspace") as HTMLDivElement;
-const railEl = document.getElementById("ar-rail") as HTMLElement;
-const turnStreamEl = document.getElementById("ar-turn-stream") as HTMLDivElement;
+const runViewEl = document.getElementById("ar-run-view") as HTMLElement;
+const earlierWrapEl = document.getElementById("ar-earlier-wrap") as HTMLDivElement;
+const latestTurnEl = document.getElementById("ar-latest-turn") as HTMLDivElement;
+const readonlyLineEl = document.getElementById("ar-readonly-line") as HTMLDivElement;
 const composerEl = document.getElementById("ar-composer") as HTMLDivElement;
 const replyInput = document.getElementById("ar-reply-input") as HTMLTextAreaElement;
 const replySendBtn = document.getElementById("ar-reply-send-btn") as HTMLButtonElement;
 
-let state: AriaStudioState = createInitialState();
+const runListViewEl = document.getElementById("ar-run-list-view") as HTMLElement;
+const runListSummaryEl = document.getElementById("ar-run-list-summary") as HTMLDivElement;
+const runListRowsEl = document.getElementById("ar-run-list-rows") as HTMLDivElement;
+
+const threadListViewEl = document.getElementById("ar-thread-list-view") as HTMLElement;
+const threadListSummaryEl = document.getElementById("ar-thread-list-summary") as HTMLDivElement;
+const threadListRowsEl = document.getElementById("ar-thread-list-rows") as HTMLDivElement;
+
+let state: AriaCardState = createInitialState();
 let pollTimer: number | null = null;
 let clockInterval: number | null = null;
 let actionBusy = false;
-let lastRenderedSessionId: string | null = null;
-let lastRenderedTurnCount = 0;
 
 function showBanner(message: string, tone: "info" | "warning" | "error" = "info"): void {
   state = { ...state, bannerMessage: message, bannerTone: tone };
@@ -90,23 +83,15 @@ function clearPollTimer(): void {
   }
 }
 
-function parseSpawnTasks(raw: string): string[] {
-  const blocks = raw
-    .split(/\n\s*---\s*\n/g)
-    .map((b) => b.trim())
-    .filter(Boolean);
-  return blocks;
-}
-
-function updateSpawnHint(): void {
-  const tasks = parseSpawnTasks(spawnPromptsInput.value);
-  const count = Math.max(1, tasks.length);
-  spawnCountHintEl.textContent =
-    count === 1
-      ? "1 async ARIA sub-agent ready"
-      : `${count} parallel async ARIA sub-agents ready`;
-  spawnSubmitBtn.textContent =
-    count === 1 ? "Launch async ARIA" : `Launch ${count} parallel ARIA agents`;
+function closeMenu(restoreFocus = false): void {
+  if (!state.menuOpen) {
+    return;
+  }
+  state = { ...state, menuOpen: false };
+  renderHeader();
+  if (restoreFocus) {
+    menuBtn.focus();
+  }
 }
 
 function selectedSession(): AriaAgentSession | null {
@@ -127,13 +112,22 @@ function handleOpenLink(url: string): void {
   });
 }
 
-function handleEnvelope(envelope: ParsedAriaToolEnvelope, immediateSync = false): void {
+function handleEnvelope(
+  envelope: ParsedAriaToolEnvelope,
+  options?: { immediateSync?: boolean; fromBackgroundPoll?: boolean },
+): void {
   const now = Date.now();
   if (envelope.kind === "error") {
+    if (options?.fromBackgroundPoll) {
+      state = { ...state, pollFailed: true };
+      renderHeader();
+      return;
+    }
     showBanner(envelope.message, envelope.retryable ? "warning" : "error");
     renderAll();
     return;
   }
+
   if (envelope.kind === "parallel_turns") {
     state = applyParallelBatchToState(state, envelope.data, now);
   } else if (envelope.kind === "turn") {
@@ -144,28 +138,17 @@ function handleEnvelope(envelope: ParsedAriaToolEnvelope, immediateSync = false)
     state = applyThreadsListToState(state, envelope.data);
   }
 
-  // Prefill spawn scope from active session when empty
-  const active = selectedSession();
-  if (active) {
-    if (!spawnEntityInput.value && active.scope.entity) {
-      spawnEntityInput.value = active.scope.entity;
-    }
-    if (!spawnProjectInput.value && active.scope.project) {
-      spawnProjectInput.value = active.scope.project;
-    }
-  }
-
   renderAll();
-  bridge.scheduleModelContextSync(buildModelContextPayload(state), immediateSync);
+  bridge.scheduleModelContextSync(buildModelContextPayload(state), Boolean(options?.immediateSync));
   scheduleNextPollOrHydration();
 }
 
-async function pollSpecificTurnIds(turnIds: string[]): Promise<void> {
+async function pollSpecificTurnIds(turnIds: string[], manual = false): Promise<void> {
   if (turnIds.length === 0 || state.pollInFlight || !bridge.canCallServerTools()) {
     return;
   }
   clearPollTimer();
-  state = { ...state, pollInFlight: true };
+  state = { ...state, pollInFlight: true, ...(manual ? { pollFailed: false } : {}) };
   renderHeader();
 
   const primary = turnIds[0]!;
@@ -180,7 +163,7 @@ async function pollSpecificTurnIds(turnIds: string[]): Promise<void> {
 
   const envelope = await bridge.callAriaTool("aria_get_turn", args);
   state = { ...state, pollInFlight: false };
-  handleEnvelope(envelope);
+  handleEnvelope(envelope, { fromBackgroundPoll: !manual });
 }
 
 function scheduleNextPollOrHydration(): void {
@@ -197,7 +180,7 @@ function scheduleNextPollOrHydration(): void {
     return;
   }
 
-  if (!state.autoPoll) {
+  if (state.liveUpdatesPaused || state.pollFailed) {
     return;
   }
 
@@ -206,7 +189,7 @@ function scheduleNextPollOrHydration(): void {
     return;
   }
 
-  let delaySec = 2.4;
+  let delaySec = 2.2;
   for (const session of state.sessions) {
     const latest = latestSessionEntry(session);
     const hint = latest?.turn.poll_after_seconds;
@@ -248,64 +231,7 @@ async function sendContinuationMessage(
 
   const envelope = await bridge.callAriaTool("aria_send_message", sendArgs);
   actionBusy = false;
-  handleEnvelope(envelope, true);
-}
-
-async function launchParallelSubAgents(): Promise<void> {
-  if (actionBusy || state.accessMode === "read-only") {
-    return;
-  }
-  const prompts = parseSpawnTasks(spawnPromptsInput.value);
-  if (prompts.length === 0) {
-    showBanner("Enter at least one prompt to launch an ARIA sub-agent.", "warning");
-    return;
-  }
-  actionBusy = true;
-  spawnSubmitBtn.disabled = true;
-
-  const entity = spawnEntityInput.value.trim() || undefined;
-  const project = spawnProjectInput.value.trim() || undefined;
-  const titlePrefix = spawnTitleInput.value.trim();
-
-  const calls = prompts.map((promptText, idx) => {
-    const computedTitle =
-      prompts.length > 1
-        ? titlePrefix
-          ? `${titlePrefix} #${idx + 1}`
-          : undefined
-        : titlePrefix || undefined;
-    const args: Record<string, unknown> = {
-      message: promptText,
-      wait_seconds: 0,
-    };
-    if (entity) {
-      args.entity = entity;
-    }
-    if (project) {
-      args.project = project;
-    }
-    if (computedTitle) {
-      args.title = computedTitle;
-    }
-    state = applyOptimisticSendInput(state, args, Date.now() + idx);
-    return bridge.callAriaTool("aria_send_message", args);
-  });
-
-  state = {
-    ...state,
-    spawnDrawerOpen: false,
-    parallelLayout: state.sessions.length >= 2 ? "grid" : state.parallelLayout,
-  };
-  spawnPromptsInput.value = "";
-  updateSpawnHint();
-  renderAll();
-
-  const results = await Promise.all(calls);
-  actionBusy = false;
-  spawnSubmitBtn.disabled = false;
-  for (const env of results) {
-    handleEnvelope(env, true);
-  }
+  handleEnvelope(envelope, { immediateSync: true });
 }
 
 function renderBanner(): void {
@@ -328,9 +254,11 @@ function buildPhasePillContent(
   pill.dataset.tone = meta.tone;
   pill.replaceChildren();
 
-  const dot = document.createElement("span");
-  dot.className = "ar-live-dot";
-  pill.appendChild(dot);
+  if (meta.tone === "active") {
+    const dot = document.createElement("span");
+    dot.className = "ar-live-dot";
+    pill.appendChild(dot);
+  }
 
   const label = document.createElement("span");
   label.textContent = meta.label;
@@ -352,29 +280,44 @@ function buildPhasePillContent(
 function renderHeader(): void {
   appRoot.dataset.displayMode = state.displayMode;
   const nowMs = Date.now();
-  const isParallel = state.sessions.length >= 2;
   const active = selectedSession();
   const pollable = getPollableTurnIds(state);
   const canTools = bridge.canCallServerTools();
-  const isReadWrite = state.accessMode === "read-write";
 
-  if (state.sessions.length === 0) {
-    titleEl.textContent =
-      state.recentThreads.length > 0 ? "ARIA Conversations" : "Waiting for ARIA…";
-    scopePillEl.hidden = true;
-    phasePillEl.hidden = true;
-    subtitleEl.hidden = true;
-  } else if (isParallel) {
-    const summary = summarizeFleet(state.sessions);
-    titleEl.textContent = `Parallel ARIA Sub-Agents (${summary.total})`;
-    const sharedEntity = active?.scope.entity;
-    const sharedProject = active?.scope.project;
-    if (sharedEntity || sharedProject) {
-      scopePillEl.hidden = false;
-      scopePillEl.textContent = [sharedEntity, sharedProject].filter(Boolean).join("/");
-    } else {
-      scopePillEl.hidden = true;
-    }
+  // Back link when navigating to/from Recent threads
+  if (state.view === "threadList" && state.previousView && state.sessions.length > 0) {
+    backBtn.hidden = false;
+    backBtn.textContent = "← Back";
+  } else if (state.view === "run" && state.cameFromThreadList && state.recentThreads.length > 0) {
+    backBtn.hidden = false;
+    backBtn.textContent = "← Threads";
+  } else {
+    backBtn.hidden = true;
+  }
+
+  if (state.view === "threadList") {
+    titleEl.textContent = "Recent conversations";
+    titleEl.title = "Recent conversations";
+    const sampleScope = active?.scope ?? state.recentThreads[0]?.scope;
+    const scopeStr = sampleScope
+      ? [sampleScope.entity, sampleScope.project].filter(Boolean).join("/")
+      : "";
+    scopePillEl.hidden = !scopeStr;
+    scopePillEl.textContent = scopeStr;
+    phasePillEl.hidden = false;
+    phasePillEl.dataset.tone = "muted";
+    phasePillEl.replaceChildren();
+    phasePillEl.textContent = `${state.recentThreads.length}`;
+  } else if (state.view === "runList" && state.sessions.length > 0) {
+    const summary = summarizeBatch(state.sessions);
+    titleEl.textContent = `${summary.total} ARIA runs`;
+    titleEl.title = `${summary.total} ARIA runs`;
+    const sharedScope = active
+      ? [active.scope.entity, active.scope.project].filter(Boolean).join("/")
+      : "";
+    scopePillEl.hidden = !sharedScope;
+    scopePillEl.textContent = sharedScope;
+
     phasePillEl.hidden = false;
     phasePillEl.dataset.tone =
       summary.active > 0
@@ -385,162 +328,71 @@ function renderHeader(): void {
             ? "danger"
             : "success";
     phasePillEl.replaceChildren();
-    const dot = document.createElement("span");
-    dot.className = "ar-live-dot";
-    phasePillEl.appendChild(dot);
+    if (summary.active > 0) {
+      const dot = document.createElement("span");
+      dot.className = "ar-live-dot";
+      phasePillEl.appendChild(dot);
+    }
     const text = document.createElement("span");
     text.textContent =
       summary.active > 0
         ? `${summary.active} running · ${summary.completed}/${summary.total} done`
-        : summary.awaitingPermission > 0
-          ? `${summary.awaitingPermission} awaiting access`
-          : `${summary.completed}/${summary.total} completed`;
+        : summary.awaitingPermission + summary.awaitingInput > 0
+          ? `${summary.awaitingPermission + summary.awaitingInput} waiting`
+          : `${summary.completed}/${summary.total} done`;
     phasePillEl.appendChild(text);
-    subtitleEl.hidden = true;
   } else if (active) {
     titleEl.textContent = active.label;
-    if (active.scope.entity || active.scope.project) {
-      scopePillEl.hidden = false;
-      scopePillEl.textContent = [active.scope.entity, active.scope.project]
-        .filter(Boolean)
-        .join("/");
-    } else {
-      scopePillEl.hidden = true;
-    }
+    titleEl.title = active.label;
+    const scopeStr = [active.scope.entity, active.scope.project].filter(Boolean).join("/");
+    scopePillEl.hidden = !scopeStr;
+    scopePillEl.textContent = scopeStr;
     phasePillEl.hidden = false;
     buildPhasePillContent(phasePillEl, active, nowMs);
-    subtitleEl.hidden = true;
-  }
-
-  autoPollBtn.hidden = !canTools || state.sessions.length === 0;
-  autoPollBtn.setAttribute("aria-pressed", state.autoPoll ? "true" : "false");
-  autoPollBtn.textContent = state.autoPoll ? "Auto-poll: On" : "Auto-poll: Paused";
-
-  pollNowBtn.hidden = !canTools || state.sessions.length === 0;
-  pollNowBtn.disabled = state.pollInFlight;
-  if (state.pollInFlight) {
-    pollNowBtn.textContent = "Polling…";
-  } else if (pollable.length > 1) {
-    pollNowBtn.textContent = `Poll active (${pollable.length})`;
   } else {
-    pollNowBtn.textContent = "Poll now";
+    titleEl.textContent = "Waiting for ARIA…";
+    titleEl.title = "Waiting for ARIA…";
+    scopePillEl.hidden = true;
+    phasePillEl.hidden = true;
   }
 
-  spawnToggleBtn.hidden = !canTools || !isReadWrite;
-  threadsToggleBtn.hidden = !canTools;
+  // Silent polling: Refresh appears ONLY if a poll failed, live updates were paused while active,
+  // or the host cannot call server tools on an in-flight turn.
+  const needsManualRefresh =
+    state.sessions.length > 0 &&
+    (state.pollFailed || (pollable.length > 0 && (state.liveUpdatesPaused || !canTools)));
+  refreshLinkBtn.hidden = !needsManualRefresh;
+  if (needsManualRefresh) {
+    if (!canTools) {
+      refreshLinkBtn.disabled = true;
+      refreshLinkBtn.textContent = "Static snapshot";
+    } else if (state.pollInFlight) {
+      refreshLinkBtn.disabled = true;
+      refreshLinkBtn.textContent = "Refreshing…";
+    } else {
+      refreshLinkBtn.disabled = false;
+      refreshLinkBtn.textContent = state.pollFailed ? "Retry refresh" : "Refresh";
+    }
+  }
 
   const canFullscreen = state.availableDisplayModes.includes("fullscreen");
   expandBtn.hidden = !canFullscreen;
   expandBtn.textContent = state.displayMode === "fullscreen" ? "Inline" : "Expand";
 
+  // Overflow menu
   const targetForgeUrl =
-    (!isParallel ? active?.forgeUrl : null) || state.forgeHomeUrl;
-  openForgeBtn.hidden = !targetForgeUrl;
-}
+    (state.view === "run" ? active?.forgeUrl : null) || state.forgeHomeUrl;
+  menuThreadsBtn.hidden = !canTools;
+  menuLiveBtn.hidden = !canTools;
+  menuLiveBtn.textContent = state.liveUpdatesPaused
+    ? "Resume live updates"
+    : "Pause live updates";
+  menuForgeBtn.hidden = !targetForgeUrl;
 
-function renderFleetBar(): void {
-  const isParallel = state.sessions.length >= 2;
-  fleetBarEl.hidden = !isParallel;
-  if (!isParallel) {
-    return;
-  }
-  const summary = summarizeFleet(state.sessions);
-  fleetCountsEl.replaceChildren();
-
-  const parts: string[] = [`${summary.total} ARIA agents`];
-  if (summary.active > 0) {
-    parts.push(`${summary.active} working`);
-  }
-  if (summary.awaitingPermission > 0) {
-    parts.push(`${summary.awaitingPermission} awaiting network access`);
-  }
-  if (summary.awaitingInput > 0) {
-    parts.push(`${summary.awaitingInput} awaiting input`);
-  }
-  parts.push(`${summary.completed} completed`);
-  if (summary.errored > 0) {
-    parts.push(`${summary.errored} errored`);
-  }
-
-  const label = document.createElement("strong");
-  label.textContent = parts.join(" · ");
-  fleetCountsEl.appendChild(label);
-
-  fleetMeterEl.replaceChildren();
-  const total = Math.max(1, summary.total);
-  const segs: Array<{ count: number; tone: string }> = [
-    { count: summary.completed, tone: "success" },
-    { count: summary.active, tone: "active" },
-    { count: summary.awaitingPermission + summary.awaitingInput, tone: "warning" },
-    { count: summary.errored, tone: "danger" },
-  ];
-  for (const seg of segs) {
-    if (seg.count <= 0) {
-      continue;
-    }
-    const bar = document.createElement("span");
-    bar.className = "ar-fleet-seg";
-    bar.dataset.tone = seg.tone;
-    bar.style.width = `${Math.round((seg.count / total) * 100)}%`;
-    fleetMeterEl.appendChild(bar);
-  }
-
-  layoutGridBtn.setAttribute(
-    "aria-selected",
-    state.parallelLayout === "grid" ? "true" : "false",
-  );
-  layoutSplitBtn.setAttribute(
-    "aria-selected",
-    state.parallelLayout === "split" ? "true" : "false",
-  );
-}
-
-function renderDrawers(): void {
-  spawnDrawerEl.hidden = !state.spawnDrawerOpen || state.accessMode === "read-only";
-  threadsDrawerEl.hidden = !state.threadsDrawerOpen;
-
-  if (state.threadsDrawerOpen) {
-    threadsListEl.replaceChildren();
-    if (state.recentThreads.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "ar-muted-note";
-      empty.textContent = "No recent ARIA threads loaded.";
-      threadsListEl.appendChild(empty);
-    } else {
-      for (const th of state.recentThreads) {
-        const row = document.createElement("button");
-        row.type = "button";
-        row.className = "ar-thread-row";
-
-        const left = document.createElement("div");
-        const title = document.createElement("strong");
-        title.textContent = th.title || th.prompt_preview || th.thread_id;
-        left.appendChild(title);
-        const scopeStr = [th.scope.entity, th.scope.project].filter(Boolean).join("/");
-        if (scopeStr) {
-          const scopeSpan = document.createElement("div");
-          scopeSpan.className = "ar-muted-note";
-          scopeSpan.textContent = scopeStr;
-          left.appendChild(scopeSpan);
-        }
-        row.appendChild(left);
-
-        const openTag = document.createElement("span");
-        openTag.className = "ar-muted-note";
-        openTag.textContent = "Load thread →";
-        row.appendChild(openTag);
-
-        row.addEventListener("click", () => {
-          state = { ...state, threadsDrawerOpen: false };
-          renderDrawers();
-          void bridge
-            .callAriaTool("aria_get_thread", { thread_id: th.thread_id, limit: 20 })
-            .then((env) => handleEnvelope(env, true));
-        });
-        threadsListEl.appendChild(row);
-      }
-    }
-  }
+  const hasAnyMenuAction = !menuThreadsBtn.hidden || !menuLiveBtn.hidden || !menuForgeBtn.hidden;
+  menuWrapEl.hidden = !hasAnyMenuAction;
+  menuBtn.setAttribute("aria-expanded", state.menuOpen ? "true" : "false");
+  menuPopoverEl.hidden = !state.menuOpen || !hasAnyMenuAction;
 }
 
 function buildStepChip(step: AriaToolStep): HTMLSpanElement {
@@ -557,337 +409,36 @@ function buildStepChip(step: AriaToolStep): HTMLSpanElement {
   return pill;
 }
 
-function renderParallelGrid(nowMs: number): void {
-  gridViewEl.replaceChildren();
-  state.sessions.forEach((session, idx) => {
-    const latest = latestSessionEntry(session);
-    const turn = latest?.turn ?? null;
-    const phase = deriveSessionPhase(session);
-    const meta = phaseDisplayMeta(phase);
-
-    const card = document.createElement("article");
-    card.className = "ar-agent-card";
-    card.dataset.tone = meta.tone;
-    card.dataset.selected = session.sessionId === state.selectedSessionId ? "true" : "false";
-    card.dataset.sessionId = session.sessionId;
-
-    const top = document.createElement("div");
-    top.className = "ar-card-top";
-
-    const titleGroup = document.createElement("div");
-    titleGroup.className = "ar-card-title-group";
-    const badge = document.createElement("span");
-    badge.className = "ar-idx-badge";
-    badge.textContent = `#${idx + 1}`;
-    titleGroup.appendChild(badge);
-
-    const title = document.createElement("span");
-    title.className = "ar-card-title";
-    title.textContent = session.label;
-    title.title = session.label;
-    titleGroup.appendChild(title);
-    top.appendChild(titleGroup);
-
-    const pill = document.createElement("span");
-    pill.className = "ar-phase-pill";
-    buildPhasePillContent(pill, session, nowMs);
-    top.appendChild(pill);
-    card.appendChild(top);
-
-    // Status line
-    const statusLine = document.createElement("div");
-    statusLine.className = "ar-card-status-line";
-    const latestTool =
-      turn?.progress?.latest_tool_activity?.name ??
-      (turn?.tool_steps && turn.tool_steps.length > 0
-        ? turn.tool_steps[turn.tool_steps.length - 1]!.name
-        : null);
-    const statusText = document.createElement("span");
-    if (!turn?.is_terminal && latestTool) {
-      statusText.textContent = `Running ${latestTool}`;
-    } else {
-      statusText.textContent =
-        turn?.progress?.status_text ||
-        (turn?.is_terminal ? "Turn finished" : "Waiting for sandbox…");
-    }
-    statusLine.appendChild(statusText);
-
-    const toolCount = turn?.progress?.tool_call_record_count ?? 0;
-    if (toolCount > 0) {
-      const counts = document.createElement("span");
-      counts.textContent = `${Math.ceil(toolCount / 2)} tools`;
-      statusLine.appendChild(counts);
-    }
-    card.appendChild(statusLine);
-
-    // Preview box
-    const preview = document.createElement("div");
-    preview.className = "ar-card-preview";
-    if (turn?.latest_response && turn.latest_response.trim()) {
-      const mdWrap = document.createElement("div");
-      mdWrap.className = "ar-md-body";
-      mdWrap.appendChild(renderMarkdownFragment(turn.latest_response, handleOpenLink));
-      preview.appendChild(mdWrap);
-    } else if (phase === "awaiting_permission" && turn) {
-      const { domains, reasons } = extractRequestedDomains(turn);
-      const p = document.createElement("p");
-      p.className = "ar-md-p";
-      p.textContent =
-        reasons[0] ||
-        `ARIA paused to request outbound sandbox access to ${domains.join(", ") || "an external domain"}.`;
-      preview.appendChild(p);
-    } else if (turn?.user_prompt) {
-      const p = document.createElement("p");
-      p.className = "ar-md-p ar-muted-note";
-      p.textContent = turn.user_prompt;
-      preview.appendChild(p);
-    } else {
-      const p = document.createElement("p");
-      p.className = "ar-md-p ar-muted-note";
-      p.textContent = "Executing in ARIA workspace…";
-      preview.appendChild(p);
-    }
-    card.appendChild(preview);
-
-    // Footer actions
-    const footer = document.createElement("div");
-    footer.className = "ar-card-footer";
-
-    if (
-      phase === "awaiting_permission" &&
-      turn &&
-      state.accessMode === "read-write" &&
-      bridge.canCallServerTools()
-    ) {
-      const { domains } = extractRequestedDomains(turn);
-      if (domains.length > 0) {
-        const grantBtn = document.createElement("button");
-        grantBtn.type = "button";
-        grantBtn.className = "ar-btn ar-btn-warning";
-        grantBtn.textContent = `Grant ${domains.join(", ")}`;
-        grantBtn.addEventListener("click", () => {
-          void sendContinuationMessage(
-            turn,
-            `Outbound network access granted for ${domains.join(", ")}. Continue from the saved /workspace state without repeating completed work.`,
-            domains,
-          );
-        });
-        footer.appendChild(grantBtn);
-      }
-    }
-
-    const inspectBtn = document.createElement("button");
-    inspectBtn.type = "button";
-    inspectBtn.className = "ar-btn";
-    inspectBtn.textContent = "Open conversation →";
-    inspectBtn.addEventListener("click", () => {
-      state = {
-        ...state,
-        selectedSessionId: session.sessionId,
-        parallelLayout: "split",
-      };
-      renderAll();
-    });
-    footer.appendChild(inspectBtn);
-
-    card.appendChild(footer);
-    gridViewEl.appendChild(card);
-  });
-}
-
-function renderSplitRail(nowMs: number): void {
-  const isSplit = state.sessions.length >= 2 && state.parallelLayout === "split";
-  railEl.hidden = !isSplit;
-  if (!isSplit) {
-    return;
-  }
-  railEl.replaceChildren();
-  state.sessions.forEach((session, idx) => {
-    const phase = deriveSessionPhase(session);
-    const meta = phaseDisplayMeta(phase);
-    const latest = latestSessionEntry(session);
-    const elapsed = latest ? formatElapsedClock(computeLiveElapsedSeconds(latest, nowMs)) : "";
-
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "ar-rail-item";
-    btn.setAttribute(
-      "aria-selected",
-      session.sessionId === state.selectedSessionId ? "true" : "false",
-    );
-
-    const top = document.createElement("div");
-    top.className = "ar-rail-item-top";
-    const label = document.createElement("span");
-    label.className = "ar-rail-item-label";
-    label.textContent = `#${idx + 1} ${session.label}`;
-    top.appendChild(label);
-    btn.appendChild(top);
-
-    const bottom = document.createElement("div");
-    bottom.className = "ar-rail-item-meta";
-    const status = document.createElement("span");
-    status.textContent = meta.label;
-    bottom.appendChild(status);
-    if (elapsed && latest) {
-      const clock = document.createElement("span");
-      clock.dataset.elapsedTurnId = latest.turn.turn_id;
-      clock.textContent = elapsed;
-      bottom.appendChild(clock);
-    }
-    btn.appendChild(bottom);
-
-    btn.addEventListener("click", () => {
-      state = { ...state, selectedSessionId: session.sessionId };
-      renderAll();
-    });
-    railEl.appendChild(btn);
-  });
-}
-
-function buildTurnGroupNode(
-  entry: SyncedTurnEntry,
-  turnIndex: number,
+function buildGateOrErrorNode(
+  turn: AriaTurnPayload,
   isLatestTurn: boolean,
-  nowMs: number,
-): HTMLElement {
-  const { turn } = entry;
+): HTMLElement | null {
   const phase = deriveTurnPhase(turn);
-  const group = document.createElement("section");
-  group.className = "ar-turn-group";
-  group.dataset.turnId = turn.turn_id;
+  const canAct =
+    isLatestTurn &&
+    !turn.continued_in_turn_id &&
+    state.accessMode === "read-write" &&
+    bridge.canCallServerTools();
 
-  // 1. User / IDE Prompt Bubble
-  if (turn.user_prompt) {
-    const userCard = document.createElement("div");
-    userCard.className = "ar-user-card";
-    const meta = document.createElement("div");
-    meta.className = "ar-bubble-meta";
-    const role = document.createElement("span");
-    role.className = "ar-role-tag";
-    role.textContent = turnIndex === 0 ? "IDE → ARIA" : `Follow-up #${turnIndex + 1}`;
-    meta.appendChild(role);
-
-    const activeDomains = turn.active_allowed_network_domains ?? [];
-    if (activeDomains.length > 0) {
-      const allowWrap = document.createElement("span");
-      allowWrap.className = "ar-domain-pill";
-      allowWrap.textContent = `Allowed egress: ${activeDomains.join(", ")}`;
-      meta.appendChild(allowWrap);
-    }
-    userCard.appendChild(meta);
-
-    const p = document.createElement("p");
-    p.className = "ar-user-text";
-    p.textContent = turn.user_prompt;
-    userCard.appendChild(p);
-    group.appendChild(userCard);
-  }
-
-  // 2. Live Activity & Tool Trail Card
-  const steps = turn.tool_steps ?? [];
-  const toolRecords = turn.progress?.tool_call_record_count ?? 0;
-  const msgCount = turn.progress?.message_count ?? 0;
-  const isActive = !turn.is_terminal;
-  const stepsExpanded = state.expandedStepTurnIds.includes(turn.turn_id);
-
-  if (isActive || steps.length > 0 || toolRecords > 0 || turn.progress?.poll_interrupted) {
-    const activity = document.createElement("div");
-    activity.className = "ar-activity-card";
-    activity.dataset.active = isActive ? "true" : "false";
-
-    const top = document.createElement("div");
-    top.className = "ar-activity-top";
-
-    const left = document.createElement("div");
-    left.className = "ar-activity-status";
-    const dot = document.createElement("span");
-    dot.className = "ar-live-dot";
-    left.appendChild(dot);
-
-    const statusSpan = document.createElement("span");
-    const elapsedStr = formatElapsedClock(computeLiveElapsedSeconds(entry, nowMs));
-    if (isActive) {
-      statusSpan.textContent =
-        turn.progress?.status_text || "ARIA is working in the sandbox…";
-    } else {
-      const approxTools = steps.length || Math.ceil(toolRecords / 2);
-      statusSpan.textContent =
-        approxTools > 0
-          ? `Executed ${approxTools} sandbox/API step${approxTools === 1 ? "" : "s"}${elapsedStr ? ` in ${elapsedStr}` : ""}`
-          : `Turn finished${elapsedStr ? ` in ${elapsedStr}` : ""}`;
-    }
-    left.appendChild(statusSpan);
-    top.appendChild(left);
-
-    const right = document.createElement("div");
-    right.className = "ar-activity-stats";
-    if (isActive && elapsedStr) {
-      const clock = document.createElement("span");
-      clock.dataset.elapsedTurnId = turn.turn_id;
-      clock.textContent = elapsedStr;
-      right.appendChild(clock);
-    }
-    if (msgCount > 0 || toolRecords > 0) {
-      const counts = document.createElement("span");
-      counts.textContent = `${msgCount} msgs · ${Math.ceil(toolRecords / 2)} tool calls`;
-      right.appendChild(counts);
-    }
-    if (!isActive && steps.length > 0) {
-      const toggleBtn = document.createElement("button");
-      toggleBtn.type = "button";
-      toggleBtn.className = "ar-btn";
-      toggleBtn.textContent = stepsExpanded ? "Hide steps" : "Show steps";
-      toggleBtn.addEventListener("click", () => {
-        const nextIds = stepsExpanded
-          ? state.expandedStepTurnIds.filter((id) => id !== turn.turn_id)
-          : [...state.expandedStepTurnIds, turn.turn_id];
-        state = { ...state, expandedStepTurnIds: nextIds };
-        renderAll();
-      });
-      right.appendChild(toggleBtn);
-    }
-    top.appendChild(right);
-    activity.appendChild(top);
-
-    if (isActive) {
-      const track = document.createElement("div");
-      track.className = "ar-progress-track";
-      const bar = document.createElement("div");
-      bar.className = "ar-progress-bar";
-      track.appendChild(bar);
-      activity.appendChild(track);
-    }
-
-    if (steps.length > 0 && (isActive || stepsExpanded)) {
-      const stepsRow = document.createElement("div");
-      stepsRow.className = "ar-steps-row";
-      for (const step of steps) {
-        stepsRow.appendChild(buildStepChip(step));
-      }
-      activity.appendChild(stepsRow);
-    }
-
-    if (turn.progress?.internal_error_note) {
-      const note = document.createElement("div");
-      note.className = "ar-muted-note";
-      note.textContent = turn.progress.internal_error_note;
-      activity.appendChild(note);
-    }
-
-    group.appendChild(activity);
-  }
-
-  // 3. Permission Gate Card (`network_access`)
   if (phase === "awaiting_permission") {
     const { domains, reasons } = extractRequestedDomains(turn);
     const gate = document.createElement("div");
-    gate.className = "ar-gate-card";
+    gate.className = "ar-gate-block";
 
-    const heading = document.createElement("div");
-    heading.className = "ar-gate-title";
-    heading.textContent = "ARIA paused to request outbound sandbox network access";
-    gate.appendChild(heading);
+    const head = document.createElement("div");
+    head.className = "ar-gate-head";
+    const title = document.createElement("span");
+    title.className = "ar-gate-title";
+    title.textContent = "Outbound network access requested";
+    head.appendChild(title);
+
+    for (const dom of domains) {
+      const chip = document.createElement("span");
+      chip.className = "ar-domain-pill";
+      chip.textContent = dom;
+      head.appendChild(chip);
+    }
+    gate.appendChild(head);
 
     if (reasons.length > 0) {
       const reasonP = document.createElement("p");
@@ -896,32 +447,12 @@ function buildTurnGroupNode(
       gate.appendChild(reasonP);
     }
 
-    if (domains.length > 0) {
-      const domRow = document.createElement("div");
-      domRow.className = "ar-gate-domains";
-      for (const dom of domains) {
-        const chip = document.createElement("span");
-        chip.className = "ar-domain-pill";
-        chip.textContent = dom;
-        domRow.appendChild(chip);
-      }
-      gate.appendChild(domRow);
-    }
-
     if (!isLatestTurn || turn.continued_in_turn_id) {
-      const resolved = document.createElement("div");
-      resolved.className = "ar-gate-resolved";
-      resolved.textContent = "Continued in subsequent turn below.";
-      gate.appendChild(resolved);
-    } else if (state.accessMode === "read-only" || !bridge.canCallServerTools()) {
-      const ro = document.createElement("div");
-      ro.className = "ar-gate-resolved";
-      ro.textContent =
-        state.accessMode === "read-only"
-          ? "Server is in read-only mode; network grants require read-write access."
-          : "Approve or decline via aria_send_message(parent_turn_id=..., allowed_network_domains=...).";
-      gate.appendChild(ro);
-    } else {
+      const note = document.createElement("div");
+      note.className = "ar-muted-note";
+      note.textContent = "Resolved in follow-up turn.";
+      gate.appendChild(note);
+    } else if (canAct) {
       const actions = document.createElement("div");
       actions.className = "ar-gate-actions";
       if (domains.length > 0) {
@@ -929,7 +460,7 @@ function buildTurnGroupNode(
         grantBtn.type = "button";
         grantBtn.className = "ar-btn ar-btn-warning";
         grantBtn.dataset.action = "grant-network";
-        grantBtn.textContent = `Grant access (${domains.join(", ")}) & continue`;
+        grantBtn.textContent = `Grant ${domains.join(", ")}`;
         grantBtn.addEventListener("click", () => {
           void sendContinuationMessage(
             turn,
@@ -952,40 +483,45 @@ function buildTurnGroupNode(
       });
       actions.appendChild(offlineBtn);
       gate.appendChild(actions);
+    } else if (state.accessMode !== "read-only" && !bridge.canCallServerTools()) {
+      const note = document.createElement("div");
+      note.className = "ar-muted-note";
+      note.textContent =
+        "Resume via aria_send_message(parent_turn_id=..., allowed_network_domains=...).";
+      gate.appendChild(note);
     }
-    group.appendChild(gate);
+    return gate;
   }
 
-  // 4. Clarifying Question Card (`agent_questions`)
   if (phase === "awaiting_user_input") {
     const questions = extractAgentQuestions(turn);
+    if (questions.length === 0) {
+      return null;
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "ar-gate-stack";
     for (const q of questions) {
       const gate = document.createElement("div");
-      gate.className = "ar-gate-card";
+      gate.className = "ar-gate-block";
 
-      const heading = document.createElement("div");
-      heading.className = "ar-gate-title";
-      heading.textContent = "ARIA asked a clarifying question";
-      gate.appendChild(heading);
+      const title = document.createElement("div");
+      title.className = "ar-gate-title";
+      title.textContent = "Clarifying question";
+      gate.appendChild(title);
 
       const qText = document.createElement("p");
       qText.className = "ar-gate-reason";
       qText.textContent = q.question;
       gate.appendChild(qText);
 
-      if (
-        isLatestTurn &&
-        state.accessMode === "read-write" &&
-        bridge.canCallServerTools() &&
-        Array.isArray(q.options) &&
-        q.options.length > 0
-      ) {
+      if (canAct && Array.isArray(q.options) && q.options.length > 0) {
         const optRow = document.createElement("div");
-        optRow.className = "ar-question-options";
+        optRow.className = "ar-gate-actions";
         for (const opt of q.options) {
           const optBtn = document.createElement("button");
           optBtn.type = "button";
           optBtn.className = "ar-btn";
+          optBtn.dataset.action = "answer-question";
           optBtn.textContent = opt;
           optBtn.addEventListener("click", () => {
             void sendContinuationMessage(turn, opt);
@@ -994,138 +530,625 @@ function buildTurnGroupNode(
         }
         gate.appendChild(optRow);
       }
-      group.appendChild(gate);
+      wrap.appendChild(gate);
     }
+    return wrap;
   }
 
-  // 5. Error Card
   if (phase === "errored") {
-    const errCard = document.createElement("div");
-    errCard.className = "ar-banner";
-    errCard.dataset.tone = "error";
-    errCard.textContent =
+    const errBlock = document.createElement("div");
+    errBlock.className = "ar-error-block";
+    errBlock.textContent =
       turn.error?.message ||
       (turn.error_info ? `ARIA stopped with error: ${turn.error_info}` : "ARIA turn errored.");
-    group.appendChild(errCard);
+    return errBlock;
   }
 
-  // 6. ARIA Response Card
-  if (turn.latest_response && turn.latest_response.trim()) {
-    const assistantCard = document.createElement("div");
-    assistantCard.className = "ar-assistant-card";
-
-    const meta = document.createElement("div");
-    meta.className = "ar-bubble-meta";
-    const leftMeta = document.createElement("div");
-    leftMeta.style.display = "flex";
-    leftMeta.style.alignItems = "center";
-    leftMeta.style.gap = "6px";
-
-    const role = document.createElement("span");
-    role.className = "ar-role-tag";
-    role.textContent = "ARIA";
-    leftMeta.appendChild(role);
-
-    if (!turn.is_terminal) {
-      const draftBadge = document.createElement("span");
-      draftBadge.className = "ar-draft-badge";
-      draftBadge.textContent = "LIVE DRAFT";
-      leftMeta.appendChild(draftBadge);
-    }
-    meta.appendChild(leftMeta);
-
-    const copyBtn = document.createElement("button");
-    copyBtn.type = "button";
-    copyBtn.className = "ar-btn";
-    copyBtn.textContent = "Copy";
-    copyBtn.addEventListener("click", () => {
-      void navigator.clipboard?.writeText(turn.latest_response ?? "").then(() => {
-        copyBtn.textContent = "Copied";
-        window.setTimeout(() => {
-          copyBtn.textContent = "Copy";
-        }, 1200);
-      });
-    });
-    meta.appendChild(copyBtn);
-    assistantCard.appendChild(meta);
-
-    const mdBody = document.createElement("div");
-    mdBody.className = "ar-md-body";
-    mdBody.appendChild(renderMarkdownFragment(turn.latest_response, handleOpenLink));
-    assistantCard.appendChild(mdBody);
-    group.appendChild(assistantCard);
-  }
-
-  return group;
+  return null;
 }
 
-function renderMain(): void {
-  const nowMs = Date.now();
-  if (state.sessions.length === 0) {
+function buildLatestTurnNode(
+  session: AriaAgentSession,
+  entry: SyncedTurnEntry,
+  nowMs: number,
+): HTMLElement {
+  const { turn } = entry;
+  const wrap = document.createElement("div");
+  wrap.className = "ar-turn-body";
+  wrap.dataset.turnId = turn.turn_id;
+
+  const isRunning = !turn.is_terminal;
+  const steps = turn.tool_steps ?? [];
+  const stepCount = countTurnSteps(turn);
+  const recoveredCount = countRecoveredErrors(turn);
+  const stepsExpanded = state.expandedStepTurnIds.includes(turn.turn_id);
+  const hasAnswer = Boolean(turn.latest_response && turn.latest_response.trim());
+
+  if (isRunning) {
+    // 1. Prompt clamped to two lines
+    if (turn.user_prompt) {
+      const promptBlock = document.createElement("div");
+      promptBlock.className = "ar-running-prompt";
+      const pText = document.createElement("p");
+      pText.className = "ar-prompt-clamp";
+      pText.textContent = turn.user_prompt;
+      promptBlock.appendChild(pText);
+      wrap.appendChild(promptBlock);
+    }
+
+    // 2. One live step line: e.g. "Running shell, 3 steps, 37s"
+    const liveWrap = document.createElement("div");
+    liveWrap.className = "ar-live-block";
+
+    const liveRow = document.createElement("div");
+    liveRow.className = "ar-live-line";
+
+    const liveLeft = document.createElement("div");
+    liveLeft.className = "ar-live-left";
+    const dot = document.createElement("span");
+    dot.className = "ar-live-dot ar-live-dot-active";
+    liveLeft.appendChild(dot);
+
+    const lineText = document.createElement("span");
+    lineText.className = "ar-live-text";
+    lineText.dataset.liveStepTurnId = turn.turn_id;
+    lineText.textContent = formatLiveStepLine(entry, nowMs);
+    liveLeft.appendChild(lineText);
+
+    if (recoveredCount > 0) {
+      const retryBadge = document.createElement("span");
+      retryBadge.className = "ar-retry-tag";
+      retryBadge.textContent =
+        recoveredCount === 1 ? "1 retry recovered" : `${recoveredCount} retries recovered`;
+      liveLeft.appendChild(retryBadge);
+    }
+    liveRow.appendChild(liveLeft);
+
+    if (steps.length > 0) {
+      const toggleStepsBtn = document.createElement("button");
+      toggleStepsBtn.type = "button";
+      toggleStepsBtn.className = "ar-link-btn";
+      toggleStepsBtn.dataset.action = "toggle-steps";
+      toggleStepsBtn.textContent = stepsExpanded ? "Hide steps" : "Show steps";
+      toggleStepsBtn.addEventListener("click", () => {
+        const nextIds = stepsExpanded
+          ? state.expandedStepTurnIds.filter((id) => id !== turn.turn_id)
+          : [...state.expandedStepTurnIds, turn.turn_id];
+        state = { ...state, expandedStepTurnIds: nextIds };
+        renderAll();
+      });
+      liveRow.appendChild(toggleStepsBtn);
+    }
+    liveWrap.appendChild(liveRow);
+
+    const track = document.createElement("div");
+    track.className = "ar-progress-track";
+    const bar = document.createElement("div");
+    bar.className = "ar-progress-bar";
+    track.appendChild(bar);
+    liveWrap.appendChild(track);
+
+    if (steps.length > 0 && stepsExpanded) {
+      const stepsRow = document.createElement("div");
+      stepsRow.className = "ar-steps-row";
+      for (const step of steps) {
+        stepsRow.appendChild(buildStepChip(step));
+      }
+      liveWrap.appendChild(stepsRow);
+    }
+
+    wrap.appendChild(liveWrap);
+
+    // 3. Streaming draft answer if present
+    if (hasAnswer) {
+      const draftWrap = document.createElement("div");
+      draftWrap.className = "ar-draft-answer";
+      draftWrap.appendChild(renderMarkdownFragment(turn.latest_response!, handleOpenLink));
+      wrap.appendChild(draftWrap);
+    }
+
+    return wrap;
+  }
+
+  // Completed / terminal turn:
+  // Show a quiet 1-line prompt cue on follow-up turns (since earlier turns are collapsed)
+  // or when no answer text arrived yet (e.g. paused on a gate).
+  if (turn.user_prompt && (session.turns.length > 1 || !hasAnswer)) {
+    const cue = document.createElement("p");
+    cue.className = hasAnswer ? "ar-followup-cue" : "ar-prompt-clamp";
+    cue.textContent = turn.user_prompt;
+    wrap.appendChild(cue);
+  }
+
+  const gateOrErr = buildGateOrErrorNode(turn, true);
+  if (gateOrErr) {
+    wrap.appendChild(gateOrErr);
+  }
+
+  if (hasAnswer) {
+    const isClamped =
+      state.displayMode !== "fullscreen" &&
+      isLongInlineAnswer(turn.latest_response) &&
+      !state.expandedAnswerTurnIds.includes(turn.turn_id);
+    const isExpandedLong =
+      state.displayMode !== "fullscreen" &&
+      isLongInlineAnswer(turn.latest_response) &&
+      state.expandedAnswerTurnIds.includes(turn.turn_id);
+
+    const answerOuter = document.createElement("div");
+    answerOuter.className = "ar-answer-outer";
+
+    const answerBody = document.createElement("div");
+    answerBody.className = "ar-md-body ar-answer-body";
+    if (isClamped) {
+      answerBody.dataset.clamped = "true";
+    }
+    answerBody.appendChild(renderMarkdownFragment(turn.latest_response!, handleOpenLink));
+    answerOuter.appendChild(answerBody);
+
+    if (isClamped || isExpandedLong) {
+      const moreBtn = document.createElement("button");
+      moreBtn.type = "button";
+      moreBtn.className = "ar-link-btn ar-show-more-btn";
+      moreBtn.dataset.action = "toggle-answer";
+      moreBtn.textContent = isClamped ? "Show more" : "Show less";
+      moreBtn.addEventListener("click", () => {
+        const nextIds = isClamped
+          ? [...state.expandedAnswerTurnIds, turn.turn_id]
+          : state.expandedAnswerTurnIds.filter((id) => id !== turn.turn_id);
+        state = { ...state, expandedAnswerTurnIds: nextIds };
+        renderAll();
+      });
+      answerOuter.appendChild(moreBtn);
+    }
+
+    wrap.appendChild(answerOuter);
+  }
+
+  // One footer line: step count, elapsed time, Show steps, and Copy
+  const elapsedStr = formatElapsedClock(computeLiveElapsedSeconds(entry, nowMs));
+  const activeDomains = turn.active_allowed_network_domains ?? [];
+  const hasFooterContent =
+    stepCount > 0 ||
+    Boolean(elapsedStr) ||
+    steps.length > 0 ||
+    hasAnswer ||
+    recoveredCount > 0 ||
+    activeDomains.length > 0;
+
+  if (hasFooterContent) {
+    const footer = document.createElement("div");
+    footer.className = "ar-turn-footer";
+
+    const left = document.createElement("div");
+    left.className = "ar-footer-left";
+
+    const metaParts: string[] = [];
+    if (stepCount > 0) {
+      metaParts.push(`${stepCount} ${stepCount === 1 ? "step" : "steps"}`);
+    }
+    if (elapsedStr) {
+      metaParts.push(elapsedStr);
+    }
+    if (recoveredCount > 0) {
+      metaParts.push(
+        recoveredCount === 1 ? "1 retry recovered" : `${recoveredCount} retries recovered`,
+      );
+    }
+    if (activeDomains.length > 0) {
+      metaParts.push(`allowed ${activeDomains.join(", ")}`);
+    }
+
+    if (metaParts.length > 0) {
+      const metaSpan = document.createElement("span");
+      metaSpan.className = "ar-footer-meta";
+      metaSpan.textContent = metaParts.join(" · ");
+      left.appendChild(metaSpan);
+    }
+
+    if (steps.length > 0) {
+      const stepsBtn = document.createElement("button");
+      stepsBtn.type = "button";
+      stepsBtn.className = "ar-link-btn";
+      stepsBtn.dataset.action = "toggle-steps";
+      stepsBtn.textContent = stepsExpanded ? "Hide steps" : "Show steps";
+      stepsBtn.addEventListener("click", () => {
+        const nextIds = stepsExpanded
+          ? state.expandedStepTurnIds.filter((id) => id !== turn.turn_id)
+          : [...state.expandedStepTurnIds, turn.turn_id];
+        state = { ...state, expandedStepTurnIds: nextIds };
+        renderAll();
+      });
+      left.appendChild(stepsBtn);
+    }
+    footer.appendChild(left);
+
+    if (hasAnswer) {
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "ar-link-btn";
+      copyBtn.dataset.action = "copy-answer";
+      copyBtn.textContent = "Copy";
+      copyBtn.addEventListener("click", () => {
+        void navigator.clipboard?.writeText(turn.latest_response ?? "").then(() => {
+          copyBtn.textContent = "Copied";
+          window.setTimeout(() => {
+            copyBtn.textContent = "Copy";
+          }, 1200);
+        });
+      });
+      footer.appendChild(copyBtn);
+    }
+
+    wrap.appendChild(footer);
+
+    if (steps.length > 0 && stepsExpanded) {
+      const stepsRow = document.createElement("div");
+      stepsRow.className = "ar-steps-row";
+      for (const step of steps) {
+        stepsRow.appendChild(buildStepChip(step));
+      }
+      wrap.appendChild(stepsRow);
+    }
+  }
+
+  return wrap;
+}
+
+function buildEarlierTurnsNode(
+  session: AriaAgentSession,
+  earlierEntries: SyncedTurnEntry[],
+  nowMs: number,
+): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "ar-earlier-section";
+  const isOpen = state.expandedEarlierSessionIds.includes(session.sessionId);
+  const count = earlierEntries.length;
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "ar-earlier-toggle";
+  toggle.dataset.action = "toggle-earlier";
+  toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  toggle.textContent = `${isOpen ? "▾" : "▸"} ${count} earlier ${count === 1 ? "turn" : "turns"}`;
+  toggle.addEventListener("click", () => {
+    const nextIds = isOpen
+      ? state.expandedEarlierSessionIds.filter((id) => id !== session.sessionId)
+      : [...state.expandedEarlierSessionIds, session.sessionId];
+    state = { ...state, expandedEarlierSessionIds: nextIds };
+    renderAll();
+  });
+  wrap.appendChild(toggle);
+
+  if (isOpen) {
+    const list = document.createElement("div");
+    list.className = "ar-earlier-list";
+    earlierEntries.forEach((entry, idx) => {
+      const item = document.createElement("div");
+      item.className = "ar-earlier-item";
+      item.dataset.turnId = entry.turn.turn_id;
+
+      if (entry.turn.user_prompt) {
+        const promptP = document.createElement("p");
+        promptP.className = "ar-earlier-prompt";
+        promptP.textContent = entry.turn.user_prompt;
+        item.appendChild(promptP);
+      }
+
+      if (entry.turn.latest_response && entry.turn.latest_response.trim()) {
+        const md = document.createElement("div");
+        md.className = "ar-md-body ar-earlier-answer";
+        md.appendChild(renderMarkdownFragment(entry.turn.latest_response, handleOpenLink));
+        item.appendChild(md);
+      } else {
+        const phase = deriveTurnPhase(entry.turn);
+        const note = document.createElement("div");
+        note.className = "ar-muted-note";
+        if (phase === "awaiting_permission") {
+          const { domains } = extractRequestedDomains(entry.turn);
+          note.textContent = domains.length
+            ? `Paused for network access (${domains.join(", ")}) — continued in turn #${idx + 2}.`
+            : `Paused for network access — continued in turn #${idx + 2}.`;
+        } else if (phase === "awaiting_user_input") {
+          note.textContent = `Asked clarifying question — answered in turn #${idx + 2}.`;
+        } else {
+          const elapsed = formatElapsedClock(computeLiveElapsedSeconds(entry, nowMs));
+          note.textContent = `Completed${elapsed ? ` in ${elapsed}` : ""}.`;
+        }
+        item.appendChild(note);
+      }
+
+      list.appendChild(item);
+    });
+    wrap.appendChild(list);
+  }
+
+  return wrap;
+}
+
+function renderRunView(nowMs: number): void {
+  const active = selectedSession();
+  if (!active || active.turns.length === 0) {
+    runViewEl.hidden = true;
     emptyEl.hidden = false;
-    gridViewEl.hidden = true;
-    workspaceEl.hidden = true;
-    emptyEl.textContent =
-      state.recentThreads.length > 0
-        ? "Select an ARIA conversation above to inspect its turns."
-        : "Waiting for ARIA turn…";
+    emptyEl.textContent = "Waiting for ARIA…";
     return;
   }
 
   emptyEl.hidden = true;
-  const isParallelGrid = state.sessions.length >= 2 && state.parallelLayout === "grid";
+  runViewEl.hidden = false;
 
-  if (isParallelGrid) {
-    gridViewEl.hidden = false;
-    workspaceEl.hidden = true;
-    renderParallelGrid(nowMs);
-    return;
+  const earlier = active.turns.slice(0, -1);
+  if (earlier.length > 0) {
+    earlierWrapEl.hidden = false;
+    earlierWrapEl.replaceChildren(buildEarlierTurnsNode(active, earlier, nowMs));
+  } else {
+    earlierWrapEl.hidden = true;
+    earlierWrapEl.replaceChildren();
   }
 
-  gridViewEl.hidden = true;
-  workspaceEl.hidden = false;
-  renderSplitRail(nowMs);
+  const latest = active.turns[active.turns.length - 1]!;
+  latestTurnEl.replaceChildren(buildLatestTurnNode(active, latest, nowMs));
 
-  const active = selectedSession();
-  turnStreamEl.replaceChildren();
-  if (!active) {
+  const latestPhase = deriveTurnPhase(latest.turn);
+  if (state.accessMode === "read-only") {
+    readonlyLineEl.hidden = false;
+    readonlyLineEl.textContent =
+      "Read-only mode — replies and network approvals are disabled.";
     composerEl.hidden = true;
+  } else {
+    readonlyLineEl.hidden = true;
+    const canReply =
+      bridge.canCallServerTools() &&
+      !latest.optimistic &&
+      (latestPhase === "completed" || latestPhase === "awaiting_user_input");
+    composerEl.hidden = !canReply;
+    if (canReply) {
+      replyInput.placeholder =
+        latestPhase === "awaiting_user_input"
+          ? "Type your answer… (Enter to send)"
+          : "Ask a follow-up… (Enter to send)";
+    }
+  }
+}
+
+function renderRunListView(nowMs: number): void {
+  const summary = summarizeBatch(state.sessions);
+  const summaryParts: string[] = [`${summary.total} runs`];
+  if (summary.active > 0) {
+    summaryParts.push(`${summary.active} running`);
+  }
+  if (summary.awaitingPermission > 0) {
+    summaryParts.push(`${summary.awaitingPermission} needs network access`);
+  }
+  if (summary.awaitingInput > 0) {
+    summaryParts.push(`${summary.awaitingInput} needs answer`);
+  }
+  summaryParts.push(`${summary.completed} done`);
+  if (summary.errored > 0) {
+    summaryParts.push(`${summary.errored} errored`);
+  }
+  runListSummaryEl.textContent = summaryParts.join(" · ");
+
+  runListRowsEl.replaceChildren();
+  for (const session of state.sessions) {
+    const latest = latestSessionEntry(session);
+    const turn = latest?.turn ?? null;
+    const phase = deriveSessionPhase(session);
+    const meta = phaseDisplayMeta(phase);
+    const isExpanded = state.expandedBatchSessionId === session.sessionId;
+
+    const row = document.createElement("div");
+    row.className = "ar-list-row";
+    row.dataset.sessionId = session.sessionId;
+    row.dataset.expanded = isExpanded ? "true" : "false";
+
+    const headBtn = document.createElement("button");
+    headBtn.type = "button";
+    headBtn.className = "ar-list-row-btn";
+    headBtn.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+
+    const left = document.createElement("div");
+    left.className = "ar-list-row-left";
+
+    const chevron = document.createElement("span");
+    chevron.className = "ar-chevron";
+    chevron.textContent = isExpanded ? "▾" : "▸";
+    left.appendChild(chevron);
+
+    const title = document.createElement("span");
+    title.className = "ar-list-row-title";
+    title.textContent = session.label;
+    left.appendChild(title);
+
+    if (!isExpanded && turn) {
+      const hint = document.createElement("span");
+      hint.className = "ar-list-row-hint";
+      if (!turn.is_terminal) {
+        const runningStep =
+          turn.tool_steps?.[turn.tool_steps.length - 1]?.name ??
+          turn.progress?.latest_tool_activity?.name;
+        hint.textContent = runningStep ? `Running ${runningStep}` : "Working";
+      } else if (phase === "awaiting_permission") {
+        const { domains } = extractRequestedDomains(turn);
+        hint.textContent = domains.join(", ");
+      } else if (phase === "errored") {
+        hint.textContent = turn.error?.message || turn.error_info || "";
+      }
+      if (hint.textContent) {
+        left.appendChild(hint);
+      }
+    }
+    headBtn.appendChild(left);
+
+    const right = document.createElement("div");
+    right.className = "ar-list-row-right";
+
+    const badge = document.createElement("span");
+    badge.className = "ar-status-tag";
+    badge.dataset.tone = meta.tone;
+    badge.textContent = meta.label;
+    right.appendChild(badge);
+
+    if (latest) {
+      const elapsed = formatElapsedClock(computeLiveElapsedSeconds(latest, nowMs));
+      if (elapsed) {
+        const clock = document.createElement("span");
+        clock.className = "ar-row-clock";
+        clock.dataset.elapsedTurnId = latest.turn.turn_id;
+        clock.textContent = elapsed;
+        right.appendChild(clock);
+      }
+    }
+    headBtn.appendChild(right);
+
+    headBtn.addEventListener("click", () => {
+      state = {
+        ...state,
+        selectedSessionId: session.sessionId,
+        expandedBatchSessionId: isExpanded ? null : session.sessionId,
+      };
+      renderAll();
+    });
+    row.appendChild(headBtn);
+
+    if (isExpanded && latest) {
+      const detail = document.createElement("div");
+      detail.className = "ar-list-row-detail";
+
+      const earlier = session.turns.slice(0, -1);
+      if (earlier.length > 0) {
+        detail.appendChild(buildEarlierTurnsNode(session, earlier, nowMs));
+      }
+      detail.appendChild(buildLatestTurnNode(session, latest, nowMs));
+
+      const latestPhase = deriveTurnPhase(latest.turn);
+      if (state.accessMode === "read-only") {
+        const ro = document.createElement("div");
+        ro.className = "ar-readonly-line";
+        ro.textContent =
+          "Read-only mode — replies and network approvals are disabled.";
+        detail.appendChild(ro);
+      } else if (
+        bridge.canCallServerTools() &&
+        !latest.optimistic &&
+        (latestPhase === "completed" || latestPhase === "awaiting_user_input")
+      ) {
+        const inlineComposer = document.createElement("div");
+        inlineComposer.className = "ar-composer";
+        const input = document.createElement("textarea");
+        input.className = "ar-reply-input";
+        input.rows = 1;
+        input.placeholder =
+          latestPhase === "awaiting_user_input"
+            ? "Type your answer… (Enter to send)"
+            : "Ask a follow-up… (Enter to send)";
+        input.setAttribute("aria-label", `Follow-up message for ${session.label}`);
+
+        const sendBtn = document.createElement("button");
+        sendBtn.type = "button";
+        sendBtn.className = "ar-btn ar-btn-primary";
+        sendBtn.textContent = "Send";
+
+        const submitInline = () => {
+          const text = input.value.trim();
+          if (!text) {
+            return;
+          }
+          input.value = "";
+          void sendContinuationMessage(latest.turn, text);
+        };
+        sendBtn.addEventListener("click", submitInline);
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+            event.preventDefault();
+            submitInline();
+          }
+        });
+        inlineComposer.appendChild(input);
+        inlineComposer.appendChild(sendBtn);
+        detail.appendChild(inlineComposer);
+      }
+
+      row.appendChild(detail);
+    }
+
+    runListRowsEl.appendChild(row);
+  }
+}
+
+function renderThreadListView(): void {
+  const count = state.recentThreads.length;
+  threadListSummaryEl.textContent =
+    count === 0
+      ? "No recent ARIA conversations found."
+      : `${count} recent ${count === 1 ? "conversation" : "conversations"}`;
+
+  threadListRowsEl.replaceChildren();
+  for (const th of state.recentThreads) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ar-thread-item";
+    btn.dataset.threadId = th.thread_id;
+
+    const left = document.createElement("div");
+    left.className = "ar-thread-item-left";
+    const title = document.createElement("span");
+    title.className = "ar-list-row-title";
+    title.textContent = th.title || th.prompt_preview || th.thread_id;
+    left.appendChild(title);
+
+    const scopeStr = [th.scope.entity, th.scope.project].filter(Boolean).join("/");
+    if (scopeStr) {
+      const scope = document.createElement("span");
+      scope.className = "ar-list-row-hint";
+      scope.textContent = scopeStr;
+      left.appendChild(scope);
+    }
+    btn.appendChild(left);
+
+    const openCue = document.createElement("span");
+    openCue.className = "ar-thread-open-cue";
+    openCue.textContent = "Open →";
+    btn.appendChild(openCue);
+
+    btn.addEventListener("click", () => {
+      if (!bridge.canCallServerTools()) {
+        return;
+      }
+      void bridge
+        .callAriaTool("aria_get_thread", { thread_id: th.thread_id, limit: 20 })
+        .then((env) => handleEnvelope(env, { immediateSync: true }));
+    });
+
+    threadListRowsEl.appendChild(btn);
+  }
+}
+
+function renderMain(): void {
+  const nowMs = Date.now();
+  emptyEl.hidden = true;
+  runViewEl.hidden = true;
+  runListViewEl.hidden = true;
+  threadListViewEl.hidden = true;
+
+  if (state.view === "threadList") {
+    threadListViewEl.hidden = false;
+    renderThreadListView();
     return;
   }
 
-  active.turns.forEach((entry, idx) => {
-    const isLatest = idx === active.turns.length - 1;
-    turnStreamEl.appendChild(buildTurnGroupNode(entry, idx, isLatest, nowMs));
-  });
-
-  if (active.sessionId !== lastRenderedSessionId) {
-    turnStreamEl.scrollTop = 0;
-  } else if (active.turns.length > lastRenderedTurnCount && active.turns.length > 1) {
-    const newestGroup = turnStreamEl.lastElementChild as HTMLElement | null;
-    newestGroup?.scrollIntoView({ block: "start" });
+  if (state.view === "runList" && state.sessions.length > 0) {
+    runListViewEl.hidden = false;
+    renderRunListView(nowMs);
+    return;
   }
-  lastRenderedSessionId = active.sessionId;
-  lastRenderedTurnCount = active.turns.length;
 
-  const latest = latestSessionEntry(active);
-  const canReply =
-    state.accessMode === "read-write" &&
-    bridge.canCallServerTools() &&
-    Boolean(latest && !latest.optimistic && latest.turn.state === "completed");
-  composerEl.hidden = !canReply;
-  if (canReply && latest) {
-    const phase = deriveTurnPhase(latest.turn);
-    replyInput.placeholder =
-      phase === "awaiting_user_input"
-        ? "Type your answer to ARIA… (Enter to send)"
-        : "Ask ARIA a follow-up in this conversation… (Enter to send, Shift+Enter for newline)";
-  }
+  renderRunView(nowMs);
 }
 
 function renderAll(): void {
   renderHeader();
-  renderFleetBar();
-  renderDrawers();
   renderBanner();
   renderMain();
 }
@@ -1146,19 +1169,24 @@ function tickLiveClocks(): void {
   if (entryByTurnId.size === 0) {
     return;
   }
-  const nodes = document.querySelectorAll<HTMLElement>("[data-elapsed-turn-id]");
-  nodes.forEach((el) => {
+
+  document.querySelectorAll<HTMLElement>("[data-elapsed-turn-id]").forEach((el) => {
     const tid = el.dataset.elapsedTurnId;
-    if (!tid) {
-      return;
-    }
-    const entry = entryByTurnId.get(tid);
+    const entry = tid ? entryByTurnId.get(tid) : undefined;
     if (!entry) {
       return;
     }
     const formatted = formatElapsedClock(computeLiveElapsedSeconds(entry, nowMs));
     if (formatted) {
       el.textContent = el.closest(".ar-phase-pill") ? `· ${formatted}` : formatted;
+    }
+  });
+
+  document.querySelectorAll<HTMLElement>("[data-live-step-turn-id]").forEach((el) => {
+    const tid = el.dataset.liveStepTurnId;
+    const entry = tid ? entryByTurnId.get(tid) : undefined;
+    if (entry) {
+      el.textContent = formatLiveStepLine(entry, nowMs);
     }
   });
 }
@@ -1174,7 +1202,7 @@ const bridge = new AriaHostBridge({
     }
   },
   onToolEnvelope(envelope) {
-    handleEnvelope(envelope, true);
+    handleEnvelope(envelope, { immediateSync: true });
   },
   onHostContext(displayMode, availableDisplayModes) {
     state = {
@@ -1182,7 +1210,7 @@ const bridge = new AriaHostBridge({
       displayMode: displayMode ?? state.displayMode,
       availableDisplayModes: availableDisplayModes ?? state.availableDisplayModes,
     };
-    renderHeader();
+    renderAll();
   },
   onTeardown() {
     clearPollTimer();
@@ -1193,69 +1221,30 @@ const bridge = new AriaHostBridge({
   },
 });
 
-// Wire static DOM controls
-autoPollBtn.addEventListener("click", () => {
-  state = { ...state, autoPoll: !state.autoPoll };
-  renderHeader();
-  scheduleNextPollOrHydration();
+// Header & menu controls
+backBtn.addEventListener("click", () => {
+  if (state.view === "threadList" && state.previousView) {
+    state = { ...state, view: state.previousView };
+    renderAll();
+    return;
+  }
+  if (state.view === "run" && state.cameFromThreadList && state.recentThreads.length > 0) {
+    state = { ...state, view: "threadList", previousView: "run" };
+    renderAll();
+  }
 });
 
-pollNowBtn.addEventListener("click", () => {
+refreshLinkBtn.addEventListener("click", () => {
   const activeIds = getPollableTurnIds(state);
   if (activeIds.length > 0) {
-    void pollSpecificTurnIds(activeIds);
+    void pollSpecificTurnIds(activeIds, true);
     return;
   }
   const current = selectedSession();
   const latest = current ? latestSessionEntry(current) : null;
   if (latest && !latest.optimistic) {
-    void pollSpecificTurnIds([latest.turn.turn_id]);
+    void pollSpecificTurnIds([latest.turn.turn_id], true);
   }
-});
-
-spawnToggleBtn.addEventListener("click", () => {
-  state = {
-    ...state,
-    spawnDrawerOpen: !state.spawnDrawerOpen,
-    threadsDrawerOpen: false,
-  };
-  renderDrawers();
-});
-
-spawnCloseBtn.addEventListener("click", () => {
-  state = { ...state, spawnDrawerOpen: false };
-  renderDrawers();
-});
-
-spawnPromptsInput.addEventListener("input", updateSpawnHint);
-spawnSubmitBtn.addEventListener("click", () => {
-  void launchParallelSubAgents();
-});
-
-threadsToggleBtn.addEventListener("click", () => {
-  const willOpen = !state.threadsDrawerOpen;
-  state = {
-    ...state,
-    threadsDrawerOpen: willOpen,
-    spawnDrawerOpen: false,
-  };
-  renderDrawers();
-  if (willOpen && bridge.canCallServerTools()) {
-    const active = selectedSession();
-    const args: Record<string, unknown> = { limit: 15 };
-    if (active?.scope.entity) {
-      args.entity = active.scope.entity;
-    }
-    if (active?.scope.project) {
-      args.project = active.scope.project;
-    }
-    void bridge.callAriaTool("aria_list_threads", args).then((env) => handleEnvelope(env));
-  }
-});
-
-threadsCloseBtn.addEventListener("click", () => {
-  state = { ...state, threadsDrawerOpen: false };
-  renderDrawers();
 });
 
 expandBtn.addEventListener("click", () => {
@@ -1263,30 +1252,68 @@ expandBtn.addEventListener("click", () => {
   void bridge.requestDisplayMode(target).then((res) => {
     if (res.ok) {
       state = { ...state, displayMode: res.mode };
-      renderHeader();
+      renderAll();
     } else {
       showBanner(res.message, "info");
     }
   });
 });
 
-openForgeBtn.addEventListener("click", () => {
-  const isParallel = state.sessions.length >= 2;
+menuBtn.addEventListener("click", (event) => {
+  event.stopPropagation();
+  state = { ...state, menuOpen: !state.menuOpen };
+  renderHeader();
+});
+
+menuThreadsBtn.addEventListener("click", () => {
+  closeMenu();
+  if (!bridge.canCallServerTools()) {
+    return;
+  }
   const active = selectedSession();
-  const target = (!isParallel ? active?.forgeUrl : null) || state.forgeHomeUrl;
+  const args: Record<string, unknown> = { limit: 15 };
+  if (active?.scope.entity) {
+    args.entity = active.scope.entity;
+  }
+  if (active?.scope.project) {
+    args.project = active.scope.project;
+  }
+  void bridge
+    .callAriaTool("aria_list_threads", args)
+    .then((env) => handleEnvelope(env, { immediateSync: true }));
+});
+
+menuLiveBtn.addEventListener("click", () => {
+  const nextPaused = !state.liveUpdatesPaused;
+  state = { ...state, liveUpdatesPaused: nextPaused, menuOpen: false };
+  renderHeader();
+  if (nextPaused) {
+    clearPollTimer();
+  } else {
+    scheduleNextPollOrHydration();
+  }
+});
+
+menuForgeBtn.addEventListener("click", () => {
+  closeMenu();
+  const active = selectedSession();
+  const target = (state.view === "run" ? active?.forgeUrl : null) || state.forgeHomeUrl;
   if (target) {
     handleOpenLink(target);
   }
 });
 
-layoutGridBtn.addEventListener("click", () => {
-  state = { ...state, parallelLayout: "grid" };
-  renderAll();
+document.addEventListener("click", (event) => {
+  if (state.menuOpen && !menuWrapEl.contains(event.target as Node)) {
+    closeMenu();
+  }
 });
 
-layoutSplitBtn.addEventListener("click", () => {
-  state = { ...state, parallelLayout: "split" };
-  renderAll();
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.menuOpen) {
+    event.preventDefault();
+    closeMenu(true);
+  }
 });
 
 bannerDismissBtn.addEventListener("click", () => {
@@ -1316,6 +1343,5 @@ replyInput.addEventListener("keydown", (event) => {
 });
 
 clockInterval = window.setInterval(tickLiveClocks, 1000);
-updateSpawnHint();
 renderAll();
 void bridge.connect();

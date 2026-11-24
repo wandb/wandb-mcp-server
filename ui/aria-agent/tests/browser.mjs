@@ -60,7 +60,7 @@ const browser = await chromium.launch({ headless: true });
 const consoleErrors = [];
 
 try {
-  const page = await browser.newPage({ viewport: { width: 980, height: 740 } });
+  const page = await browser.newPage({ viewport: { width: 920, height: 720 } });
   page.on("pageerror", (err) => consoleErrors.push(`pageerror: ${err.message}`));
   page.on("console", (msg) => {
     if (msg.type() === "error") {
@@ -71,7 +71,7 @@ try {
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "networkidle" });
 
   // -------------------------------------------------------------------------
-  // Scenario 1: 1-to-1 IDE <-> ARIA Back-and-Forth (Polling -> Permission -> Reply)
+  // Scenario 1: Compact RunCard (silent polling -> network gate -> direct answer -> collapsed earlier turns)
   // -------------------------------------------------------------------------
   await page.evaluate(async (html) => {
     window.__MCP_APP_TEST_HOST__.setToolHandler(async (name, args) => {
@@ -98,14 +98,12 @@ try {
               tool_steps: [
                 { call_id: "c1", name: "query_wandb", status: "ok" },
                 { call_id: "c2", name: "shell", status: "ok" },
-                { call_id: "c3", name: "request_network_access", status: "ok" },
               ],
               progress: {
                 phase: "awaiting_permission",
-                status_text: "ARIA paused to request outbound network access to arxiv.org.",
                 elapsed_seconds: 44,
                 message_count: 4,
-                tool_call_record_count: 6,
+                tool_call_record_count: 4,
                 requested_network_domains: ["arxiv.org"],
               },
               forge_url: "https://forge.coreweave.com/home/aria/threads/thread-solo",
@@ -132,7 +130,6 @@ try {
               tool_steps: [{ call_id: "c4", name: "shell", status: "ok" }],
               progress: {
                 phase: "completed",
-                status_text: "ARIA completed the turn.",
                 elapsed_seconds: 26,
                 message_count: 3,
                 tool_call_record_count: 2,
@@ -179,10 +176,10 @@ try {
   }, appHtml);
 
   const frame = page.frameLocator("#mcp-app-frame");
-  await frame.locator(".ar-user-text").waitFor({ state: "visible" });
-  assert.equal(await frame.locator("#ar-fleet-bar").isVisible(), false, "1-to-1 mode must hide parallel fleet bar");
+  await frame.locator(".ar-prompt-clamp").waitFor({ state: "visible" });
+  assert.equal(await frame.locator("#ar-refresh-link").isVisible(), false, "Silent polling hides Refresh link");
 
-  // Push in-progress polling turn
+  // Push in-progress turn -> silent poll automatically advances to awaiting_permission within ~2s
   await page.evaluate(async () => {
     await window.__MCP_APP_TEST_HOST__.sendToolResult({
       structuredContent: {
@@ -195,14 +192,13 @@ try {
           scope: { entity: "studio-ai", project: "looped-synth-study" },
           state: "in_progress",
           is_terminal: false,
-          poll_after_seconds: 5,
+          poll_after_seconds: 2,
           tool_steps: [
             { call_id: "c1", name: "query_wandb", status: "ok" },
             { call_id: "c2", name: "shell", status: "running" },
           ],
           progress: {
             phase: "working",
-            status_text: "ARIA is running shell.",
             elapsed_seconds: 19,
             message_count: 2,
             tool_call_record_count: 3,
@@ -214,19 +210,19 @@ try {
     });
   });
 
-  await frame.locator(".ar-step-pill[data-status='running']").waitFor({ state: "visible" });
-  assert.match(await frame.locator("#ar-title").innerText(), /Chorus Extrapolation Audit/);
+  await frame.locator(".ar-live-text").waitFor({ state: "visible" });
+  assert.match(await frame.locator(".ar-live-text").innerText(), /Running shell, 2 steps/);
 
-  // Poll now -> advances to awaiting_permission (`arxiv.org`)
-  await frame.locator("#ar-poll-now-btn").click();
+  // Silent background poll advances to awaiting_permission (`arxiv.org`) with zero button clicks
   const grantBtn = frame.locator("button[data-action='grant-network']");
-  await grantBtn.waitFor({ state: "visible" });
+  await grantBtn.waitFor({ state: "visible", timeout: 5_000 });
   assert.match(await grantBtn.innerText(), /arxiv\.org/);
 
-  // Grant access inline -> calls aria_send_message(parent_turn_id='turn-1', allowed_network_domains=['arxiv.org'])
+  // Grant access inline -> renders GFM table directly
   await grantBtn.click();
   await frame.locator(".ar-md-table").waitFor({ state: "visible" });
   assert.match(await frame.locator(".ar-md-table").innerText(), /0\.941/);
+  assert.match(await frame.locator(".ar-earlier-toggle").innerText(), /1 earlier turn/);
 
   // Click validated HTTPS link in ARIA markdown response
   await frame.locator(".ar-md-link").first().click();
@@ -236,25 +232,24 @@ try {
     ),
   );
 
-  // Send 1-to-1 follow-up message with Enter key (no <form> submit!)
+  // Send follow-up message -> earlier turns collapse into "2 earlier turns"
   await frame.locator("#ar-reply-input").fill("Check seed-0 vs seed-1 variance.");
   await frame.locator("#ar-reply-input").press("Enter");
-  await page.waitForFunction(
-    () =>
-      window.__MCP_APP_TEST_HOST__.toolCalls.some(
-        (c) => c.name === "aria_send_message" && c.arguments.parent_turn_id === "turn-2",
-      ),
-  );
-  await frame.locator(".ar-turn-group[data-turn-id='turn-3']").waitFor({ state: "visible" });
+  await frame.locator("button.ar-earlier-toggle", { hasText: "2 earlier turns" }).waitFor({
+    state: "visible",
+  });
+  assert.equal(await frame.locator(".ar-earlier-list").isVisible(), false);
+  await frame.locator("button.ar-earlier-toggle").click();
+  assert.equal(await frame.locator(".ar-earlier-list").isVisible(), true);
 
   // -------------------------------------------------------------------------
-  // Scenario 2: N=4 Parallel Async ARIA Sub-Agents Fleet + Batch Polling + Read-Only Guard
+  // Scenario 2: Batch poll RunList (parallel_turn_ids) + inline row expansion
   // -------------------------------------------------------------------------
   await page.evaluate(async (html) => {
     window.__MCP_APP_TEST_HOST__.toolCalls.length = 0;
     window.__MCP_APP_TEST_HOST__.contextUpdates.length = 0;
 
-    window.__MCP_APP_TEST_HOST__.setToolHandler(async (name, args) => {
+    window.__MCP_APP_TEST_HOST__.setToolHandler(async (name) => {
       if (name === "aria_get_turn") {
         return {
           structuredContent: {
@@ -323,10 +318,9 @@ try {
               scope: { entity: "studio-ai", project: "looped-synth-study" },
               state: "in_progress",
               is_terminal: false,
-              poll_after_seconds: 6,
+              poll_after_seconds: 2,
               progress: {
                 phase: "working",
-                status_text: "ARIA is running shell.",
                 elapsed_seconds: 51,
                 message_count: 3,
                 tool_call_record_count: 4,
@@ -351,10 +345,9 @@ try {
               scope: { entity: "studio-ai", project: "looped-synth-study" },
               state: "in_progress",
               is_terminal: false,
-              poll_after_seconds: 6,
+              poll_after_seconds: 2,
               progress: {
                 phase: "working",
-                status_text: "ARIA is running query_wandb.",
                 elapsed_seconds: 38,
                 message_count: 2,
                 tool_call_record_count: 2,
@@ -367,13 +360,11 @@ try {
     });
   }, appHtml);
 
-  const parallelFrame = page.frameLocator("#mcp-app-frame");
-  await parallelFrame.locator("#ar-fleet-bar").waitFor({ state: "visible" });
-  assert.equal(await parallelFrame.locator(".ar-agent-card").count(), 4);
-  assert.match(await parallelFrame.locator("#ar-poll-now-btn").innerText(), /Poll active \(2\)/);
+  const batchFrame = page.frameLocator("#mcp-app-frame");
+  await batchFrame.locator("#ar-run-list-view").waitFor({ state: "visible" });
+  assert.equal(await batchFrame.locator(".ar-list-row").count(), 4);
 
-  // Batch poll active turns -> single aria_get_turn with parallel_turn_ids=['arm-d']
-  await parallelFrame.locator("#ar-poll-now-btn").click();
+  // Silent batch poll calls aria_get_turn with parallel_turn_ids=['arm-d']
   await page.waitForFunction(
     () =>
       window.__MCP_APP_TEST_HOST__.toolCalls.some(
@@ -383,50 +374,135 @@ try {
           Array.isArray(c.arguments.parallel_turn_ids) &&
           c.arguments.parallel_turn_ids.includes("arm-d"),
       ),
+    null,
+    { timeout: 5_000 },
   );
-  await parallelFrame.locator(".ar-fleet-counts").waitFor({ state: "visible" });
-  assert.match(await parallelFrame.locator(".ar-fleet-counts").innerText(), /4 completed/);
+  await batchFrame.locator("#ar-run-list-summary", { hasText: "4 done" }).waitFor({
+    state: "visible",
+  });
 
-  // Switch into Split focus for Arm C
-  await parallelFrame
-    .locator(".ar-agent-card[data-session-id='th-c'] button")
-    .filter({ hasText: "Open conversation" })
+  // Expand Arm C row inline -> shows its normal run view
+  await batchFrame
+    .locator(".ar-list-row[data-session-id='th-c'] .ar-list-row-btn")
     .click();
-  await parallelFrame.locator("#ar-rail").waitFor({ state: "visible" });
-  assert.match(await parallelFrame.locator(".ar-assistant-card").innerText(), /0\.948/);
-
-  // Verify model context sync published parallel structuredContent
-  const ctxUpdates = await page.evaluate(() => window.__MCP_APP_TEST_HOST__.contextUpdates);
-  assert.ok(
-    ctxUpdates.some(
-      (u) => u.structuredContent && u.structuredContent.mode === "parallel",
-    ),
-    "Expected parallel model context update",
+  assert.match(
+    await batchFrame.locator(".ar-list-row[data-session-id='th-c'] .ar-list-row-detail").innerText(),
+    /0\.948/,
   );
 
-  // Verify read-only mode hides write controls
+  // -------------------------------------------------------------------------
+  // Scenario 3: ThreadList as card -> open thread into RunCard + back link
+  // -------------------------------------------------------------------------
+  await page.evaluate(async (html) => {
+    window.__MCP_APP_TEST_HOST__.setToolHandler(async (name, args) => {
+      if (name === "aria_get_thread" && args.thread_id === "th-history-1") {
+        return {
+          structuredContent: {
+            result: {
+              ok: true,
+              thread: {
+                thread_id: "th-history-1",
+                root_turn_id: "t-hist-1",
+                latest_turn_id: "t-hist-1",
+                turn_count: 1,
+                title: "RoPE Extrapolation Check",
+                prompt_preview: "Compare RoPE base 10k vs 50k",
+                scope: { entity: "studio-ai", project: "looped-synth-study" },
+                state: "completed",
+                is_terminal: true,
+              },
+              turns: [{ turn_id: "t-hist-1", state: "completed", is_terminal: true }],
+              count: 1,
+              offset: 0,
+              has_more: false,
+              access_mode: "read-write",
+            },
+          },
+        };
+      }
+      if (name === "aria_get_turn" && args.turn_id === "t-hist-1") {
+        return {
+          structuredContent: {
+            result: {
+              ok: true,
+              turn_id: "t-hist-1",
+              thread_id: "th-history-1",
+              title: "RoPE Extrapolation Check",
+              scope: { entity: "studio-ai", project: "looped-synth-study" },
+              state: "completed",
+              is_terminal: true,
+              latest_response: "RoPE 50k holds perplexity flat to 16k tokens.",
+              access_mode: "read-write",
+            },
+          },
+        };
+      }
+      return { isError: true, content: [{ type: "text", text: `unexpected ${name}` }] };
+    });
+
+    await window.__MCP_APP_TEST_HOST__.mount(html, { theme: "light", displayMode: "inline" });
+    await window.__MCP_APP_TEST_HOST__.sendToolResult({
+      structuredContent: {
+        result: {
+          ok: true,
+          threads: [
+            {
+              thread_id: "th-history-1",
+              title: "RoPE Extrapolation Check",
+              prompt_preview: "Compare RoPE base 10k vs 50k",
+              scope: { entity: "studio-ai", project: "looped-synth-study" },
+            },
+          ],
+          count: 1,
+          offset: 0,
+          has_more: false,
+          access_mode: "read-write",
+        },
+      },
+    });
+  }, appHtml);
+
+  const threadFrame = page.frameLocator("#mcp-app-frame");
+  await threadFrame.locator("#ar-thread-list-view").waitFor({ state: "visible" });
+  assert.equal(await threadFrame.locator("#ar-empty").isVisible(), false);
+  await threadFrame.locator(".ar-thread-item").first().click();
+  await threadFrame.locator(".ar-answer-body", { hasText: "RoPE 50k holds" }).waitFor({
+    state: "visible",
+  });
+  assert.equal(await threadFrame.locator("#ar-back-btn").isVisible(), true);
+  await threadFrame.locator("#ar-back-btn").click();
+  await threadFrame.locator("#ar-thread-list-view").waitFor({ state: "visible" });
+
+  // -------------------------------------------------------------------------
+  // Scenario 4: Read-only mode replaces gate buttons & composer with one muted line
+  // -------------------------------------------------------------------------
   await page.evaluate(async () => {
     await window.__MCP_APP_TEST_HOST__.sendToolResult({
       structuredContent: {
         result: {
           ok: true,
-          turn_id: "arm-c",
-          thread_id: "th-c",
+          turn_id: "turn-ro",
+          thread_id: "th-ro",
+          title: "Read-Only Audit",
+          user_prompt: "Fetch paper and compare runs.",
           scope: { entity: "studio-ai", project: "looped-synth-study" },
           state: "completed",
           is_terminal: true,
-          latest_response: "Winner: **0.948** across 3 seeds.",
+          requires_permission: true,
+          permission_requests: [{ type: "network_access", domains: ["arxiv.org"] }],
           access_mode: "read-only",
         },
       },
     });
   });
-  assert.equal(await parallelFrame.locator("#ar-spawn-toggle-btn").isVisible(), false);
-  assert.equal(await parallelFrame.locator("#ar-composer").isVisible(), false);
+
+  await threadFrame.locator("#ar-readonly-line").waitFor({ state: "visible" });
+  assert.equal(await threadFrame.locator("button[data-action='grant-network']").count(), 0);
+  assert.equal(await threadFrame.locator("#ar-composer").isVisible(), false);
 
   await page.evaluate(() => window.__MCP_APP_TEST_HOST__.teardown());
   assert.deepEqual(consoleErrors, [], `Unexpected console/page errors: ${consoleErrors.join("; ")}`);
-  console.log("aria-agent AppBridge browser suite passed (1-to-1 + 4-parallel + read-only).");
+  console.log("aria-agent AppBridge browser suite passed (RunCard + RunList + ThreadList + read-only).");
 } finally {
   await browser.close();
   server.close();
