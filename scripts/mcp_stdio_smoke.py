@@ -73,7 +73,6 @@ _CLIENTS = (
 )
 _AGENT_TOOL_NAMES = {
     "list_weave_agents_tool",
-    "list_weave_agent_versions_tool",
     "query_weave_agent_spans_tool",
     "get_weave_agent_span_stats_tool",
     "list_weave_agent_custom_attributes_tool",

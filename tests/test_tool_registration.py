@@ -46,22 +46,22 @@ def test_default_public_profile_is_exact_models_weave():
 @pytest.mark.parametrize(
     ("tool_profile", "access_mode", "expected_count"),
     [
-        ("models-only", "read-write", 18),
-        ("models-only", "read-only", 16),
-        ("models-weave", "read-write", 23),
-        ("models-weave", "read-only", 21),
-        ("models-weave-agents", "read-write", 34),
-        ("models-weave-agents", "read-only", 31),
-        ("models-weave-agents-aria", "read-write", 38),
-        ("models-weave-agents-aria", "read-only", 34),
-        ("models-weave-graphql-compat", "read-write", 24),
-        ("models-weave-graphql-compat", "read-only", 22),
-        ("models-weave-agents-agent-lens", "read-write", 48),
-        ("models-weave-agents-agent-lens", "read-only", 43),
-        ("models-weave-agents-agent-lens-aria", "read-write", 52),
-        ("models-weave-agents-agent-lens-aria", "read-only", 46),
-        ("models-weave-agents-agent-lens-aria-raw-graphql", "read-write", 53),
-        ("models-weave-agents-agent-lens-aria-raw-graphql", "read-only", 47),
+        ("models-only", "read-write", 17),
+        ("models-only", "read-only", 15),
+        ("models-weave", "read-write", 21),
+        ("models-weave", "read-only", 19),
+        ("models-weave-agents", "read-write", 31),
+        ("models-weave-agents", "read-only", 28),
+        ("models-weave-agents-aria", "read-write", 35),
+        ("models-weave-agents-aria", "read-only", 31),
+        ("models-weave-graphql-compat", "read-write", 22),
+        ("models-weave-graphql-compat", "read-only", 20),
+        ("models-weave-agents-agent-lens", "read-write", 41),
+        ("models-weave-agents-agent-lens", "read-only", 36),
+        ("models-weave-agents-agent-lens-aria", "read-write", 45),
+        ("models-weave-agents-agent-lens-aria", "read-only", 39),
+        ("models-weave-agents-agent-lens-aria-raw-graphql", "read-write", 46),
+        ("models-weave-agents-agent-lens-aria-raw-graphql", "read-only", 40),
     ],
 )
 def test_every_supported_profile_has_one_exact_manifest(
@@ -131,11 +131,11 @@ def test_agent_lens_profile_is_shared_only(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("WANDB_MCP_TOOL_PROFILE", "models-weave-agents-agent-lens")
     monkeypatch.setenv("WF_TRACE_SERVER_URL", "https://trace.wandb.ai")
     monkeypatch.setenv("AGENT_LENS_BASE_URL", "https://agent-lens.example.com")
-    assert len(_registered_tool_names()) == 48
+    assert len(_registered_tool_names()) == 41
 
     monkeypatch.setenv("WANDB_MCP_ACCESS_MODE", "read-only")
     readonly_names = _registered_tool_names()
-    assert len(readonly_names) == 43
+    assert len(readonly_names) == 36
     assert {
         "manage_agent_lens_tags_tool",
         "manage_agent_lens_guidelines_tool",
@@ -159,7 +159,7 @@ def test_hosted_agent_lens_tools_list_stays_within_transport_budget(monkeypatch:
     tools = asyncio.run(mcp.list_tools())
     payload = ListToolsResult(tools=tools).model_dump_json(exclude_none=True).encode("utf-8")
 
-    assert len(tools) == 48
+    assert len(tools) == 41
     assert len(payload) <= 128 * 1024
 
     monkeypatch.setenv("MCP_WORKLOAD_PROFILE", "local")
@@ -169,7 +169,7 @@ def test_hosted_agent_lens_tools_list_stays_within_transport_budget(monkeypatch:
     register_tools(mcp_full)
     full_tools = asyncio.run(mcp_full.list_tools())
     full_payload = ListToolsResult(tools=full_tools).model_dump_json(exclude_none=True).encode("utf-8")
-    assert len(full_tools) == 53
+    assert len(full_tools) == 46
     assert len(full_payload) <= 128 * 1024
 
 

@@ -26,7 +26,7 @@ from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Unio
 import wandb
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import Field, PositiveInt, StrictInt
+from pydantic import Field, StrictInt
 
 from wandb_mcp_server.config import (
     MCP_COUNT_TOOL_WORKERS,
@@ -56,9 +56,7 @@ except ImportError:
 
 from wandb_mcp_server.mcp_tools.automations import (
     LIST_AUTOMATIONS_TOOL_DESCRIPTION,
-    LIST_INTEGRATIONS_TOOL_DESCRIPTION,
     list_automations,
-    list_integrations,
 )
 from wandb_mcp_server.mcp_tools.aria import (
     ARIA_GET_THREAD_TOOL_DESCRIPTION,
@@ -112,27 +110,19 @@ from wandb_mcp_server.mcp_tools.query_weave import (
 )
 from wandb_mcp_server.mcp_tools.agent_lens import (
     GET_CATEGORY_BREAKDOWNS_TOOL_DESCRIPTION,
-    GET_CLUSTERING_STATUS_TOOL_DESCRIPTION,
     GET_CONVERSATION_TAGS_TOOL_DESCRIPTION,
     GET_FAILURE_ATTRIBUTIONS_TOOL_DESCRIPTION,
     GET_GUIDELINES_TOOL_DESCRIPTION,
-    GET_INSIGHTS_COVERAGE_TOOL_DESCRIPTION,
-    GET_TAG_DISTRIBUTION_TOOL_DESCRIPTION,
     LIST_CATEGORY_EXAMPLE_TURNS_TOOL_DESCRIPTION,
-    LIST_CLUSTERS_TOOL_DESCRIPTION,
     LIST_TAGS_TOOL_DESCRIPTION,
     LIST_TAGGED_CONVERSATIONS_TOOL_DESCRIPTION,
     MANAGE_GUIDELINES_TOOL_DESCRIPTION,
     MANAGE_TAGS_TOOL_DESCRIPTION,
     get_category_breakdowns,
-    get_clustering_status,
     get_conversation_tags,
     get_failure_attributions,
     get_guidelines,
-    get_insights_coverage,
-    get_tag_distribution,
     list_category_example_turns,
-    list_clusters,
     list_tags,
     list_tagged_conversations,
     manage_guidelines,
@@ -148,7 +138,6 @@ from wandb_mcp_server.mcp_tools.agents import (
     GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION,
     GET_AGENT_TRACE_TOOL_DESCRIPTION,
     LIST_AGENT_CUSTOM_ATTRIBUTES_TOOL_DESCRIPTION,
-    LIST_AGENT_VERSIONS_TOOL_DESCRIPTION,
     LIST_AGENTS_TOOL_DESCRIPTION,
     MANAGE_AGENT_FEEDBACK_TOOL_DESCRIPTION,
     QUERY_AGENT_FEEDBACK_TOOL_DESCRIPTION,
@@ -159,7 +148,6 @@ from wandb_mcp_server.mcp_tools.agents import (
     get_agent_span_stats,
     get_agent_trace,
     list_agent_custom_attributes,
-    list_agent_versions,
     list_agents,
     manage_agent_feedback,
     query_agent_feedback,
@@ -205,7 +193,6 @@ class _DirectTool:
 # Implementations for the agent tools selected by the packaged runtime contract.
 _AGENT_TOOLS = (
     _DirectTool("list_weave_agents_tool", list_agents, LIST_AGENTS_TOOL_DESCRIPTION),
-    _DirectTool("list_weave_agent_versions_tool", list_agent_versions, LIST_AGENT_VERSIONS_TOOL_DESCRIPTION),
     _DirectTool("query_weave_agent_spans_tool", query_agent_spans, QUERY_AGENT_SPANS_TOOL_DESCRIPTION),
     _DirectTool("get_weave_agent_span_stats_tool", get_agent_span_stats, GET_AGENT_SPAN_STATS_TOOL_DESCRIPTION),
     _DirectTool(
@@ -231,12 +218,9 @@ _AGENT_WRITE_TOOLS = (
 # always available when the profile and AGENT_LENS_BASE_URL are configured;
 # write tools are additionally gated by WANDB_MCP_ACCESS_MODE=read-write.
 _AGENT_LENS_TOOLS = (
-    _DirectTool("get_agent_lens_insights_coverage_tool", get_insights_coverage, GET_INSIGHTS_COVERAGE_TOOL_DESCRIPTION),
-    _DirectTool("get_agent_lens_clustering_status_tool", get_clustering_status, GET_CLUSTERING_STATUS_TOOL_DESCRIPTION),
     _DirectTool(
         "get_agent_lens_category_breakdowns_tool", get_category_breakdowns, GET_CATEGORY_BREAKDOWNS_TOOL_DESCRIPTION
     ),
-    _DirectTool("list_agent_lens_clusters_tool", list_clusters, LIST_CLUSTERS_TOOL_DESCRIPTION),
     _DirectTool(
         "list_agent_lens_category_example_turns_tool",
         list_category_example_turns,
@@ -258,7 +242,6 @@ _AGENT_LENS_TOOLS = (
         list_tagged_conversations,
         LIST_TAGGED_CONVERSATIONS_TOOL_DESCRIPTION,
     ),
-    _DirectTool("get_agent_lens_tag_distribution_tool", get_tag_distribution, GET_TAG_DISTRIBUTION_TOOL_DESCRIPTION),
     _DirectTool("get_agent_lens_guidelines_tool", get_guidelines, GET_GUIDELINES_TOOL_DESCRIPTION),
     _DirectTool(
         "diagnose_agent_lens_instrumentation_tool",
@@ -633,7 +616,6 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     Available tools:
     - query_weave_traces_tool: Query LLM traces with filtering and pagination
     - count_weave_traces_tool: Efficiently count traces without returning data
-    - resolve_trace_roots_tool: Batch-resolve root spans for child trace_ids
     - query_wandb_tool: Query W&B experiment data through the public SDK
     - create_wandb_report_tool: Create shareable reports with visualizations
     - log_analysis_to_wandb: Log analysis results as W&B runs
@@ -651,15 +633,11 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     - summarize_evaluation_tool: Aggregate Weave evaluation results
     - diagnose_run_tool: Automatic training health check
     - probe_project_tool: Run-side schema and structure discovery
-    - list_wandb_automations_tool: List W&B Automations (rules that trigger
-      notifications/webhooks on artifact, run-state, or run-metric events)
-    - list_wandb_integrations_tool: List Slack and webhook integrations
-      available as targets for Automation actions
+    - list_wandb_automations_tool: List W&B Automations and optional Slack/webhook integrations
 
     Weave Agents (OTel/GenAI) tools -- read the agent-spans data plane, which
     is separate from classic Weave calls:
-    - list_weave_agents_tool: List agents with aggregated stats
-    - list_weave_agent_versions_tool: Per-version stats for one agent
+    - list_weave_agents_tool: List agents with aggregated stats and optional version breakdown
     - query_weave_agent_spans_tool: Query individual agent/LLM/tool spans
     - get_weave_agent_span_stats_tool: Time-bucketed metric series
     - list_weave_agent_custom_attributes_tool: Discover custom attribute keys
@@ -963,24 +941,6 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                 }
             )
 
-    from wandb_mcp_server.mcp_tools.resolve_trace_roots import (
-        RESOLVE_TRACE_ROOTS_TOOL_DESCRIPTION,
-        resolve_trace_roots,
-    )
-
-    @register_tool(description=RESOLVE_TRACE_ROOTS_TOOL_DESCRIPTION)
-    def resolve_trace_roots_tool(
-        entity_name: str,
-        project_name: str,
-        trace_ids: List[str],
-    ) -> str:
-        """Batch-resolve root spans for child trace_ids."""
-        return resolve_trace_roots(
-            entity_name=entity_name,
-            project_name=project_name,
-            trace_ids=trace_ids,
-        )
-
     @register_tool(description=QUERY_WANDB_TOOL_DESCRIPTION)
     def query_wandb_tool(
         entity_name: Optional[str] = None,
@@ -1140,15 +1100,6 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             include_integrations=include_integrations,
             integration_kind=integration_kind,
         )
-
-    @register_tool(description=LIST_INTEGRATIONS_TOOL_DESCRIPTION)
-    def list_wandb_integrations_tool(
-        entity: str | None = None,
-        kind: str | None = None,
-        max_items: PositiveInt = 50,
-    ) -> str:
-        """List Slack and webhook integrations for a W&B entity."""
-        return list_integrations(entity=entity, kind=kind, max_items=max_items)
 
     from wandb_mcp_server.mcp_tools.infer_schema import (
         INFER_TRACE_SCHEMA_TOOL_DESCRIPTION,

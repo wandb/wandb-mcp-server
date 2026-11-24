@@ -54,17 +54,13 @@ endpoints route through `/api/*` on the same origin.
 
 | Tool | Access | Endpoint |
 |---|---|---|
-| `get_agent_lens_insights_coverage_tool` | `read` | `GET /api/insights/latest-week` |
-| `get_agent_lens_clustering_status_tool` | `read` | `GET /api/insights/clustering-status` |
-| `get_agent_lens_category_breakdowns_tool` | `read` | `GET /api/insights/{type}/breakdowns` |
-| `list_agent_lens_clusters_tool` | `read` | `GET /api/insights/clusters` (+ optional `GET /api/insights/{type}/volume`) |
+| `get_agent_lens_category_breakdowns_tool` | `read` | `GET /api/insights/{type}/breakdowns` (+ optional `/api/insights/latest-week`, `/api/insights/clustering-status`, `/api/insights/{type}/volume`) |
 | `list_agent_lens_category_example_turns_tool` | `read` | `GET /api/insights/{type}/categories/{id}/example-turns` |
 | `get_agent_lens_failure_attributions_tool` | `read` | `POST /api/insights/failure-attributions/query` |
-| `list_agent_lens_tags_tool` | `read` | `GET /api/v1/tags` / `GET /api/v1/tags/{id}` |
+| `list_agent_lens_tags_tool` | `read` | `GET /api/v1/tags` / `GET /api/v1/tags/{id}` (+ optional `POST /api/conversation-tags/distribution`) |
 | `get_agent_lens_conversation_tags_tool` | `read` | `POST /api/conversation-tags/query` |
 | `list_agent_lens_tagged_conversations_tool` | `read` | `POST /api/conversation-tags/conversations/query` or `GET /api/tags/{id}/assignments` |
-| `get_agent_lens_tag_distribution_tool` | `read` | `POST /api/conversation-tags/distribution` |
-| `get_agent_lens_guidelines_tool` | `read` | `GET /api/guidelines?type=project` or `POST /api/conversations/{id}/summarize` |
+| `get_agent_lens_guidelines_tool` | `read` | `GET /api/guidelines?type=project` |
 | `diagnose_agent_lens_instrumentation_tool` | `read` | `GET /api/instrumentation/health` |
 | `manage_agent_lens_tags_tool` | `write` | `POST /api/v1/tags`, `POST/DELETE /api/v1/tags/{id}`, `POST/DELETE /api/conversation-tags` |
 | `manage_agent_lens_guidelines_tool` | `write` | `POST /api/guidelines`, `PATCH/DELETE /api/guidelines/{id}` |
@@ -76,11 +72,12 @@ never from the HTTP method.
 
 ### 1. Cluster discovery, stratified sampling, and root-cause analysis
 
-1. `get_agent_lens_insights_coverage_tool` — find a populated `first_week`..`latest_week` range.
-2. `get_agent_lens_category_breakdowns_tool` (`signature_type="both"`, `top_n_clusters=10`)
-   or `list_agent_lens_clusters_tool` (`include_volume=True` for trend spikes) —
-   inspect top user-intent and failure categories and clusters.
-3. `list_agent_lens_category_example_turns_tool` with `topic_ids=[...]` and
+1. `get_agent_lens_category_breakdowns_tool` (`signature_type="both"`, `top_n_clusters=10`,
+   and optional `include_volume=True` for trend spikes) — auto-resolves a `window_days`
+   range anchored to `latest_week` when `start_at`/`end_at` are omitted, returning
+   intent and failure categories, ranked clusters, `coverage`, `clustering_status`,
+   and `empty_diagnostics`.
+2. `list_agent_lens_category_example_turns_tool` with `topic_ids=[...]` and
    `per_topic_limit=5` — stratified-sample representative turns concurrently
    across every cluster in the category so high-volume clusters never crowd out
    smaller ones.
