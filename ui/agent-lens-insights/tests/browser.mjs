@@ -274,6 +274,7 @@ async function main() {
       window.__MCP_APP_TEST_HOST__.toolCalls.some(
         (c) =>
           c.name === "list_agent_lens_category_example_turns_tool" &&
+          c.arguments.category_id === "tool_misuse" &&
           Array.isArray(c.arguments.topic_ids) &&
           c.arguments.topic_ids[0] === "01a1fc1d-f6a4-7e82-9d62-fbdeb71f5d12",
       ),

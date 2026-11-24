@@ -61,8 +61,8 @@ function makeIconSvg(kind: "turn" | "llm" | "tool" | "copy"): SVGSVGElement {
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
   svg.setAttribute("viewBox", "0 0 16 16");
-  svg.setAttribute("width", "13");
-  svg.setAttribute("height", "13");
+  svg.setAttribute("width", "12.5");
+  svg.setAttribute("height", "12.5");
   svg.setAttribute("fill", "none");
   svg.setAttribute("stroke", "currentColor");
   svg.setAttribute("stroke-width", "1.4");
@@ -113,6 +113,20 @@ function formatTurnTimestamp(iso: string | null | undefined): string | null {
     return `${match[1]} UTC`;
   }
   return null;
+}
+
+function formatArgPreview(argsText: string | null, durationMs: number | null): string {
+  const parts: string[] = [];
+  if (durationMs !== null && Number.isFinite(durationMs)) {
+    parts.push(formatDuration(durationMs));
+  }
+  if (argsText) {
+    const compact = argsText.replace(/\s+/g, " ").trim();
+    if (compact && compact !== "{}") {
+      parts.push(compact.length > 56 ? `${compact.slice(0, 56)}…` : compact);
+    }
+  }
+  return parts.join(", ");
 }
 
 async function copyText(value: string, label: string): Promise<void> {
@@ -563,13 +577,29 @@ function createToolRow(
 
   const left = document.createElement("span");
   left.className = "ac-tool-left";
+
   const iconWrap = document.createElement("span");
   iconWrap.className = "ac-node-icon";
+  iconWrap.dataset.error = errorText ? "true" : "false";
   iconWrap.appendChild(makeIconSvg("tool"));
+
+  const titleGroup = document.createElement("span");
+  titleGroup.className = "ac-tool-title-group";
+
   const name = document.createElement("span");
   name.className = "ac-tool-name";
-  name.textContent = `tools/call ${toolName}`;
-  left.append(iconWrap, name);
+  name.textContent = toolName;
+  titleGroup.appendChild(name);
+
+  const previewText = formatArgPreview(argsText, durationMs);
+  if (previewText) {
+    const preview = document.createElement("span");
+    preview.className = "ac-tool-preview";
+    preview.textContent = previewText;
+    titleGroup.appendChild(preview);
+  }
+
+  left.append(iconWrap, titleGroup);
 
   const right = document.createElement("span");
   right.className = "ac-tool-right";
@@ -579,12 +609,11 @@ function createToolRow(
     errDot.textContent = "Error";
     right.appendChild(errDot);
   }
-  if (durationMs !== null) {
-    const d = document.createElement("span");
-    d.className = "ac-mono-dim";
-    d.textContent = formatDuration(durationMs);
-    right.appendChild(d);
-  }
+  const chev = document.createElement("span");
+  chev.className = "ac-tool-chevron";
+  chev.textContent = "▸";
+  chev.setAttribute("aria-hidden", "true");
+  right.appendChild(chev);
 
   summary.append(left, right);
   details.appendChild(summary);
@@ -613,72 +642,139 @@ function createToolRow(
   return details;
 }
 
-function renderMessageEl(turn: NormalizedTurn, msg: NormalizedMessage): HTMLElement {
-  if (msg.role === "tool" || (msg.toolName && !msg.content)) {
-    return createToolRow(
-      turn,
-      msg.toolName ?? "tool",
-      msg.durationMs,
-      msg.arguments,
-      msg.toolResult,
-      msg.error,
-      msg.spanId,
-    );
-  }
+function renderTurnMessages(turn: NormalizedTurn): HTMLElement {
+  const container = document.createElement("div");
+  container.className = "ac-messages";
 
-  const wrap = document.createElement("div");
-  wrap.className = "ac-msg";
-  wrap.dataset.role = msg.role;
+  let pendingAgentItems: NormalizedMessage[] = [];
 
-  if (msg.role === "user") {
+  const flushAgentGroup = () => {
+    if (pendingAgentItems.length === 0) {
+      return;
+    }
+    const block = document.createElement("div");
+    block.className = "ac-role-block";
+
+    const header = document.createElement("div");
+    header.className = "ac-role-header";
+    const agentLabel = document.createElement("span");
+    agentLabel.className = "ac-role-label";
+    agentLabel.textContent = turn.agentName ?? "Agent";
+    header.appendChild(agentLabel);
+
+    const modelName =
+      pendingAgentItems.find((m) => m.model)?.model ?? turn.model;
+    if (modelName) {
+      const modelEl = document.createElement("span");
+      modelEl.className = "ac-mono-dim";
+      modelEl.textContent = `· ${modelName}`;
+      header.appendChild(modelEl);
+    }
+    block.appendChild(header);
+
     const bubble = document.createElement("div");
-    bubble.className = "ac-user-bubble";
-    bubble.textContent = msg.content ?? "";
-    wrap.appendChild(bubble);
-    return wrap;
-  }
+    bubble.className = "ac-secondary-bubble";
 
-  const roleHeader = document.createElement("div");
-  roleHeader.className = "ac-agent-head";
-  const agentName = document.createElement("span");
-  agentName.className = "ac-agent-name";
-  agentName.textContent = turn.agentName ?? (msg.role === "assistant" ? "Agent" : msg.role);
-  roleHeader.appendChild(agentName);
-  if (msg.model) {
-    const m = document.createElement("span");
-    m.className = "ac-mono-dim";
-    m.textContent = msg.model;
-    roleHeader.appendChild(m);
-  }
-  wrap.appendChild(roleHeader);
+    const toolRows: HTMLElement[] = [];
+    const proseEls: HTMLElement[] = [];
 
-  for (const tc of msg.toolCalls) {
-    wrap.appendChild(
-      createToolRow(turn, tc.name, null, tc.arguments, tc.result, tc.error, tc.spanId),
-    );
-  }
+    for (const msg of pendingAgentItems) {
+      if (msg.role === "tool" || (msg.toolName && !msg.content)) {
+        toolRows.push(
+          createToolRow(
+            turn,
+            msg.toolName ?? "tool",
+            msg.durationMs,
+            msg.arguments,
+            msg.toolResult,
+            msg.error,
+            msg.spanId,
+          ),
+        );
+        continue;
+      }
 
-  if (msg.arguments && msg.toolName) {
-    wrap.appendChild(
-      createToolRow(turn, msg.toolName, msg.durationMs, msg.arguments, msg.toolResult, msg.error, msg.spanId),
-    );
-  }
+      for (const tc of msg.toolCalls) {
+        toolRows.push(
+          createToolRow(turn, tc.name, null, tc.arguments, tc.result, tc.error, tc.spanId),
+        );
+      }
 
-  if (msg.content) {
-    const p = document.createElement("p");
-    p.className = "ac-msg-body";
-    p.textContent = msg.content;
-    wrap.appendChild(p);
-  }
+      if (msg.arguments && msg.toolName) {
+        toolRows.push(
+          createToolRow(
+            turn,
+            msg.toolName,
+            msg.durationMs,
+            msg.arguments,
+            msg.toolResult,
+            msg.error,
+            msg.spanId,
+          ),
+        );
+      }
 
-  if (msg.error) {
-    const errDiv = document.createElement("div");
-    errDiv.className = "ac-error-callout";
-    errDiv.textContent = msg.error;
-    wrap.appendChild(errDiv);
-  }
+      if (msg.content) {
+        const p = document.createElement("p");
+        p.className = "ac-msg-body";
+        p.textContent = msg.content;
+        proseEls.push(p);
+      }
 
-  return wrap;
+      if (msg.error) {
+        const errDiv = document.createElement("div");
+        errDiv.className = "ac-error-callout";
+        errDiv.textContent = msg.error;
+        proseEls.push(errDiv);
+      }
+    }
+
+    if (toolRows.length > 0) {
+      const wf = document.createElement("div");
+      wf.className = "ac-agent-waterfall";
+      for (const tr of toolRows) {
+        wf.appendChild(tr);
+      }
+      bubble.appendChild(wf);
+    }
+
+    for (const pe of proseEls) {
+      bubble.appendChild(pe);
+    }
+
+    block.appendChild(bubble);
+    container.appendChild(block);
+    pendingAgentItems = [];
+  };
+
+  for (const msg of turn.messages) {
+    if (msg.role === "user") {
+      flushAgentGroup();
+      const userBlock = document.createElement("div");
+      userBlock.className = "ac-role-block";
+      const userHeader = document.createElement("div");
+      userHeader.className = "ac-role-header";
+      const userLabel = document.createElement("span");
+      userLabel.className = "ac-role-label";
+      userLabel.textContent = "User";
+      userHeader.appendChild(userLabel);
+
+      const userBubble = document.createElement("div");
+      userBubble.className = "ac-secondary-bubble";
+      const p = document.createElement("p");
+      p.className = "ac-msg-body";
+      p.textContent = msg.content ?? "";
+      userBubble.appendChild(p);
+
+      userBlock.append(userHeader, userBubble);
+      container.appendChild(userBlock);
+    } else {
+      pendingAgentItems.push(msg);
+    }
+  }
+  flushAgentGroup();
+
+  return container;
 }
 
 function renderTurnCard(turn: NormalizedTurn, writable: boolean): HTMLElement {
@@ -714,6 +810,7 @@ function renderTurnCard(turn: NormalizedTurn, writable: boolean): HTMLElement {
 
   const turnIcon = document.createElement("span");
   turnIcon.className = "ac-node-icon";
+  turnIcon.dataset.error = turn.isError ? "true" : "false";
   turnIcon.appendChild(makeIconSvg("turn"));
   leftBadges.appendChild(turnIcon);
 
@@ -807,12 +904,7 @@ function renderTurnCard(turn: NormalizedTurn, writable: boolean): HTMLElement {
   sepBar.append(leftBadges, rightActions);
   card.appendChild(sepBar);
 
-  const msgsContainer = document.createElement("div");
-  msgsContainer.className = "ac-messages";
-  for (const msg of turn.messages) {
-    msgsContainer.appendChild(renderMessageEl(turn, msg));
-  }
-  card.appendChild(msgsContainer);
+  card.appendChild(renderTurnMessages(turn));
 
   if (turn.errorMessage) {
     const errBox = document.createElement("div");
@@ -863,6 +955,16 @@ function renderTurnCard(turn: NormalizedTurn, writable: boolean): HTMLElement {
   return card;
 }
 
+function addOverviewRow(grid: HTMLElement, key: string, val: string): void {
+  const kEl = document.createElement("span");
+  kEl.className = "ac-overview-key";
+  kEl.textContent = key;
+  const vEl = document.createElement("span");
+  vEl.className = "ac-overview-val";
+  vEl.textContent = val;
+  grid.append(kEl, vEl);
+}
+
 function renderSpanDrawer(span: SpanWaterfallNode | null): void {
   spanDrawerEl.replaceChildren();
   if (!span) {
@@ -873,9 +975,19 @@ function renderSpanDrawer(span: SpanWaterfallNode | null): void {
 
   const head = document.createElement("div");
   head.className = "ac-drawer-head";
+
+  const headLeft = document.createElement("div");
+  headLeft.className = "ac-drawer-head-left";
+  const iconBox = document.createElement("span");
+  iconBox.className = "ac-node-icon";
+  iconBox.dataset.error = span.isError ? "true" : "false";
+  iconBox.appendChild(
+    makeIconSvg(span.kind === "llm" ? "llm" : span.kind === "tool" ? "tool" : "turn"),
+  );
   const title = document.createElement("h2");
   title.className = "ac-drawer-title";
   title.textContent = span.name;
+  headLeft.append(iconBox, title);
 
   const closeBtn = document.createElement("button");
   closeBtn.type = "button";
@@ -883,27 +995,31 @@ function renderSpanDrawer(span: SpanWaterfallNode | null): void {
   closeBtn.textContent = "✕";
   closeBtn.ariaLabel = "Close span details";
   closeBtn.addEventListener("click", () => dispatch({ type: "selectSpan", spanId: null }, false));
-  head.append(title, closeBtn);
+  head.append(headLeft, closeBtn);
   spanDrawerEl.appendChild(head);
 
-  const meta = document.createElement("div");
-  meta.className = "ac-drawer-meta";
-  const items = [
-    span.statusCode,
-    formatDuration(span.durationMs),
-    `+${Math.round(span.offsetMs)}ms`,
-  ];
+  const overview = document.createElement("div");
+  overview.className = "ac-overview-list";
+  addOverviewRow(overview, "Status", span.statusCode);
+  addOverviewRow(
+    overview,
+    "Duration",
+    `${formatDuration(span.durationMs)} (+${Math.round(span.offsetMs)}ms)`,
+  );
   if (span.toolName) {
-    items.push(`tool: ${span.toolName}`);
+    addOverviewRow(overview, "Tool", span.toolName);
   }
   if (span.model) {
-    items.push(span.model);
+    addOverviewRow(overview, "Model", span.model);
   }
   if (span.inputTokens !== null || span.outputTokens !== null) {
-    items.push(`${formatCompactCount(span.inputTokens)} in / ${formatCompactCount(span.outputTokens)} out`);
+    addOverviewRow(
+      overview,
+      "Tokens",
+      `${formatCompactCount(span.inputTokens)} in / ${formatCompactCount(span.outputTokens)} out`,
+    );
   }
-  meta.textContent = items.join(" • ");
-  spanDrawerEl.appendChild(meta);
+  spanDrawerEl.appendChild(overview);
 
   const citedFailures = state.agentFailures.filter((f) =>
     f.evidenceSpanIds.includes(span.spanId),
@@ -923,6 +1039,11 @@ function renderSpanDrawer(span: SpanWaterfallNode | null): void {
   }
 
   if (span.attributesJson) {
+    const rawLbl = document.createElement("div");
+    rawLbl.className = "ac-drawer-section-label";
+    rawLbl.textContent = "Attributes & payload";
+    spanDrawerEl.appendChild(rawLbl);
+
     const pre = document.createElement("pre");
     pre.className = "ac-code-pre";
     pre.textContent = span.attributesJson;
@@ -932,12 +1053,28 @@ function renderSpanDrawer(span: SpanWaterfallNode | null): void {
 
 function formatSpanTreeLabel(span: SpanWaterfallNode): string {
   if (span.kind === "llm") {
-    return span.model ? `chat ${span.model}` : `chat ${span.name}`;
+    return span.model ?? span.name;
   }
   if (span.kind === "tool") {
-    return span.toolName ? `tools/call ${span.toolName}` : `tools/call ${span.name}`;
+    return span.toolName ?? span.name;
   }
   return span.name;
+}
+
+function formatSpanSubtitle(span: SpanWaterfallNode): string {
+  const parts: string[] = [formatDuration(span.durationMs)];
+  if (span.inputTokens !== null || span.outputTokens !== null) {
+    const tok = (span.inputTokens ?? 0) + (span.outputTokens ?? 0);
+    if (tok > 0) {
+      parts.push(`${formatCompactCount(tok)} tok`);
+    }
+  }
+  if (span.kind === "llm") {
+    parts.push("LLM call");
+  } else if (span.kind === "tool") {
+    parts.push("Tool call");
+  }
+  return parts.join(" · ");
 }
 
 function renderSpansView(): void {
@@ -992,15 +1129,23 @@ function renderSpansView(): void {
 
     const iconBox = document.createElement("span");
     iconBox.className = "ac-node-icon";
+    iconBox.dataset.error = span.isError ? "true" : "false";
+    iconBox.dataset.evidence = isEvidence && !span.isError ? "true" : "false";
     iconBox.appendChild(
       makeIconSvg(span.kind === "llm" ? "llm" : span.kind === "tool" ? "tool" : "turn"),
     );
     left.appendChild(iconBox);
 
+    const textStack = document.createElement("div");
+    textStack.className = "ac-wf-text";
     const nameSpan = document.createElement("span");
     nameSpan.className = "ac-wf-name";
     nameSpan.textContent = formatSpanTreeLabel(span);
-    left.appendChild(nameSpan);
+    const subSpan = document.createElement("span");
+    subSpan.className = "ac-wf-sub";
+    subSpan.textContent = formatSpanSubtitle(span);
+    textStack.append(nameSpan, subSpan);
+    left.appendChild(textStack);
 
     const right = document.createElement("div");
     right.className = "ac-wf-right";
@@ -1018,21 +1163,6 @@ function renderSpansView(): void {
       errPill.textContent = "Error";
       right.appendChild(errPill);
     }
-
-    if (span.inputTokens !== null || span.outputTokens !== null) {
-      const tok = (span.inputTokens ?? 0) + (span.outputTokens ?? 0);
-      if (tok > 0) {
-        const tokSpan = document.createElement("span");
-        tokSpan.className = "ac-mono-dim";
-        tokSpan.textContent = `${formatCompactCount(tok)} tok`;
-        right.appendChild(tokSpan);
-      }
-    }
-
-    const dur = document.createElement("span");
-    dur.className = "ac-mono-dim ac-wf-dur";
-    dur.textContent = formatDuration(span.durationMs);
-    right.appendChild(dur);
 
     row.append(left, right);
     spansListEl.appendChild(row);
@@ -1260,7 +1390,7 @@ expandBtn.addEventListener("click", async () => {
   if (next.ok) {
     dispatch({ type: "hostContextChanged", displayMode: next.mode }, false);
   } else {
-    dispatch({ type: "banner", kind: "info", message: next.message }, false);
+    dispatch({ type: "banner", kind: "info", message: next.message });
   }
 });
 

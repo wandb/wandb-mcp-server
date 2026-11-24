@@ -20,11 +20,8 @@
         </div>
 
         <div class="ac-header-right">
-          <div id="ac-meta-strip" class="ac-meta-strip">
-            <span id="ac-subtitle">Connecting…</span>
-          </div>
           <div class="ac-actions">
-            <button id="ac-expand-btn" type="button" class="ac-btn" hidden aria-label="Expand view">
+            <button id="ac-expand-btn" type="button" class="ac-btn ac-btn-ghost" hidden aria-label="Expand view">
               Expand
             </button>
             <button id="ac-open-forge-btn" type="button" class="ac-btn" hidden>
@@ -35,25 +32,31 @@
       </header>
 
       <nav id="ac-toolbar" class="ac-toolbar" aria-label="Conversation views" hidden>
-        <div class="ac-tabs" role="tablist">
-          <button id="ac-tab-conversation" type="button" role="tab" class="ac-tab" aria-selected="true">
-            Thread
-          </button>
-          <button id="ac-tab-spans" type="button" role="tab" class="ac-tab" aria-selected="false">
-            Spans
-          </button>
+        <div class="ac-toolbar-left">
+          <div class="ac-tabs" role="tablist">
+            <button id="ac-tab-conversation" type="button" role="tab" class="ac-tab" aria-selected="true">
+              Thread
+            </button>
+            <button id="ac-tab-spans" type="button" role="tab" class="ac-tab" aria-selected="false">
+              Spans
+            </button>
+          </div>
+
+          <div class="ac-toolbar-filters">
+            <button id="ac-failures-btn" type="button" class="ac-chip-btn ac-chip-failures" aria-expanded="true" hidden>
+              Agent failures
+            </button>
+            <button id="ac-errors-only-btn" type="button" class="ac-chip-btn" aria-pressed="false" hidden>
+              Errors only
+            </button>
+            <button id="ac-tag-menu-btn" type="button" class="ac-chip-btn" aria-expanded="false" hidden>
+              + Tag
+            </button>
+          </div>
         </div>
 
-        <div class="ac-toolbar-right">
-          <button id="ac-failures-btn" type="button" class="ac-chip-btn ac-chip-failures" aria-expanded="true" hidden>
-            Agent failures
-          </button>
-          <button id="ac-errors-only-btn" type="button" class="ac-chip-btn" aria-pressed="false" hidden>
-            Errors only
-          </button>
-          <button id="ac-tag-menu-btn" type="button" class="ac-chip-btn" aria-expanded="false" hidden>
-            + Tag
-          </button>
+        <div id="ac-meta-strip" class="ac-meta-strip">
+          <span id="ac-subtitle">Connecting…</span>
         </div>
       </nav>
 

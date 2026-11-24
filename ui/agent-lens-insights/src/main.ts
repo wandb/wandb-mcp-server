@@ -39,14 +39,68 @@ const bannerDismissBtn = document.getElementById("ali-banner-dismiss") as HTMLBu
 const emptyEl = document.getElementById("ali-empty") as HTMLElement;
 const workspaceEl = document.getElementById("ali-workspace") as HTMLElement;
 const topClustersSectionEl = document.getElementById("ali-top-clusters-section") as HTMLElement;
+const topClustersNoteEl = document.getElementById("ali-top-clusters-note") as HTMLElement;
 const topClustersEl = document.getElementById("ali-top-clusters") as HTMLElement;
+const sectionDividerEl = document.getElementById("ali-section-divider") as HTMLElement;
 const explorerHeadingEl = document.getElementById("ali-explorer-heading") as HTMLElement;
+const barCaptionEl = document.getElementById("ali-bar-caption") as HTMLElement;
 const paneGroupEl = document.getElementById("ali-pane-group") as HTMLElement;
 const barsListEl = document.getElementById("ali-bars-list") as HTMLElement;
 const detailPaneEl = document.getElementById("ali-detail-pane") as HTMLElement;
 const convDrawerEl = document.getElementById("ali-conv-drawer") as HTMLElement;
 
 let state: InsightsState = createInitialInsightsState();
+
+function makeChevronSvg(expanded: boolean): SVGSVGElement {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", "13");
+  svg.setAttribute("height", "13");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.6");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", expanded ? "m4 6 4 4 4-4" : "m6 4 4 4-4 4");
+  svg.appendChild(path);
+  return svg;
+}
+
+function makeAlertSquareSvg(): SVGSVGElement {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("class", "ali-review-icon");
+  svg.setAttribute("aria-hidden", "true");
+
+  const rect = document.createElementNS(ns, "rect");
+  rect.setAttribute("x", "1.8");
+  rect.setAttribute("y", "1.8");
+  rect.setAttribute("width", "12.4");
+  rect.setAttribute("height", "12.4");
+  rect.setAttribute("rx", "3");
+  rect.setAttribute("stroke", "currentColor");
+  rect.setAttribute("stroke-width", "1.35");
+
+  const line = document.createElementNS(ns, "path");
+  line.setAttribute("d", "M8 4.8v3.6");
+  line.setAttribute("stroke", "currentColor");
+  line.setAttribute("stroke-width", "1.45");
+  line.setAttribute("stroke-linecap", "round");
+
+  const dot = document.createElementNS(ns, "circle");
+  dot.setAttribute("cx", "8");
+  dot.setAttribute("cy", "11");
+  dot.setAttribute("r", "0.85");
+  dot.setAttribute("fill", "currentColor");
+
+  svg.append(rect, line, dot);
+  return svg;
+}
 
 function formatPct(share: number | null | undefined): string {
   if (share === null || share === undefined || !Number.isFinite(share)) {
@@ -184,7 +238,7 @@ async function ensureExamplesLoaded(opts: {
     entity_name: payload.entityName,
     project_name: payload.projectName,
     signature_type: opts.signatureType,
-    categories: [opts.categoryId],
+    category_id: opts.categoryId,
     start_at: payload.window.startAt,
     end_at: payload.window.endAt,
     limit: 6,
@@ -193,7 +247,7 @@ async function ensureExamplesLoaded(opts: {
     args.topic_ids = [opts.topicId];
   }
   if (payload.window.agentName) {
-    args.agent_name = payload.window.agentName;
+    args.filters = [{ field: "agent_name", values: [payload.window.agentName] }];
   }
 
   const outcome = await bridge.invokeJsonTool("list_agent_lens_category_example_turns_tool", args);
@@ -323,6 +377,14 @@ function renderImpactSummary(
   },
   kind: "failure" | "intent",
 ): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "ali-impact-card";
+
+  const heading = document.createElement("div");
+  heading.className = "ali-impact-heading";
+  heading.textContent = "Impact";
+  card.appendChild(heading);
+
   const grid = document.createElement("div");
   grid.className = "ali-impact-grid";
 
@@ -369,7 +431,9 @@ function renderImpactSummary(
     cell.append(lEl, vEl);
     grid.appendChild(cell);
   }
-  return grid;
+
+  card.appendChild(grid);
+  return card;
 }
 
 function renderExamplesPanel(
@@ -446,8 +510,35 @@ function renderExamplesPanel(
       );
     });
 
-    const body = document.createElement("div");
-    body.className = "ali-example-body";
+    const plainReason = formatPlainFailureReason(turn.failureReason);
+    if (plainReason) {
+      const reviewBox = document.createElement("div");
+      reviewBox.className = "ali-review-callout";
+      reviewBox.appendChild(makeAlertSquareSvg());
+
+      const copyWrap = document.createElement("div");
+      copyWrap.className = "ali-review-copy";
+
+      const reviewLbl = document.createElement("span");
+      reviewLbl.className = "ali-review-label";
+      reviewLbl.textContent = "Review this turn";
+
+      const reason = document.createElement("p");
+      reason.className = "ali-example-reason";
+      reason.textContent = plainReason;
+
+      copyWrap.append(reviewLbl, reason);
+      reviewBox.appendChild(copyWrap);
+      row.appendChild(reviewBox);
+    } else {
+      const copy = document.createElement("p");
+      copy.className = "ali-example-intent-copy";
+      copy.textContent = `Classified in ${cluster ? cluster.title : category.label}`;
+      row.appendChild(copy);
+    }
+
+    const footer = document.createElement("div");
+    footer.className = "ali-example-footer";
 
     const meta = document.createElement("div");
     meta.className = "ali-example-meta";
@@ -478,16 +569,8 @@ function renderExamplesPanel(
 
     const convSpan = document.createElement("span");
     convSpan.className = "ali-mono-dim";
-    convSpan.textContent = turn.conversationId.slice(0, 20);
+    convSpan.textContent = turn.conversationId.slice(0, 22);
     meta.appendChild(convSpan);
-
-    const reason = document.createElement("p");
-    reason.className = "ali-example-reason";
-    reason.textContent =
-      formatPlainFailureReason(turn.failureReason) ||
-      `Example ${kind} turn in ${category.label}`;
-
-    body.append(meta, reason);
 
     const inspectBtn = document.createElement("button");
     inspectBtn.type = "button";
@@ -498,7 +581,8 @@ function renderExamplesPanel(
       void openEmbeddedConversationDrawer(kind, category, cluster, examplesKey, turn);
     });
 
-    row.append(body, inspectBtn);
+    footer.append(meta, inspectBtn);
+    row.appendChild(footer);
     panel.appendChild(row);
   }
 
@@ -554,11 +638,18 @@ function renderTopClustersStrip(categories: InsightsCategory[], kind: "failure" 
 
   if (flat.length === 0) {
     topClustersSectionEl.hidden = true;
+    sectionDividerEl.hidden = true;
     topClustersEl.replaceChildren();
     return;
   }
 
   topClustersSectionEl.hidden = false;
+  sectionDividerEl.hidden = false;
+  topClustersNoteEl.textContent =
+    kind === "failure"
+      ? "Most common issues and errors from your agents."
+      : "Most common prompts and responses from your users.";
+
   topClustersEl.replaceChildren();
   for (const { category, cluster } of flat.slice(0, 3)) {
     const card = document.createElement("button");
@@ -585,14 +676,22 @@ function renderTopClustersStrip(categories: InsightsCategory[], kind: "failure" 
 
     const foot = document.createElement("div");
     foot.className = "ali-top-cluster-foot";
+
+    const footLeft = document.createElement("div");
+    footLeft.className = "ali-top-cluster-foot-left";
     const catBadge = document.createElement("span");
     catBadge.className = "ali-subtle-badge";
     catBadge.textContent = category.label;
     const stats = document.createElement("span");
     stats.className = "ali-mono-dim";
     stats.textContent = `${cluster.count.toLocaleString("en-US")} traces · ${formatPct(cluster.share)}`;
-    foot.append(catBadge, stats);
+    footLeft.append(catBadge, stats);
 
+    const viewHint = document.createElement("span");
+    viewHint.className = "ali-view-examples-hint";
+    viewHint.textContent = "View examples";
+
+    foot.append(footLeft, viewHint);
     card.append(head, desc, foot);
     topClustersEl.appendChild(card);
   }
@@ -638,10 +737,8 @@ function renderNavigatorCategory(cat: InsightsCategory, kind: "failure" | "inten
     }
   });
 
-  const chevron = document.createElement("span");
-  chevron.className = "ali-chevron";
-  chevron.setAttribute("aria-hidden", "true");
-  chevron.textContent = expanded ? "▾" : "▸";
+  const labelWrap = document.createElement("span");
+  labelWrap.className = "ali-bar-label-wrap";
 
   const label = document.createElement("span");
   label.className = "ali-bar-title";
@@ -649,9 +746,16 @@ function renderNavigatorCategory(cat: InsightsCategory, kind: "failure" | "inten
 
   const share = document.createElement("span");
   share.className = "ali-bar-metrics";
-  share.textContent = `${formatPct(cat.share)} of turns`;
+  share.textContent = `(${formatPct(cat.share)} of turns)`;
 
-  trigger.append(chevron, label, share);
+  labelWrap.append(label, share);
+
+  const chevron = document.createElement("span");
+  chevron.className = "ali-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.appendChild(makeChevronSvg(expanded));
+
+  trigger.append(labelWrap, chevron);
   group.appendChild(trigger);
 
   if (expanded && hasClusters) {
@@ -738,7 +842,7 @@ function renderDetailPane(categories: InsightsCategory[], kind: "failure" | "int
       activeCluster.description ??
       `${activeCategory.label} · ${activeCluster.count.toLocaleString("en-US")} turns (${formatPct(activeCluster.share)} of all turns)`;
   } else {
-    subDesc.textContent = `${activeCategory.count.toLocaleString("en-US")} turns — ${formatPct(activeCategory.share)} of all turns${activeCategory.clusterBreakdowns.length > 0 ? ` across ${activeCategory.clusterBreakdowns.length} clusters` : ""}`;
+    subDesc.textContent = `${activeCategory.count.toLocaleString("en-US")} turns · ${formatPct(activeCategory.share)} of all turns${activeCategory.clusterBreakdowns.length > 0 ? ` across ${activeCategory.clusterBreakdowns.length} clusters` : ""}`;
   }
   titleWrap.appendChild(subDesc);
 
@@ -747,7 +851,7 @@ function renderDetailPane(categories: InsightsCategory[], kind: "failure" | "int
   if (kind === "failure") {
     const copyBtn = document.createElement("button");
     copyBtn.type = "button";
-    copyBtn.className = "ali-btn ali-copy-brief-btn";
+    copyBtn.className = "ali-btn ali-btn-ghost ali-copy-brief-btn";
     copyBtn.textContent = "Copy as markdown";
     copyBtn.addEventListener("click", () => void copyBriefToClipboard());
     actions.appendChild(copyBtn);
@@ -834,7 +938,7 @@ function renderDrawer(): void {
 
   const closeBtn = document.createElement("button");
   closeBtn.type = "button";
-  closeBtn.className = "ali-btn";
+  closeBtn.className = "ali-btn ali-btn-ghost";
   closeBtn.textContent = "Close";
   closeBtn.addEventListener("click", () => dispatch({ type: "closeDrawer" }));
   head.append(title, closeBtn);
@@ -1042,6 +1146,10 @@ function render(): void {
     state.activeTab === "failure"
       ? "Failure categories and clusters"
       : "User intent categories and clusters";
+  barCaptionEl.textContent =
+    state.activeTab === "failure"
+      ? "Explore examples grouped by failure category and cluster."
+      : "Explore examples grouped by user intent category and cluster.";
 
   if (activeCategories.length === 0) {
     workspaceEl.hidden = true;
