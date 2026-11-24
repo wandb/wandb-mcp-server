@@ -216,12 +216,12 @@ detail_level : str, optional
 
 ### root span resolution
 If you find child traces and need to know which root session they belong to,
-use resolve_trace_roots_tool with the trace_ids from the results.
+pass `filters={"trace_ids": [...], "trace_roots_only": True}` to `query_weave_traces_tool`.
 This resolves all roots in a single batched call (O(1), not N separate lookups).
 
 Typical workflow:
 1. query_weave_traces_tool(filters={...}) -> find child traces
-2. resolve_trace_roots_tool(entity_name, project_name, trace_ids=[...]) -> get root context
+2. query_weave_traces_tool(entity_name, project_name, filters={"trace_ids": [...], "trace_roots_only": True}) -> get root context
 
 
 Returns
@@ -286,10 +286,11 @@ str
         detail_level="schema"
     )
     # Step 2: Resolve root spans for the found traces
-    resolve_trace_roots_tool(
+    query_weave_traces_tool(
         entity_name="my-team",
         project_name="my-project",
-        trace_ids=["<unique trace_ids from step 1>"]
+        filters={"trace_ids": ["<unique trace_ids from step 1>"], "trace_roots_only": True},
+        detail_level="summary"
     )
     ```
 
@@ -523,7 +524,7 @@ Prefer the existing specialized tools when they match the request:
 - time-series metrics: get_run_history_tool and render_wandb_line_plot_tool
 - artifact reads: list_artifact_versions_tool and get_artifact_details_tool
 - registry reads: list_registries_tool and list_registry_collections_tool
-- automations/integrations: list_wandb_automations_tool and list_wandb_integrations_tool
+- automations/integrations: list_wandb_automations_tool (pass include_integrations=True for Slack/webhook destinations)
 
 ### when to use
 Use this tool for run discovery, summary-metric analysis, project metadata,

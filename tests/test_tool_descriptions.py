@@ -231,7 +231,6 @@ class TestQueryWandbSdkRouting:
             "list_registries_tool",
             "list_registry_collections_tool",
             "list_wandb_automations_tool",
-            "list_wandb_integrations_tool",
         ],
     )
     def test_sdk_query_description_routes_dedicated_resources(self, tool_name):

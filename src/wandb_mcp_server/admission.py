@@ -137,12 +137,8 @@ LIGHT_TOOLS = frozenset(
         "list_registries_tool",
         "list_registry_collections_tool",
         "list_wandb_automations_tool",
-        "list_wandb_integrations_tool",
         "list_weave_agents_tool",
-        "list_weave_agent_versions_tool",
         "list_weave_agent_custom_attributes_tool",
-        "get_agent_lens_insights_coverage_tool",
-        "get_agent_lens_clustering_status_tool",
         "list_agent_lens_tags_tool",
         "get_agent_lens_guidelines_tool",
     }
@@ -150,7 +146,6 @@ LIGHT_TOOLS = frozenset(
 
 EXPENSIVE_TOOLS = frozenset(
     {
-        "resolve_trace_roots_tool",
         "create_wandb_report_tool",
         "log_analysis_to_wandb",
         "query_weave_agent_spans_tool",
@@ -161,12 +156,10 @@ EXPENSIVE_TOOLS = frozenset(
         "query_weave_agent_feedback_tool",
         "manage_weave_agent_feedback_tool",
         "get_agent_lens_category_breakdowns_tool",
-        "list_agent_lens_clusters_tool",
         "list_agent_lens_category_example_turns_tool",
         "get_agent_lens_failure_attributions_tool",
         "get_agent_lens_conversation_tags_tool",
         "list_agent_lens_tagged_conversations_tool",
-        "get_agent_lens_tag_distribution_tool",
         "manage_agent_lens_tags_tool",
         "manage_agent_lens_guidelines_tool",
     }
