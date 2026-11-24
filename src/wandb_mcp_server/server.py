@@ -1113,18 +1113,33 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     def query_wandb_entity_projects(
         entity: Optional[str] = None,
         max_projects: int = 50,
+        order: str = "-updated_at",
     ) -> str:
         """List projects for a W&B entity."""
-        return list_entity_projects(entity=entity, max_projects=max_projects)
+        return list_entity_projects(entity=entity, max_projects=max_projects, order=order)
 
     @register_tool(description=LIST_AUTOMATIONS_TOOL_DESCRIPTION)
     def list_wandb_automations_tool(
         entity: Optional[str] = None,
         name: Optional[str] = None,
         max_items: int = 50,
+        project: Optional[str] = None,
+        registry_name: Optional[str] = None,
+        organization: Optional[str] = None,
+        include_integrations: bool = False,
+        integration_kind: Optional[str] = None,
     ) -> str:
         """List W&B Automations accessible with the current API key."""
-        return list_automations(entity=entity, name=name, max_items=max_items)
+        return list_automations(
+            entity=entity,
+            name=name,
+            max_items=max_items,
+            project=project,
+            registry_name=registry_name,
+            organization=organization,
+            include_integrations=include_integrations,
+            integration_kind=integration_kind,
+        )
 
     @register_tool(description=LIST_INTEGRATIONS_TOOL_DESCRIPTION)
     def list_wandb_integrations_tool(
@@ -1511,6 +1526,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         sample_runs: int = 6,
         field_pattern: Optional[str] = None,
         include_artifacts: bool = False,
+        include_traces: bool = False,
     ) -> str:
         """Probe a W&B project to discover its structure."""
         return probe_project(
@@ -1519,6 +1535,7 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             sample_runs=sample_runs,
             field_pattern=field_pattern,
             include_artifacts=include_artifacts,
+            include_traces=include_traces,
         )
 
     # ----- Weave Agents (OTel/GenAI) tools -----

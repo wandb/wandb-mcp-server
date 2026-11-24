@@ -1020,19 +1020,13 @@ def test_v1_error_format_extracts_message_and_param():
     assert "name: Tag name already exists" in result["message"]
 
 
-def test_guidelines_read_summarize_and_manage():
+def test_guidelines_read_and_manage():
     gid = "30201f95-1221-433a-9ea5-1e513081962f"
     with _mocked(_FakeResponse({"data": [], "max_length": 2000, "read_only": False})) as session:
         res = json.loads(get_guidelines(ENTITY, PROJECT))
     assert session.last["url"] == f"{BASE_URL}/api/guidelines"
     assert session.last["params"] == {"type": "project"}
     assert res["max_length"] == 2000
-
-    with _mocked(_FakeResponse({"title": "Bassline edit", "summary": "Edited track 2"})) as session:
-        summary = json.loads(get_guidelines(ENTITY, PROJECT, summarize_conversation_id="conv-9"))
-    assert session.last["method"] == "POST"
-    assert session.last["url"] == f"{BASE_URL}/api/conversations/conv-9/summarize"
-    assert summary["data"]["title"] == "Bassline edit"
 
     with _mocked(
         _FakeResponse({"data": {"id": gid, "content": "Minor timing drift is low severity"}}, status_code=201)

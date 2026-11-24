@@ -396,6 +396,27 @@ def _validated_window(start_at: str, end_at: str) -> Dict[str, object]:
     return {"start_at": start_at, "end_at": end_at}
 
 
+def _resolve_window(
+    start_at: Optional[str],
+    end_at: Optional[str],
+    window_days: int = 7,
+) -> tuple[Dict[str, str], bool]:
+    """Validate an explicit RFC 3339 window or synthesize a trailing UTC window."""
+    if isinstance(window_days, bool) or not isinstance(window_days, int) or not 1 <= window_days <= MAX_INSIGHTS_WINDOW_DAYS:
+        raise ValueError(f"window_days must be an integer between 1 and {MAX_INSIGHTS_WINDOW_DAYS}")
+    if (start_at is None) != (end_at is None):
+        raise ValueError("provide both start_at and end_at, or omit both to use window_days")
+    if start_at is not None and end_at is not None:
+        validated = _validated_window(start_at, end_at)
+        return {"start_at": str(validated["start_at"]), "end_at": str(validated["end_at"])}, False
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    start = now - timedelta(days=window_days)
+    return {
+        "start_at": start.isoformat().replace("+00:00", "Z"),
+        "end_at": now.isoformat().replace("+00:00", "Z"),
+    }, True
+
+
 def _bounded_list(values: Sequence[str], maximum: int, field: str) -> List[str]:
     """Reject an oversized or blank-containing list locally rather than trading a 422 round-trip."""
     items = [str(value).strip() for value in values]
@@ -718,14 +739,60 @@ async def get_clustering_status(entity_name: str, project_name: str) -> str:
     )
 
 
+def _empty_insights_diagnostics(
+    payload_data: Any,
+    *,
+    coverage: Optional[Dict[str, Any]],
+    clustering_status: Any,
+    window: Dict[str, str],
+) -> Optional[Dict[str, Any]]:
+    """Explain empty Agent Lens Insights results using ARIA's 4-case diagnostic model."""
+    is_empty = False
+    if isinstance(payload_data, dict):
+        if "intent" in payload_data or "failure" in payload_data:
+            intent_turns = int((payload_data.get("intent") or {}).get("turn_count") or 0)
+            failure_turns = int((payload_data.get("failure") or {}).get("turn_count") or 0)
+            is_empty = intent_turns == 0 and failure_turns == 0
+        else:
+            is_empty = int(payload_data.get("turn_count") or 0) == 0
+    if not is_empty:
+        return None
+
+    latest_week = coverage.get("latest_week") if isinstance(coverage, dict) else None
+    first_week = coverage.get("first_week") if isinstance(coverage, dict) else None
+    has_runs = bool(clustering_status) if isinstance(clustering_status, list) else False
+    if latest_week and not has_runs:
+        reason = "no_clustering_run_recorded"
+    elif latest_week:
+        reason = "no_classified_turns_in_window"
+    else:
+        reason = "unclassified_project"
+    return {
+        "reason": reason,
+        "window": window,
+        "first_week": first_week,
+        "latest_week": latest_week,
+        "possible_causes": [
+            "No OTel agent spans logged yet (verify via list_weave_agents_tool or probe_project_tool(include_traces=True)).",
+            "Fewer than 1,000 new turns since the last twice-daily batch clustering run.",
+            "Selected start_at..end_at window misses the latest classified week.",
+            "Organization AI features toggle is disabled.",
+        ],
+    }
+
+
 async def get_category_breakdowns(
     entity_name: str,
     project_name: str,
-    start_at: str,
-    end_at: str,
+    start_at: Optional[str] = None,
+    end_at: Optional[str] = None,
     signature_type: Literal["intent", "failure", "both"] = "both",
     filters: Optional[List[Dict[str, Any]]] = None,
     top_n_clusters: Optional[int] = None,
+    window_days: int = 7,
+    include_status: Optional[bool] = None,
+    include_volume: bool = False,
+    bucket_seconds: int = 3600,
 ) -> str:
     """Return intent and/or failure category and cluster breakdowns for a bounded range."""
     if signature_type not in {"intent", "failure", "both"}:
@@ -733,37 +800,139 @@ async def get_category_breakdowns(
     if top_n_clusters is not None and (isinstance(top_n_clusters, bool) or not 1 <= top_n_clusters <= 100):
         return _invalid_argument("top_n_clusters must be an integer between 1 and 100")
     try:
-        params = _validated_window(start_at, end_at)
+        window, auto_window = _resolve_window(start_at, end_at, window_days=window_days)
+        params: Dict[str, Any] = dict(window)
         serialized_filters = _serialize_insights_filters(filters)
         if serialized_filters is not None:
             params["filters"] = serialized_filters
+        volume_params: Optional[Dict[str, Any]] = None
+        if include_volume:
+            if not MIN_VOLUME_BUCKET_SECONDS <= bucket_seconds <= MAX_TIME_BUCKET_SECONDS:
+                return _invalid_argument(
+                    f"bucket_seconds must be between {MIN_VOLUME_BUCKET_SECONDS} and {MAX_TIME_BUCKET_SECONDS}"
+                )
+            span_seconds = (
+                parse_timestamp(window["end_at"], "end_at") - parse_timestamp(window["start_at"], "start_at")
+            ).total_seconds()
+            if math.ceil(span_seconds / bucket_seconds) > MAX_VOLUME_BUCKETS:
+                return _invalid_argument(
+                    f"time window and bucket_seconds exceed {MAX_VOLUME_BUCKETS} buckets; increase bucket_seconds"
+                )
+            volume_params = {**window, "bucket_seconds": bucket_seconds}
+            if serialized_filters is not None:
+                volume_params["filters"] = serialized_filters
     except ValueError as error:
         return _invalid_argument(str(error))
 
+    effective_include_status = auto_window if include_status is None else bool(include_status)
     track = {
         "entity_name": entity_name,
         "project_name": project_name,
         "signature_type": signature_type,
         "filters": bool(filters),
+        "auto_window": auto_window,
+        "include_status": effective_include_status,
+        "include_volume": include_volume,
     }
-    if signature_type in {"intent", "failure"}:
-        res = await fetch_agent_lens_json(
-            _breakdowns_path(signature_type),
-            tool_name="get_category_breakdowns",
-            method="GET",
-            entity_name=entity_name,
-            project_name=project_name,
-            track_params=track,
-            params=params,
+
+    coverage_data: Optional[Dict[str, Any]] = None
+    clustering_data: Any = None
+    if effective_include_status:
+        cov_res, status_res = await asyncio.gather(
+            fetch_agent_lens_json(
+                LATEST_WEEK_PATH,
+                tool_name="get_category_breakdowns",
+                method="GET",
+                entity_name=entity_name,
+                project_name=project_name,
+                track_params=track,
+            ),
+            fetch_agent_lens_json(
+                CLUSTERING_STATUS_PATH,
+                tool_name="get_category_breakdowns",
+                method="GET",
+                entity_name=entity_name,
+                project_name=project_name,
+                track_params=track,
+            ),
         )
+        if isinstance(cov_res, dict) and isinstance(cov_res.get("data"), dict):
+            coverage_data = cov_res["data"]
+        if isinstance(status_res, dict):
+            clustering_data = status_res.get("data")
+        # When start_at/end_at were omitted and latest_week precedes our default trailing window,
+        # anchor end_at to latest_week + 7 days so quiet projects return populated Insights automatically.
+        if auto_window and isinstance(coverage_data, dict) and isinstance(coverage_data.get("latest_week"), str):
+            try:
+                latest_dt = parse_timestamp(coverage_data["latest_week"], "latest_week")
+                window_start_dt = parse_timestamp(window["start_at"], "start_at")
+                if latest_dt + timedelta(days=7) <= window_start_dt:
+                    anchored_end = latest_dt + timedelta(days=7)
+                    anchored_start = anchored_end - timedelta(days=window_days)
+                    window = {
+                        "start_at": anchored_start.isoformat().replace("+00:00", "Z"),
+                        "end_at": anchored_end.isoformat().replace("+00:00", "Z"),
+                    }
+                    params["start_at"] = window["start_at"]
+                    params["end_at"] = window["end_at"]
+                    if volume_params is not None:
+                        volume_params["start_at"] = window["start_at"]
+                        volume_params["end_at"] = window["end_at"]
+            except ValueError:
+                pass
+
+    if signature_type in {"intent", "failure"}:
+        tasks: List[Any] = [
+            fetch_agent_lens_json(
+                _breakdowns_path(signature_type),
+                tool_name="get_category_breakdowns",
+                method="GET",
+                entity_name=entity_name,
+                project_name=project_name,
+                track_params=track,
+                params=params,
+            )
+        ]
+        if volume_params is not None:
+            tasks.append(
+                fetch_agent_lens_json(
+                    _volume_path(signature_type),
+                    tool_name="get_category_breakdowns",
+                    method="GET",
+                    entity_name=entity_name,
+                    project_name=project_name,
+                    track_params=track,
+                    params=volume_params,
+                )
+            )
+        results = await asyncio.gather(*tasks)
+        res = results[0]
         if isinstance(res, ToolErrorJSON):
             return res
+        vol_res = results[1] if len(results) > 1 else None
+        if isinstance(vol_res, ToolErrorJSON):
+            return vol_res
         payload: Dict[str, Any] = dict(res)
         if top_n_clusters is not None:
             payload["top_clusters"] = _rank_top_clusters(payload.get("data"), top_n_clusters)
+        if isinstance(vol_res, dict):
+            payload["volume"] = vol_res.get("data")
+        if auto_window:
+            payload["window"] = {**window, "auto_resolved": True}
+        if effective_include_status:
+            payload["coverage"] = coverage_data
+            payload["clustering_status"] = clustering_data
+            diag = _empty_insights_diagnostics(
+                payload.get("data"),
+                coverage=coverage_data,
+                clustering_status=clustering_data,
+                window=window,
+            )
+            if diag is not None:
+                payload["empty_diagnostics"] = diag
         return _compact_json(_truncate_response(payload))
 
-    intent_res, failure_res = await asyncio.gather(
+    tasks = [
         fetch_agent_lens_json(
             _breakdowns_path("intent"),
             tool_name="get_category_breakdowns",
@@ -782,7 +951,32 @@ async def get_category_breakdowns(
             track_params={**track, "signature_type": "failure"},
             params=params,
         ),
-    )
+    ]
+    if volume_params is not None:
+        tasks.extend(
+            [
+                fetch_agent_lens_json(
+                    _volume_path("intent"),
+                    tool_name="get_category_breakdowns",
+                    method="GET",
+                    entity_name=entity_name,
+                    project_name=project_name,
+                    track_params={**track, "signature_type": "intent"},
+                    params=volume_params,
+                ),
+                fetch_agent_lens_json(
+                    _volume_path("failure"),
+                    tool_name="get_category_breakdowns",
+                    method="GET",
+                    entity_name=entity_name,
+                    project_name=project_name,
+                    track_params={**track, "signature_type": "failure"},
+                    params=volume_params,
+                ),
+            ]
+        )
+    gathered = await asyncio.gather(*tasks)
+    intent_res, failure_res = gathered[0], gathered[1]
     if isinstance(intent_res, ToolErrorJSON):
         return intent_res
     if isinstance(failure_res, ToolErrorJSON):
@@ -794,11 +988,34 @@ async def get_category_breakdowns(
             "failure": failure_res.get("data"),
         }
     }
+    if len(gathered) == 4:
+        intent_vol, failure_vol = gathered[2], gathered[3]
+        if isinstance(intent_vol, ToolErrorJSON):
+            return intent_vol
+        if isinstance(failure_vol, ToolErrorJSON):
+            return failure_vol
+        combined["volume"] = {
+            "intent": intent_vol.get("data") if isinstance(intent_vol, dict) else None,
+            "failure": failure_vol.get("data") if isinstance(failure_vol, dict) else None,
+        }
     if top_n_clusters is not None:
         combined["top_clusters"] = {
             "intent": _rank_top_clusters(intent_res.get("data"), top_n_clusters),
             "failure": _rank_top_clusters(failure_res.get("data"), top_n_clusters),
         }
+    if auto_window:
+        combined["window"] = {**window, "auto_resolved": True}
+    if effective_include_status:
+        combined["coverage"] = coverage_data
+        combined["clustering_status"] = clustering_data
+        diag = _empty_insights_diagnostics(
+            combined["data"],
+            coverage=coverage_data,
+            clustering_status=clustering_data,
+            window=window,
+        )
+        if diag is not None:
+            combined["empty_diagnostics"] = diag
     return _compact_json(_truncate_response(combined))
 
 
@@ -917,17 +1134,18 @@ async def list_category_example_turns(
     project_name: str,
     signature_type: Literal["intent", "failure"],
     category_id: str,
-    start_at: str,
-    end_at: str,
+    start_at: Optional[str] = None,
+    end_at: Optional[str] = None,
     topic_ids: Optional[List[str]] = None,
     filters: Optional[List[Dict[str, Any]]] = None,
     limit: int = 10,
     cursor: Optional[str] = None,
     per_topic_limit: Optional[int] = None,
+    window_days: int = 7,
 ) -> str:
     """Page or stratified-sample example turns for one intent or failure category."""
     if signature_type not in {"intent", "failure"}:
-        return _invalid_argument('signature_type must be "intent" or "failure"')
+        return _invalid_argument('signature_type must be "intent", "failure", or "failure"') if False else _invalid_argument('signature_type must be "intent" or "failure"')
     if not str(category_id).strip():
         return _invalid_argument("category_id must be a non-empty category identifier")
     if not 1 <= limit <= MAX_EXAMPLE_LIMIT:
@@ -941,7 +1159,8 @@ async def list_category_example_turns(
             return _invalid_argument("cursor cannot be combined with per_topic_limit stratified sampling")
 
     try:
-        base_params = _validated_window(start_at, end_at)
+        resolved_win, _ = _resolve_window(start_at, end_at, window_days=window_days)
+        base_params: Dict[str, Any] = dict(resolved_win)
         validated_topics = _bounded_list(topic_ids, MAX_TOPIC_IDS, "topic_ids") if topic_ids else None
         serialized_filters = _serialize_insights_filters(filters)
         if serialized_filters is not None:
@@ -1041,8 +1260,13 @@ async def list_tags(
     entity_name: str,
     project_name: str,
     tag_id: Optional[str] = None,
+    include_distribution: bool = False,
+    start_at: Optional[str] = None,
+    end_at: Optional[str] = None,
+    window_days: int = 7,
+    time_bucket_seconds: int = 86400,
 ) -> str:
-    """List the Agent Lens tag catalog or retrieve one tag via the official v1 API."""
+    """List the Agent Lens tag catalog or retrieve one tag via v1, with optional volume distribution."""
     if tag_id is not None:
         try:
             validated_id = _validated_uuid(tag_id, "tag_id")
@@ -1051,15 +1275,64 @@ async def list_tags(
         path = _tag_path(validated_id)
     else:
         path = TAGS_PATH
-    return await _agent_lens_request(
-        "list_tags",
-        "GET",
-        path,
-        entity_name,
-        project_name,
-        {"entity_name": entity_name, "project_name": project_name},
-        api_version="v1",
+
+    if not include_distribution:
+        return await _agent_lens_request(
+            "list_tags",
+            "GET",
+            path,
+            entity_name,
+            project_name,
+            {"entity_name": entity_name, "project_name": project_name},
+            api_version="v1",
+        )
+
+    if isinstance(time_bucket_seconds, bool) or not 1 <= time_bucket_seconds <= MAX_TIME_BUCKET_SECONDS:
+        return _invalid_argument(f"time_bucket_seconds must be between 1 and {MAX_TIME_BUCKET_SECONDS}")
+    try:
+        resolved_win, auto_window = _resolve_window(start_at, end_at, window_days=window_days)
+        after_ms = int(parse_timestamp(resolved_win["start_at"], "start_at").timestamp() * 1000)
+        before_ms = int(parse_timestamp(resolved_win["end_at"], "end_at").timestamp() * 1000)
+    except ValueError as error:
+        return _invalid_argument(str(error))
+
+    track = {
+        "entity_name": entity_name,
+        "project_name": project_name,
+        "include_distribution": True,
+    }
+    tags_res, dist_res = await asyncio.gather(
+        fetch_agent_lens_json(
+            path,
+            tool_name="list_tags",
+            method="GET",
+            entity_name=entity_name,
+            project_name=project_name,
+            track_params=track,
+            api_version="v1",
+        ),
+        fetch_agent_lens_json(
+            TAG_DISTRIBUTION_PATH,
+            tool_name="list_tags",
+            method="POST",
+            entity_name=entity_name,
+            project_name=project_name,
+            track_params=track,
+            body={
+                "after_ms": after_ms,
+                "before_ms": before_ms,
+                "time_bucket_seconds": time_bucket_seconds,
+            },
+        ),
     )
+    if isinstance(tags_res, ToolErrorJSON):
+        return tags_res
+    if isinstance(dist_res, ToolErrorJSON):
+        return dist_res
+    combined: Dict[str, Any] = dict(tags_res)
+    combined["distribution"] = dist_res.get("data") if isinstance(dist_res, dict) else None
+    combined["window"] = {**resolved_win, "auto_resolved": auto_window}
+    return _compact_json(_truncate_response(combined))
 
 
 async def get_conversation_tags(entity_name: str, project_name: str, conversation_ids: List[str]) -> str:
@@ -1173,26 +1446,8 @@ async def get_tag_distribution(
 async def get_guidelines(
     entity_name: str,
     project_name: str,
-    summarize_conversation_id: Optional[str] = None,
 ) -> str:
-    """List project judge guidelines, or generate an Agent Lens conversation summary."""
-    if summarize_conversation_id is not None:
-        conv_id = str(summarize_conversation_id).strip()
-        if not conv_id or len(conv_id) > 512:
-            return _invalid_argument("summarize_conversation_id must be a non-empty identifier up to 512 chars")
-        res = await fetch_agent_lens_json(
-            _conversation_summarize_path(conv_id),
-            tool_name="get_guidelines",
-            method="POST",
-            entity_name=entity_name,
-            project_name=project_name,
-            track_params={"entity_name": entity_name, "project_name": project_name},
-        )
-        if isinstance(res, ToolErrorJSON):
-            return res
-        wrapped = res if "data" in res else {"data": res}
-        return _compact_json(_truncate_response(wrapped))
-
+    """List project-level Agent Lens judge guidelines."""
     return await _agent_lens_request(
         "get_guidelines",
         "GET",
@@ -1433,17 +1688,18 @@ Returns `{"data": [{"signature_type", "completed_at", "window_start", "window_en
 """
 
 
-GET_CATEGORY_BREAKDOWNS_TOOL_DESCRIPTION = """Summarize Agent Lens intent and failure categories and clusters (`start_at`..`end_at` <= 30d).
+GET_CATEGORY_BREAKDOWNS_TOOL_DESCRIPTION = """Summarize Agent Lens intent and failure categories, clusters, coverage, and optional volume (`<= 30d`).
 
 <when_to_use>
-Primary aggregate view for top user intents, failure modes, and severities via
-`/api/insights/{type}/breakdowns`. Defaults to `signature_type="both"`; pass
-`top_n_clusters` (1-100) for a flat ranked cluster summary, or `filters`
-(`[{"field": "agent_name"|"language"|"intent_category"|"intent_sentiment"|"failure_category"|"failure_severity"|"intent_topic_id"|"failure_topic_id", "values": [...], "exclude"?: bool}]`).
+Primary aggregate view for user intents, failure modes, and severities via
+`/api/insights/{type}/breakdowns`. Omit `start_at`/`end_at` to auto-resolve a
+`window_days` (default 7d) window anchored to `latest_week` with `coverage`,
+`clustering_status`, and `empty_diagnostics`. Pass `top_n_clusters` (1-100) for
+ranked clusters, `include_volume=True` for bucketed trends, or `filters`.
 Drill down with `list_agent_lens_category_example_turns_tool`.
 </when_to_use>
 
-Returns `data` (`turn_count`, `categories[]` with `cluster_breakdowns[]`) and optional `top_clusters`.
+Returns `data` (`turn_count`, `categories[]` with `cluster_breakdowns[]`) plus optional `top_clusters`, `volume`, `coverage`, `clustering_status`.
 """
 
 
@@ -1487,15 +1743,16 @@ Returns `{{"data": [TurnFailureAttribution]}}`.
 """
 
 
-LIST_TAGS_TOOL_DESCRIPTION = """List the Agent Lens v1 tag catalog or retrieve one tag by UUID (`/api/v1/tags`).
+LIST_TAGS_TOOL_DESCRIPTION = """List the Agent Lens v1 tag catalog (or one `tag_id`) with optional time-bucketed tag volume.
 
 <when_to_use>
-Call before filtering or assigning tags to discover tag UUIDs, lowercase
-hyphenated names, judge `criteria`, `agent_name_filter`, and `llm_judge_enabled`.
-Pass `tag_id` to fetch a single tag.
+Discover tag UUIDs, lowercase hyphenated names, judge `criteria`, and
+`llm_judge_enabled`. Set `include_distribution=True` (with optional RFC 3339
+`start_at`/`end_at` or `window_days=7` and `time_bucket_seconds=86400`) to
+include per-tag conversation volume buckets in the same call.
 </when_to_use>
 
-Returns `{"data": [Tag]}` or `{"data": Tag}`.
+Returns `{"data": [Tag], "distribution"?: ...}` or `{"data": Tag}`.
 """
 
 
@@ -1534,15 +1791,13 @@ Returns `{{"data": {{"time_bucket_seconds", "after_ms", "before_ms", "buckets"}}
 """
 
 
-GET_GUIDELINES_TOOL_DESCRIPTION = """Read project Agent Lens judge guidelines or generate a single-conversation summary.
+GET_GUIDELINES_TOOL_DESCRIPTION = """Read project-level Agent Lens judge guidelines.
 
 <when_to_use>
-Inspect project-level guidelines injected into Agent Lens intent/failure judges,
-or pass `summarize_conversation_id` to generate a `{title, summary}` for one
-conversation.
+Inspect project-level guidelines injected into Agent Lens intent and failure judges.
 </when_to_use>
 
-Returns `{"data": [Guideline], "max_length", "read_only"}` or `{"data": {"title", "summary"}}`.
+Returns `{"data": [Guideline], "max_length", "read_only"}`.
 """
 
 

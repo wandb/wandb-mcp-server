@@ -55,13 +55,21 @@ its error/token aggregates are exhaustive or sampled.
 """
 
 
-def _extract_scores(summary: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract scorer results from a trace's summary."""
-    scores = {}
-    weave_summary = summary.get("weave", {})
-    for key, val in weave_summary.items():
-        if isinstance(val, dict) and ("mean" in val or "true_count" in val or "true_fraction" in val):
-            scores[key] = val
+def _extract_scores(summary: Dict[str, Any], output: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Extract scorer results from an evaluation trace's output and summary."""
+    scores: Dict[str, Any] = {}
+    if isinstance(output, dict):
+        for key, val in output.items():
+            if isinstance(val, dict) and any(
+                metric in val
+                for metric in ("mean", "true_count", "true_fraction", "false_count", "stderr", "count")
+            ):
+                scores[key] = val
+    weave_summary = summary.get("weave", {}) if isinstance(summary, dict) else {}
+    if isinstance(weave_summary, dict):
+        for key, val in weave_summary.items():
+            if isinstance(val, dict) and ("mean" in val or "true_count" in val or "true_fraction" in val):
+                scores.setdefault(key, val)
     return scores
 
 
@@ -72,12 +80,15 @@ def _aggregate_eval(
 ) -> Dict[str, Any]:
     """Aggregate a single evaluation's results."""
     summary = eval_trace.get("summary", {})
-    scores = _extract_scores(summary)
+    scores = _extract_scores(summary, eval_trace.get("output"))
 
     observed = len(children)
     total = observed if total_matching_count is None else max(0, total_matching_count)
     errors = sum(
-        1 for c in children if c.get("exception") or c.get("summary", {}).get("weave", {}).get("status") == "error"
+        1
+        for c in children
+        if c.get("exception")
+        or c.get("summary", {}).get("weave", {}).get("status") in {"error", "descendant_error"}
     )
     successes = observed - errors
 
@@ -198,7 +209,7 @@ def summarize_evaluation(
                 sort_direction="desc",
                 include_costs=False,
                 include_feedback=False,
-                columns=["id", "op_name", "started_at", "summary"],
+                columns=["id", "op_name", "started_at", "summary", "output"],
                 return_full_data=False,
             )
 
@@ -255,7 +266,7 @@ def summarize_evaluation(
                             "status": child.get("summary", {}).get("weave", {}).get("status", "unknown"),
                             "has_exception": child.get("exception") is not None,
                         }
-                        child_scores = _extract_scores(child.get("summary", {}))
+                        child_scores = _extract_scores(child.get("summary", {}), child.get("output"))
                         if child_scores:
                             task_entry["scores"] = child_scores
                         per_task.append(task_entry)
