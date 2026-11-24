@@ -4,20 +4,23 @@ import {
   applyOptimisticSendInput,
   applyParallelBatchToState,
   applyThreadPayloadToState,
+  applyThreadsListToState,
   buildModelContextPayload,
   computeLiveElapsedSeconds,
   createInitialState,
   deriveSessionPhase,
   extractRequestedDomains,
   formatElapsedClock,
+  formatLiveStepLine,
   getHydratableCompletedTurnIds,
   getPollableTurnIds,
-  summarizeFleet,
+  isLongInlineAnswer,
+  summarizeBatch,
   upsertTurnIntoState,
 } from "../src/state";
 
-describe("ARIA MCP App schema & state engine", () => {
-  it("unwraps FastMCP structuredContent.result for single turns and parallel batches", () => {
+describe("ARIA compact run card schema & state engine", () => {
+  it("unwraps FastMCP structuredContent.result for single turns and batch polls", () => {
     const single = parseAriaToolEnvelope({
       structuredContent: {
         result: {
@@ -91,7 +94,7 @@ describe("ARIA MCP App schema & state engine", () => {
     expect(parallel.kind).toBe("parallel_turns");
   });
 
-  it("maintains 1-to-1 chronological lineage across optimistic input, permission pause, and continuation", () => {
+  it("maintains chronological lineage across optimistic input, permission gate, and continuation", () => {
     let state = createInitialState();
     state = applyOptimisticSendInput(
       state,
@@ -102,6 +105,7 @@ describe("ARIA MCP App schema & state engine", () => {
       },
       1_000,
     );
+    expect(state.view).toBe("run");
     expect(state.sessions).toHaveLength(1);
     expect(state.sessions[0]!.turns[0]!.optimistic).toBe(true);
 
@@ -143,7 +147,7 @@ describe("ARIA MCP App schema & state engine", () => {
       reasons: ["Read primary arXiv paper on looped attention."],
     });
 
-    // Continuation turn with granted domain appends to the same 1-to-1 session
+    // Continuation turn with granted domain appends to the same session
     state = upsertTurnIntoState(
       state,
       {
@@ -173,7 +177,37 @@ describe("ARIA MCP App schema & state engine", () => {
     expect(ctx?.text).toContain("Chorus Attention Collapse");
   });
 
-  it("tracks N parallel sub-agents, computes pollable subset, and ticks live elapsed clocks", () => {
+  it("formats compact live step lines and detects long inline answers", () => {
+    const line = formatLiveStepLine(
+      {
+        syncedAtMs: 10_000,
+        turn: {
+          ok: true,
+          turn_id: "t-live",
+          scope: { entity: "wandb", project: "lab" },
+          state: "in_progress",
+          is_terminal: false,
+          tool_steps: [
+            { call_id: "c1", name: "query_wandb", status: "ok" },
+            { call_id: "c2", name: "shell", status: "recovered_error" },
+            { call_id: "c3", name: "shell", status: "running" },
+          ],
+          progress: {
+            phase: "working",
+            elapsed_seconds: 35,
+            message_count: 2,
+            tool_call_record_count: 5,
+          },
+        },
+      },
+      12_000,
+    );
+    expect(line).toBe("Running shell, 3 steps, 37s");
+    expect(isLongInlineAnswer("Short summary.")).toBe(false);
+    expect(isLongInlineAnswer("Line\n".repeat(14))).toBe(true);
+  });
+
+  it("renders parallel_turns into RunList view, auto-expands gated run, and preserves RunList on single-turn poll", () => {
     let state = createInitialState();
     const batch = parseAriaToolEnvelope({
       structuredContent: {
@@ -220,15 +254,6 @@ describe("ARIA MCP App schema & state engine", () => {
               requires_permission: true,
               permission_requests: [{ type: "network_access", domains: ["arxiv.org"] }],
             },
-            {
-              ok: true,
-              turn_id: "turn-4",
-              thread_id: "th-4",
-              title: "Arm D · Weight-Tied",
-              scope: { entity: "studio-ai", project: "looped-synth-study" },
-              state: "queued",
-              is_terminal: false,
-            },
           ],
         },
       },
@@ -238,14 +263,15 @@ describe("ARIA MCP App schema & state engine", () => {
       state = applyParallelBatchToState(state, batch.data, 10_000);
     }
 
-    expect(state.sessions).toHaveLength(4);
-    expect(state.parallelLayout).toBe("grid");
-    expect(getPollableTurnIds(state)).toEqual(["turn-2", "turn-4"]);
+    expect(state.view).toBe("runList");
+    expect(state.sessions).toHaveLength(3);
+    expect(state.expandedBatchSessionId).toBe("th-3");
+    expect(getPollableTurnIds(state)).toEqual(["turn-2"]);
 
-    const summary = summarizeFleet(state.sessions);
+    const summary = summarizeBatch(state.sessions);
     expect(summary).toEqual({
-      total: 4,
-      active: 2,
+      total: 3,
+      active: 1,
       awaitingPermission: 1,
       awaitingInput: 0,
       completed: 1,
@@ -257,28 +283,46 @@ describe("ARIA MCP App schema & state engine", () => {
     expect(liveElapsed).toBeCloseTo(70, 1);
     expect(formatElapsedClock(liveElapsed)).toBe("1m 10s");
 
-    const ctx = buildModelContextPayload(state);
-    expect(ctx?.structuredContent.mode).toBe("parallel");
-    expect(ctx?.text).toContain("ARIA Parallel Sub-Agents (4)");
-  });
-
-  it("keeps 1-to-1 Studio mode when switching threads via aria_get_thread and flags hydration", () => {
-    let state = createInitialState();
+    // Single remaining active turn finishes via background poll — RunList view stays open
     state = upsertTurnIntoState(
       state,
       {
         ok: true,
-        turn_id: "turn-current",
-        thread_id: "thread-current",
-        title: "Current Session",
-        scope: { entity: "wandb", project: "looped-transformer-lab" },
+        turn_id: "turn-2",
+        thread_id: "th-2",
+        title: "Arm B · 1-Layer Control",
+        scope: { entity: "studio-ai", project: "looped-synth-study" },
         state: "completed",
         is_terminal: true,
-        latest_response: "Done.",
+        latest_response: "Control finished.",
       },
-      1_000,
+      16_000,
     );
-    expect(state.sessions).toHaveLength(1);
+    expect(state.view).toBe("runList");
+
+    const ctx = buildModelContextPayload(state);
+    expect(ctx?.structuredContent.mode).toBe("batch");
+    expect(ctx?.text).toContain("ARIA Batch (3 runs)");
+  });
+
+  it("opens ThreadList as the card view and transitions to RunCard with back-navigation flag on thread load", () => {
+    let state = createInitialState();
+    state = applyThreadsListToState(state, {
+      ok: true,
+      threads: [
+        {
+          thread_id: "thread-older",
+          title: "8x RoPE Base Frequency Sweep",
+          prompt_preview: "Sweep RoPE theta across 10k, 50k, and 250k",
+          scope: { entity: "wandb", project: "looped-transformer-lab" },
+        },
+      ],
+      count: 1,
+      offset: 0,
+      has_more: false,
+    });
+    expect(state.view).toBe("threadList");
+    expect(state.recentThreads).toHaveLength(1);
 
     state = applyThreadPayloadToState(
       state,
@@ -316,6 +360,8 @@ describe("ARIA MCP App schema & state engine", () => {
       2_000,
     );
 
+    expect(state.view).toBe("run");
+    expect(state.cameFromThreadList).toBe(true);
     expect(state.sessions).toHaveLength(1);
     expect(state.sessions[0]!.sessionId).toBe("thread-older");
     expect(state.sessions[0]!.label).toBe("8x RoPE Base Frequency Sweep");

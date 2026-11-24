@@ -11,7 +11,7 @@ import type {
 } from "./schema";
 
 export type DisplayMode = "inline" | "fullscreen" | "pip";
-export type ParallelLayout = "grid" | "split";
+export type AriaCardView = "run" | "runList" | "threadList";
 
 export type SessionPhase =
   | "queued"
@@ -37,14 +37,17 @@ export interface AriaAgentSession {
   turns: SyncedTurnEntry[];
 }
 
-export interface AriaStudioState {
+export interface AriaCardState {
+  view: AriaCardView;
+  previousView: "run" | "runList" | null;
+  cameFromThreadList: boolean;
   sessions: AriaAgentSession[];
   selectedSessionId: string | null;
-  parallelLayout: ParallelLayout;
-  autoPoll: boolean;
+  expandedBatchSessionId: string | null;
+  liveUpdatesPaused: boolean;
   pollInFlight: boolean;
-  spawnDrawerOpen: boolean;
-  threadsDrawerOpen: boolean;
+  pollFailed: boolean;
+  menuOpen: boolean;
   recentThreads: AriaThreadSummary[];
   accessMode: AccessMode;
   forgeHomeUrl: string;
@@ -53,9 +56,11 @@ export interface AriaStudioState {
   bannerMessage: string | null;
   bannerTone: "info" | "warning" | "error";
   expandedStepTurnIds: string[];
+  expandedAnswerTurnIds: string[];
+  expandedEarlierSessionIds: string[];
 }
 
-export interface FleetSummary {
+export interface BatchSummary {
   total: number;
   active: number;
   awaitingPermission: number;
@@ -72,15 +77,18 @@ export interface ModelContextPayload {
 
 const DEFAULT_FORGE_HOME_URL = "https://forge.coreweave.com/home/aria";
 
-export function createInitialState(): AriaStudioState {
+export function createInitialState(): AriaCardState {
   return {
+    view: "run",
+    previousView: null,
+    cameFromThreadList: false,
     sessions: [],
     selectedSessionId: null,
-    parallelLayout: "grid",
-    autoPoll: true,
+    expandedBatchSessionId: null,
+    liveUpdatesPaused: false,
     pollInFlight: false,
-    spawnDrawerOpen: false,
-    threadsDrawerOpen: false,
+    pollFailed: false,
+    menuOpen: false,
     recentThreads: [],
     accessMode: "read-write",
     forgeHomeUrl: DEFAULT_FORGE_HOME_URL,
@@ -89,6 +97,8 @@ export function createInitialState(): AriaStudioState {
     bannerMessage: null,
     bannerTone: "info",
     expandedStepTurnIds: [],
+    expandedAnswerTurnIds: [],
+    expandedEarlierSessionIds: [],
   };
 }
 
@@ -154,7 +164,7 @@ export function phaseDisplayMeta(phase: SessionPhase): {
     case "awaiting_user_input":
       return { label: "Needs answer", tone: "warning" };
     case "completed":
-      return { label: "Completed", tone: "success" };
+      return { label: "Done", tone: "success" };
     case "errored":
       return { label: "Errored", tone: "danger" };
     case "cancelled":
@@ -244,6 +254,73 @@ export function formatElapsedClock(seconds: number | null): string {
   return `${mins}m ${secs.toString().padStart(2, "0")}s`;
 }
 
+export function countTurnSteps(turn: AriaTurnPayload): number {
+  const explicit = turn.tool_steps?.length ?? 0;
+  if (explicit > 0) {
+    return explicit;
+  }
+  const records = turn.progress?.tool_call_record_count ?? 0;
+  return records > 0 ? Math.ceil(records / 2) : 0;
+}
+
+export function countRecoveredErrors(turn: AriaTurnPayload): number {
+  const fromSteps =
+    turn.tool_steps?.filter((s) => s.status === "recovered_error").length ?? 0;
+  if (fromSteps > 0) {
+    return fromSteps;
+  }
+  return turn.progress?.tool_error_count ?? 0;
+}
+
+export function formatLiveStepLine(
+  entry: SyncedTurnEntry,
+  nowMs: number,
+): string {
+  const { turn } = entry;
+  const steps = turn.tool_steps ?? [];
+  const runningStep = [...steps].reverse().find((s) => s.status === "running");
+  const latestToolName =
+    runningStep?.name ??
+    turn.progress?.latest_tool_activity?.name ??
+    (steps.length > 0 ? steps[steps.length - 1]!.name : null);
+
+  let lead: string;
+  if (turn.state === "queued") {
+    lead = "Starting in sandbox";
+  } else if (latestToolName) {
+    lead = `Running ${latestToolName}`;
+  } else if (turn.latest_response?.trim()) {
+    lead = "Writing response";
+  } else if (turn.progress?.status_text?.trim()) {
+    lead = turn.progress.status_text.trim().replace(/\.$/, "");
+  } else {
+    lead = "Working in sandbox";
+  }
+
+  const parts = [lead];
+  const stepCount = countTurnSteps(turn);
+  if (stepCount > 0) {
+    parts.push(`${stepCount} ${stepCount === 1 ? "step" : "steps"}`);
+  }
+  const elapsed = formatElapsedClock(computeLiveElapsedSeconds(entry, nowMs));
+  if (elapsed) {
+    parts.push(elapsed);
+  }
+  return parts.join(", ");
+}
+
+export function isLongInlineAnswer(markdown: string | null | undefined): boolean {
+  if (!markdown) {
+    return false;
+  }
+  const trimmed = markdown.trim();
+  if (trimmed.length > 560) {
+    return true;
+  }
+  const lineCount = trimmed.split(/\r?\n/).length;
+  return lineCount > 11;
+}
+
 function deriveLabelFromPromptOrTurn(
   turn: AriaTurnPayload,
   fallbackIndex: number,
@@ -260,7 +337,7 @@ function deriveLabelFromPromptOrTurn(
       ? `${turn.scope.entity}/${turn.scope.project}`
       : turn.scope.project;
   }
-  return fallbackIndex > 1 ? `ARIA Agent #${fallbackIndex}` : "ARIA Session";
+  return fallbackIndex > 1 ? `ARIA Run #${fallbackIndex}` : "ARIA";
 }
 
 function findMatchingSessionIndex(
@@ -287,7 +364,6 @@ function findMatchingSessionIndex(
       return i;
     }
   }
-  // Match optimistic pending session if one exists for the same parent or root
   const optimisticIdx = sessions.findIndex((s) =>
     s.turns.some(
       (t) =>
@@ -353,15 +429,15 @@ function sortSessionTurns(entries: SyncedTurnEntry[]): SyncedTurnEntry[] {
 }
 
 export function upsertTurnIntoState(
-  state: AriaStudioState,
+  state: AriaCardState,
   turn: AriaTurnPayload,
   nowMs: number,
-  options?: { selectUpserted?: boolean },
-): AriaStudioState {
-  const prevCount = state.sessions.length;
+  options?: { selectUpserted?: boolean; preserveView?: boolean },
+): AriaCardState {
   const nextSessions = state.sessions.map((s) => ({ ...s, turns: [...s.turns] }));
   const matchIdx = findMatchingSessionIndex(nextSessions, turn);
 
+  let oldSessionId: string | null = null;
   let upsertedSessionId: string;
   if (matchIdx === -1) {
     const sessionId = turn.thread_id || turn.turn_id;
@@ -375,6 +451,7 @@ export function upsertTurnIntoState(
     });
   } else {
     const existing = nextSessions[matchIdx]!;
+    oldSessionId = existing.sessionId;
     const cleanedTurns = existing.turns.filter(
       (entry) =>
         !(
@@ -402,7 +479,7 @@ export function upsertTurnIntoState(
       sessionId: nextSessionId,
       label:
         turn.title?.trim() ||
-        (existing.label.startsWith("ARIA ") || existing.label === "Starting ARIA turn…"
+        (existing.label.startsWith("ARIA") || existing.label === "Starting ARIA turn…"
           ? deriveLabelFromPromptOrTurn(turn, matchIdx + 1)
           : existing.label),
       scope: {
@@ -414,31 +491,49 @@ export function upsertTurnIntoState(
     };
   }
 
-  const transitionedToParallel = prevCount < 2 && nextSessions.length >= 2;
   const nextSelected =
     options?.selectUpserted || !state.selectedSessionId
       ? upsertedSessionId
-      : nextSessions.some((s) => s.sessionId === state.selectedSessionId)
-        ? state.selectedSessionId
-        : upsertedSessionId;
+      : state.selectedSessionId === oldSessionId
+        ? upsertedSessionId
+        : nextSessions.some((s) => s.sessionId === state.selectedSessionId)
+          ? state.selectedSessionId
+          : upsertedSessionId;
+
+  const nextExpandedBatch =
+    state.expandedBatchSessionId && state.expandedBatchSessionId === oldSessionId
+      ? upsertedSessionId
+      : state.expandedBatchSessionId;
+
+  const nextView: AriaCardView = options?.preserveView
+    ? state.view
+    : state.view === "runList" && nextSessions.length > 1
+      ? "runList"
+      : "run";
 
   return {
     ...state,
+    view: nextView,
     sessions: nextSessions,
     selectedSessionId: nextSelected,
-    parallelLayout: transitionedToParallel ? "grid" : state.parallelLayout,
+    expandedBatchSessionId: nextExpandedBatch,
     accessMode: turn.access_mode ?? state.accessMode,
     forgeHomeUrl: turn.forge_home_url || state.forgeHomeUrl,
+    pollFailed: false,
     bannerMessage: null,
   };
 }
 
 export function applyParallelBatchToState(
-  state: AriaStudioState,
+  state: AriaCardState,
   batch: AriaParallelBatchPayload,
   nowMs: number,
-): AriaStudioState {
-  let next = state;
+): AriaCardState {
+  let next: AriaCardState = {
+    ...state,
+    view: "runList",
+    pollFailed: false,
+  };
   batch.parallel_turns.forEach((member, idx) => {
     const enriched: AriaTurnPayload = {
       ...member,
@@ -447,24 +542,48 @@ export function applyParallelBatchToState(
     };
     next = upsertTurnIntoState(next, enriched, nowMs, {
       selectUpserted: idx === 0 && !next.selectedSessionId,
+      preserveView: true,
     });
   });
-  return next;
+
+  // Auto-expand the first run that needs permission/input if nothing is expanded yet
+  let expandedId = next.expandedBatchSessionId;
+  if (!expandedId || !next.sessions.some((s) => s.sessionId === expandedId)) {
+    const gated = next.sessions.find((s) => {
+      const p = deriveSessionPhase(s);
+      return p === "awaiting_permission" || p === "awaiting_user_input";
+    });
+    expandedId = gated ? gated.sessionId : null;
+  }
+
+  return {
+    ...next,
+    view: "runList",
+    expandedBatchSessionId: expandedId,
+  };
 }
 
 export function applyThreadPayloadToState(
-  state: AriaStudioState,
+  state: AriaCardState,
   payload: AriaThreadPayload,
   nowMs: number,
-): AriaStudioState {
+): AriaCardState {
   const { thread, turns } = payload;
   const chronological = [...turns].reverse();
-  const wasParallel = state.sessions.length >= 2;
-  // In 1-to-1 Studio mode, switching threads via aria_get_thread replaces the focused
-  // conversation cleanly instead of turning thread navigation into a 2-agent fleet.
-  let next: AriaStudioState = wasParallel
+  const fromThreadList = state.view === "threadList" || state.cameFromThreadList;
+
+  // One card shows one conversation unless we are inside a batch RunList
+  const inBatchList = state.view === "runList" && state.sessions.length > 1;
+  let next: AriaCardState = inBatchList
     ? state
-    : { ...state, sessions: [], selectedSessionId: null };
+    : {
+        ...state,
+        view: "run",
+        cameFromThreadList: fromThreadList,
+        sessions: [],
+        selectedSessionId: null,
+      };
+
   if (chronological.length === 0) {
     const placeholder: AriaTurnPayload = {
       ok: true,
@@ -480,7 +599,7 @@ export function applyThreadPayloadToState(
       forge_home_url: payload.forge_home_url,
     };
     const out = upsertTurnIntoState(next, placeholder, nowMs, { selectUpserted: true });
-    return wasParallel ? { ...out, parallelLayout: "split" } : out;
+    return { ...out, view: "run", cameFromThreadList: fromThreadList };
   }
 
   chronological.forEach((summary, index) => {
@@ -504,27 +623,34 @@ export function applyThreadPayloadToState(
       selectUpserted: index === chronological.length - 1,
     });
   });
-  return wasParallel ? { ...next, parallelLayout: "split" } : next;
+  return { ...next, view: "run", cameFromThreadList: fromThreadList };
 }
 
 export function applyThreadsListToState(
-  state: AriaStudioState,
+  state: AriaCardState,
   payload: AriaThreadsListPayload,
-): AriaStudioState {
+): AriaCardState {
+  const prevView: "run" | "runList" | null =
+    state.view !== "threadList" && state.sessions.length > 0
+      ? state.view
+      : state.previousView;
   return {
     ...state,
+    view: "threadList",
+    previousView: prevView,
+    menuOpen: false,
     recentThreads: payload.threads,
-    threadsDrawerOpen: state.sessions.length === 0 ? true : state.threadsDrawerOpen,
     accessMode: payload.access_mode ?? state.accessMode,
     forgeHomeUrl: payload.forge_home_url || state.forgeHomeUrl,
+    bannerMessage: null,
   };
 }
 
 export function applyOptimisticSendInput(
-  state: AriaStudioState,
+  state: AriaCardState,
   args: Record<string, unknown>,
   nowMs: number,
-): AriaStudioState {
+): AriaCardState {
   const message = typeof args.message === "string" ? args.message.trim() : "";
   if (!message) {
     return state;
@@ -558,7 +684,7 @@ export function applyOptimisticSendInput(
     active_allowed_network_domains: allowedDomains,
     progress: {
       phase: "queued",
-      status_text: "Submitting ARIA turn and waiting for initial status…",
+      status_text: "Starting in sandbox",
       message_count: 0,
       tool_call_record_count: 0,
     },
@@ -580,24 +706,24 @@ export function applyOptimisticSendInput(
     }
   }
 
+  // Root send on a single run card replaces any empty state with one conversation
   const sessionId = tempId;
-  nextSessions.push({
+  const singleSession: AriaAgentSession = {
     sessionId,
-    label: deriveLabelFromPromptOrTurn(optimisticTurn, nextSessions.length + 1),
+    label: deriveLabelFromPromptOrTurn(optimisticTurn, 1),
     scope: { entity, project },
     forgeUrl: null,
     turns: [{ turn: optimisticTurn, syncedAtMs: nowMs, optimistic: true }],
-  });
+  };
   return {
     ...state,
-    sessions: nextSessions,
+    view: "run",
+    sessions: [singleSession],
     selectedSessionId: sessionId,
-    parallelLayout:
-      state.sessions.length < 2 && nextSessions.length >= 2 ? "grid" : state.parallelLayout,
   };
 }
 
-export function summarizeFleet(sessions: AriaAgentSession[]): FleetSummary {
+export function summarizeBatch(sessions: AriaAgentSession[]): BatchSummary {
   let active = 0;
   let awaitingPermission = 0;
   let awaitingInput = 0;
@@ -630,7 +756,7 @@ export function summarizeFleet(sessions: AriaAgentSession[]): FleetSummary {
   };
 }
 
-export function getPollableTurnIds(state: AriaStudioState): string[] {
+export function getPollableTurnIds(state: AriaCardState): string[] {
   const ids: string[] = [];
   for (const session of state.sessions) {
     const latest = latestSessionEntry(session);
@@ -644,14 +770,13 @@ export function getPollableTurnIds(state: AriaStudioState): string[] {
   return ids;
 }
 
-export function getHydratableCompletedTurnIds(state: AriaStudioState): string[] {
+export function getHydratableCompletedTurnIds(state: AriaCardState): string[] {
   const ids: string[] = [];
   for (const session of state.sessions) {
     const latest = latestSessionEntry(session);
     if (!latest || latest.optimistic) {
       continue;
     }
-    // Turns loaded via aria_get_thread metadata lack latest_response & progress
     if (
       latest.turn.state === "completed" &&
       latest.turn.latest_response === undefined &&
@@ -664,12 +789,26 @@ export function getHydratableCompletedTurnIds(state: AriaStudioState): string[] 
   return ids;
 }
 
-export function buildModelContextPayload(state: AriaStudioState): ModelContextPayload | null {
+export function buildModelContextPayload(state: AriaCardState): ModelContextPayload | null {
+  if (state.view === "threadList" && state.sessions.length === 0) {
+    if (state.recentThreads.length === 0) {
+      return null;
+    }
+    return {
+      text: `ARIA recent threads (${state.recentThreads.length} listed).`,
+      structuredContent: {
+        schema: "wandb.aria_agent_context/v1",
+        mode: "threads",
+        threadCount: state.recentThreads.length,
+      },
+    };
+  }
   if (state.sessions.length === 0) {
     return null;
   }
-  const summary = summarizeFleet(state.sessions);
-  const isParallel = state.sessions.length >= 2;
+
+  const summary = summarizeBatch(state.sessions);
+  const isBatch = state.view === "runList" || state.sessions.length > 1;
   const sessionItems = state.sessions.map((session) => {
     const latest = latestSessionEntry(session);
     const turn = latest?.turn ?? null;
@@ -693,14 +832,14 @@ export function buildModelContextPayload(state: AriaStudioState): ModelContextPa
   });
 
   const lines: string[] = [];
-  if (isParallel) {
+  if (isBatch) {
     lines.push(
-      `ARIA Parallel Sub-Agents (${summary.total}): ${summary.completed} completed, ${summary.active} active, ${summary.awaitingPermission} awaiting permission, ${summary.awaitingInput} awaiting input, ${summary.errored} errored.`,
+      `ARIA Batch (${summary.total} runs): ${summary.completed} done, ${summary.active} running, ${summary.awaitingPermission} awaiting network access, ${summary.awaitingInput} awaiting answer, ${summary.errored} errored.`,
     );
   } else {
     const s = sessionItems[0]!;
     lines.push(
-      `ARIA Session "${s.label}" (turn_id=${s.turnId ?? "pending"}, phase=${s.phase}, terminal=${s.isTerminal}).`,
+      `ARIA "${s.label}" (turn_id=${s.turnId ?? "pending"}, phase=${s.phase}, terminal=${s.isTerminal}).`,
     );
   }
   for (const item of sessionItems) {
@@ -716,7 +855,7 @@ export function buildModelContextPayload(state: AriaStudioState): ModelContextPa
     text: lines.join("\n"),
     structuredContent: {
       schema: "wandb.aria_agent_context/v1",
-      mode: isParallel ? "parallel" : "single",
+      mode: isBatch ? "batch" : "single",
       selectedSessionId: state.selectedSessionId,
       summary,
       sessions: sessionItems,

@@ -1,4 +1,4 @@
-"""Interactive ARIA Conversation & Parallel Sub-Agents Studio MCP App (`ui://wandb/aria-agent.html`)."""
+"""Interactive compact ARIA conversation card MCP App (`ui://wandb/aria-agent.html`)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ ARIA_UI_META: Dict[str, Any] = {
 
 
 def register_aria_agent_resource(mcp: FastMCP) -> None:
-    """Register the offline single-file ARIA Studio & Parallel Sub-Agents MCP App resource."""
+    """Register the offline single-file ARIA conversation card MCP App resource."""
     if not hasattr(mcp, "resource"):
         return
     ui: Dict[str, Any] = {
