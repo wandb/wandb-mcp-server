@@ -355,7 +355,7 @@ async def test_stateless_streamable_http_serves_both_new_mcp_apps(monkeypatch: p
 
 @pytest.mark.parametrize(
     "bundle_name",
-    ["line-plot.html", "agent-conversation.html", "agent-lens-insights.html"],
+    ["line-plot.html", "agent-conversation.html", "agent-lens-insights.html", "aria-agent.html"],
 )
 def test_all_mcp_app_bundles_are_offline_and_integrity_stamped(bundle_name: str):
     html = files("wandb_mcp_server").joinpath(f"data/{bundle_name}").read_text(encoding="utf-8")

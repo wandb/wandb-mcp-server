@@ -10,9 +10,10 @@ on:
       - "src/wandb_mcp_server/mcp_tools/line_plot*.py"
       - "src/wandb_mcp_server/mcp_tools/agent_conversation_app.py"
       - "src/wandb_mcp_server/mcp_tools/agent_lens_insights_app.py"
+      - "src/wandb_mcp_server/mcp_tools/aria*.py"
       - ".github/workflows/ui-line-plot.yml"
   pull_request:
-    branches: [main, "staging/**"]
+    branches: [main, "staging/**", "feat/**"]
     paths:
       - "ui/**"
       - "src/wandb_mcp_server/data/*.html"
@@ -20,6 +21,7 @@ on:
       - "src/wandb_mcp_server/mcp_tools/line_plot*.py"
       - "src/wandb_mcp_server/mcp_tools/agent_conversation_app.py"
       - "src/wandb_mcp_server/mcp_tools/agent_lens_insights_app.py"
+      - "src/wandb_mcp_server/mcp_tools/aria*.py"
       - ".github/workflows/ui-line-plot.yml"
 
 permissions:
@@ -64,6 +66,7 @@ jobs:
             src/wandb_mcp_server/data/line-plot.html \
             src/wandb_mcp_server/data/agent-conversation.html \
             src/wandb_mcp_server/data/agent-lens-insights.html \
+            src/wandb_mcp_server/data/aria-agent.html \
             src/wandb_mcp_server/data/THIRD_PARTY_NOTICES.txt
 
       - name: Install Playwright Chromium

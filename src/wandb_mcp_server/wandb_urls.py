@@ -26,6 +26,14 @@ def public_forge_agent_lens_url(entity_name: object, project_name: object, *extr
     return f"{public_forge_base_url()}/{suffix}"
 
 
+def public_forge_aria_url(thread_id: object = None) -> str:
+    """Build a public Forge ARIA deep link (`/home/aria` or `/home/aria/threads/<thread_id>`)."""
+    raw_thread = str(thread_id).strip("/") if thread_id is not None else ""
+    if raw_thread:
+        return f"{public_forge_base_url()}/home/aria/threads/{quote(raw_thread, safe='')}"
+    return f"{public_forge_base_url()}/home/aria"
+
+
 def public_app_base_url() -> str:
     """Return the user-facing W&B application origin."""
     parsed = urlsplit(WANDB_BASE_URL)
@@ -74,6 +82,7 @@ def publicize_wandb_url(value: object, *, fallback_segments: tuple[object, ...] 
 __all__ = [
     "public_app_base_url",
     "public_forge_agent_lens_url",
+    "public_forge_aria_url",
     "public_forge_base_url",
     "public_wandb_url",
     "publicize_wandb_url",

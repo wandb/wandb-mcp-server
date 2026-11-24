@@ -53,6 +53,7 @@ export function finalizeMcpAppBundle({ appRoot, outFileName }) {
     path.join(uiWorkspaceRoot, "line-plot/node_modules"),
     path.join(uiWorkspaceRoot, "agent-conversation/node_modules"),
     path.join(uiWorkspaceRoot, "agent-lens-insights/node_modules"),
+    path.join(uiWorkspaceRoot, "aria-agent/node_modules"),
   ];
 
   const sections = [
@@ -60,6 +61,7 @@ export function finalizeMcpAppBundle({ appRoot, outFileName }) {
     "  - line-plot.html",
     "  - agent-conversation.html",
     "  - agent-lens-insights.html",
+    "  - aria-agent.html",
     "====================================================================",
     "",
   ];
