@@ -309,6 +309,9 @@ describe("ARIA MCP App schema & state engine", () => {
             is_terminal: true,
           },
         ],
+        count: 2,
+        offset: 0,
+        has_more: false,
       },
       2_000,
     );
