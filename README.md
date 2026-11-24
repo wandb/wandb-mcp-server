@@ -142,7 +142,7 @@ Recommended deployment presets:
 
 | Deployment | Settings |
 |---|---|
-| MT SaaS with Agent Lens and ARIA | `models-weave-agents` + `WANDB_MCP_TOOL_EXTENSIONS=agent-lens,aria`, `shared`, `read-write` (45 tools) |
+| MT SaaS with Agent Lens and ARIA | `models-weave-agents` + `WANDB_MCP_TOOL_EXTENSIONS=agent-lens,aria`, `shared`, `read-write` (46 tools) |
 | Dedicated Models-only | `models-only`, `dedicated`, `read-write` (17 tools) |
 | Dedicated with classic Weave | `models-weave`, `dedicated`, `read-write` (21 tools) |
 | Dedicated with Weave + Agents | `models-weave-agents`, `dedicated`, `read-write` (31 tools) |
@@ -199,8 +199,8 @@ extension composed onto it) on both `shared` and `dedicated` workloads when `WF_
 | **get_weave_agent_span_stats_tool** | Time- or value-bucketed metric and percentile series (`p50`/`p95`/`p99` latency, tokens, cost, errors) | *"Show hourly p95 tool duration by agent"* |
 | **list_weave_agent_custom_attributes_tool** | Discover custom attribute keys on agent spans | *"What custom attributes do my agent spans have?"* |
 | **search_weave_agents_tool** | Full-text / structured message search, grouped by conversation | *"Find conversations mentioning refunds"* |
-| **get_weave_agent_trace_tool** | Structured chat/trajectory view for one trace (a turn) | *"What did the agent do in trace abc123?"* |
-| **get_weave_agent_conversation_tool** | Chronological multi-turn chat view for a conversation (`Turn 1` onward by default) | *"Show the whole conversation conv-42"* |
+| **get_weave_agent_trace_tool** | Structured chat/trajectory view for one trace (a turn), rendered inline as an interactive Conversation & Span Trajectory MCP App | *"What did the agent do in trace abc123?"* |
+| **get_weave_agent_conversation_tool** | Chronological multi-turn chat view (`Turn 1` onward by default) rendered inline as an interactive Conversation & Span Trajectory MCP App with lazy OTel span waterfall and feedback triage | *"Show the whole conversation conv-42"* |
 | **get_weave_agent_conversation_spans_tool** | Batch-load full OTel span trees and feedback markers for up to 100 conversations | *"Fetch span trees for the 15 sampled cluster conversations"* |
 | **query_weave_agent_feedback_tool** | Search or aggregate project-wide human notes (`wandb.note.1`), reactions, and scorer feedback | *"Find human notes mentioning wrong track across the project"* |
 | **manage_weave_agent_feedback_tool** | Add or delete human notes/corrections and reactions on turns or conversations (`read-write` only) | *"Add a note on turn abc123 explaining the expected edit"* |
@@ -751,7 +751,7 @@ Exact tool profiles:
 
 | Extension (`WANDB_MCP_TOOL_EXTENSIONS`) | Requires | Managed workloads | Tools |
 |---|---|---|---:|
-| `agent-lens` | weave, agents | shared | 10 |
+| `agent-lens` | weave, agents | shared | 11 |
 | `aria` | weave, agents | shared | 4 |
 | `raw-graphql` | weave | local only | 1 |
 
@@ -761,13 +761,13 @@ Exact tool profiles:
 | `models-weave` | `models-weave` | none | dedicated, shared | 21 | 19 |
 | `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 22 | 20 |
 | `models-weave-agents` | `models-weave-agents` | none | dedicated, shared | 31 | 28 |
-| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 41 | 36 |
+| `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 42 | 37 |
 | `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 35 | 31 |
 | `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 32 | 29 |
-| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 45 | 39 |
-| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 42 | 37 |
+| `models-weave-agents-agent-lens-aria` | `models-weave-agents` | agent-lens, aria | shared | 46 | 40 |
+| `models-weave-agents-agent-lens-raw-graphql` | `models-weave-agents` | agent-lens, raw-graphql | local only | 43 | 38 |
 | `models-weave-agents-aria-raw-graphql` | `models-weave-agents` | aria, raw-graphql | local only | 36 | 32 |
-| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 46 | 40 |
+| `models-weave-agents-agent-lens-aria-raw-graphql` | `models-weave-agents` | agent-lens, aria, raw-graphql | local only | 47 | 41 |
 
 Exact workload defaults:
 
@@ -785,7 +785,7 @@ Exact capacity classes:
 | `medium` | 12 | 16 | 8 | 8 |
 | `large` | 16 | 32 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:fbab000d321a4fcb08606eebacc21eff38a0720d70f7dcfdb34ecad96ac861a6`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:d1179268b8ed70cc795bbb5802685109e94eb862df6f6ec8b13dadf6a501f3a6`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Agent Lens Conversation</title>
+  </head>
+  <body>
+    <div id="app-root" class="ac-shell" data-display-mode="inline">
+      <header class="ac-header">
+        <div class="ac-header-left">
+          <div class="ac-title-row">
+            <h1 id="ac-title" class="ac-title">Loading conversation…</h1>
+            <button id="ac-copy-conv-btn" type="button" class="ac-copy-conv-btn" hidden></button>
+            <span id="ac-version-pill" class="ac-subtle-badge" hidden></span>
+            <span id="ac-error-pill" class="ac-error-badge" hidden></span>
+          </div>
+          <div id="ac-tags-row" class="ac-tags-row" hidden></div>
+        </div>
+
+        <div class="ac-header-right">
+          <div id="ac-meta-strip" class="ac-meta-strip">
+            <span id="ac-subtitle">Connecting…</span>
+          </div>
+          <div class="ac-actions">
+            <button id="ac-expand-btn" type="button" class="ac-btn" hidden aria-label="Expand view">
+              Expand
+            </button>
+            <button id="ac-open-forge-btn" type="button" class="ac-btn" hidden>
+              Open in Agent Lens ↗
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <nav id="ac-toolbar" class="ac-toolbar" aria-label="Conversation views" hidden>
+        <div class="ac-tabs" role="tablist">
+          <button id="ac-tab-conversation" type="button" role="tab" class="ac-tab" aria-selected="true">
+            Thread
+          </button>
+          <button id="ac-tab-spans" type="button" role="tab" class="ac-tab" aria-selected="false">
+            Spans
+          </button>
+        </div>
+
+        <div class="ac-toolbar-right">
+          <button id="ac-failures-btn" type="button" class="ac-chip-btn ac-chip-failures" aria-expanded="true" hidden>
+            Agent failures
+          </button>
+          <button id="ac-errors-only-btn" type="button" class="ac-chip-btn" aria-pressed="false" hidden>
+            Errors only
+          </button>
+          <button id="ac-tag-menu-btn" type="button" class="ac-chip-btn" aria-expanded="false" hidden>
+            + Tag
+          </button>
+        </div>
+      </nav>
+
+      <section id="ac-failures-panel" class="ac-failures-panel" aria-label="Agent failures in conversation" hidden></section>
+      <section id="ac-tag-popover" class="ac-popover" aria-label="Manage conversation tags" hidden></section>
+
+      <div id="ac-banner" class="ac-banner" role="status" aria-live="polite" hidden>
+        <span id="ac-banner-text"></span>
+        <button id="ac-banner-dismiss" type="button" class="ac-banner-dismiss" aria-label="Dismiss notice">✕</button>
+      </div>
+
+      <main id="ac-main" class="ac-main">
+        <div id="ac-empty" class="ac-empty" role="status">Waiting for conversation…</div>
+        <div id="ac-conversation-view" class="ac-turn-stream" hidden></div>
+        <div id="ac-spans-view" class="ac-spans-layout" hidden>
+          <div id="ac-spans-list" class="ac-span-tree"></div>
+          <aside id="ac-span-drawer" class="ac-span-drawer" aria-label="Selected span details" hidden></aside>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

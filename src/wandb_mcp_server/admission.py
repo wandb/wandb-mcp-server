@@ -177,6 +177,7 @@ HEAVY_TOOLS = frozenset(
         "compare_artifact_versions_tool",
         "get_weave_agent_conversation_spans_tool",
         "render_wandb_line_plot_tool",
+        "render_agent_lens_insights_tool",
     }
 )
 

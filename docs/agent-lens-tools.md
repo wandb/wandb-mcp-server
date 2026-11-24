@@ -1,6 +1,6 @@
 # Agent Lens tools
 
-Fourteen tools (12 read, 2 write) over the [Agent Lens](https://docs.coreweave.com/products/agent-lens)
+Eleven tools (9 read, 2 write) over the [Agent Lens](https://docs.coreweave.com/products/agent-lens)
 official `v1`, Insights, conversation-tag, instrumentation-health, and judge-guideline APIs.
 Agent Lens classifies agent turns into intent and failure categories and clusters,
 manages human- and judge-applied conversation tags, stores project judge guidelines,
@@ -30,7 +30,7 @@ The server refuses to start if the variable is missing or malformed.
 
 The profile is allowed on managed `shared` workloads and in local development.
 It is rejected on managed `dedicated` workloads. Setting
-`WANDB_MCP_ACCESS_MODE=read-only` keeps all 12 Agent Lens read tools while
+`WANDB_MCP_ACCESS_MODE=read-only` keeps all 9 Agent Lens read tools while
 omitting `manage_agent_lens_tags_tool` and `manage_agent_lens_guidelines_tool`
 (alongside `manage_weave_agent_feedback_tool`, `create_wandb_report_tool`, and
 `log_analysis_to_wandb`).
@@ -54,6 +54,7 @@ endpoints route through `/api/*` on the same origin.
 
 | Tool | Access | Endpoint |
 |---|---|---|
+| `render_agent_lens_insights_tool` | `read` | Parallel gather across `latest-week`, `clustering-status`, `{failure,intent}/breakdowns`, `clusters`, and optional `failure-attributions/query` (`ui://wandb/agent-lens-insights.html` MCP App) |
 | `get_agent_lens_category_breakdowns_tool` | `read` | `GET /api/insights/{type}/breakdowns` (+ optional `/api/insights/latest-week`, `/api/insights/clustering-status`, `/api/insights/{type}/volume`) |
 | `list_agent_lens_category_example_turns_tool` | `read` | `GET /api/insights/{type}/categories/{id}/example-turns` |
 | `get_agent_lens_failure_attributions_tool` | `read` | `POST /api/insights/failure-attributions/query` |

@@ -2,9 +2,28 @@
 
 from __future__ import annotations
 
+import os
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from wandb_mcp_server.config import WANDB_API_BASE_URL, WANDB_BASE_URL
+
+_DEFAULT_FORGE_ORIGIN = "https://forge.coreweave.com"
+
+
+def public_forge_base_url() -> str:
+    """Return the user-facing Forge application origin (HTTPS only)."""
+    raw = (os.environ.get("FORGE_APP_BASE_URL") or _DEFAULT_FORGE_ORIGIN).strip()
+    parsed = urlsplit(raw)
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        return _DEFAULT_FORGE_ORIGIN
+    return urlunsplit(("https", parsed.netloc, parsed.path.rstrip("/"), "", "")).rstrip("/")
+
+
+def public_forge_agent_lens_url(entity_name: object, project_name: object, *extra_segments: object) -> str:
+    """Build a public Forge Agent Lens deep link (`/agent-lens/<entity>/<project>/...`)."""
+    segments = ("agent-lens", entity_name, project_name, *extra_segments)
+    suffix = "/".join(quote(str(segment).strip("/"), safe="") for segment in segments if str(segment).strip("/"))
+    return f"{public_forge_base_url()}/{suffix}"
 
 
 def public_app_base_url() -> str:
@@ -52,4 +71,10 @@ def publicize_wandb_url(value: object, *, fallback_segments: tuple[object, ...] 
     return raw
 
 
-__all__ = ["public_app_base_url", "public_wandb_url", "publicize_wandb_url"]
+__all__ = [
+    "public_app_base_url",
+    "public_forge_agent_lens_url",
+    "public_forge_base_url",
+    "public_wandb_url",
+    "publicize_wandb_url",
+]
