@@ -1,4 +1,7 @@
-THIRD-PARTY SOFTWARE NOTICES — wandb_mcp_server/data/line-plot.html
+THIRD-PARTY SOFTWARE NOTICES — wandb_mcp_server/data/*.html
+  - line-plot.html
+  - agent-conversation.html
+  - agent-lens-insights.html
 ====================================================================
 
 --------------------------------------------------------------------

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>W&amp;B Agent Lens Insights Explorer</title>
+  </head>
+  <body>
+    <div id="app-root" class="ali-shell" data-display-mode="inline">
+      <header class="ali-header">
+        <div class="ali-heading">
+          <div class="ali-title-row">
+            <span class="ali-pill ali-pill-brand">AGENT LENS</span>
+            <h1 id="ali-title" class="ali-title">Loading Agent Lens insights…</h1>
+            <span id="ali-agent-pill" class="ali-pill" hidden></span>
+            <span id="ali-busy-pill" class="ali-pill ali-pill-busy" hidden>Updating…</span>
+          </div>
+          <p id="ali-key" class="ali-key">
+            Click a failure category or topic cluster to expand example turns, inspect the full conversation, and sync the failure pattern into your coding agent.
+          </p>
+          <div id="ali-kpi-strip" class="ali-kpi-strip" hidden></div>
+        </div>
+
+        <div class="ali-actions">
+          <div id="ali-window-group" class="ali-window-group" role="group" aria-label="Time window presets" hidden>
+            <button type="button" class="ali-preset-btn" data-days="1">24h</button>
+            <button type="button" class="ali-preset-btn" data-days="7">7d</button>
+            <button type="button" class="ali-preset-btn" data-days="14">14d</button>
+            <button type="button" class="ali-preset-btn" data-days="30">30d</button>
+          </div>
+          <button id="ali-expand-btn" type="button" class="ali-btn" hidden>Expand</button>
+          <button id="ali-open-forge-btn" type="button" class="ali-btn ali-btn-accent" hidden>
+            Open in Forge Agent Lens ↗
+          </button>
+        </div>
+      </header>
+
+      <nav id="ali-toolbar" class="ali-toolbar" aria-label="Insights sections" hidden>
+        <div class="ali-tabs" role="tablist">
+          <button id="ali-tab-failures" type="button" role="tab" class="ali-tab" aria-selected="true">
+            Failures
+          </button>
+          <button id="ali-tab-intents" type="button" role="tab" class="ali-tab" aria-selected="false">
+            Intents
+          </button>
+          <button id="ali-tab-clusters" type="button" role="tab" class="ali-tab" aria-selected="false">
+            Topic Clusters
+          </button>
+        </div>
+        <div id="ali-cluster-filter-group" class="ali-cluster-filters" hidden>
+          <button type="button" class="ali-filter-chip" data-filter="failure" aria-pressed="true">Failure topics</button>
+          <button type="button" class="ali-filter-chip" data-filter="intent" aria-pressed="false">Intent topics</button>
+        </div>
+      </nav>
+
+      <div id="ali-banner" class="ali-banner" role="status" aria-live="polite" hidden>
+        <span id="ali-banner-text"></span>
+        <button id="ali-banner-dismiss" type="button" class="ali-banner-dismiss" aria-label="Dismiss notice">✕</button>
+      </div>
+
+      <main id="ali-main" class="ali-main">
+        <div id="ali-empty" class="ali-empty" role="status">Waiting for Agent Lens insights…</div>
+        <div id="ali-workspace" class="ali-workspace" hidden>
+          <section id="ali-bars-list" class="ali-bars-list" aria-label="Category and cluster breakdown"></section>
+          <aside id="ali-conv-drawer" class="ali-conv-drawer" aria-label="Embedded conversation inspector" hidden></aside>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

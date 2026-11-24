@@ -371,6 +371,12 @@
           "access": "write",
           "risk": "non-idempotent-credential-forwarding",
           "prerequisite": "agent-lens-https-origin"
+        },
+        {
+          "name": "render_agent_lens_insights_tool",
+          "access": "read",
+          "risk": "credential-forwarding",
+          "prerequisite": "agent-lens-https-origin"
         }
       ]
     },

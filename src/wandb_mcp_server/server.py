@@ -142,6 +142,19 @@ from wandb_mcp_server.mcp_tools.agent_lens_doctor import (
     DIAGNOSE_INSTRUMENTATION_TOOL_DESCRIPTION,
     diagnose_instrumentation,
 )
+from wandb_mcp_server.mcp_tools.agent_lens_insights_app import (
+    INSIGHTS_RESOURCE_URI,
+    INSIGHTS_TOOL_NAME,
+    RENDER_AGENT_LENS_INSIGHTS_TOOL_DESCRIPTION,
+    register_agent_lens_insights_resource,
+    render_agent_lens_insights,
+)
+from wandb_mcp_server.mcp_tools.agent_conversation_app import (
+    CONVERSATION_RESOURCE_URI,
+    register_agent_conversation_resource,
+    render_agent_conversation,
+    render_agent_trace,
+)
 from wandb_mcp_server.mcp_tools.agents import (
     GET_AGENT_CONVERSATION_SPANS_TOOL_DESCRIPTION,
     GET_AGENT_CONVERSATION_TOOL_DESCRIPTION,
@@ -154,10 +167,8 @@ from wandb_mcp_server.mcp_tools.agents import (
     QUERY_AGENT_FEEDBACK_TOOL_DESCRIPTION,
     QUERY_AGENT_SPANS_TOOL_DESCRIPTION,
     SEARCH_AGENTS_TOOL_DESCRIPTION,
-    get_agent_conversation,
     get_agent_conversation_spans,
     get_agent_span_stats,
-    get_agent_trace,
     list_agent_custom_attributes,
     list_agent_versions,
     list_agents,
@@ -190,16 +201,14 @@ logger = get_rich_logger("weave-mcp-server", default_level_str="WARNING", env_va
 
 @dataclass(frozen=True, slots=True)
 class _DirectTool:
-    """One directly-registered tool: the MCP tool name, its implementation, and
-    its description. Implementations in mcp_tools.agents and mcp_tools.agent_lens
-    are complete tools -- each builds its own request and returns a JSON string --
-    so they are registered without a wrapper and their parameter schemas come
-    from the function signatures.
+    """One directly-registered tool: the MCP tool name, its implementation,
+    its description, and optional MCP tool metadata (e.g. MCP App UI resourceUri).
     """
 
     name: str
     impl: Callable[..., Any]
     description: str
+    meta: Optional[Dict[str, Any]] = None
 
 
 # Implementations for the agent tools selected by the packaged runtime contract.
@@ -214,8 +223,6 @@ _AGENT_TOOLS = (
         LIST_AGENT_CUSTOM_ATTRIBUTES_TOOL_DESCRIPTION,
     ),
     _DirectTool("search_weave_agents_tool", search_agents, SEARCH_AGENTS_TOOL_DESCRIPTION),
-    _DirectTool("get_weave_agent_trace_tool", get_agent_trace, GET_AGENT_TRACE_TOOL_DESCRIPTION),
-    _DirectTool("get_weave_agent_conversation_tool", get_agent_conversation, GET_AGENT_CONVERSATION_TOOL_DESCRIPTION),
     _DirectTool(
         "get_weave_agent_conversation_spans_tool",
         get_agent_conversation_spans,
@@ -1526,21 +1533,122 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
     # calls), so they are registered directly and independently gated below.
     # Each implementation is a complete tool; its parameter schema is derived
     # from the function signature.
+    effective_access_mode: Literal["read-only", "read-write"] = "read-only" if read_only else "read-write"
+    agent_lens_group_enabled = "agent-lens" in selection.groups
+
+    if {"get_weave_agent_trace_tool", "get_weave_agent_conversation_tool"} & selection.tools:
+        register_agent_conversation_resource(mcp_instance)
+
     for tool in _AGENT_TOOLS:
-        register_tool(name=tool.name, description=tool.description)(tool.impl)
+        register_tool(name=tool.name, description=tool.description, **({"meta": tool.meta} if tool.meta else {}))(
+            tool.impl
+        )
+
+    @register_tool(
+        description=GET_AGENT_TRACE_TOOL_DESCRIPTION,
+        meta={
+            "ui": {"resourceUri": CONVERSATION_RESOURCE_URI},
+            "ui/resourceUri": CONVERSATION_RESOURCE_URI,
+        },
+    )
+    def get_weave_agent_trace_tool(
+        entity_name: str,
+        project_name: str,
+        trace_id: str,
+        include_feedback: bool = False,
+        include_model_tool_calls: bool = False,
+    ) -> CallToolResult:
+        """Get the structured chat/trajectory view for one trace."""
+        return render_agent_trace(
+            entity_name=entity_name,
+            project_name=project_name,
+            trace_id=trace_id,
+            include_feedback=include_feedback,
+            include_model_tool_calls=include_model_tool_calls,
+            _access_mode=effective_access_mode,
+            _agent_lens_available=agent_lens_group_enabled,
+        )
+
+    @register_tool(
+        description=GET_AGENT_CONVERSATION_TOOL_DESCRIPTION,
+        meta={
+            "ui": {"resourceUri": CONVERSATION_RESOURCE_URI},
+            "ui/resourceUri": CONVERSATION_RESOURCE_URI,
+        },
+    )
+    def get_weave_agent_conversation_tool(
+        entity_name: str,
+        project_name: str,
+        conversation_id: str,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        sort_direction: Literal["asc", "desc"] = "asc",
+        include_feedback: bool = False,
+        include_model_tool_calls: bool = False,
+    ) -> CallToolResult:
+        """Get the multi-turn chat view for a conversation."""
+        return render_agent_conversation(
+            entity_name=entity_name,
+            project_name=project_name,
+            conversation_id=conversation_id,
+            limit=limit,
+            offset=offset,
+            sort_direction=sort_direction,
+            include_feedback=include_feedback,
+            include_model_tool_calls=include_model_tool_calls,
+            _access_mode=effective_access_mode,
+            _agent_lens_available=agent_lens_group_enabled,
+        )
+
     if not read_only:
         for tool in _AGENT_WRITE_TOOLS:
-            register_tool(name=tool.name, description=tool.description)(tool.impl)
+            register_tool(name=tool.name, description=tool.description, **({"meta": tool.meta} if tool.meta else {}))(
+                tool.impl
+            )
 
     # ----- Agent Lens (v1, Insights, conversation tags, and guidelines) tools -----
     # A distinct service with its own origin and classification data plane. The
     # contract already refused the profile without a validated AGENT_LENS_BASE_URL,
     # so reaching registration means the origin is configured and usable.
+    if INSIGHTS_TOOL_NAME in selection.tools:
+        register_agent_lens_insights_resource(mcp_instance)
     for tool in _AGENT_LENS_TOOLS:
-        register_tool(name=tool.name, description=tool.description)(tool.impl)
+        register_tool(name=tool.name, description=tool.description, **({"meta": tool.meta} if tool.meta else {}))(
+            tool.impl
+        )
+
+    @register_tool(
+        description=RENDER_AGENT_LENS_INSIGHTS_TOOL_DESCRIPTION,
+        meta={"ui": {"resourceUri": INSIGHTS_RESOURCE_URI}, "ui/resourceUri": INSIGHTS_RESOURCE_URI},
+    )
+    async def render_agent_lens_insights_tool(
+        entity_name: str,
+        project_name: str,
+        window_days: Literal[1, 7, 14, 30] = 7,
+        start_at: Optional[str] = None,
+        end_at: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        top_n_clusters: int = 12,
+        trace_ids: Optional[List[str]] = None,
+    ) -> CallToolResult:
+        """Render Agent Lens failure & intent insights as an interactive MCP App."""
+        return await render_agent_lens_insights(
+            entity_name=entity_name,
+            project_name=project_name,
+            window_days=window_days,
+            start_at=start_at,
+            end_at=end_at,
+            agent_name=agent_name,
+            top_n_clusters=top_n_clusters,
+            trace_ids=trace_ids,
+            _access_mode=effective_access_mode,
+        )
+
     if not read_only:
         for tool in _AGENT_LENS_WRITE_TOOLS:
-            register_tool(name=tool.name, description=tool.description)(tool.impl)
+            register_tool(name=tool.name, description=tool.description, **({"meta": tool.meta} if tool.meta else {}))(
+                tool.impl
+            )
 
     # ARIA forwards the caller's credential to a distinct hosted service and
     # includes a write operation. Register it only after explicit opt-in;

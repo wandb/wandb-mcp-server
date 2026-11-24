@@ -90,6 +90,8 @@ _USAGE_COUNTABLE_NUMBER_KEYS = frozenset(
         "max_evals",
         "history_samples",
         "top_n_values",
+        "top_n_clusters",
+        "window_days",
         "max_file_diff_entries",
         "request_timeout",
         "queue_ms",
