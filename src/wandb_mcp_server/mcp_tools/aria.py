@@ -5,19 +5,23 @@ schema at https://wb-agent.wandb.ai/openapi.json.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import math
+import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from importlib.metadata import PackageNotFoundError, version as distribution_version
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Literal, Optional, Sequence
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
 import httpx
+from pydantic import BaseModel, Field
 
 from wandb_mcp_server.api_client import WandBApiManager
 from wandb_mcp_server.admission import current_tool_deadline
@@ -56,6 +60,63 @@ POLL_BACKOFF_MULTIPLIERS = (1, 2, 3)
 POLL_DEADLINE_SAFETY_SECONDS = 0.5
 MIN_RETRY_AFTER_MS = 1_000
 MAX_RETRY_AFTER_MS = 30_000
+MAX_ALLOWED_NETWORK_DOMAINS = 32
+MAX_DOMAIN_LENGTH = 253
+MAX_PERMISSION_REASON_CHARS = 500
+MAX_AUTO_PERMISSION_GRANTS = 2
+ELICIT_TIMEOUT_SECONDS = 60.0
+
+NetworkAccessMode = Literal["prompt", "auto_safe", "auto_public", "deny"]
+VALID_NETWORK_ACCESS_MODES: frozenset[str] = frozenset({"prompt", "auto_safe", "auto_public", "deny"})
+
+# Read-only public ML research, documentation, and package registries safe for
+# unattended `network_access_mode="auto_safe"` grants (extendable by operators
+# via comma-separated `MCP_ARIA_AUTO_SAFE_DOMAINS`).
+DEFAULT_SAFE_NETWORK_DOMAINS: frozenset[str] = frozenset(
+    {
+        "arxiv.org",
+        "export.arxiv.org",
+        "openreview.net",
+        "aclanthology.org",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "huggingface.co",
+        "cdn-lfs.huggingface.co",
+        "pytorch.org",
+        "docs.python.org",
+    }
+)
+_RESERVED_EXACT_DOMAINS: frozenset[str] = frozenset(
+    {
+        "localhost",
+        "metadata",
+        "metadata.google.internal",
+        "instance-data",
+    }
+)
+_RESERVED_DOMAIN_SUFFIXES: tuple[str, ...] = (
+    ".localhost",
+    ".local",
+    ".internal",
+    ".lan",
+    ".home",
+    ".arpa",
+    ".svc",
+    ".cluster.local",
+    ".corp",
+)
+_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+class _AriaNetworkAccessElicitation(BaseModel):
+    """MCP form elicitation schema when ARIA requests sandbox network egress."""
+
+    grant_access: bool = Field(
+        default=True,
+        description="Grant ARIA outbound sandbox access to the requested domain(s) and continue the turn.",
+    )
+
+
 _OUTBOUND_LIMITERS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = WeakKeyDictionary()
 _OUTBOUND_LIMITERS_LOCK = threading.Lock()
 
@@ -119,53 +180,46 @@ ARIA_SEND_MESSAGE_TOOL_DESCRIPTION = """Start or continue an asynchronous conver
 <when_to_use>
 ARIA is W&B's own agent: it has the caller's W&B context, runs code against the
 W&B and Weave APIs, and can read and change the W&B UI. ARIA can:
-- Workspaces: create or edit saved views, filters, grouping, sorting, sections,
+- Workspaces: create/edit saved views, filters, grouping, sorting, sections,
   panels, run colours, pinned/baseline runs; describe what a workspace shows.
-- Runs: rank, compare, diff configs, find regressions and anomalies, explain
-  runtime or metric differences, read run console logs, tag/rename/move/delete
-  runs, export run tables.
-- Sweeps: create, run and analyse sweeps and parameter importance.
-- Reports: create or edit reports and verify them; PDF export.
-- Artifacts and Registry: lineage, versions, promotion, storage cleanup.
-- Weave: query traces, debug evaluations, prompts/datasets/leaderboards,
-  monitors; Agent Lens conversations and insights.
-- Automations and alerts, Launch queues, Serverless training and inference,
-  notebooks, Sandboxes, GitHub repos when the user enabled it.
-- Investigations: open-ended "why is this slow", "what regressed", "audit this
-  project" with a written analysis.
+- Runs & Sweeps: rank, compare, diff configs, find regressions, read console
+  logs, tag/rename/move/delete runs, export tables, run/analyse sweeps.
+- Reports, Artifacts & Registry: create/edit reports, PDF export, lineage,
+  versions, promotion, storage cleanup.
+- Weave & Agent Lens: query traces, debug evaluations, prompts/datasets,
+  monitors, conversations, and insights.
+- Platform & Investigations: automations, Launch, Serverless training/inference,
+  notebooks, Sandboxes, GitHub repos, and open-ended project audits.
 Earlier ARIA conversations are found with aria_list_threads.
 </when_to_use>
 
-This tool returns promptly by default because ARIA turns are asynchronous. Keep the returned turn_id. If state is queued or in_progress, call aria_get_turn until is_terminal is true; open-ended project audits and multi-step investigations routinely take 2 to 8 minutes, so do not start a duplicate ARIA thread while a turn is working. Set wait_seconds (up to 30) to wait server-side for a fast result without adding separate client sleep calls. To continue a completed conversation, call this tool again with parent_turn_id set to the previous turn_id; omit entity, project, and title for continuations.
-
-Root turns may omit both entity and project. If only project is supplied, this
-tool resolves the caller's default W&B entity before creating the turn. Passing
-a short title is recommended for new conversations; when omitted on a root
-turn, the thread is titled automatically. Results are compact by default; set
-include_turn=true only when a bounded raw ARIA turn snapshot is actually
-needed. Oversized snapshots include `_truncation` metadata.
+ARIA turns are asynchronous: keep `turn_id` and poll `aria_get_turn` until `is_terminal` is true (audits routinely take 2 to 8 minutes; do not start a duplicate thread while working). Set `wait_seconds` (up to 30) to wait server-side without client sleep calls. Continue a completed turn with `parent_turn_id` (omit `entity`, `project`, and `title`). Root turns may omit `entity`/`project` (auto-resolves default entity when only `project` is set) and auto-title when `title` is omitted. Set `include_turn=true` only when a bounded raw snapshot (`_truncation` when oversized) is needed.
 
 Parameters
 ----------
 message : str
-    A focused request for ARIA, limited to 32 KiB of UTF-8 text. Include relevant W&B entity/project names, run IDs, call IDs, URLs, metrics, time windows, and the desired output shape.
+    Focused request (up to 32 KiB UTF-8) with relevant entity/project, IDs, metrics, windows, and output shape.
 entity : str, optional
-    W&B entity for a new conversation, up to 512 characters. Omit to let ARIA use the account default. Must be omitted for continuations.
+    W&B entity for a new conversation (<= 512 chars). Omit on continuations.
 project : str, optional
-    W&B project for a new conversation, up to 512 characters. Omit to let ARIA use the default. Must be omitted for continuations.
+    W&B project for a new conversation (<= 512 chars). Omit on continuations.
 title : str, optional
-    Optional for a new conversation (omit with parent_turn_id): a short descriptive name for this conversation, up to 255 characters, shown in aria_list_threads and the ARIA thread list in the W&B UI. When omitted on a new conversation, ARIA titles the thread automatically.
+    Short name for a new conversation (<= 255 chars; omit with `parent_turn_id`).
 parent_turn_id : str, optional
-    Completed ARIA turn to continue, up to 512 characters. Use the exact turn_id returned by the prior call.
+    Completed `turn_id` to continue (<= 512 chars).
 wait_seconds : int
-    Seconds to poll before returning, from 0 to 30. Default 0 returns the initial asynchronous handle immediately.
+    Seconds to poll server-side before returning (0-30, default 0).
 include_turn : bool
-    Include a bounded raw turn snapshot. Oversized data is truncated with metadata. Default false avoids very large responses.
+    Include bounded raw turn snapshot (default false).
+allowed_network_domains : list[str], optional
+    Public DNS hostnames (e.g. `["arxiv.org"]`) added to ARIA's sandbox egress allowlist; merged with parent grants on continuations.
+network_access_mode : {"prompt", "auto_safe", "auto_public", "deny"}, optional
+    Policy for ARIA `network_access` `permission_requests`: `"prompt"` (default; elicits or pauses with `phase="awaiting_permission"`), `"auto_safe"` (auto-grants vetted registries like `arxiv.org`, `pypi.org`, `huggingface.co`), `"auto_public"` (only when the host harness runs in user-authorized full-auto mode), or `"deny"` (continues offline).
 
 Returns
 -------
 dict
-    Compact state, progress, scope, turn/thread handles, latest assistant response, and next action. Errors use the MCP error state with a JSON payload and never include the W&B token.
+    Compact state, progress, scope, turn/thread handles, latest response, and next action. Errors use the MCP error state and never include the W&B token.
 """
 
 ARIA_GET_TURN_TOOL_DESCRIPTION = """Get the current state and result of an asynchronous ARIA turn.
@@ -179,7 +233,7 @@ working.
 
 With wait_seconds=0 this performs one poll; with 1-30 it polls server-side for that bounded interval and returns early if the turn completes, errors, or is cancelled. Do not insert separate sleep or wait tool calls between polls because wait_seconds=30 already waits server-side. Open-ended ARIA investigations routinely run 2 to 8 minutes, and individual sandbox scripts or final synthesis passes can run 30 to 90 seconds without changing message_count or tool_call_record_count; treat unchanged counters as active work rather than a hang, reuse the same turn_id until is_terminal is true, and do not start a duplicate ARIA thread while state is queued or in_progress. In-progress results include a phase, meaningful status text, elapsed_seconds when available, message/tool counts, and latest tool activity, plus a suggested poll interval.
 
-When state is completed, latest_response contains ARIA's newest assistant answer. Continue the conversation with aria_send_message(parent_turn_id=turn_id). When state is errored, inspect error_info. A transport/service error uses the MCP error state and keeps turn_id in its JSON payload so this tool can be retried safely. Results are compact by default; set include_turn=true only for a bounded raw snapshot, which may contain `_truncation` metadata.
+When state is completed, check progress.phase: if "awaiting_permission" or "awaiting_user_input", ARIA paused on permission_requests or agent_questions and can be resumed from saved workspace state via aria_send_message(parent_turn_id=turn_id, ...). Otherwise latest_response contains ARIA's answer. When state is errored, inspect error_info. A transport/service error uses the MCP error state and keeps turn_id in its JSON payload so this tool can be retried safely. Results are compact by default; set include_turn=true only for a bounded raw snapshot, which may contain `_truncation` metadata.
 
 Parameters
 ----------
@@ -189,6 +243,8 @@ wait_seconds : int
     Seconds to poll before returning, from 0 to 30. Default 0 performs one status request.
 include_turn : bool
     Include a bounded raw turn snapshot. Oversized data is truncated with metadata. Default false avoids very large responses.
+network_access_mode : {"prompt", "auto_safe", "auto_public", "deny"}, optional
+    Optional policy when a polled turn pauses on network_access permission_requests in read-write mode (inherits MCP_ARIA_NETWORK_ACCESS_MODE when omitted).
 
 Returns
 -------
@@ -1234,6 +1290,232 @@ def _resolve_tool_name(tool_calls: list[Any], record: Dict[str, Any]) -> Optiona
     return None
 
 
+def _normalize_public_domain(raw_domain: Any) -> Optional[str]:
+    """Validate and canonicalize one public DNS hostname, rejecting IP literals and internal zones."""
+    if not isinstance(raw_domain, str):
+        return None
+    candidate = raw_domain.strip().rstrip(".")
+    if not candidate or len(candidate) > MAX_DOMAIN_LENGTH:
+        return None
+    if any(ch in candidate for ch in ("/", ":", "@", "?", "#", "*", "\\", " ", "\t", "\r", "\n")):
+        return None
+    try:
+        ascii_host = candidate.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+    if not ascii_host or len(ascii_host) > MAX_DOMAIN_LENGTH:
+        return None
+    if ascii_host in _RESERVED_EXACT_DOMAINS or ascii_host.endswith(_RESERVED_DOMAIN_SUFFIXES):
+        return None
+    try:
+        ipaddress.ip_address(ascii_host.strip("[]"))
+        return None
+    except ValueError:
+        pass
+    labels = ascii_host.split(".")
+    if len(labels) < 2:
+        return None
+    if labels[-1].isdigit():
+        return None
+    for label in labels:
+        if not _DOMAIN_LABEL_RE.fullmatch(label):
+            return None
+    return ascii_host
+
+
+def normalize_allowed_network_domains(raw_domains: Optional[Sequence[str]]) -> Optional[List[str]]:
+    """Validate caller-supplied `allowed_network_domains`, raising `AriaAPIError` on invalid input."""
+    if raw_domains is None:
+        return None
+    if isinstance(raw_domains, (str, bytes)) or not isinstance(raw_domains, Sequence):
+        raise AriaAPIError(
+            "invalid_request",
+            "allowed_network_domains must be a list of public DNS hostnames.",
+            retryable=False,
+        )
+    if len(raw_domains) > MAX_ALLOWED_NETWORK_DOMAINS:
+        raise AriaAPIError(
+            "invalid_request",
+            f"allowed_network_domains may include at most {MAX_ALLOWED_NETWORK_DOMAINS} hostnames.",
+            retryable=False,
+        )
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for item in raw_domains:
+        normalized = _normalize_public_domain(item)
+        if normalized is None:
+            raise AriaAPIError(
+                "invalid_request",
+                "Each entry in allowed_network_domains must be a valid public DNS hostname "
+                "(no schemes, ports, paths, wildcards, IP literals, or internal domains).",
+                retryable=False,
+            )
+        if normalized not in seen:
+            seen.add(normalized)
+            deduped.append(normalized)
+    return deduped
+
+
+def _resolve_network_access_mode(
+    explicit_mode: Optional[str],
+) -> tuple[NetworkAccessMode, bool]:
+    """Return `(mode, explicitly_configured)` from call argument or `MCP_ARIA_NETWORK_ACCESS_MODE`."""
+    if explicit_mode is not None:
+        cleaned = str(explicit_mode).strip().lower() if isinstance(explicit_mode, str) else ""
+        if cleaned not in VALID_NETWORK_ACCESS_MODES:
+            raise AriaAPIError(
+                "invalid_request",
+                "network_access_mode must be one of: prompt, auto_safe, auto_public, deny.",
+                retryable=False,
+            )
+        return cleaned, True  # type: ignore[return-value]
+    env_raw = (os.environ.get("MCP_ARIA_NETWORK_ACCESS_MODE") or "").strip().lower()
+    if not env_raw:
+        return "prompt", False
+    if env_raw not in VALID_NETWORK_ACCESS_MODES:
+        logger.warning("Ignoring invalid MCP_ARIA_NETWORK_ACCESS_MODE=%r; defaulting to prompt.", env_raw)
+        return "prompt", False
+    return env_raw, True  # type: ignore[return-value]
+
+
+def _configured_safe_network_domains() -> frozenset[str]:
+    extra_raw = os.environ.get("MCP_ARIA_AUTO_SAFE_DOMAINS") or ""
+    if not extra_raw.strip():
+        return DEFAULT_SAFE_NETWORK_DOMAINS
+    merged = set(DEFAULT_SAFE_NETWORK_DOMAINS)
+    for token in extra_raw.split(","):
+        normalized = _normalize_public_domain(token)
+        if normalized is not None:
+            merged.add(normalized)
+    return frozenset(merged)
+
+
+def _turn_allowed_network_domains(turn: Dict[str, Any]) -> List[str]:
+    perms = turn.get("permissions")
+    if not isinstance(perms, dict):
+        return []
+    raw_list = perms.get("allowed_network_domains")
+    if not isinstance(raw_list, list):
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in raw_list:
+        norm = _normalize_public_domain(item)
+        if norm and norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
+
+
+def _inspect_permission_requests(turn: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarize ARIA `permission_requests` and partition valid vs rejected domains."""
+    raw_reqs = turn.get("permission_requests")
+    if not isinstance(raw_reqs, list) or not raw_reqs:
+        return {
+            "has_requests": False,
+            "all_network_access": False,
+            "valid_domains": [],
+            "rejected_domains": [],
+            "reasons": [],
+        }
+    valid_domains: List[str] = []
+    seen_valid: set[str] = set()
+    rejected_domains: List[str] = []
+    reasons: List[str] = []
+    all_network_access = True
+
+    for item in raw_reqs:
+        if not isinstance(item, dict):
+            all_network_access = False
+            continue
+        if item.get("type") != "network_access":
+            all_network_access = False
+            continue
+        reason = item.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            bounded_reason = sanitize_sensitive_text(reason.strip(), max_chars=MAX_PERMISSION_REASON_CHARS)
+            if bounded_reason and bounded_reason not in reasons:
+                reasons.append(bounded_reason)
+        domains = item.get("domains")
+        if isinstance(domains, list):
+            for dom in domains[:MAX_ALLOWED_NETWORK_DOMAINS]:
+                norm = _normalize_public_domain(dom)
+                if norm is not None:
+                    if norm not in seen_valid:
+                        seen_valid.add(norm)
+                        valid_domains.append(norm)
+                elif isinstance(dom, str) and dom.strip():
+                    rejected_domains.append(sanitize_sensitive_text(dom.strip(), max_chars=128))
+
+    return {
+        "has_requests": True,
+        "all_network_access": all_network_access and bool(valid_domains or rejected_domains),
+        "valid_domains": valid_domains,
+        "rejected_domains": rejected_domains,
+        "reasons": reasons,
+    }
+
+
+def _has_agent_questions(turn: Dict[str, Any]) -> bool:
+    questions = turn.get("agent_questions")
+    return isinstance(questions, list) and len(questions) > 0
+
+
+def _client_supports_elicitation(ctx: Any) -> bool:
+    if ctx is None:
+        return False
+    if (os.environ.get("MCP_SESSION_MODE") or "").strip().lower() == "stateless":
+        return False
+    try:
+        session = ctx.request_context.session
+        client_params = getattr(session, "client_params", None)
+        capabilities = getattr(client_params, "capabilities", None)
+        return getattr(capabilities, "elicitation", None) is not None
+    except Exception:
+        return False
+
+
+async def _elicit_network_permission(
+    ctx: Any,
+    *,
+    domains: List[str],
+    reasons: List[str],
+) -> Optional[bool]:
+    """Prompt the MCP client via `ctx.elicit` when supported; return True/False or None on fallback."""
+    if not _client_supports_elicitation(ctx):
+        return None
+    reason_text = "; ".join(reasons) if reasons else "Complete the current ARIA task."
+    prompt = (
+        f"ARIA is requesting outbound sandbox network access to {', '.join(domains)}.\n"
+        f"Reason: {reason_text}\n"
+        "Grant access and continue from ARIA's saved workspace state?"
+    )
+    deadline = current_tool_deadline.get()
+    timeout = ELICIT_TIMEOUT_SECONDS
+    if deadline is not None:
+        remaining = deadline - time.monotonic() - 1.0
+        if remaining <= 0.5:
+            return None
+        timeout = min(timeout, remaining)
+    try:
+        outcome = await asyncio.wait_for(
+            ctx.elicit(message=prompt, schema=_AriaNetworkAccessElicitation),
+            timeout=timeout,
+        )
+    except Exception as exc:
+        logger.debug(
+            "MCP elicitation unavailable or failed (%s); falling back to awaiting_permission.", type(exc).__name__
+        )
+        return None
+    action = getattr(outcome, "action", None)
+    if action == "accept":
+        data = getattr(outcome, "data", None)
+        return bool(getattr(data, "grant_access", True))
+    if action in ("decline", "cancel"):
+        return False
+    return None
+
+
 def _progress_summary(turn: Dict[str, Any], *, poll_error: Optional[AriaAPIError] = None) -> Dict[str, Any]:
     messages = turn.get("messages")
     tool_calls = turn.get("tool_calls")
@@ -1310,7 +1592,30 @@ def _progress_summary(turn: Dict[str, Any], *, poll_error: Optional[AriaAPIError
     elif state == "in_progress":
         summary.update(phase="working", status_text="ARIA is working on the turn.")
     elif state == "completed":
-        summary.update(phase="completed", status_text="ARIA completed the turn.")
+        perm_info = _inspect_permission_requests(turn)
+        if perm_info["has_requests"]:
+            domain_label = ", ".join(perm_info["valid_domains"])
+            detail = f" to {domain_label}" if domain_label else ""
+            summary.update(
+                phase="awaiting_permission",
+                requires_permission=True,
+                status_text=(
+                    f"ARIA paused to request outbound network access{detail} "
+                    "before finishing; saved workspace state is preserved."
+                ),
+            )
+            if perm_info["valid_domains"]:
+                summary["requested_network_domains"] = perm_info["valid_domains"]
+            if perm_info["rejected_domains"]:
+                summary["rejected_network_domains"] = perm_info["rejected_domains"]
+        elif _has_agent_questions(turn):
+            summary.update(
+                phase="awaiting_user_input",
+                requires_user_input=True,
+                status_text="ARIA paused with follow-up question(s) in agent_questions.",
+            )
+        else:
+            summary.update(phase="completed", status_text="ARIA completed the turn.")
     elif state == "errored":
         summary.update(phase="errored", status_text="ARIA stopped with an execution error.")
     elif state == "cancelled":
@@ -1329,8 +1634,36 @@ def _turn_result(
     state = str(turn["state"])
     turn_id = str(turn["id"])
     is_terminal = state in TERMINAL_STATES
+    perm_info = _inspect_permission_requests(turn) if state == "completed" else None
+    has_questions = _has_agent_questions(turn) if state == "completed" else False
 
-    if state == "completed":
+    if state == "completed" and perm_info and perm_info["has_requests"]:
+        valid_domains = perm_info["valid_domains"]
+        if valid_domains:
+            domains_json = json.dumps(valid_domains)
+            next_action = (
+                "ARIA paused on permission_requests without losing /workspace progress. "
+                f"Ask the user whether to grant outbound access to {domains_json} (or if the host "
+                "harness is running in user-authorized full-auto mode and these domains match the "
+                "user's task, proceed directly), then call aria_send_message with "
+                f"parent_turn_id='{turn_id}', allowed_network_domains={domains_json}, and a brief "
+                "continuation message (or pass network_access_mode='auto_safe' for vetted research "
+                "registries). To decline, call aria_send_message with parent_turn_id set to this "
+                "turn_id instructing ARIA to finish without network access."
+            )
+        else:
+            next_action = (
+                "ARIA requested a permission that cannot be granted automatically (non-public or "
+                "unsupported target). Inspect permission_requests and continue via aria_send_message "
+                f"with parent_turn_id='{turn_id}' instructing ARIA how to proceed offline."
+            )
+    elif state == "completed" and has_questions:
+        next_action = (
+            "ARIA paused with follow-up question(s) in agent_questions. Confirm the answer with "
+            f"the user (or answer from authorized task context) and call aria_send_message with "
+            f"parent_turn_id='{turn_id}'."
+        )
+    elif state == "completed":
         next_action = (
             "Use latest_response as ARIA's answer. To continue this conversation, "
             "call aria_send_message with parent_turn_id set to this turn_id."
@@ -1384,6 +1717,13 @@ def _turn_result(
         "progress": _progress_summary(turn, poll_error=poll_error),
         "next_action": next_action,
     }
+    active_domains = _turn_allowed_network_domains(turn)
+    if active_domains:
+        result["active_allowed_network_domains"] = active_domains
+    if perm_info and perm_info["has_requests"]:
+        result["requires_permission"] = True
+    elif has_questions:
+        result["requires_user_input"] = True
     if include_turn:
         result["turn"] = turn
     return result
@@ -1451,6 +1791,208 @@ async def _apply_root_thread_title(
     return {"title": fallback_title}
 
 
+def _merge_domain_lists(existing: Sequence[str], added: Sequence[str]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in (*existing, *added):
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    if len(out) > MAX_ALLOWED_NETWORK_DOMAINS:
+        raise AriaAPIError(
+            "invalid_request",
+            f"Combined allowed_network_domains exceeds {MAX_ALLOWED_NETWORK_DOMAINS} hostnames.",
+            retryable=False,
+        )
+    return out
+
+
+async def _find_existing_child_turn_id(
+    client: httpx.AsyncClient,
+    turn: Dict[str, Any],
+) -> Optional[str]:
+    """Return a child/newer turn_id if `turn` has already been continued in its thread."""
+    thread_id = turn.get("thread_id")
+    current_id = str(turn.get("id") or "")
+    if not isinstance(thread_id, str) or not thread_id or not current_id:
+        return None
+    encoded_thread_id = quote(thread_id, safe="")
+    try:
+        _, turns = await _request_json(
+            client,
+            "GET",
+            f"/api/v1/threads/{encoded_thread_id}/turns",
+            params={
+                "field_set": "metadata",
+                "sort_by": "created_at",
+                "sort_desc": "true",
+                "limit": 5,
+                "offset": 0,
+            },
+        )
+    except AriaAPIError:
+        return None
+    if not isinstance(turns, list) or not turns:
+        return None
+    for candidate in turns:
+        if not isinstance(candidate, dict):
+            continue
+        cand_id = _bounded_identifier(candidate.get("id"))
+        if cand_id and candidate.get("parent_turn_id") == current_id:
+            return cand_id
+    newest = turns[0] if isinstance(turns[0], dict) else None
+    newest_id = _bounded_identifier(newest.get("id")) if newest else None
+    if newest_id and newest_id != current_id:
+        return newest_id
+    return None
+
+
+async def _maybe_resolve_permission_requests(
+    client: httpx.AsyncClient,
+    turn: Dict[str, Any],
+    *,
+    mode: NetworkAccessMode,
+    ctx: Any,
+    wait_deadline: float,
+) -> tuple[Dict[str, Any], Optional[AriaAPIError], Dict[str, Any]]:
+    """Resolve terminal `network_access` `permission_requests` safely when policy/elicitation allows."""
+    extra_meta: Dict[str, Any] = {}
+    poll_error: Optional[AriaAPIError] = None
+    auto_grants: List[Dict[str, Any]] = []
+    origin_turn_id = str(turn.get("id") or "")
+
+    for _ in range(MAX_AUTO_PERMISSION_GRANTS):
+        if str(turn.get("state")) != "completed":
+            break
+        perm_info = _inspect_permission_requests(turn)
+        if not perm_info["has_requests"] or not perm_info["all_network_access"]:
+            break
+
+        valid_domains = perm_info["valid_domains"]
+        rejected_domains = perm_info["rejected_domains"]
+        grant: Optional[bool] = None
+        source = ""
+
+        if mode == "deny":
+            grant = False
+            source = "policy_deny"
+        elif rejected_domains or not valid_domains:
+            break
+        elif mode == "auto_safe":
+            safe_domains = _configured_safe_network_domains()
+            if all(d in safe_domains for d in valid_domains):
+                grant = True
+                source = "auto_safe"
+            else:
+                elicited = await _elicit_network_permission(
+                    ctx,
+                    domains=valid_domains,
+                    reasons=perm_info["reasons"],
+                )
+                if elicited is None:
+                    break
+                grant = elicited
+                source = "mcp_elicitation"
+        elif mode == "auto_public":
+            grant = True
+            source = "auto_public"
+        else:
+            elicited = await _elicit_network_permission(
+                ctx,
+                domains=valid_domains,
+                reasons=perm_info["reasons"],
+            )
+            if elicited is None:
+                break
+            grant = elicited
+            source = "mcp_elicitation"
+
+        if grant is True:
+            merged_domains = _merge_domain_lists(_turn_allowed_network_domains(turn), valid_domains)
+            cont_message = (
+                f"Outbound network access granted for {', '.join(valid_domains)}. "
+                "Continue from the saved /workspace state without repeating completed work."
+            )
+            cont_payload: Dict[str, Any] = {
+                "parent_turn_id": str(turn["id"]),
+                "user_prompt": [{"type": "text", "text": cont_message}, dict(ARIA_CLIENT_PROMPT_PART)],
+                "permissions": {"allowed_network_domains": merged_domains},
+            }
+            logger.info(
+                "Auto-continuing ARIA turn with %d network domain(s) via %s",
+                len(valid_domains),
+                source,
+            )
+            prev_turn_id = str(turn["id"])
+            turn = await _request_turn(client, "POST", "/api/v1/turns", payload=cont_payload)
+            auto_grants.append(
+                {
+                    "from_turn_id": prev_turn_id,
+                    "to_turn_id": str(turn["id"]),
+                    "granted_domains": valid_domains,
+                    "active_allowed_network_domains": merged_domains,
+                    "source": source,
+                }
+            )
+            remaining_wait = max(0, min(MAX_WAIT_SECONDS, int(wait_deadline - time.monotonic())))
+            turn, poll_error = await _poll_turn_with_status(
+                client,
+                turn,
+                remaining_wait,
+                confirmed_get=False,
+            )
+            if poll_error is not None:
+                break
+            continue
+
+        # grant is False
+        if source == "policy_deny":
+            deny_targets = valid_domains or rejected_domains
+            cont_message = (
+                "Outbound network access is denied by caller policy. "
+                "Complete the analysis offline using existing /workspace files and W&B APIs without repeating completed work."
+            )
+            cont_payload = {
+                "parent_turn_id": str(turn["id"]),
+                "user_prompt": [{"type": "text", "text": cont_message}, dict(ARIA_CLIENT_PROMPT_PART)],
+            }
+            prev_turn_id = str(turn["id"])
+            turn = await _request_turn(client, "POST", "/api/v1/turns", payload=cont_payload)
+            extra_meta["permission_resolution"] = {
+                "action": "denied_and_continued_offline",
+                "from_turn_id": prev_turn_id,
+                "to_turn_id": str(turn["id"]),
+                "declined_domains": deny_targets,
+                "source": source,
+            }
+            remaining_wait = max(0, min(MAX_WAIT_SECONDS, int(wait_deadline - time.monotonic())))
+            turn, poll_error = await _poll_turn_with_status(
+                client,
+                turn,
+                remaining_wait,
+                confirmed_get=False,
+            )
+            break
+
+        extra_meta["permission_resolution"] = {
+            "action": "declined_by_user",
+            "declined_domains": valid_domains,
+            "source": source,
+        }
+        break
+
+    if auto_grants:
+        extra_meta["resumed_from_turn_id"] = origin_turn_id
+        extra_meta["permission_resolution"] = {
+            "action": "granted_and_continued",
+            "grants": auto_grants,
+        }
+    elif "resumed_from_turn_id" not in extra_meta and str(turn.get("id") or "") != origin_turn_id:
+        extra_meta["resumed_from_turn_id"] = origin_turn_id
+
+    return turn, poll_error, extra_meta
+
+
 async def send_aria_message(
     message: str,
     entity: Optional[str] = None,
@@ -1459,7 +2001,10 @@ async def send_aria_message(
     wait_seconds: int = 0,
     include_turn: bool = False,
     title: Optional[str] = None,
+    allowed_network_domains: Optional[Sequence[str]] = None,
+    network_access_mode: Optional[NetworkAccessMode] = None,
     *,
+    ctx: Any = None,
     api_key: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
 ) -> Dict[str, Any]:
@@ -1474,6 +2019,8 @@ async def send_aria_message(
             max_bytes=MAX_MESSAGE_BYTES,
         )
         _validate_wait_seconds(wait_seconds)
+        normalized_domains = normalize_allowed_network_domains(allowed_network_domains)
+        resolved_access_mode, _ = _resolve_network_access_mode(network_access_mode)
 
         if entity is not None:
             entity = _normalize_bounded_string(
@@ -1523,6 +2070,18 @@ async def send_aria_message(
         if client is None:
             client = _new_http_client(resolved_api_key)
 
+        effective_domains = normalized_domains
+        if parent_turn_id is not None and normalized_domains is not None:
+            try:
+                parent_snapshot = await _fetch_turn(client, parent_turn_id)
+                effective_domains = _merge_domain_lists(
+                    _turn_allowed_network_domains(parent_snapshot),
+                    normalized_domains,
+                )
+            except AriaAPIError as exc:
+                if not exc.retryable:
+                    raise
+
         payload: Dict[str, Any] = {
             "user_prompt": [{"type": "text", "text": message}, dict(ARIA_CLIENT_PROMPT_PART)],
         }
@@ -1533,7 +2092,10 @@ async def send_aria_message(
                 payload["entity"] = entity
             if project is not None:
                 payload["project"] = project
+        if effective_domains is not None:
+            payload["permissions"] = {"allowed_network_domains": effective_domains}
 
+        wait_deadline = time.monotonic() + wait_seconds
         logger.info(
             "Submitting ARIA turn: continuation=%s scoped=%s wait=%ss",
             parent_turn_id is not None,
@@ -1549,6 +2111,7 @@ async def send_aria_message(
                 explicit_title=title,
                 message=message,
             )
+        resolution_meta: Dict[str, Any] = {}
         try:
             turn, poll_error = await _poll_turn_with_status(
                 client,
@@ -1556,11 +2119,18 @@ async def send_aria_message(
                 wait_seconds,
                 confirmed_get=False,
             )
+            if poll_error is None and str(turn.get("state")) == "completed":
+                turn, poll_error, resolution_meta = await _maybe_resolve_permission_requests(
+                    client,
+                    turn,
+                    mode=resolved_access_mode,
+                    ctx=ctx,
+                    wait_deadline=wait_deadline,
+                )
         except AriaAPIError as exc:
             # The non-idempotent POST was confirmed and returned a durable
-            # handle. A later GET failure must never erase that handle or imply
-            # that the submission outcome is unknown: the caller can safely
-            # resume polling the same turn instead of creating duplicate work.
+            # handle. A later GET/continuation failure must never erase that
+            # handle or imply that the submission outcome is unknown.
             result = exc.as_result(turn_id=str(turn["id"]), operation="get")
             result.update(title_fields)
             return _finalize_result(
@@ -1569,6 +2139,7 @@ async def send_aria_message(
             )
         result = _turn_result(turn, include_turn=include_turn, poll_error=poll_error)
         result.update(title_fields)
+        result.update(resolution_meta)
         return _finalize_result(
             result,
             extra_secrets=(resolved_api_key,),
@@ -1588,38 +2159,75 @@ async def get_aria_turn(
     turn_id: str,
     wait_seconds: int = 0,
     include_turn: bool = False,
+    network_access_mode: Optional[NetworkAccessMode] = None,
     *,
+    ctx: Any = None,
+    allow_writes: bool = False,
     api_key: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
 ) -> Dict[str, Any]:
     """Fetch an ARIA turn and optionally poll until terminal or a short deadline."""
     owns_client = client is None
     resolved_api_key: Optional[str] = None
+    active_turn_id: Optional[str] = None
     try:
         turn_id = _normalize_bounded_string(
             turn_id,
             name="turn_id",
             max_length=MAX_IDENTIFIER_LENGTH,
         )
+        active_turn_id = turn_id
         _validate_wait_seconds(wait_seconds)
+        resolved_access_mode, mode_explicit = _resolve_network_access_mode(network_access_mode)
         resolved_api_key = _resolve_api_key(api_key)
         if client is None:
             client = _new_http_client(resolved_api_key)
 
+        wait_deadline = time.monotonic() + wait_seconds
         turn = await _fetch_turn(client, turn_id)
+        was_terminal_before_poll = str(turn.get("state")) in TERMINAL_STATES
         turn, poll_error = await _poll_turn_with_status(
             client,
             turn,
             wait_seconds,
             confirmed_get=True,
         )
+        active_turn_id = str(turn.get("id") or turn_id)
+        resolution_meta: Dict[str, Any] = {}
+        can_auto_resolve = allow_writes and (mode_explicit or _client_supports_elicitation(ctx))
+        if can_auto_resolve and poll_error is None and str(turn.get("state")) == "completed":
+            perm_info = _inspect_permission_requests(turn)
+            if perm_info["has_requests"] and perm_info["all_network_access"]:
+                existing_child = await _find_existing_child_turn_id(client, turn) if was_terminal_before_poll else None
+                if existing_child:
+                    resolution_meta["continued_in_turn_id"] = existing_child
+                else:
+                    try:
+                        turn, poll_error, resolution_meta = await _maybe_resolve_permission_requests(
+                            client,
+                            turn,
+                            mode=resolved_access_mode,
+                            ctx=ctx,
+                            wait_deadline=wait_deadline,
+                        )
+                        active_turn_id = str(turn.get("id") or active_turn_id)
+                    except AriaAPIError as exc:
+                        return _finalize_result(
+                            exc.as_result(turn_id=active_turn_id, operation="get"),
+                            extra_secrets=(resolved_api_key,),
+                        )
+
+        result = _turn_result(turn, include_turn=include_turn, poll_error=poll_error)
+        result.update(resolution_meta)
         return _finalize_result(
-            _turn_result(turn, include_turn=include_turn, poll_error=poll_error),
+            result,
             extra_secrets=(resolved_api_key,),
         )
     except AriaAPIError as exc:
         logger.warning("ARIA get failed: %s", exc.error_type)
-        safe_turn_id = turn_id if isinstance(turn_id, str) and len(turn_id) <= MAX_IDENTIFIER_LENGTH else None
+        safe_turn_id = (
+            active_turn_id if isinstance(active_turn_id, str) and len(active_turn_id) <= MAX_IDENTIFIER_LENGTH else None
+        )
         return _finalize_result(
             exc.as_result(turn_id=safe_turn_id, operation="get"),
             extra_secrets=(resolved_api_key,) if resolved_api_key else (),

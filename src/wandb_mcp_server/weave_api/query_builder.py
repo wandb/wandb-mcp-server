@@ -217,8 +217,53 @@ class QueryBuilder:
                 )
                 if comp_op:
                     operations.append(comp_op)
+            elif isinstance(target_status, (list, tuple, set)):
+                normalized_statuses = [str(item).lower() for item in target_status if str(item).strip()]
+                if normalized_statuses:
+                    operations.append(
+                        InOperation(
+                            **{
+                                "$in": (
+                                    GetFieldOperator(**{"$getField": "summary.weave.status"}),
+                                    [LiteralOperation(**{"$literal": item}) for item in normalized_statuses],
+                                )
+                            }
+                        )
+                    )
             else:
                 logger.warning("Invalid status filter value type")
+
+        # Handle has_error filter across both summary.weave.status ("error" | "descendant_error")
+        # and top-level exception != None (parent spans set descendant_error while keeping exception=None).
+        if "has_error" in filters and filters["has_error"] is not None:
+            has_error = bool(filters["has_error"])
+            status_error_op = InOperation(
+                **{
+                    "$in": (
+                        GetFieldOperator(**{"$getField": "summary.weave.status"}),
+                        [
+                            LiteralOperation(**{"$literal": "error"}),
+                            LiteralOperation(**{"$literal": "descendant_error"}),
+                        ],
+                    )
+                }
+            )
+            no_exception_op = EqOperation(
+                **{
+                    "$eq": (
+                        GetFieldOperator(**{"$getField": "exception"}),
+                        LiteralOperation(**{"$literal": None}),
+                    )
+                }
+            )
+            if has_error:
+                operations.append(
+                    OrOperation(**{"$or": [status_error_op, NotOperation(**{"$not": [no_exception_op]})]})
+                )
+            else:
+                operations.append(
+                    AndOperation(**{"$and": [NotOperation(**{"$not": [status_error_op]}), no_exception_op]})
+                )
 
         # Handle time range filter (convert ISO datetime strings to Unix seconds)
         if "time_range" in filters:
