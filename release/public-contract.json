@@ -23,6 +23,7 @@
     "tests/test_agent_lens_doctor.py",
     "tests/test_agent_mcp_apps.py",
     "tests/test_agents.py",
+    "tests/test_aria_mcp_app.py",
     "tests/test_documentation.py",
     "tests/test_graphql_compat_safety.py",
     "tests/test_line_plot.py",

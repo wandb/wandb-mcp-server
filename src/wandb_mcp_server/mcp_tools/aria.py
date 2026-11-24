@@ -29,6 +29,7 @@ from wandb_mcp_server.config import MAX_RESPONSE_TOKENS, WB_AGENT_BASE_URL, reso
 from wandb_mcp_server.error_sanitizer import sanitize_sensitive_text, sanitize_sensitive_value
 from wandb_mcp_server.trace_utils import count_tokens_conservative
 from wandb_mcp_server.utils import get_rich_logger
+from wandb_mcp_server.wandb_urls import public_forge_aria_url
 
 logger = get_rich_logger(__name__)
 
@@ -65,6 +66,10 @@ MAX_DOMAIN_LENGTH = 253
 MAX_PERMISSION_REASON_CHARS = 500
 MAX_AUTO_PERMISSION_GRANTS = 2
 ELICIT_TIMEOUT_SECONDS = 60.0
+MAX_PARALLEL_TURN_IDS = 15
+MAX_USER_PROMPT_PREVIEW_CHARS = 1_200
+MAX_TOOL_STEPS = 12
+MAX_PARALLEL_MEMBER_RESPONSE_CHARS = 6_000
 
 NetworkAccessMode = Literal["prompt", "auto_safe", "auto_public", "deny"]
 VALID_NETWORK_ACCESS_MODES: frozenset[str] = frozenset({"prompt", "auto_safe", "auto_public", "deny"})
@@ -245,11 +250,13 @@ include_turn : bool
     Include a bounded raw turn snapshot. Oversized data is truncated with metadata. Default false avoids very large responses.
 network_access_mode : {"prompt", "auto_safe", "auto_public", "deny"}, optional
     Optional policy when a polled turn pauses on network_access permission_requests in read-write mode (inherits MCP_ARIA_NETWORK_ACCESS_MODE when omitted).
+parallel_turn_ids : list[str], optional
+    Optional additional ARIA turn_ids (up to 15) spawned for parallel asynchronous sub-agent tasks; polls `[turn_id, *parallel_turn_ids]` concurrently within `wait_seconds` and adds `parallel_turns` plus `parallel_summary`.
 
 Returns
 -------
 dict
-    Compact current state, progress, latest response, and continuation/poll guidance, or a native MCP error containing JSON details.
+    Compact current state, progress, latest response, optional parallel sub-agent statuses, and continuation/poll guidance, or a native MCP error containing JSON details.
 """
 
 ARIA_LIST_THREADS_TOOL_DESCRIPTION = """Find the caller's previous ARIA conversations (their chat history with ARIA, the W&B agent), most recently active first.
@@ -1625,6 +1632,64 @@ def _progress_summary(turn: Dict[str, Any], *, poll_error: Optional[AriaAPIError
     return summary
 
 
+def _extract_user_prompt_text(turn: Dict[str, Any]) -> Optional[str]:
+    """Extract a bounded, sanitized plain-text user prompt from a turn snapshot."""
+    raw = turn.get("user_prompt")
+    if isinstance(raw, str) and raw.strip():
+        return sanitize_sensitive_text(raw.strip(), max_chars=MAX_USER_PROMPT_PREVIEW_CHARS)
+    if isinstance(raw, list):
+        parts: List[str] = []
+        for item in raw[:20]:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        if parts:
+            return sanitize_sensitive_text("\n\n".join(parts), max_chars=MAX_USER_PROMPT_PREVIEW_CHARS)
+    return None
+
+
+def _extract_tool_steps(turn: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Pair recent tool invocations and responses into compact, zero-output UI activity steps."""
+    tool_calls = turn.get("tool_calls")
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return []
+    steps_by_id: Dict[str, Dict[str, Any]] = {}
+    ordered_steps: List[Dict[str, Any]] = []
+    for idx, record in enumerate(tool_calls[-MAX_PROGRESS_TOOL_RECORDS:]):
+        if not isinstance(record, dict):
+            continue
+        raw_call_id = record.get("call_id")
+        call_id = raw_call_id.strip() if isinstance(raw_call_id, str) and raw_call_id.strip() else f"step-{idx}"
+        rec_type = record.get("type")
+        resolved_name = _resolve_tool_name(tool_calls, record) or "tool"
+        safe_name = sanitize_sensitive_text(resolved_name, max_chars=80)
+        ts = record.get("timestamp") if isinstance(record.get("timestamp"), str) else None
+
+        existing = steps_by_id.get(call_id)
+        if existing is None:
+            existing = {
+                "call_id": sanitize_sensitive_text(call_id, max_chars=80),
+                "name": safe_name,
+                "status": "running",
+            }
+            if ts:
+                existing["started_at"] = ts
+            steps_by_id[call_id] = existing
+            ordered_steps.append(existing)
+        elif existing.get("name") == "tool" and safe_name != "tool":
+            existing["name"] = safe_name
+
+        if rec_type == "response":
+            existing["status"] = "recovered_error" if _tool_response_has_error(record) else "ok"
+            if ts:
+                existing["ended_at"] = ts
+        elif ts and "started_at" not in existing:
+            existing["started_at"] = ts
+
+    return ordered_steps[-MAX_TOOL_STEPS:]
+
+
 def _turn_result(
     turn: Dict[str, Any],
     *,
@@ -1720,6 +1785,18 @@ def _turn_result(
     active_domains = _turn_allowed_network_domains(turn)
     if active_domains:
         result["active_allowed_network_domains"] = active_domains
+    user_prompt_text = _extract_user_prompt_text(turn)
+    if user_prompt_text:
+        result["user_prompt"] = user_prompt_text
+    raw_title = turn.get("title")
+    if isinstance(raw_title, str) and raw_title.strip():
+        result["title"] = sanitize_sensitive_text(raw_title.strip(), max_chars=MAX_THREAD_TITLE_LENGTH)
+    tool_steps = _extract_tool_steps(turn)
+    if tool_steps:
+        result["tool_steps"] = tool_steps
+    bounded_thread_id = _bounded_identifier(turn.get("thread_id"))
+    if bounded_thread_id:
+        result["forge_url"] = public_forge_aria_url(bounded_thread_id)
     if perm_info and perm_info["has_requests"]:
         result["requires_permission"] = True
     elif has_questions:
@@ -2155,18 +2232,133 @@ async def send_aria_message(
             await client.aclose()
 
 
+def _normalize_parallel_turn_ids(
+    primary_turn_id: str,
+    parallel_turn_ids: Optional[Sequence[str]],
+) -> List[str]:
+    if parallel_turn_ids is None:
+        return []
+    if isinstance(parallel_turn_ids, (str, bytes)) or not isinstance(parallel_turn_ids, Sequence):
+        raise AriaAPIError(
+            "invalid_request",
+            f"parallel_turn_ids must be a list of up to {MAX_PARALLEL_TURN_IDS} turn_id strings.",
+            retryable=False,
+        )
+    if len(parallel_turn_ids) > MAX_PARALLEL_TURN_IDS:
+        raise AriaAPIError(
+            "invalid_request",
+            f"parallel_turn_ids may contain at most {MAX_PARALLEL_TURN_IDS} additional turn_ids.",
+            retryable=False,
+        )
+    deduped: List[str] = []
+    seen: set[str] = {primary_turn_id}
+    for item in parallel_turn_ids:
+        normalized = _normalize_bounded_string(
+            item,
+            name="parallel_turn_ids item",
+            max_length=MAX_IDENTIFIER_LENGTH,
+        )
+        if normalized not in seen:
+            seen.add(normalized)
+            deduped.append(normalized)
+    return deduped
+
+
+async def _poll_and_build_turn_entry(
+    client: httpx.AsyncClient,
+    target_turn_id: str,
+    *,
+    wait_seconds: int,
+    wait_deadline: float,
+    include_turn: bool,
+    resolved_access_mode: NetworkAccessMode,
+    mode_explicit: bool,
+    ctx: Any,
+    allow_writes: bool,
+) -> Dict[str, Any]:
+    active_id = target_turn_id
+    turn = await _fetch_turn(client, target_turn_id)
+    was_terminal_before_poll = str(turn.get("state")) in TERMINAL_STATES
+    remaining_wait = max(0, min(wait_seconds, math.ceil(wait_deadline - time.monotonic())))
+    turn, poll_error = await _poll_turn_with_status(
+        client,
+        turn,
+        remaining_wait,
+        confirmed_get=True,
+    )
+    active_id = str(turn.get("id") or target_turn_id)
+    resolution_meta: Dict[str, Any] = {}
+    can_auto_resolve = allow_writes and (mode_explicit or _client_supports_elicitation(ctx))
+    if can_auto_resolve and poll_error is None and str(turn.get("state")) == "completed":
+        perm_info = _inspect_permission_requests(turn)
+        if perm_info["has_requests"] and perm_info["all_network_access"]:
+            existing_child = await _find_existing_child_turn_id(client, turn) if was_terminal_before_poll else None
+            if existing_child:
+                resolution_meta["continued_in_turn_id"] = existing_child
+            else:
+                try:
+                    turn, poll_error, resolution_meta = await _maybe_resolve_permission_requests(
+                        client,
+                        turn,
+                        mode=resolved_access_mode,
+                        ctx=ctx,
+                        wait_deadline=wait_deadline,
+                    )
+                    active_id = str(turn.get("id") or active_id)
+                except AriaAPIError as exc:
+                    return exc.as_result(turn_id=active_id, operation="get")
+
+    entry = _turn_result(turn, include_turn=include_turn, poll_error=poll_error)
+    entry.update(resolution_meta)
+    return entry
+
+
+def _summarize_parallel_turns(items: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    completed_count = 0
+    active_count = 0
+    awaiting_permission_count = 0
+    awaiting_user_input_count = 0
+    errored_count = 0
+    cancelled_count = 0
+    for item in items:
+        if item.get("ok") is False or item.get("state") == "errored":
+            errored_count += 1
+        elif item.get("state") == "cancelled":
+            cancelled_count += 1
+        elif not item.get("is_terminal", False):
+            active_count += 1
+        elif item.get("requires_permission"):
+            awaiting_permission_count += 1
+        elif item.get("requires_user_input"):
+            awaiting_user_input_count += 1
+        else:
+            completed_count += 1
+
+    return {
+        "total_count": len(items),
+        "completed_count": completed_count,
+        "active_count": active_count,
+        "awaiting_permission_count": awaiting_permission_count,
+        "awaiting_user_input_count": awaiting_user_input_count,
+        "errored_count": errored_count,
+        "cancelled_count": cancelled_count,
+        "all_terminal": active_count == 0,
+    }
+
+
 async def get_aria_turn(
     turn_id: str,
     wait_seconds: int = 0,
     include_turn: bool = False,
     network_access_mode: Optional[NetworkAccessMode] = None,
+    parallel_turn_ids: Optional[Sequence[str]] = None,
     *,
     ctx: Any = None,
     allow_writes: bool = False,
     api_key: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
 ) -> Dict[str, Any]:
-    """Fetch an ARIA turn and optionally poll until terminal or a short deadline."""
+    """Fetch one ARIA turn (or concurrently poll parallel sub-agent turns) within a bounded deadline."""
     owns_client = client is None
     resolved_api_key: Optional[str] = None
     active_turn_id: Optional[str] = None
@@ -2178,47 +2370,106 @@ async def get_aria_turn(
         )
         active_turn_id = turn_id
         _validate_wait_seconds(wait_seconds)
+        extra_turn_ids = _normalize_parallel_turn_ids(turn_id, parallel_turn_ids)
+        has_parallel_request = parallel_turn_ids is not None and len(parallel_turn_ids) > 0
         resolved_access_mode, mode_explicit = _resolve_network_access_mode(network_access_mode)
         resolved_api_key = _resolve_api_key(api_key)
         if client is None:
             client = _new_http_client(resolved_api_key)
 
         wait_deadline = time.monotonic() + wait_seconds
-        turn = await _fetch_turn(client, turn_id)
-        was_terminal_before_poll = str(turn.get("state")) in TERMINAL_STATES
-        turn, poll_error = await _poll_turn_with_status(
-            client,
-            turn,
-            wait_seconds,
-            confirmed_get=True,
-        )
-        active_turn_id = str(turn.get("id") or turn_id)
-        resolution_meta: Dict[str, Any] = {}
-        can_auto_resolve = allow_writes and (mode_explicit or _client_supports_elicitation(ctx))
-        if can_auto_resolve and poll_error is None and str(turn.get("state")) == "completed":
-            perm_info = _inspect_permission_requests(turn)
-            if perm_info["has_requests"] and perm_info["all_network_access"]:
-                existing_child = await _find_existing_child_turn_id(client, turn) if was_terminal_before_poll else None
-                if existing_child:
-                    resolution_meta["continued_in_turn_id"] = existing_child
-                else:
-                    try:
-                        turn, poll_error, resolution_meta = await _maybe_resolve_permission_requests(
-                            client,
-                            turn,
-                            mode=resolved_access_mode,
-                            ctx=ctx,
-                            wait_deadline=wait_deadline,
-                        )
-                        active_turn_id = str(turn.get("id") or active_turn_id)
-                    except AriaAPIError as exc:
-                        return _finalize_result(
-                            exc.as_result(turn_id=active_turn_id, operation="get"),
-                            extra_secrets=(resolved_api_key,),
-                        )
+        if not has_parallel_request:
+            single_entry = await _poll_and_build_turn_entry(
+                client,
+                turn_id,
+                wait_seconds=wait_seconds,
+                wait_deadline=wait_deadline,
+                include_turn=include_turn,
+                resolved_access_mode=resolved_access_mode,
+                mode_explicit=mode_explicit,
+                ctx=ctx,
+                allow_writes=allow_writes,
+            )
+            return _finalize_result(
+                single_entry,
+                extra_secrets=(resolved_api_key,),
+            )
 
-        result = _turn_result(turn, include_turn=include_turn, poll_error=poll_error)
-        result.update(resolution_meta)
+        all_turn_ids = [turn_id, *extra_turn_ids]
+
+        async def _poll_member(tid: str) -> Dict[str, Any]:
+            try:
+                return await _poll_and_build_turn_entry(
+                    client,
+                    tid,
+                    wait_seconds=wait_seconds,
+                    wait_deadline=wait_deadline,
+                    include_turn=include_turn and len(all_turn_ids) <= 2,
+                    resolved_access_mode=resolved_access_mode,
+                    mode_explicit=mode_explicit,
+                    ctx=None if len(all_turn_ids) > 1 else ctx,
+                    allow_writes=allow_writes,
+                )
+            except AriaAPIError as exc:
+                err_entry = exc.as_result(turn_id=tid, operation="get")
+                err_entry.setdefault("is_terminal", not exc.retryable)
+                err_entry.setdefault("state", "errored" if not exc.retryable else "in_progress")
+                return err_entry
+
+        polled_entries = list(await asyncio.gather(*(_poll_member(tid) for tid in all_turn_ids)))
+        primary_entry = polled_entries[0]
+        if primary_entry.get("ok") is False and all(item.get("ok") is False for item in polled_entries):
+            return _finalize_result(
+                primary_entry,
+                extra_secrets=(resolved_api_key,),
+            )
+
+        compact_members: List[Dict[str, Any]] = []
+        for entry in polled_entries:
+            member = dict(entry)
+            if len(all_turn_ids) > 2 and isinstance(member.get("latest_response"), str):
+                resp_text = member["latest_response"]
+                if len(resp_text) > MAX_PARALLEL_MEMBER_RESPONSE_CHARS:
+                    member["latest_response"] = (
+                        f"{resp_text[:MAX_PARALLEL_MEMBER_RESPONSE_CHARS].rstrip()}\n\n...[truncated in parallel batch; poll individual turn_id for full text]"
+                    )
+            compact_members.append(member)
+
+        summary = _summarize_parallel_turns(compact_members)
+        result = dict(primary_entry)
+        result["ok"] = True
+        result["parallel_turns"] = compact_members
+        result["parallel_summary"] = summary
+
+        if not summary["all_terminal"]:
+            sibling_waits = [
+                int(item["poll_after_seconds"])
+                for item in compact_members
+                if isinstance(item.get("poll_after_seconds"), int) and item["poll_after_seconds"] > 0
+            ]
+            result["poll_after_seconds"] = min(sibling_waits) if sibling_waits else 2
+            active_ids = [
+                str(item.get("turn_id"))
+                for item in compact_members
+                if not item.get("is_terminal", False) and isinstance(item.get("turn_id"), str)
+            ]
+            result["next_action"] = (
+                f"{summary['active_count']} of {summary['total_count']} parallel ARIA turns are still running "
+                f"({json.dumps(active_ids)}). Call aria_get_turn again with turn_id={json.dumps(active_ids[0])}, "
+                f"parallel_turn_ids={json.dumps(active_ids[1:])}, and wait_seconds up to 30."
+            )
+        elif summary["awaiting_permission_count"] > 0:
+            paused_ids = [
+                str(item.get("turn_id"))
+                for item in compact_members
+                if item.get("requires_permission") and isinstance(item.get("turn_id"), str)
+            ]
+            result["next_action"] = (
+                f"{summary['awaiting_permission_count']} parallel ARIA turn(s) paused on permission_requests "
+                f"({json.dumps(paused_ids)}). Inspect parallel_turns and continue each via aria_send_message "
+                "with parent_turn_id and allowed_network_domains (or decline offline)."
+            )
+
         return _finalize_result(
             result,
             extra_secrets=(resolved_api_key,),
@@ -2276,6 +2527,7 @@ def _thread_summary(thread: Any) -> Dict[str, Any]:
         "visibility": thread.get("visibility"),
         "created_at": thread.get("created_at"),
         "last_turn_created_at": thread.get("last_turn_created_at"),
+        "forge_url": public_forge_aria_url(thread["id"]),
     }
 
 

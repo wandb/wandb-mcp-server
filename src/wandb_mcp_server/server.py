@@ -69,6 +69,11 @@ from wandb_mcp_server.mcp_tools.aria import (
     normalize_aria_json_value,
     send_aria_message,
 )
+from wandb_mcp_server.mcp_tools.aria_app import (
+    ARIA_UI_META,
+    enrich_aria_result_for_ui,
+    register_aria_agent_resource,
+)
 from wandb_mcp_server.mcp_tools.count_traces import (
     COUNT_WEAVE_TRACES_TOOL_DESCRIPTION,
     count_traces,
@@ -1631,9 +1636,10 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
         # here so a late configuration can never silently fall back to a
         # different credential-bearing origin.
         resolve_aria_base_url()
+        register_aria_agent_resource(mcp_instance)
         if not read_only:
 
-            @register_tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION)
+            @register_tool(description=ARIA_SEND_MESSAGE_TOOL_DESCRIPTION, meta=ARIA_UI_META)
             async def aria_send_message(
                 message: str,
                 entity: Optional[str] = None,
@@ -1647,40 +1653,48 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
                 ctx: Optional[Context] = None,
             ) -> Dict[str, Any]:
                 return _aria_result_or_tool_error(
-                    await send_aria_message(
-                        message=message,
-                        entity=entity,
-                        project=project,
-                        title=title,
-                        parent_turn_id=parent_turn_id,
-                        wait_seconds=wait_seconds,
-                        include_turn=include_turn,
-                        allowed_network_domains=allowed_network_domains,
-                        network_access_mode=network_access_mode,
-                        ctx=ctx,
+                    enrich_aria_result_for_ui(
+                        await send_aria_message(
+                            message=message,
+                            entity=entity,
+                            project=project,
+                            title=title,
+                            parent_turn_id=parent_turn_id,
+                            wait_seconds=wait_seconds,
+                            include_turn=include_turn,
+                            allowed_network_domains=allowed_network_domains,
+                            network_access_mode=network_access_mode,
+                            ctx=ctx,
+                        ),
+                        access_mode=effective_access_mode,
                     )
                 )
 
-        @register_tool(description=ARIA_GET_TURN_TOOL_DESCRIPTION)
+        @register_tool(description=ARIA_GET_TURN_TOOL_DESCRIPTION, meta=ARIA_UI_META)
         async def aria_get_turn(
             turn_id: str,
             wait_seconds: int = 0,
             include_turn: bool = False,
             network_access_mode: Optional[Literal["prompt", "auto_safe", "auto_public", "deny"]] = None,
+            parallel_turn_ids: Optional[List[str]] = None,
             ctx: Optional[Context] = None,
         ) -> Dict[str, Any]:
             return _aria_result_or_tool_error(
-                await get_aria_turn(
-                    turn_id=turn_id,
-                    wait_seconds=wait_seconds,
-                    include_turn=include_turn,
-                    network_access_mode=network_access_mode,
-                    ctx=ctx,
-                    allow_writes=not read_only,
+                enrich_aria_result_for_ui(
+                    await get_aria_turn(
+                        turn_id=turn_id,
+                        wait_seconds=wait_seconds,
+                        include_turn=include_turn,
+                        network_access_mode=network_access_mode,
+                        parallel_turn_ids=parallel_turn_ids,
+                        ctx=ctx,
+                        allow_writes=not read_only,
+                    ),
+                    access_mode=effective_access_mode,
                 )
             )
 
-        @register_tool(description=ARIA_LIST_THREADS_TOOL_DESCRIPTION)
+        @register_tool(description=ARIA_LIST_THREADS_TOOL_DESCRIPTION, meta=ARIA_UI_META)
         async def aria_list_threads(
             entity: Optional[str] = None,
             project: Optional[str] = None,
@@ -1688,16 +1702,24 @@ def register_tools(mcp_instance: FastMCP, selection: RuntimeSelection | None = N
             offset: int = 0,
         ) -> Dict[str, Any]:
             return _aria_result_or_tool_error(
-                await list_aria_threads(entity=entity, project=project, limit=limit, offset=offset)
+                enrich_aria_result_for_ui(
+                    await list_aria_threads(entity=entity, project=project, limit=limit, offset=offset),
+                    access_mode=effective_access_mode,
+                )
             )
 
-        @register_tool(description=ARIA_GET_THREAD_TOOL_DESCRIPTION)
+        @register_tool(description=ARIA_GET_THREAD_TOOL_DESCRIPTION, meta=ARIA_UI_META)
         async def aria_get_thread(
             thread_id: str,
             limit: int = 20,
             offset: int = 0,
         ) -> Dict[str, Any]:
-            return _aria_result_or_tool_error(await get_aria_thread(thread_id=thread_id, limit=limit, offset=offset))
+            return _aria_result_or_tool_error(
+                enrich_aria_result_for_ui(
+                    await get_aria_thread(thread_id=thread_id, limit=limit, offset=offset),
+                    access_mode=effective_access_mode,
+                )
+            )
 
     missing = selection.tools - registered_tools
     unexpected = registered_tools - selection.tools

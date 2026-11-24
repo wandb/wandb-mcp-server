@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>W&amp;B ARIA Studio</title>
+  </head>
+  <body>
+    <div id="app-root" class="ar-shell" data-display-mode="inline">
+      <header class="ar-header">
+        <div class="ar-header-left">
+          <div class="ar-title-row">
+            <span class="ar-brand-pill" aria-hidden="true">ARIA</span>
+            <h1 id="ar-title" class="ar-title">Waiting for ARIA…</h1>
+            <span id="ar-scope-pill" class="ar-scope-pill" hidden></span>
+            <span id="ar-phase-pill" class="ar-phase-pill" data-tone="muted" hidden></span>
+          </div>
+          <p id="ar-subtitle" class="ar-subtitle" hidden></p>
+        </div>
+
+        <div class="ar-header-actions">
+          <button
+            id="ar-autopoll-btn"
+            type="button"
+            class="ar-btn ar-btn-chip"
+            aria-pressed="true"
+            hidden
+          >
+            Auto-poll: On
+          </button>
+          <button id="ar-poll-now-btn" type="button" class="ar-btn" hidden>
+            Poll now
+          </button>
+          <button id="ar-spawn-toggle-btn" type="button" class="ar-btn" hidden>
+            + Parallel task
+          </button>
+          <button id="ar-threads-toggle-btn" type="button" class="ar-btn" hidden>
+            Threads
+          </button>
+          <button id="ar-expand-btn" type="button" class="ar-btn" hidden>
+            Expand
+          </button>
+          <button id="ar-open-forge-btn" type="button" class="ar-btn" hidden>
+            Open in Forge ↗
+          </button>
+        </div>
+      </header>
+
+      <section id="ar-fleet-bar" class="ar-fleet-bar" aria-label="Parallel ARIA sub-agents summary" hidden>
+        <div class="ar-fleet-left">
+          <div class="ar-fleet-counts" id="ar-fleet-counts"></div>
+          <div class="ar-fleet-meter" id="ar-fleet-meter" aria-hidden="true"></div>
+        </div>
+        <div class="ar-fleet-right" role="tablist" aria-label="Parallel layout">
+          <button
+            id="ar-layout-grid-btn"
+            type="button"
+            role="tab"
+            class="ar-seg-btn"
+            aria-selected="true"
+          >
+            Fleet grid
+          </button>
+          <button
+            id="ar-layout-split-btn"
+            type="button"
+            role="tab"
+            class="ar-seg-btn"
+            aria-selected="false"
+          >
+            Split focus
+          </button>
+        </div>
+      </section>
+
+      <section id="ar-spawn-drawer" class="ar-drawer" aria-label="Spawn parallel ARIA sub-agents" hidden>
+        <div class="ar-drawer-header">
+          <div>
+            <strong class="ar-drawer-title">Spawn asynchronous ARIA sub-agent(s)</strong>
+            <span class="ar-drawer-hint">
+              Enter one prompt, or separate multiple parallel arms with a blank line (`---`). Each runs independently with `wait_seconds=0`.
+            </span>
+          </div>
+          <button id="ar-spawn-close-btn" type="button" class="ar-icon-btn" aria-label="Close parallel launcher">✕</button>
+        </div>
+        <div class="ar-spawn-scope-row">
+          <label class="ar-field-inline">
+            <span>Entity</span>
+            <input id="ar-spawn-entity" type="text" class="ar-input" placeholder="e.g. wandb" />
+          </label>
+          <label class="ar-field-inline">
+            <span>Project</span>
+            <input id="ar-spawn-project" type="text" class="ar-input" placeholder="e.g. looped-synth-study" />
+          </label>
+          <label class="ar-field-inline ar-field-grow">
+            <span>Title prefix (optional)</span>
+            <input id="ar-spawn-title" type="text" class="ar-input" placeholder="e.g. Arm C · Gated Residual" />
+          </label>
+        </div>
+        <textarea
+          id="ar-spawn-prompts"
+          class="ar-textarea"
+          rows="3"
+          placeholder="Investigate seed-to-seed variance on Arm C and summarize metrics in a table…"
+        ></textarea>
+        <div class="ar-drawer-footer">
+          <span id="ar-spawn-count-hint" class="ar-muted-note">1 async ARIA task ready</span>
+          <button id="ar-spawn-submit-btn" type="button" class="ar-btn ar-btn-primary">
+            Launch async ARIA
+          </button>
+        </div>
+      </section>
+
+      <section id="ar-threads-drawer" class="ar-drawer" aria-label="Recent ARIA threads" hidden>
+        <div class="ar-drawer-header">
+          <strong class="ar-drawer-title">Recent ARIA conversations</strong>
+          <button id="ar-threads-close-btn" type="button" class="ar-icon-btn" aria-label="Close recent threads">✕</button>
+        </div>
+        <div id="ar-threads-list" class="ar-threads-list"></div>
+      </section>
+
+      <div id="ar-banner" class="ar-banner" role="status" aria-live="polite" hidden>
+        <span id="ar-banner-text"></span>
+        <button id="ar-banner-dismiss" type="button" class="ar-icon-btn" aria-label="Dismiss notice">✕</button>
+      </div>
+
+      <main id="ar-main" class="ar-main">
+        <div id="ar-empty" class="ar-empty" role="status">
+          Connecting to ARIA session…
+        </div>
+        <div id="ar-grid-view" class="ar-grid-view" hidden></div>
+        <div id="ar-workspace" class="ar-workspace" hidden>
+          <aside id="ar-rail" class="ar-rail" aria-label="Active ARIA sub-agents" hidden></aside>
+          <div class="ar-studio-col">
+            <div id="ar-turn-stream" class="ar-turn-stream"></div>
+            <div id="ar-composer" class="ar-composer" hidden>
+              <textarea
+                id="ar-reply-input"
+                class="ar-reply-input"
+                rows="1"
+                placeholder="Ask ARIA a follow-up in this conversation… (Enter to send, Shift+Enter for newline)"
+                aria-label="Follow-up message to ARIA"
+              ></textarea>
+              <button id="ar-reply-send-btn" type="button" class="ar-btn ar-btn-primary">
+                Send
+              </button>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
