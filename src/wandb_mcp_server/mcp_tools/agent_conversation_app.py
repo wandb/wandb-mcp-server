@@ -104,17 +104,48 @@ def _stringify_value(value: Any) -> Optional[str]:
         return str(value)
 
 
+import re
+
+def _canonical_trace_hex(raw: Any) -> Optional[str]:
+    text = str(raw or "").strip().lower().replace("-", "")
+    if len(text) == 32 and all(ch in "0123456789abcdef" for ch in text):
+        return text
+    return None
+
+
+def _trace_id_from_weave_ref(raw_ref: Any) -> Optional[str]:
+    if not isinstance(raw_ref, str) or "/agent_turn/" not in raw_ref:
+        return None
+    match = re.search(r"/agent_turn/([0-9a-fA-F-]{32,36})$", raw_ref.strip())
+    if not match:
+        return None
+    raw_id = match.group(1).strip()
+    hex_id = _canonical_trace_hex(raw_id)
+    if hex_id and "-" not in raw_id:
+        return f"{hex_id[:8]}-{hex_id[8:12]}-{hex_id[12:16]}-{hex_id[16:20]}-{hex_id[20:]}"
+    return raw_id
+
+
+def _align_trace_id(candidate: Optional[str], known_trace_ids: Dict[str, str]) -> Optional[str]:
+    if not candidate:
+        return None
+    hex_key = _canonical_trace_hex(candidate)
+    if hex_key and hex_key in known_trace_ids:
+        return known_trace_ids[hex_key]
+    return candidate
+
+
 def _normalize_role(raw_role: Any, msg: Dict[str, Any]) -> str:
     role = str(raw_role or "").strip().lower()
-    if role in {"user", "human"}:
+    if role in {"user", "human", "user_message"}:
         return "user"
-    if role in {"assistant", "ai", "model", "agent"}:
+    if role in {"assistant", "ai", "model", "agent", "assistant_message"}:
         return "assistant"
-    if role in {"tool", "function", "tool_result"}:
+    if role in {"tool", "function", "tool_result", "tool_call"}:
         return "tool"
-    if role == "system" or role == "developer":
+    if role in {"system", "developer", "agent_start", "context_compacted"}:
         return "system"
-    if role in {"handoff", "transfer"} or msg.get("handoff_target"):
+    if role in {"handoff", "transfer", "agent_handoff"} or msg.get("handoff_target"):
         return "handoff"
     if "tool_result" in msg or "tool_call_id" in msg:
         return "tool"
@@ -123,9 +154,14 @@ def _normalize_role(raw_role: Any, msg: Dict[str, Any]) -> str:
     return role if role else "other"
 
 
-def _normalize_feedback_list(raw_feedback: Any, fallback_trace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def _normalize_feedback_list(
+    raw_feedback: Any,
+    fallback_trace_id: Optional[str] = None,
+    known_trace_ids: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
     if not isinstance(raw_feedback, list):
         return []
+    trace_lookup = known_trace_ids or {}
     out: List[Dict[str, Any]] = []
     for item in raw_feedback:
         if not isinstance(item, dict):
@@ -144,7 +180,13 @@ def _normalize_feedback_list(raw_feedback: Any, fallback_trace_id: Optional[str]
             first_tag = item["scorer_tags"][0]
             if isinstance(first_tag, str) and first_tag.strip():
                 emoji = first_tag.strip()
-        trace_id = str(item.get("span_trace_id") or item.get("trace_id") or fallback_trace_id or "").strip() or None
+        raw_trace_id = (
+            str(item.get("span_trace_id") or item.get("trace_id") or "").strip()
+            or _trace_id_from_weave_ref(item.get("weave_ref"))
+            or (str(fallback_trace_id).strip() if fallback_trace_id else "")
+            or None
+        )
+        trace_id = _align_trace_id(raw_trace_id, trace_lookup)
         span_id = str(item.get("span_id") or "").strip() or None
         created_at = str(item.get("created_at") or "").strip() or None
         created_by = str(item.get("wb_user_id") or item.get("creator") or "").strip() or None
@@ -192,55 +234,237 @@ def _normalize_tool_calls(raw_calls: Any) -> List[Dict[str, Any]]:
     return calls
 
 
-def _normalize_message(msg: Any, idx: int) -> Dict[str, Any]:
+def _normalize_message(msg: Any, idx: int) -> tuple[Dict[str, Any], Dict[str, Any]]:
     if not isinstance(msg, dict):
-        return {
-            "index": idx,
-            "role": "other",
-            "content": _stringify_value(msg),
-            "toolName": None,
-            "toolCallId": None,
-            "arguments": None,
-            "toolCalls": [],
-            "toolResult": None,
-            "spanId": None,
-            "spanName": None,
-            "statusCode": None,
-            "error": None,
-            "durationMs": None,
-            "model": None,
-        }
+        return (
+            {
+                "index": idx,
+                "role": "other",
+                "content": _stringify_value(msg),
+                "toolName": None,
+                "toolCallId": None,
+                "arguments": None,
+                "toolCalls": [],
+                "toolResult": None,
+                "spanId": None,
+                "spanName": None,
+                "statusCode": None,
+                "error": None,
+                "durationMs": None,
+                "model": None,
+            },
+            {},
+        )
+
+    msg_type = str(msg.get("type") or "").strip()
+    span_id = str(msg.get("span_id") or "").strip() or None
+    span_name = str(msg.get("span_name") or msg.get("operation_name") or "").strip() or None
+    top_status_raw = str(msg.get("status_code") or msg.get("status") or "").strip().upper()
+
+    # Unpack Weave AgentChatMessage tagged union (`weave-utils.ts` normalizeChatMessage)
+    if msg_type == "user_message" and isinstance(msg.get("user_message"), dict):
+        um = msg["user_message"]
+        status_code = top_status_raw or None
+        err_val = msg.get("error") or (msg.get("status_message") if status_code == "ERROR" else None)
+        return (
+            {
+                "index": idx,
+                "role": "user",
+                "content": _stringify_value(um.get("text")),
+                "toolName": None,
+                "toolCallId": None,
+                "arguments": None,
+                "toolCalls": [],
+                "toolResult": None,
+                "spanId": span_id,
+                "spanName": span_name,
+                "statusCode": status_code,
+                "error": _stringify_value(err_val),
+                "durationMs": None,
+                "model": None,
+            },
+            {},
+        )
+
+    if msg_type == "assistant_message" and isinstance(msg.get("assistant_message"), dict):
+        am = msg["assistant_message"]
+        sub_status = str(am.get("status") or "").strip().upper()
+        status_code = (sub_status if sub_status and sub_status != "UNSET" else top_status_raw) or None
+        err_val = msg.get("error") or (
+            (msg.get("status_message") or msg.get("error_type")) if status_code == "ERROR" else None
+        )
+        model = str(am.get("model") or "").strip() or None
+        return (
+            {
+                "index": idx,
+                "role": "assistant",
+                "content": _stringify_value(am.get("text")),
+                "toolName": None,
+                "toolCallId": None,
+                "arguments": None,
+                "toolCalls": [],
+                "toolResult": None,
+                "spanId": span_id,
+                "spanName": span_name,
+                "statusCode": status_code,
+                "error": _stringify_value(err_val),
+                "durationMs": _safe_optional_float(am.get("duration_ms")),
+                "model": model,
+            },
+            {
+                "inputTokens": _safe_optional_int(am.get("input_tokens")),
+                "outputTokens": _safe_optional_int(am.get("output_tokens")),
+                "costUsd": _safe_optional_float(am.get("total_cost_usd")),
+            },
+        )
+
+    if msg_type == "tool_call" and isinstance(msg.get("tool_call"), dict):
+        tc = msg["tool_call"]
+        sub_status = str(tc.get("status") or "").strip().upper()
+        status_code = (sub_status if sub_status and sub_status != "UNSET" else top_status_raw) or None
+        err_val = msg.get("error") or (
+            (msg.get("status_message") or msg.get("error_type")) if status_code == "ERROR" else None
+        )
+        tool_name = str(tc.get("tool_name") or "").strip() or "tool"
+        args_str = _stringify_value(tc.get("tool_arguments"))
+        if args_str == "":
+            args_str = None
+        return (
+            {
+                "index": idx,
+                "role": "tool",
+                "content": None,
+                "toolName": tool_name,
+                "toolCallId": str(msg.get("tool_call_id") or "").strip() or None,
+                "arguments": args_str,
+                "toolCalls": [],
+                "toolResult": _stringify_value(tc.get("tool_result")),
+                "spanId": span_id,
+                "spanName": span_name or tool_name,
+                "statusCode": status_code,
+                "error": _stringify_value(err_val),
+                "durationMs": _safe_optional_float(tc.get("duration_ms")),
+                "model": None,
+            },
+            {},
+        )
+
+    if msg_type == "agent_start" and isinstance(msg.get("agent_start"), dict):
+        ast = msg["agent_start"]
+        sub_status = str(ast.get("status") or "").strip().upper()
+        status_code = (sub_status if sub_status and sub_status != "UNSET" else top_status_raw) or None
+        model = str(ast.get("model") or "").strip() or None
+        sys_inst = _stringify_value(ast.get("system_instructions"))
+        content = sys_inst if sys_inst else (f"Agent started ({model})" if model else "Agent started")
+        return (
+            {
+                "index": idx,
+                "role": "system",
+                "content": content,
+                "toolName": None,
+                "toolCallId": None,
+                "arguments": None,
+                "toolCalls": [],
+                "toolResult": None,
+                "spanId": span_id,
+                "spanName": span_name,
+                "statusCode": status_code,
+                "error": None,
+                "durationMs": None,
+                "model": model,
+            },
+            {},
+        )
+
+    if msg_type == "agent_handoff" and isinstance(msg.get("agent_handoff"), dict):
+        ah = msg["agent_handoff"]
+        target = str(
+            ah.get("target_agent") or ah.get("to_agent") or ah.get("agent_name") or msg.get("agent_name") or "agent"
+        ).strip()
+        reason = _stringify_value(ah.get("reason") or ah.get("summary") or ah.get("message"))
+        content = f"Handoff to {target}: {reason}" if reason else f"Handoff to {target}"
+        return (
+            {
+                "index": idx,
+                "role": "handoff",
+                "content": content,
+                "toolName": target,
+                "toolCallId": None,
+                "arguments": None,
+                "toolCalls": [],
+                "toolResult": None,
+                "spanId": span_id,
+                "spanName": span_name,
+                "statusCode": top_status_raw or None,
+                "error": None,
+                "durationMs": None,
+                "model": None,
+            },
+            {},
+        )
+
+    if msg_type == "context_compacted" and isinstance(msg.get("context_compacted"), dict):
+        cc = msg["context_compacted"]
+        before = _safe_optional_int(cc.get("compaction_items_before"))
+        after = _safe_optional_int(cc.get("compaction_items_after"))
+        summary = _stringify_value(cc.get("compaction_summary"))
+        counts = f" ({before} -> {after} items)" if before is not None and after is not None else ""
+        content = f"Context compacted{counts}: {summary}" if summary else f"Context compacted{counts}"
+        return (
+            {
+                "index": idx,
+                "role": "system",
+                "content": content,
+                "toolName": None,
+                "toolCallId": None,
+                "arguments": None,
+                "toolCalls": [],
+                "toolResult": None,
+                "spanId": span_id,
+                "spanName": span_name,
+                "statusCode": top_status_raw or None,
+                "error": None,
+                "durationMs": None,
+                "model": None,
+            },
+            {},
+        )
+
     role = _normalize_role(msg.get("role") or msg.get("type"), msg)
     content = _stringify_value(msg.get("content") if "content" in msg else msg.get("text"))
     tool_name = str(msg.get("tool_name") or msg.get("name") or msg.get("handoff_target") or "").strip() or None
     tool_call_id = str(msg.get("tool_call_id") or msg.get("call_id") or "").strip() or None
-    arguments = _stringify_value(msg.get("arguments") if "arguments" in msg else msg.get("tool_input"))
+    arguments = _stringify_value(
+        msg.get("arguments")
+        if "arguments" in msg
+        else (msg.get("tool_arguments") if "tool_arguments" in msg else msg.get("tool_input"))
+    )
     tool_calls = _normalize_tool_calls(msg.get("tool_calls"))
     tool_result = _stringify_value(msg.get("tool_result") if "tool_result" in msg else msg.get("output"))
-    span_id = str(msg.get("span_id") or "").strip() or None
-    span_name = str(msg.get("span_name") or msg.get("operation_name") or "").strip() or None
-    status_raw = str(msg.get("status_code") or msg.get("status") or "").strip().upper()
-    status_code = status_raw or None
+    status_code = top_status_raw or None
     err_val = msg.get("error") or (msg.get("status_message") if status_code == "ERROR" else None)
     error = _stringify_value(err_val)
     duration_ms = _safe_optional_float(msg.get("duration_ms") or msg.get("total_duration_ms"))
     model = str(msg.get("response_model") or msg.get("request_model") or msg.get("model") or "").strip() or None
-    return {
-        "index": idx,
-        "role": role,
-        "content": content,
-        "toolName": tool_name,
-        "toolCallId": tool_call_id,
-        "arguments": arguments,
-        "toolCalls": tool_calls,
-        "toolResult": tool_result,
-        "spanId": span_id,
-        "spanName": span_name,
-        "statusCode": status_code,
-        "error": error,
-        "durationMs": duration_ms,
-        "model": model,
-    }
+    return (
+        {
+            "index": idx,
+            "role": role,
+            "content": content,
+            "toolName": tool_name,
+            "toolCallId": tool_call_id,
+            "arguments": arguments,
+            "toolCalls": tool_calls,
+            "toolResult": tool_result,
+            "spanId": span_id,
+            "spanName": span_name,
+            "statusCode": status_code,
+            "error": error,
+            "durationMs": duration_ms,
+            "model": model,
+        },
+        {},
+    )
 
 
 def _normalize_turn(raw_turn: Dict[str, Any], turn_index: int) -> Dict[str, Any]:
@@ -250,7 +474,17 @@ def _normalize_turn(raw_turn: Dict[str, Any], turn_index: int) -> Dict[str, Any]
     agent_version = str(raw_turn.get("agent_version") or "").strip() or None
     status_raw = str(raw_turn.get("status_code") or raw_turn.get("status") or "OK").strip().upper()
     raw_messages = raw_turn.get("messages") if isinstance(raw_turn.get("messages"), list) else []
-    messages = [_normalize_message(m, i) for i, m in enumerate(raw_messages)]
+
+    messages: List[Dict[str, Any]] = []
+    msg_usage: List[Dict[str, Any]] = []
+    msg_feedback_raw: List[Any] = []
+    for i, raw_m in enumerate(raw_messages):
+        norm_m, usage_m = _normalize_message(raw_m, i)
+        messages.append(norm_m)
+        if usage_m:
+            msg_usage.append(usage_m)
+        if isinstance(raw_m, dict) and isinstance(raw_m.get("feedback"), list):
+            msg_feedback_raw.extend(raw_m["feedback"])
 
     has_msg_error = any(
         m.get("statusCode") == "ERROR"
@@ -259,7 +493,7 @@ def _normalize_turn(raw_turn: Dict[str, Any], turn_index: int) -> Dict[str, Any]
         for m in messages
     )
     is_error = status_raw == "ERROR" or bool(raw_turn.get("is_error")) or bool(raw_turn.get("error")) or has_msg_error
-    status_code = "ERROR" if is_error else (status_raw or "OK")
+    status_code = "ERROR" if is_error else (status_raw if status_raw and status_raw != "UNSET" else "OK")
 
     turn_err_raw = raw_turn.get("error") or raw_turn.get("failure_reason") or raw_turn.get("status_message")
     error_message = _stringify_value(turn_err_raw) if (is_error or turn_err_raw) else None
@@ -278,9 +512,19 @@ def _normalize_turn(raw_turn: Dict[str, Any], turn_index: int) -> Dict[str, Any]
     in_tok = _safe_optional_int(
         raw_turn.get("input_tokens") if "input_tokens" in raw_turn else raw_turn.get("total_input_tokens")
     )
+    if in_tok is None:
+        msg_in = [u["inputTokens"] for u in msg_usage if u.get("inputTokens") is not None]
+        if msg_in:
+            in_tok = sum(msg_in)
+
     out_tok = _safe_optional_int(
         raw_turn.get("output_tokens") if "output_tokens" in raw_turn else raw_turn.get("total_output_tokens")
     )
+    if out_tok is None:
+        msg_out = [u["outputTokens"] for u in msg_usage if u.get("outputTokens") is not None]
+        if msg_out:
+            out_tok = sum(msg_out)
+
     tot_tok = _safe_optional_int(raw_turn.get("total_tokens"))
     if tot_tok is None and (in_tok is not None or out_tok is not None):
         tot_tok = (in_tok or 0) + (out_tok or 0)
@@ -291,11 +535,36 @@ def _normalize_turn(raw_turn: Dict[str, Any], turn_index: int) -> Dict[str, Any]
     cost_usd = _safe_optional_float(
         raw_turn.get("total_cost_usd") if "total_cost_usd" in raw_turn else raw_turn.get("cost_usd")
     )
-    started_at = str(raw_turn.get("started_at") or raw_turn.get("created_at") or "").strip() or None
+    if cost_usd is None:
+        msg_costs = [u["costUsd"] for u in msg_usage if u.get("costUsd") is not None]
+        if msg_costs:
+            cost_usd = round(sum(msg_costs), 6)
+
+    started_at = (
+        str(raw_turn.get("started_at") or raw_turn.get("created_at") or "").strip()
+        or next(
+            (
+                str(rm.get("started_at")).strip()
+                for rm in raw_messages
+                if isinstance(rm, dict) and isinstance(rm.get("started_at"), str) and rm.get("started_at").strip()
+            ),
+            None,
+        )
+    )
     model = str(
         raw_turn.get("response_model") or raw_turn.get("request_model") or raw_turn.get("model") or ""
     ).strip() or next((m["model"] for m in messages if m.get("model")), None)
-    feedback = _normalize_feedback_list(raw_turn.get("feedback"), fallback_trace_id=trace_id)
+
+    known_turn_map = {_canonical_trace_hex(trace_id): trace_id} if _canonical_trace_hex(trace_id) and trace_id else {}
+    combined_turn_fb = [
+        *(raw_turn.get("feedback") if isinstance(raw_turn.get("feedback"), list) else []),
+        *msg_feedback_raw,
+    ]
+    feedback = _normalize_feedback_list(
+        combined_turn_fb,
+        fallback_trace_id=trace_id,
+        known_trace_ids=known_turn_map,
+    )
 
     return {
         "turnIndex": turn_index,
@@ -388,10 +657,27 @@ def build_agent_conversation_result(
         (t["agentVersion"] for t in turns if t.get("agentVersion")), None
     )
 
-    top_feedback = _normalize_feedback_list(data.get("feedback"), fallback_trace_id=resolved_trace_id)
+    known_trace_ids: Dict[str, str] = {}
+    for t in turns:
+        tid = t.get("traceId")
+        hex_key = _canonical_trace_hex(tid)
+        if hex_key and isinstance(tid, str):
+            known_trace_ids[hex_key] = tid
+
+    raw_top_fb = [
+        *(data.get("feedback") if isinstance(data.get("feedback"), list) else []),
+        *(data.get("conversation_feedback") if isinstance(data.get("conversation_feedback"), list) else []),
+    ]
+    top_feedback = _normalize_feedback_list(
+        raw_top_fb,
+        fallback_trace_id=resolved_trace_id,
+        known_trace_ids=known_trace_ids,
+    )
     seen_fb_keys: set[str] = set()
     merged_feedback: List[Dict[str, Any]] = []
     for fb in [*top_feedback, *(fb_item for t in turns for fb_item in t["feedback"])]:
+        if fb.get("traceId"):
+            fb["traceId"] = _align_trace_id(fb["traceId"], known_trace_ids)
         dedupe_key = fb["id"] or f"{fb['feedbackType']}:{fb['traceId']}:{fb['emoji']}:{fb['note']}"
         if dedupe_key in seen_fb_keys:
             continue

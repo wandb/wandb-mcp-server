@@ -203,4 +203,108 @@ describe("Conversation state reducer, agent failures & evidence span sync", () =
     expect(visible).toHaveLength(1);
     expect(visible[0]?.turnIndex).toBe(2);
   });
+
+  it("builds nested span waterfall from /agents/spans/query AgentSpanSchema rows and matches 32-hex vs UUID traceIds", () => {
+    const spansQueryResponse = {
+      total_count: 2,
+      groups: [],
+      spans: [
+        {
+          project_id: "acme/composer-prod",
+          trace_id: "019a4f10884170008000abcdef123456",
+          span_id: "span-root-1",
+          parent_span_id: null,
+          span_name: "studio_turn",
+          span_kind: "INTERNAL",
+          started_at: "2026-11-23T18:10:00.000Z",
+          ended_at: "2026-11-23T18:10:03.620Z",
+          status_code: "UNSET",
+          status_message: null,
+          operation_name: "agent.turn",
+        },
+        {
+          project_id: "acme/composer-prod",
+          trace_id: "019a4f10884170008000abcdef123456",
+          span_id: "span-tool-edit",
+          parent_span_id: "span-root-1",
+          span_name: "edit_track_region",
+          span_kind: "CLIENT",
+          started_at: "2026-11-23T18:10:01.100Z",
+          ended_at: "2026-11-23T18:10:01.510Z",
+          status_code: "OK",
+          status_message: null,
+          tool_name: "edit_track_region",
+          tool_call_arguments: '{"stem":"lead_vox","bars":[9,12]}',
+          tool_call_result: '{"ok":true,"mutated_stem":"lead_vox"}',
+          custom_attrs_string: { focused_track_id: "chorus_synth" },
+        },
+      ],
+    };
+
+    const waterfall = buildSpanWaterfall(spansQueryResponse);
+    expect(waterfall).toHaveLength(2);
+    expect(waterfall[0]).toMatchObject({
+      spanId: "span-root-1",
+      depth: 0,
+      statusCode: "OK",
+      durationMs: 3620,
+    });
+    expect(waterfall[1]).toMatchObject({
+      spanId: "span-tool-edit",
+      parentSpanId: "span-root-1",
+      depth: 1,
+      offsetMs: 1100,
+      durationMs: 410,
+      kind: "tool",
+      toolName: "edit_track_region",
+    });
+    expect(waterfall[1]?.attributesJson).toContain('"focused_track_id": "chorus_synth"');
+    expect(waterfall[1]?.attributesJson).toContain('"mutated_stem": "lead_vox"');
+
+    let state = reduceConversationState(createInitialConversationState(), {
+      type: "loaded",
+      payload: makeSamplePayload({
+        turns: [
+          {
+            turnIndex: 1,
+            traceId: "019a4f10-8841-7000-8000-abcdef123456",
+            spanId: "span-root-1",
+            agentName: "composer-v2",
+            agentVersion: "2.4.0",
+            statusCode: "OK",
+            isError: false,
+            errorMessage: null,
+            startedAt: "2026-11-23T18:10:00Z",
+            durationMs: 3620,
+            inputTokens: 1200,
+            outputTokens: 180,
+            totalTokens: 1380,
+            costUsd: 0.0065,
+            model: "claude-sonnet-4.5",
+            messages: [],
+            feedback: [],
+          },
+        ],
+      }),
+    });
+    state = reduceConversationState(state, {
+      type: "failuresLoaded",
+      failures: [
+        {
+          traceId: "019a4f10884170008000abcdef123456",
+          sourceTraceId: null,
+          failureId: "fail-hex-1",
+          failureCategory: "tool_misuse",
+          categoryLabel: "Tool misuse",
+          failureReason: "Mutated lead_vox instead of chorus_synth",
+          failureSeverity: "major",
+          evidenceSpanIds: ["span-tool-edit"],
+          clusterId: "cl-1",
+          clusterTitle: "Wrong stem mutated",
+        },
+      ],
+    });
+    state = reduceConversationState(state, { type: "toggleErrorsOnly" });
+    expect(getVisibleTurns(state)).toHaveLength(1);
+  });
 });

@@ -10,6 +10,7 @@ import {
   parseConversationTags,
   parseFailureAttributions,
   parseTagCatalog,
+  sameTraceId,
   type AgentFailureFinding,
   type NormalizedMessage,
   type NormalizedTurn,
@@ -208,11 +209,11 @@ async function ensureSpanWaterfallLoaded(): Promise<void> {
   if (!payload || state.spansStatus === "loading" || state.spansStatus === "ready") {
     return;
   }
-  if (!payload.conversationId) {
+  if (!payload.conversationId && !payload.traceId) {
     dispatch(
       {
         type: "spansFailed",
-        message: "Span tree requires a conversation_id on the trace.",
+        message: "Span tree requires a conversation_id or trace_id on the trace.",
       },
       false,
     );
@@ -229,10 +230,17 @@ async function ensureSpanWaterfallLoaded(): Promise<void> {
     return;
   }
   dispatch({ type: "spansLoading" }, false);
-  const outcome = await bridge.invokeJsonTool("get_weave_agent_conversation_spans_tool", {
+  const outcome = await bridge.invokeJsonTool("query_weave_agent_spans_tool", {
     entity_name: payload.entityName,
     project_name: payload.projectName,
-    conversation_ids: [payload.conversationId],
+    ...(payload.conversationId
+      ? { conversation_id: payload.conversationId }
+      : { trace_id: payload.traceId }),
+    include_details: true,
+    include_costs: true,
+    sort_by: "started_at",
+    sort_direction: "asc",
+    limit: 200,
   });
   if (!outcome.ok) {
     dispatch({ type: "spansFailed", message: outcome.message }, false);
@@ -243,7 +251,7 @@ async function ensureSpanWaterfallLoaded(): Promise<void> {
 
 function focusFailureAndEvidenceSpan(finding: AgentFailureFinding, spanId?: string | null): void {
   dispatch({ type: "focusFailure", failureId: finding.failureId, spanId }, true, true);
-  if ((spanId ?? finding.evidenceSpanIds[0]) && state.payload?.conversationId) {
+  if ((spanId ?? finding.evidenceSpanIds[0]) && (state.payload?.conversationId || state.payload?.traceId)) {
     void ensureSpanWaterfallLoaded();
   }
 }
@@ -484,7 +492,7 @@ function renderFailuresPanel(): void {
     const badges = document.createElement("div");
     badges.className = "ac-turn-badges";
 
-    const matchedTurn = state.payload?.turns.find((t) => t.traceId === finding.traceId);
+    const matchedTurn = state.payload?.turns.find((t) => sameTraceId(t.traceId, finding.traceId));
     const turnChip = document.createElement("span");
     turnChip.className = "ac-turn-num";
     turnChip.textContent = matchedTurn ? `Turn #${matchedTurn.turnIndex}` : finding.traceId.slice(0, 10);
@@ -679,7 +687,7 @@ function renderTurnCard(turn: NormalizedTurn, writable: boolean): HTMLElement {
   const isSelected =
     state.selectedTarget?.kind === "turn" && state.selectedTarget.turnIndex === turn.turnIndex;
   const turnFailures = turn.traceId
-    ? state.agentFailures.filter((f) => f.traceId === turn.traceId)
+    ? state.agentFailures.filter((f) => sameTraceId(f.traceId, turn.traceId))
     : [];
 
   card.dataset.selected = isSelected ? "true" : "false";
@@ -1194,7 +1202,7 @@ function render(): void {
 
   tabConvBtn.setAttribute("aria-selected", state.activeTab === "conversation" ? "true" : "false");
   tabSpansBtn.setAttribute("aria-selected", state.activeTab === "spans" ? "true" : "false");
-  tabSpansBtn.hidden = !payload.conversationId;
+  tabSpansBtn.hidden = !(payload.conversationId || payload.traceId);
 
   failuresBtn.hidden = state.agentFailures.length === 0;
   failuresBtn.textContent = `Agent failures (${state.agentFailures.length})`;

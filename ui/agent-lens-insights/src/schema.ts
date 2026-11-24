@@ -342,6 +342,143 @@ export function enrichTurnsWithAttributions(
   });
 }
 
+function stringifyEmbeddedField(value: unknown): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function parseRawAgentChatMessage(m: Record<string, unknown>): {
+  role: string;
+  content: string | null;
+  toolName: string | null;
+  arguments: string | null;
+  toolResult: string | null;
+  error: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+} {
+  const msgType = typeof m.type === "string" ? m.type.trim() : "";
+  const topStatus = String(m.status_code ?? m.status ?? "").toUpperCase();
+  const topErr =
+    stringifyEmbeddedField(m.error) ??
+    (topStatus === "ERROR" ? stringifyEmbeddedField(m.status_message ?? m.error_type) : null);
+
+  if (msgType === "user_message" && m.user_message && typeof m.user_message === "object") {
+    const um = m.user_message as Record<string, unknown>;
+    return {
+      role: "user",
+      content: stringifyEmbeddedField(um.text),
+      toolName: null,
+      arguments: null,
+      toolResult: null,
+      error: topErr,
+      inputTokens: null,
+      outputTokens: null,
+    };
+  }
+  if (msgType === "assistant_message" && m.assistant_message && typeof m.assistant_message === "object") {
+    const am = m.assistant_message as Record<string, unknown>;
+    const subStatus = String(am.status ?? "").toUpperCase();
+    return {
+      role: "assistant",
+      content: stringifyEmbeddedField(am.text),
+      toolName: null,
+      arguments: null,
+      toolResult: null,
+      error:
+        topErr ??
+        (subStatus === "ERROR" ? stringifyEmbeddedField(m.status_message ?? m.error_type) : null),
+      inputTokens: typeof am.input_tokens === "number" ? am.input_tokens : null,
+      outputTokens: typeof am.output_tokens === "number" ? am.output_tokens : null,
+    };
+  }
+  if (msgType === "tool_call" && m.tool_call && typeof m.tool_call === "object") {
+    const tc = m.tool_call as Record<string, unknown>;
+    const subStatus = String(tc.status ?? "").toUpperCase();
+    const argsStr = stringifyEmbeddedField(tc.tool_arguments);
+    return {
+      role: "tool",
+      content: null,
+      toolName:
+        typeof tc.tool_name === "string" && tc.tool_name.trim() ? tc.tool_name.trim() : "tool",
+      arguments: argsStr === "" ? null : argsStr,
+      toolResult: stringifyEmbeddedField(tc.tool_result),
+      error:
+        topErr ??
+        (subStatus === "ERROR" ? stringifyEmbeddedField(m.status_message ?? m.error_type) : null),
+      inputTokens: null,
+      outputTokens: null,
+    };
+  }
+  if (msgType === "agent_start" && m.agent_start && typeof m.agent_start === "object") {
+    const ast = m.agent_start as Record<string, unknown>;
+    const sysInst = stringifyEmbeddedField(ast.system_instructions);
+    const model = typeof ast.model === "string" && ast.model.trim() ? ast.model.trim() : null;
+    return {
+      role: "system",
+      content: sysInst || (model ? `Agent started (${model})` : "Agent started"),
+      toolName: null,
+      arguments: null,
+      toolResult: null,
+      error: topErr,
+      inputTokens: null,
+      outputTokens: null,
+    };
+  }
+  if (msgType === "agent_handoff" && m.agent_handoff && typeof m.agent_handoff === "object") {
+    const ah = m.agent_handoff as Record<string, unknown>;
+    const target = String(
+      ah.target_agent ?? ah.to_agent ?? ah.agent_name ?? m.agent_name ?? "agent",
+    ).trim();
+    const reason = stringifyEmbeddedField(ah.reason ?? ah.summary ?? ah.message);
+    return {
+      role: "handoff",
+      content: reason ? `Handoff to ${target}: ${reason}` : `Handoff to ${target}`,
+      toolName: target,
+      arguments: null,
+      toolResult: null,
+      error: topErr,
+      inputTokens: null,
+      outputTokens: null,
+    };
+  }
+  if (msgType === "context_compacted" && m.context_compacted && typeof m.context_compacted === "object") {
+    const cc = m.context_compacted as Record<string, unknown>;
+    const summary = stringifyEmbeddedField(cc.compaction_summary);
+    return {
+      role: "system",
+      content: summary ? `Context compacted: ${summary}` : "Context compacted",
+      toolName: null,
+      arguments: null,
+      toolResult: null,
+      error: topErr,
+      inputTokens: null,
+      outputTokens: null,
+    };
+  }
+
+  return {
+    role: String(m.role ?? "other"),
+    content: stringifyEmbeddedField(m.content ?? m.text),
+    toolName:
+      typeof (m.tool_name ?? m.name) === "string" ? String(m.tool_name ?? m.name) : null,
+    arguments: stringifyEmbeddedField(m.arguments ?? m.tool_arguments),
+    toolResult: stringifyEmbeddedField(m.tool_result ?? m.output),
+    error: topErr,
+    inputTokens: typeof m.input_tokens === "number" ? m.input_tokens : null,
+    outputTokens: typeof m.output_tokens === "number" ? m.output_tokens : null,
+  };
+}
+
 export function parseEmbeddedConversation(rawStructuredOrJson: unknown): EmbeddedConversationData | null {
   let obj: unknown = rawStructuredOrJson;
   if (typeof rawStructuredOrJson === "string") {
@@ -391,39 +528,35 @@ export function parseEmbeddedConversation(rawStructuredOrJson: unknown): Embedde
     conversationId: typeof rec.conversation_id === "string" ? rec.conversation_id : null,
     traceId: typeof rec.trace_id === "string" ? rec.trace_id : null,
     agentName: typeof rec.agent_name === "string" ? rec.agent_name : null,
-    turns: rawTurns.map((t, i) => ({
-      turnIndex: i + 1,
-      traceId: typeof t.trace_id === "string" ? t.trace_id : null,
-      isError: String(t.status_code ?? "").toUpperCase() === "ERROR" || Boolean(t.error),
-      errorMessage: typeof t.error === "string" ? t.error : null,
-      durationMs:
-        typeof (t.total_duration_ms ?? t.duration_ms) === "number"
-          ? Number(t.total_duration_ms ?? t.duration_ms)
-          : null,
-      totalTokens: typeof t.total_tokens === "number" ? t.total_tokens : null,
-      messages: Array.isArray(t.messages)
-        ? (t.messages as Array<Record<string, unknown>>).map((m) => ({
-            role: String(m.role ?? "other"),
-            content: typeof m.content === "string" ? m.content : null,
-            toolName:
-              typeof (m.tool_name ?? m.name) === "string"
-                ? String(m.tool_name ?? m.name)
-                : null,
-            arguments:
-              m.arguments !== undefined
-                ? typeof m.arguments === "string"
-                  ? m.arguments
-                  : JSON.stringify(m.arguments, null, 2)
-                : null,
-            toolResult:
-              m.tool_result !== undefined
-                ? typeof m.tool_result === "string"
-                  ? m.tool_result
-                  : JSON.stringify(m.tool_result, null, 2)
-                : null,
-            error: typeof m.error === "string" ? m.error : null,
-          }))
-        : [],
-    })),
+    turns: rawTurns.map((t, i) => {
+      const parsedMessages = Array.isArray(t.messages)
+        ? (t.messages as Array<Record<string, unknown>>).map((m) => parseRawAgentChatMessage(m))
+        : [];
+      const sumTokens = parsedMessages.reduce(
+        (acc, pm) => acc + (pm.inputTokens ?? 0) + (pm.outputTokens ?? 0),
+        0,
+      );
+      const hasTokens = parsedMessages.some(
+        (pm) => pm.inputTokens !== null || pm.outputTokens !== null,
+      );
+      const hasMsgErr = parsedMessages.some((pm) => Boolean(pm.error));
+      return {
+        turnIndex: i + 1,
+        traceId: typeof t.trace_id === "string" ? t.trace_id : null,
+        isError:
+          String(t.status_code ?? "").toUpperCase() === "ERROR" || Boolean(t.error) || hasMsgErr,
+        errorMessage:
+          typeof t.error === "string"
+            ? t.error
+            : parsedMessages.find((pm) => pm.error)?.error ?? null,
+        durationMs:
+          typeof (t.total_duration_ms ?? t.duration_ms) === "number"
+            ? Number(t.total_duration_ms ?? t.duration_ms)
+            : null,
+        totalTokens:
+          typeof t.total_tokens === "number" ? t.total_tokens : hasTokens ? sumTokens : null,
+        messages: parsedMessages.map(({ inputTokens: _in, outputTokens: _out, ...rest }) => rest),
+      };
+    }),
   };
 }

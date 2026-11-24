@@ -214,4 +214,57 @@ describe("Insights schema, markdown brief & state reducer", () => {
     expect(state.payload?.projectName).toBe("support-agent");
     expect(state.banner?.message).toBe("Upstream 503");
   });
+
+  it("unpacks AgentChatMessage tagged unions in raw embedded conversation fallback", () => {
+    const rawTaggedConversation = {
+      conversation_id: "conv-tagged-1",
+      agent_name: "composer-v2",
+      turns: [
+        {
+          trace_id: "trace-tagged-1",
+          status_code: "OK",
+          total_duration_ms: 2150,
+          messages: [
+            {
+              type: "user_message",
+              user_message: { text: "Punch in chorus_synth", content_refs: [] },
+            },
+            {
+              type: "tool_call",
+              tool_call: {
+                tool_name: "edit_track_region",
+                tool_arguments: '{"stem":"lead_vox"}',
+                tool_result: '{"ok":true}',
+                duration_ms: 340,
+                status: "OK",
+                content_refs: [],
+              },
+            },
+            {
+              type: "assistant_message",
+              assistant_message: {
+                text: "Updated the chorus bars.",
+                model: "claude-sonnet-4.5",
+                input_tokens: 900,
+                output_tokens: 120,
+                duration_ms: 1800,
+                status: "OK",
+                content_refs: [],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    const parsed = parseEmbeddedConversation(rawTaggedConversation);
+    expect(parsed?.conversationId).toBe("conv-tagged-1");
+    expect(parsed?.turns).toHaveLength(1);
+    expect(parsed?.turns[0]?.totalTokens).toBe(1020);
+    expect(parsed?.turns[0]?.messages.map((m) => m.role)).toEqual(["user", "tool", "assistant"]);
+    expect(parsed?.turns[0]?.messages[0]?.content).toBe("Punch in chorus_synth");
+    expect(parsed?.turns[0]?.messages[1]?.toolName).toBe("edit_track_region");
+    expect(parsed?.turns[0]?.messages[1]?.arguments).toContain("lead_vox");
+    expect(parsed?.turns[0]?.messages[2]?.content).toBe("Updated the chorus bars.");
+  });
 });

@@ -268,6 +268,30 @@ export function parseFailureAttributions(rawJsonOrObj: unknown): AgentFailureFin
   return out;
 }
 
+export function canonicalTraceKey(traceId: string | null | undefined): string | null {
+  if (!traceId || typeof traceId !== "string") {
+    return null;
+  }
+  const trimmed = traceId.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const hex = trimmed.toLowerCase().replace(/-/g, "");
+  if (hex.length === 32 && /^[0-9a-f]{32}$/.test(hex)) {
+    return hex;
+  }
+  return trimmed;
+}
+
+export function sameTraceId(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  const ka = canonicalTraceKey(a);
+  const kb = canonicalTraceKey(b);
+  return ka !== null && kb !== null && ka === kb;
+}
+
 function parseTimestampMs(raw: unknown): number | null {
   if (typeof raw === "number" && Number.isFinite(raw)) {
     return raw > 1e12 ? raw : raw * 1000;
@@ -305,21 +329,62 @@ function classifySpanKind(rec: Record<string, unknown>, name: string): SpanKind 
   return "span";
 }
 
+function parseMaybeJsonString(val: unknown): unknown {
+  if (typeof val !== "string") {
+    return val;
+  }
+  const trimmed = val.trim();
+  if (
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  ) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return val;
+    }
+  }
+  return val;
+}
+
 function stringifyCompactDetails(rec: Record<string, unknown>): string | null {
   const detailObj: Record<string, unknown> = {};
   for (const key of [
-    "inputs",
-    "outputs",
-    "attributes",
-    "custom_attrs",
+    "tool_call_arguments",
+    "tool_call_result",
+    "tool_arguments",
+    "tool_result",
     "tool_input",
     "tool_output",
+    "inputs",
+    "outputs",
+    "input_messages",
+    "output_messages",
+    "system_instructions",
+    "reasoning_content",
+    "compaction_summary",
+    "attributes",
+    "custom_attrs",
+    "custom_attrs_string",
+    "custom_attrs_int",
+    "custom_attrs_float",
+    "custom_attrs_bool",
+    "total_cost_usd",
+    "error_type",
     "status_message",
     "error",
   ]) {
-    if (rec[key] !== undefined && rec[key] !== null) {
-      detailObj[key] = rec[key];
+    const val = rec[key];
+    if (val === undefined || val === null || val === "") {
+      continue;
     }
+    if (Array.isArray(val) && val.length === 0) {
+      continue;
+    }
+    if (typeof val === "object" && !Array.isArray(val) && Object.keys(val as object).length === 0) {
+      continue;
+    }
+    detailObj[key] = parseMaybeJsonString(val);
   }
   if (Object.keys(detailObj).length === 0) {
     return null;
@@ -390,7 +455,8 @@ export function buildSpanWaterfall(rawJsonOrObj: unknown): SpanWaterfallNode[] {
       rec.name ?? rec.span_name ?? rec.operation_name ?? toolName ?? model ?? spanId,
     ).trim();
     const statusRaw = String(rec.status_code ?? rec.status ?? "OK").toUpperCase();
-    const errRaw = rec.error ?? (statusRaw === "ERROR" ? rec.status_message : null);
+    const errRaw =
+      rec.error ?? (statusRaw === "ERROR" ? (rec.status_message ?? rec.error_type) : null);
     const errorPreview =
       errRaw !== undefined && errRaw !== null
         ? (typeof errRaw === "string" ? errRaw : JSON.stringify(errRaw)).slice(0, 320)
@@ -418,7 +484,7 @@ export function buildSpanWaterfall(rawJsonOrObj: unknown): SpanWaterfallNode[] {
       kind: classifySpanKind(rec, name),
       toolName,
       model,
-      statusCode: isError ? "ERROR" : statusRaw || "OK",
+      statusCode: isError ? "ERROR" : statusRaw && statusRaw !== "UNSET" ? statusRaw : "OK",
       isError,
       errorPreview,
       startMs,

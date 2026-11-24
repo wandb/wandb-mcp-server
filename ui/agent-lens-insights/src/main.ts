@@ -267,13 +267,17 @@ async function openEmbeddedConversationDrawer(
         entity_name: payload.entityName,
         project_name: payload.projectName,
         conversation_id: turn.conversationId,
-        max_turns: 10,
+        limit: 10,
+        include_feedback: true,
+        include_model_tool_calls: true,
         ...(selectedFailure ? { selected_failure: selectedFailure } : {}),
       })
     : await bridge.invokeJsonTool("get_weave_agent_trace_tool", {
         entity_name: payload.entityName,
         project_name: payload.projectName,
         trace_id: turn.traceId,
+        include_feedback: true,
+        include_model_tool_calls: true,
         ...(selectedFailure ? { selected_failure: selectedFailure } : {}),
       });
 

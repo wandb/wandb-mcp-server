@@ -2,15 +2,17 @@ import {
   buildConversationTurnUrl,
   formatPlainFailureReason,
 } from "../../shared/failure-cluster-markdown";
-import type {
-  AgentFailureFinding,
-  AppliedConversationTag,
-  ConversationPayload,
-  NormalizedFeedback,
-  NormalizedTurn,
-  SelectedFailurePin,
-  SpanWaterfallNode,
-  TagCatalogEntry,
+import {
+  canonicalTraceKey,
+  sameTraceId,
+  type AgentFailureFinding,
+  type AppliedConversationTag,
+  type ConversationPayload,
+  type NormalizedFeedback,
+  type NormalizedTurn,
+  type SelectedFailurePin,
+  type SpanWaterfallNode,
+  type TagCatalogEntry,
 } from "./schema";
 
 export type DisplayMode = "inline" | "fullscreen" | "pip";
@@ -128,7 +130,7 @@ function defaultSelectionForPayload(
     return null;
   }
   const pinnedTurn = pinned
-    ? payload.turns.find((t) => t.traceId === pinned.traceId)
+    ? payload.turns.find((t) => sameTraceId(t.traceId, pinned.traceId))
     : undefined;
   const targetTurn =
     pinnedTurn ?? payload.turns.find((t) => t.isError) ?? payload.turns[0]!;
@@ -173,7 +175,7 @@ function buildTargetFromSpan(
   span: SpanWaterfallNode,
   payload: ConversationPayload | null,
 ): SelectedContextTarget {
-  const turn = payload?.turns.find((t) => t.traceId && t.traceId === span.traceId);
+  const turn = payload?.turns.find((t) => sameTraceId(t.traceId, span.traceId));
   return {
     kind: "span",
     turnIndex: turn?.turnIndex ?? null,
@@ -203,10 +205,13 @@ export function getVisibleTurns(state: ConversationState): NormalizedTurn[] {
   if (!state.errorsOnly) {
     return state.payload.turns;
   }
-  const failureTraces = new Set(state.agentFailures.map((f) => f.traceId));
-  return state.payload.turns.filter(
-    (t) => t.isError || (t.traceId !== null && failureTraces.has(t.traceId)),
+  const failureTraces = new Set(
+    state.agentFailures.map((f) => canonicalTraceKey(f.traceId)).filter((k): k is string => k !== null),
   );
+  return state.payload.turns.filter((t) => {
+    const tKey = canonicalTraceKey(t.traceId);
+    return t.isError || (tKey !== null && failureTraces.has(tKey));
+  });
 }
 
 export function getActiveFailureFinding(state: ConversationState): AgentFailureFinding | null {
@@ -228,7 +233,7 @@ export function getActiveFailureFinding(state: ConversationState): AgentFailureF
   }
   const selTrace = state.selectedTarget?.traceId;
   if (selTrace) {
-    const byTrace = state.agentFailures.find((f) => f.traceId === selTrace);
+    const byTrace = state.agentFailures.find((f) => sameTraceId(f.traceId, selTrace));
     if (byTrace) {
       return byTrace;
     }
@@ -333,13 +338,13 @@ export function reduceConversationState(
       const pinned = state.payload?.selectedFailure;
       const matchedPin = pinned
         ? (action.failures.find((f) => f.failureId === pinned.failureId) ??
-          action.failures.find((f) => f.traceId === pinned.traceId) ??
+          action.failures.find((f) => sameTraceId(f.traceId, pinned.traceId)) ??
           null)
         : null;
       const defaultFinding = matchedPin ?? action.failures[0] ?? null;
       let nextTarget = state.selectedTarget;
       if (matchedPin && state.payload) {
-        const turn = state.payload.turns.find((t) => t.traceId === matchedPin.traceId);
+        const turn = state.payload.turns.find((t) => sameTraceId(t.traceId, matchedPin.traceId));
         if (turn) {
           nextTarget = buildTargetFromTurn(turn, null, matchedPin.evidenceSpanIds[0] ?? null);
         }
@@ -371,11 +376,14 @@ export function reduceConversationState(
           };
         }
       }
-      const turn = state.payload?.turns.find((t) => t.traceId === finding.traceId);
+      const turn = state.payload?.turns.find((t) => sameTraceId(t.traceId, finding.traceId));
       return {
         ...state,
         activeFailureId: finding.failureId,
-        activeTab: targetSpanId && state.payload?.conversationId ? "spans" : state.activeTab,
+        activeTab:
+          targetSpanId && (state.payload?.conversationId || state.payload?.traceId)
+            ? "spans"
+            : state.activeTab,
         pendingFocusSpanId: targetSpanId,
         selectedTarget: turn
           ? buildTargetFromTurn(turn, null, targetSpanId)
@@ -389,7 +397,7 @@ export function reduceConversationState(
         return state;
       }
       const matchingFailure = turn.traceId
-        ? state.agentFailures.find((f) => f.traceId === turn.traceId)
+        ? state.agentFailures.find((f) => sameTraceId(f.traceId, turn.traceId))
         : null;
       return {
         ...state,
@@ -588,7 +596,7 @@ export function buildConversationModelContext(state: ConversationState): ModelCo
 
   const selectedTurn = sel?.turnIndex
     ? payload.turns.find((t) => t.turnIndex === sel.turnIndex)
-    : payload.turns.find((t) => t.traceId === resolvedTraceId);
+    : payload.turns.find((t) => sameTraceId(t.traceId, resolvedTraceId));
   const humanNotes = (selectedTurn?.feedback ?? payload.feedback)
     .map((fb) => fb.note?.trim() ?? "")
     .filter((n) => n.length > 0);
@@ -641,7 +649,7 @@ export function buildConversationModelContext(state: ConversationState): ModelCo
   if (isEvidenceSpan) {
     parts.push("evidence_span=true");
   }
-  if (plainReason && (isEvidenceSpan || activeFailure?.traceId === resolvedTraceId)) {
+  if (plainReason && (isEvidenceSpan || sameTraceId(activeFailure?.traceId, resolvedTraceId))) {
     parts.push(`failure_reason="${plainReason.replace(/\s+/g, " ").slice(0, 220)}"`);
   }
   if (humanNotes.length > 0) {

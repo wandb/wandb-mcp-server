@@ -420,3 +420,163 @@ def test_tools_list_serialized_payload_stays_under_128_kib_across_all_22_profile
 
     assert checked_profiles == 22
     assert max_bytes < 126_000
+
+
+def test_agent_conversation_unpacks_weave_tagged_union_messages_and_weave_ref_feedback():
+    turn_uuid = "019a4f10-8841-7000-8000-abcdef123456"
+    turn_hex = turn_uuid.replace("-", "")
+    raw_payload = {
+        "conversation_id": "conv-live-01",
+        "total_turns": 1,
+        "has_more": False,
+        "turns": [
+            {
+                "trace_id": turn_uuid,
+                "root_span_name": "studio_turn",
+                "agent_name": "composer-v2",
+                "agent_version": "2.4.0",
+                "status_code": "OK",
+                "provider": "anthropic",
+                "started_at": "2026-11-23T18:10:00Z",
+                "ended_at": "2026-11-23T18:10:03.620Z",
+                "total_duration_ms": 3620,
+                "total_cost_usd": None,
+                "messages": [
+                    {
+                        "type": "agent_start",
+                        "span_id": "span-start-1",
+                        "agent_name": "composer-v2",
+                        "agent_version": "2.4.0",
+                        "status_code": "UNSET",
+                        "error_type": None,
+                        "status_message": None,
+                        "started_at": "2026-11-23T18:10:00Z",
+                        "user_message": None,
+                        "assistant_message": None,
+                        "tool_call": None,
+                        "agent_start": {
+                            "model": "claude-sonnet-4.5",
+                            "system_instructions": "Preserve focused_track_id.",
+                            "tool_definitions": "[]",
+                            "status": "OK",
+                        },
+                        "agent_handoff": None,
+                        "context_compacted": None,
+                        "feedback": None,
+                    },
+                    {
+                        "type": "user_message",
+                        "span_id": "span-user-1",
+                        "agent_name": "composer-v2",
+                        "agent_version": "2.4.0",
+                        "status_code": "OK",
+                        "error_type": None,
+                        "status_message": None,
+                        "started_at": "2026-11-23T18:10:00.050Z",
+                        "user_message": {
+                            "text": "Punch in 4 bars on chorus_synth.",
+                            "content_refs": [],
+                        },
+                        "assistant_message": None,
+                        "tool_call": None,
+                        "agent_start": None,
+                        "agent_handoff": None,
+                        "context_compacted": None,
+                        "feedback": None,
+                    },
+                    {
+                        "type": "tool_call",
+                        "span_id": "span-tool-1",
+                        "agent_name": "composer-v2",
+                        "agent_version": "2.4.0",
+                        "status_code": "OK",
+                        "error_type": None,
+                        "status_message": None,
+                        "started_at": "2026-11-23T18:10:01.100Z",
+                        "user_message": None,
+                        "assistant_message": None,
+                        "tool_call": {
+                            "tool_name": "edit_track_region",
+                            "tool_arguments": '{"stem":"lead_vox","bars":[9,12]}',
+                            "tool_result": '{"ok":true,"mutated_stem":"lead_vox"}',
+                            "duration_ms": 410,
+                            "status": "OK",
+                            "content_refs": [],
+                        },
+                        "agent_start": None,
+                        "agent_handoff": None,
+                        "context_compacted": None,
+                        "feedback": None,
+                    },
+                    {
+                        "type": "assistant_message",
+                        "span_id": "span-asst-1",
+                        "agent_name": "composer-v2",
+                        "agent_version": "2.4.0",
+                        "status_code": "OK",
+                        "error_type": None,
+                        "status_message": None,
+                        "started_at": "2026-11-23T18:10:01.600Z",
+                        "user_message": None,
+                        "assistant_message": {
+                            "text": "Updated bars 9-12 on the chorus.",
+                            "model": "claude-sonnet-4.5",
+                            "reasoning_content": None,
+                            "reasoning_tokens": 0,
+                            "input_tokens": 1240,
+                            "output_tokens": 185,
+                            "input_cost_usd": 0.00372,
+                            "output_cost_usd": 0.002775,
+                            "total_cost_usd": 0.006495,
+                            "duration_ms": 1920,
+                            "status": "OK",
+                            "content_refs": [],
+                        },
+                        "tool_call": None,
+                        "agent_start": None,
+                        "agent_handoff": None,
+                        "context_compacted": None,
+                        "feedback": None,
+                    },
+                ],
+                "feedback": [
+                    {
+                        "id": "fb-note-1",
+                        "feedback_type": "wandb.note.1",
+                        "weave_ref": f"weave:///acme/composer-prod/agent_turn/{turn_hex}",
+                        "payload": {"note": "Mutated lead_vox while chorus_synth was focused"},
+                        "creator": "pm-alex",
+                        "created_at": "2026-11-23T18:15:00Z",
+                        "wb_user_id": "user-1",
+                        "scorer_tags": [],
+                    }
+                ],
+            }
+        ],
+    }
+
+    res = agent_conversation_app.build_agent_conversation_result(
+        json.dumps(raw_payload),
+        mode="conversation",
+        entity_name="acme",
+        project_name="composer-prod",
+        conversation_id="conv-live-01",
+    )
+    assert not res.isError
+    sc = res.structuredContent
+    assert sc["summary"]["totalInputTokens"] == 1240
+    assert sc["summary"]["totalOutputTokens"] == 185
+    assert sc["summary"]["totalTokens"] == 1425
+    assert sc["summary"]["totalCostUsd"] == pytest.approx(0.006495)
+
+    turn = sc["turns"][0]
+    assert [m["role"] for m in turn["messages"]] == ["system", "user", "tool", "assistant"]
+    assert turn["messages"][1]["content"] == "Punch in 4 bars on chorus_synth."
+    assert turn["messages"][2]["toolName"] == "edit_track_region"
+    assert '"stem":"lead_vox"' in turn["messages"][2]["arguments"]
+    assert '"mutated_stem":"lead_vox"' in turn["messages"][2]["toolResult"]
+    assert turn["messages"][3]["content"] == "Updated bars 9-12 on the chorus."
+    assert turn["model"] == "claude-sonnet-4.5"
+    assert sc["feedback"][0]["traceId"] == turn_uuid
+    assert sc["feedback"][0]["note"] == "Mutated lead_vox while chorus_synth was focused"
+
