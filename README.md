@@ -762,7 +762,7 @@ Exact tool profiles:
 | `models-only` | `models-only` | none | dedicated, shared | 18 | 16 |
 | `models-weave` | `models-weave` | none | dedicated, shared | 23 | 21 |
 | `models-weave-graphql-compat` | `models-weave` | raw-graphql | local only | 24 | 22 |
-| `models-weave-agents` | `models-weave-agents` | none | shared | 34 | 31 |
+| `models-weave-agents` | `models-weave-agents` | none | dedicated, shared | 34 | 31 |
 | `models-weave-agents-agent-lens` | `models-weave-agents` | agent-lens | shared | 48 | 43 |
 | `models-weave-agents-aria` | `models-weave-agents` | aria | shared | 38 | 34 |
 | `models-weave-agents-raw-graphql` | `models-weave-agents` | raw-graphql | local only | 35 | 32 |
@@ -775,19 +775,19 @@ Exact workload defaults:
 
 | Workload | Collection rows | History samples | Metric keys | Range span | Full-detail rows | Admission / HTTP rate |
 |---|---:|---:|---:|---:|---:|---|
-| `shared` | 100 | 500 | 20 | 5,000 | 3 | application admission and HTTP rate limiting off |
-| `dedicated` | 250 | 1,500 | 50 | 20,000 | 10 | admission on; 60/key/minute, 1000/process/minute |
+| `shared` | 250 | 1,000 | 50 | 50,000 | 10 | application admission and HTTP rate limiting off |
+| `dedicated` | 500 | 2,500 | 100 | 100,000 | 25 | admission on; 300/key/minute, 2000/process/minute |
 | `local` | 1,000 | 5,000 | 100 | 100,000 | 25 | application admission and HTTP rate limiting off |
 
 Exact capacity classes:
 
 | Capacity class | Actor | Process | Sync workers | Count workers |
 |---|---:|---:|---:|---:|
-| `small` | 4 | 4 | 4 | 4 |
-| `medium` | 4 | 8 | 8 | 8 |
-| `large` | 8 | 16 | 16 | 8 |
+| `small` | 8 | 8 | 4 | 4 |
+| `medium` | 12 | 16 | 8 | 8 |
+| `large` | 16 | 32 | 16 | 8 |
 
-Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:b132f6abd3330c860bb07a964cde31e8764eabde14c232352669a221807e5379`.
+Use `python scripts/public_release.py profiles --all` for every exact profile/access-mode manifest and tool name. Runtime contract: `sha256:8a1c8393098f6866be0c76d4ebe28fc63378ef7efe00ca9fc5dfc10b36b768ff`.
 <!-- END GENERATED: PUBLIC FEATURE PROFILES -->
 
 For the standalone console entrypoint, credential resolution is command-line

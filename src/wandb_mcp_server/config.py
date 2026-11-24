@@ -3,7 +3,16 @@ import ipaddress
 import re
 from urllib.parse import urlsplit
 
-from wandb_mcp_server.runtime_contract import CAPACITY_BOUNDS, WORKLOAD_LIMIT_BOUNDS, load_runtime_contract
+from wandb_mcp_server.runtime_contract import (
+    CAPACITY_BOUNDS,
+    HTTP_RATE_MAXIMA,
+    HTTP_RATE_OVERRIDE_ENVS,
+    LIMIT_OVERRIDES_ENV,
+    SESSION_OWNED_LIMITS,
+    WORKLOAD_LIMIT_BOUNDS,
+    load_runtime_contract,
+    resolve_limit_overrides_enabled,
+)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -150,10 +159,26 @@ _internal_base_url = (os.getenv("WANDB_INTERNAL_BASE_URL") or "").strip().rstrip
 WANDB_INTERNAL_BASE_URL: str | None = _internal_base_url or None
 WANDB_API_BASE_URL: str = WANDB_INTERNAL_BASE_URL or WANDB_BASE_URL
 
-# Weave Trace server URL used by the Weave API client and services
-WF_TRACE_SERVER_URL: str = (
-    os.getenv("WF_TRACE_SERVER_URL") or os.getenv("WEAVE_TRACE_SERVER_URL") or "https://trace.wandb.ai"
-)
+# Weave Trace server URL used by the Weave API client and services.
+# When a local Dedicated user configures WANDB_BASE_URL to a custom customer
+# host (e.g. https://acme.wandb.io) without setting WF_TRACE_SERVER_URL, derive
+# <WANDB_BASE_URL>/traces rather than leaking their Dedicated API key to
+# multi-tenant SaaS https://trace.wandb.ai.
+_MTSAAS_API_HOSTS = frozenset({"api.wandb.ai", "wandb.ai", "forge.coreweave.com"})
+
+
+def _default_trace_server_url(wandb_base_url: str) -> str:
+    explicit = os.getenv("WF_TRACE_SERVER_URL") or os.getenv("WEAVE_TRACE_SERVER_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    parsed = urlsplit(wandb_base_url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme in {"http", "https"} and host and host not in _MTSAAS_API_HOSTS:
+        return f"{wandb_base_url.rstrip('/')}/traces"
+    return "https://trace.wandb.ai"
+
+
+WF_TRACE_SERVER_URL: str = _default_trace_server_url(WANDB_BASE_URL)
 
 # Hosted W&B Agent (ARIA) service URL. This is intentionally separate from
 # WANDB_BASE_URL: ARIA is a distinct asynchronous service, even when the MCP
@@ -236,6 +261,7 @@ _workload_policy = _RUNTIME_CONTRACT["workload_profiles"][MCP_WORKLOAD_PROFILE]
 _workload_defaults = _workload_policy["limits"]
 _capacity_defaults = _RUNTIME_CONTRACT["capacity_classes"][MCP_CAPACITY_CLASS]
 _managed_workload = bool(_workload_policy["managed"])
+MCP_ALLOW_LIMIT_OVERRIDES: bool = resolve_limit_overrides_enabled()
 
 if "MCP_HOSTED_MODE" in os.environ:
     raise ValueError("MCP_HOSTED_MODE is internal; configure MCP_WORKLOAD_PROFILE")
@@ -243,22 +269,36 @@ if "MCP_HOSTED_MODE" in os.environ:
 MCP_HOSTED_MODE: bool = MCP_WORKLOAD_PROFILE != "local"
 
 
+def _managed_override_blocked(name: str) -> bool:
+    if not _managed_workload:
+        return False
+    if MCP_WORKLOAD_PROFILE == "shared" and name in SESSION_OWNED_LIMITS:
+        return True
+    return not MCP_ALLOW_LIMIT_OVERRIDES
+
+
 def _profile_int(name: str) -> int:
     default = int(_workload_defaults[name])
     minimum, maximum = WORKLOAD_LIMIT_BOUNDS[name]
     default = _validate_int(name, default, minimum=minimum, maximum=maximum)
-    if _managed_workload:
+    if _managed_override_blocked(name):
         if name in os.environ:
-            raise ValueError(f"{name} cannot override managed MCP_WORKLOAD_PROFILE={MCP_WORKLOAD_PROFILE}")
+            raise ValueError(
+                f"{name} cannot override managed MCP_WORKLOAD_PROFILE={MCP_WORKLOAD_PROFILE} "
+                f"(set {LIMIT_OVERRIDES_ENV}=true to allow bounded operator overrides)"
+            )
         return default
     return _env_int(name, default, minimum=minimum, maximum=maximum)
 
 
 def _profile_bool(name: str) -> bool:
     default = bool(_workload_defaults[name])
-    if _managed_workload:
+    if _managed_override_blocked(name):
         if name in os.environ:
-            raise ValueError(f"{name} cannot override managed MCP_WORKLOAD_PROFILE={MCP_WORKLOAD_PROFILE}")
+            raise ValueError(
+                f"{name} cannot override managed MCP_WORKLOAD_PROFILE={MCP_WORKLOAD_PROFILE} "
+                f"(set {LIMIT_OVERRIDES_ENV}=true to allow bounded operator overrides)"
+            )
         return default
     return _env_bool(name, default)
 
@@ -267,11 +307,24 @@ def _capacity_int(name: str, contract_key: str) -> int:
     default = int(_capacity_defaults[contract_key])
     minimum, maximum = CAPACITY_BOUNDS[contract_key]
     default = _validate_int(name, default, minimum=minimum, maximum=maximum)
-    if _managed_workload:
+    if _managed_override_blocked(name):
         if name in os.environ:
-            raise ValueError(f"{name} cannot override managed MCP_CAPACITY_CLASS={MCP_CAPACITY_CLASS}")
+            raise ValueError(
+                f"{name} cannot override managed MCP_CAPACITY_CLASS={MCP_CAPACITY_CLASS} "
+                f"(set {LIMIT_OVERRIDES_ENV}=true to allow bounded operator overrides)"
+            )
         return default
     return _env_int(name, default, minimum=minimum, maximum=maximum)
+
+
+for _rate_key, _rate_env in HTTP_RATE_OVERRIDE_ENVS.items():
+    if _rate_env in os.environ:
+        if _managed_override_blocked(_rate_env):
+            raise ValueError(
+                f"{_rate_env} cannot override managed MCP_WORKLOAD_PROFILE={MCP_WORKLOAD_PROFILE} "
+                f"(set {LIMIT_OVERRIDES_ENV}=true to allow bounded operator overrides)"
+            )
+        _env_int(_rate_env, 0, minimum=0, maximum=HTTP_RATE_MAXIMA[_rate_key])
 
 
 MAX_RESPONSE_TOKENS: int = _profile_int("MAX_RESPONSE_TOKENS")
