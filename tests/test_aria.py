@@ -2019,3 +2019,398 @@ def test_include_turn_compacts_oversized_snapshot_before_stubbing() -> None:
     assert result["turn"]["tool_calls_omitted"] == 8
     assert len(result["turn"]["tool_calls"]) == 16
     assert result["turn"]["tool_calls"][-1]["name"] == "shell"
+
+
+@pytest.mark.parametrize(
+    "bad_domain",
+    [
+        "localhost",
+        "sub.localhost",
+        "127.0.0.1",
+        "169.254.169.254",
+        "[::1]",
+        "metadata.google.internal",
+        "db.prod.internal",
+        "redis.default.svc.cluster.local",
+        "*.arxiv.org",
+        "https://arxiv.org",
+        "arxiv.org:443",
+        "arxiv.org/abs/2401.00001",
+        "host.123",
+        "",
+    ],
+)
+def test_normalize_allowed_network_domains_rejects_unsafe_or_malformed_hosts(bad_domain: str) -> None:
+    result = asyncio.run(
+        aria.send_aria_message(
+            "Check papers",
+            allowed_network_domains=[bad_domain],
+            api_key="token",
+        )
+    )
+    assert result["ok"] is False
+    assert result["error"]["type"] == "invalid_request"
+
+
+def test_completed_turn_with_permission_request_reports_awaiting_permission_in_prompt_mode() -> None:
+    turn = _turn(
+        "completed",
+        messages=[
+            {
+                "role": "assistant",
+                "content": "Saved results under /workspace. arXiv is unreachable; requesting access.",
+            }
+        ],
+        permission_requests=[
+            {
+                "type": "network_access",
+                "reason": "Read the three requested arXiv primary papers and finish final JSON.",
+                "domains": ["arxiv.org"],
+            }
+        ],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=turn, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn("turn-1", api_key="token", client=client)
+
+    result = asyncio.run(run())
+    assert result["ok"] is True
+    assert result["requires_permission"] is True
+    assert result["progress"]["phase"] == "awaiting_permission"
+    assert result["progress"]["requested_network_domains"] == ["arxiv.org"]
+    assert 'allowed_network_domains=["arxiv.org"]' in result["next_action"]
+
+
+def test_completed_turn_with_agent_questions_reports_awaiting_user_input() -> None:
+    turn = _turn(
+        "completed",
+        messages=[{"role": "assistant", "content": "Which baseline run should I compare against?"}],
+        agent_questions=[{"question": "Compare against baseline-v1 or baseline-v2?"}],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=turn, request=request)
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn("turn-1", api_key="token", client=client)
+
+    result = asyncio.run(run())
+    assert result["ok"] is True
+    assert result["requires_user_input"] is True
+    assert result["progress"]["phase"] == "awaiting_user_input"
+    assert "agent_questions" in result["next_action"]
+
+
+def test_continuation_merges_parent_allowed_network_domains() -> None:
+    posted_bodies: list[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v1/turns/turn-1":
+            return httpx.Response(
+                200,
+                json=_turn(
+                    "completed",
+                    id="turn-1",
+                    permissions={"allowed_network_domains": ["pypi.org", "files.pythonhosted.org"]},
+                ),
+                request=request,
+            )
+        assert request.method == "POST"
+        body = json.loads(request.content)
+        posted_bodies.append(body)
+        return httpx.Response(
+            202,
+            json=_turn(
+                "queued",
+                id="turn-2",
+                parent_turn_id="turn-1",
+                permissions=body["permissions"],
+            ),
+            request=request,
+        )
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.send_aria_message(
+                "Now read the arXiv papers and finish.",
+                parent_turn_id="turn-1",
+                allowed_network_domains=["ArXiv.org."],
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+    assert result["ok"] is True
+    assert posted_bodies[0]["permissions"] == {
+        "allowed_network_domains": ["pypi.org", "files.pythonhosted.org", "arxiv.org"]
+    }
+    assert result["active_allowed_network_domains"] == [
+        "pypi.org",
+        "files.pythonhosted.org",
+        "arxiv.org",
+    ]
+
+
+def test_auto_safe_grants_arxiv_during_get_turn_poll_and_blocks_unlisted_domains(monkeypatch) -> None:
+    monkeypatch.setattr(aria, "POLL_INTERVAL_SECONDS", 0)
+    calls: list[tuple[str, str, Any]] = []
+    turn1_polls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal turn1_polls
+        body = json.loads(request.content) if request.content else None
+        calls.append((request.method, request.url.path, body))
+        if request.method == "GET" and request.url.path == "/api/v1/turns/turn-1":
+            turn1_polls += 1
+            if turn1_polls == 1:
+                return httpx.Response(200, json=_turn("in_progress", id="turn-1"), request=request)
+            return httpx.Response(
+                200,
+                json=_turn(
+                    "completed",
+                    id="turn-1",
+                    permissions={"allowed_network_domains": ["pypi.org"]},
+                    permission_requests=[
+                        {
+                            "type": "network_access",
+                            "reason": "Read the three primary arXiv papers.",
+                            "domains": ["arxiv.org"],
+                        }
+                    ],
+                ),
+                request=request,
+            )
+        if request.method == "POST" and request.url.path == "/api/v1/turns":
+            return httpx.Response(
+                202,
+                json=_turn(
+                    "completed",
+                    id="turn-2",
+                    parent_turn_id="turn-1",
+                    permissions=body["permissions"],
+                    messages=[{"role": "assistant", "content": '{"round1_complete": true}'}],
+                ),
+                request=request,
+            )
+        if request.method == "GET" and request.url.path == "/api/v1/turns/turn-2":
+            return httpx.Response(
+                200,
+                json=_turn(
+                    "completed",
+                    id="turn-2",
+                    parent_turn_id="turn-1",
+                    permissions={"allowed_network_domains": ["pypi.org", "arxiv.org"]},
+                    messages=[{"role": "assistant", "content": '{"round1_complete": true}'}],
+                ),
+                request=request,
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url.path}")
+
+    async def run() -> Dict[str, Any]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            return await aria.get_aria_turn(
+                "turn-1",
+                wait_seconds=10,
+                network_access_mode="auto_safe",
+                allow_writes=True,
+                api_key="token",
+                client=client,
+            )
+
+    result = asyncio.run(run())
+    assert result["ok"] is True
+    assert result["turn_id"] == "turn-2"
+    assert result["resumed_from_turn_id"] == "turn-1"
+    assert result["latest_response"] == '{"round1_complete": true}'
+    assert result["progress"]["phase"] == "completed"
+    assert result["permission_resolution"]["action"] == "granted_and_continued"
+    assert result["permission_resolution"]["grants"][0]["active_allowed_network_domains"] == [
+        "pypi.org",
+        "arxiv.org",
+    ]
+
+    # Verify unlisted domain is NOT auto-granted under auto_safe
+    unlisted_turn = _turn(
+        "completed",
+        id="turn-unlisted",
+        permission_requests=[
+            {
+                "type": "network_access",
+                "reason": "Upload workspace summary",
+                "domains": ["webhook-collector.example.com"],
+            }
+        ],
+    )
+
+    async def run_unlisted() -> Dict[str, Any]:
+        async with _client(
+            httpx.MockTransport(lambda req: httpx.Response(200, json=unlisted_turn, request=req))
+        ) as client:
+            return await aria.send_aria_message(
+                "Run task",
+                title="Test unlisted",
+                wait_seconds=5,
+                network_access_mode="auto_safe",
+                api_key="token",
+                client=client,
+            )
+
+    unlisted_res = asyncio.run(run_unlisted())
+    assert unlisted_res["ok"] is True
+    assert unlisted_res["requires_permission"] is True
+    assert unlisted_res["progress"]["phase"] == "awaiting_permission"
+
+
+def test_read_only_and_already_continued_get_turn_never_create_duplicate_continuations() -> None:
+    post_count = 0
+    paused_turn = _turn(
+        "completed",
+        id="turn-1",
+        thread_id="thread-1",
+        permission_requests=[
+            {"type": "network_access", "reason": "Read arXiv", "domains": ["arxiv.org"]}
+        ],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal post_count
+        if request.method == "POST":
+            post_count += 1
+        if request.url.path == "/api/v1/turns/turn-1":
+            return httpx.Response(200, json=paused_turn, request=request)
+        if request.url.path == "/api/v1/threads/thread-1/turns":
+            return httpx.Response(
+                200,
+                json=[_turn("in_progress", id="turn-2", parent_turn_id="turn-1")],
+                request=request,
+            )
+        raise AssertionError(f"Unexpected {request.method} {request.url.path}")
+
+    async def run_cases() -> tuple[Dict[str, Any], Dict[str, Any]]:
+        async with _client(httpx.MockTransport(handler)) as client:
+            ro_res = await aria.get_aria_turn(
+                "turn-1",
+                network_access_mode="auto_safe",
+                allow_writes=False,
+                api_key="token",
+                client=client,
+            )
+            dup_res = await aria.get_aria_turn(
+                "turn-1",
+                network_access_mode="auto_safe",
+                allow_writes=True,
+                api_key="token",
+                client=client,
+            )
+            return ro_res, dup_res
+
+    ro_res, dup_res = asyncio.run(run_cases())
+    assert post_count == 0
+    assert ro_res["progress"]["phase"] == "awaiting_permission"
+    assert dup_res["continued_in_turn_id"] == "turn-2"
+
+
+def test_mcp_elicitation_prompts_and_grants_or_declines_network_access(monkeypatch) -> None:
+    monkeypatch.delenv("MCP_SESSION_MODE", raising=False)
+
+    class _FakeElicitationData:
+        def __init__(self, grant_access: bool) -> None:
+            self.grant_access = grant_access
+
+    class _FakeElicitationOutcome:
+        def __init__(self, action: str, grant_access: bool = True) -> None:
+            self.action = action
+            self.data = _FakeElicitationData(grant_access)
+
+    class _FakeCtx:
+        def __init__(self, action: str, grant_access: bool = True) -> None:
+            self._action = action
+            self._grant_access = grant_access
+            self.prompts: list[str] = []
+            self.request_context = type(
+                "RC",
+                (),
+                {
+                    "session": type(
+                        "Sess",
+                        (),
+                        {
+                            "client_params": type(
+                                "CP",
+                                (),
+                                {"capabilities": type("Caps", (), {"elicitation": {}})()},
+                            )()
+                        },
+                    )()
+                },
+            )()
+
+        async def elicit(self, *, message: str, schema: Any) -> Any:
+            assert schema is aria._AriaNetworkAccessElicitation
+            self.prompts.append(message)
+            return _FakeElicitationOutcome(self._action, self._grant_access)
+
+    paused_turn = _turn(
+        "completed",
+        id="turn-1",
+        permission_requests=[
+            {"type": "network_access", "reason": "Fetch Custom Benchmark", "domains": ["bench.example.org"]}
+        ],
+    )
+
+    def accept_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            body = json.loads(request.content)
+            if body.get("parent_turn_id") == "turn-1":
+                return httpx.Response(
+                    202,
+                    json=_turn(
+                        "completed",
+                        id="turn-2",
+                        parent_turn_id="turn-1",
+                        permissions=body["permissions"],
+                        messages=[{"role": "assistant", "content": "Fetched benchmark and finished."}],
+                    ),
+                    request=request,
+                )
+            return httpx.Response(202, json=paused_turn, request=request)
+        if request.method == "PATCH":
+            return httpx.Response(200, json={"id": "thread-1", "title": "Bench"}, request=request)
+        return httpx.Response(200, json=paused_turn, request=request)
+
+    accept_ctx = _FakeCtx("accept", True)
+    decline_ctx = _FakeCtx("decline", False)
+
+    async def run_both() -> tuple[Dict[str, Any], Dict[str, Any]]:
+        async with _client(httpx.MockTransport(accept_handler)) as client:
+            accepted = await aria.send_aria_message(
+                "Run benchmark",
+                title="Bench",
+                wait_seconds=5,
+                ctx=accept_ctx,
+                api_key="token",
+                client=client,
+            )
+            declined = await aria.send_aria_message(
+                "Run benchmark",
+                title="Bench",
+                wait_seconds=5,
+                ctx=decline_ctx,
+                api_key="token",
+                client=client,
+            )
+            return accepted, declined
+
+    accepted, declined = asyncio.run(run_both())
+    assert len(accept_ctx.prompts) == 1
+    assert "bench.example.org" in accept_ctx.prompts[0]
+    assert accepted["turn_id"] == "turn-2"
+    assert accepted["permission_resolution"]["grants"][0]["source"] == "mcp_elicitation"
+    assert declined["turn_id"] == "turn-1"
+    assert declined["permission_resolution"]["action"] == "declined_by_user"
+
